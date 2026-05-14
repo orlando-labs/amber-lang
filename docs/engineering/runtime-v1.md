@@ -1,6 +1,6 @@
 # amber.runtime.v1
 
-Status: `W5.1` through `W6.2` acceptance is satisfied.
+Status: `W5.1` through `W6.3` acceptance is satisfied.
 
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
 
@@ -78,6 +78,12 @@ Current implemented slice:
   maps, and closures, ownership/lifetime precondition errors, and
   `DestroyedAccessError` /
   `UseAfterFreeError` guards for ordinary access paths;
+- `W6.3` non-moving GC boundary with `ObjectGeneration`, public
+  `RuntimeGcCycle` collection hooks, logical mark/sweep over heap allocation
+  records, root scanning for VM frames and runtime class cvars, write barriers
+  for heap-reference writes, mature-to-young remembered sets, shared-to-confined
+  isolation rejection, safepoint-triggered collection requests, unrooted cycle
+  logical reclaim, and parallel smoke coverage;
 - direct `P_PREP_SEQ` / `P_PREP_MAP` coercion through object-level
   `deconstruct` / `deconstruct_keys(keys)` when native list/tuple/map
   matching is not available, with `null` as no-match and wrong protocol return
@@ -93,12 +99,13 @@ Current implemented slice:
   include invalidation, object `deconstruct*` pattern protocol paths, and
   handled/unhandled `RAISE` paths, plus W5.4 slot-shape transition stability,
   dead-shape guard, method-table descriptor coverage, W6.1 allocator stress /
-  remote-free / VM allocation-path coverage, and W6.2 lifecycle destroy,
-  dealloc, tombstone, and dead-access coverage.
+  remote-free / VM allocation-path coverage, W6.2 lifecycle destroy, dealloc,
+  tombstone, and dead-access coverage, and W6.3 non-moving GC, barrier,
+  remembered-set, safepoint-root, and parallel smoke coverage.
 
 Still intentionally missing in later layers:
 
 - `W8.1`: dependency linker and module-init state machine over serialized
   `.amberbc`;
-- `W6.3+`: GC, pinning, scheduler, and deeper
+- `W6.4+`: pinning, scheduler, and deeper
   memory/runtime integration.

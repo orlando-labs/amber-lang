@@ -27,6 +27,10 @@ enum class OwnerTokenKind { Shareable, Confined, Sync };
 
 enum class ObjectLifetimeState { Live, Destroying, Destroyed, Deallocated };
 
+enum class ObjectGeneration { Young, Mature, Shared };
+
+enum class RuntimeGcCycle { Young, Full, Shared };
+
 struct OwnerToken {
   OwnerTokenKind kind = OwnerTokenKind::Confined;
   std::uint64_t strand_id = 0;
@@ -57,6 +61,9 @@ struct ObjHeader {
   std::uint64_t arena_worker_id = 0;
   std::size_t allocation_size = 0;
   ObjectLifetimeState lifetime_state = ObjectLifetimeState::Live;
+  ObjectGeneration generation = ObjectGeneration::Young;
+  std::uint32_t gc_age = 0;
+  std::uint64_t gc_mark_epoch = 0;
 };
 
 struct SymbolValue {
@@ -172,7 +179,42 @@ struct RuntimeHeapStats {
   std::uint64_t array_allocations = 0;
   std::uint64_t map_allocations = 0;
   std::uint64_t closure_allocations = 0;
+  std::uint64_t young_objects = 0;
+  std::uint64_t mature_objects = 0;
+  std::uint64_t shared_objects = 0;
+  std::uint64_t gc_cycles = 0;
+  std::uint64_t gc_young_cycles = 0;
+  std::uint64_t gc_full_cycles = 0;
+  std::uint64_t gc_shared_cycles = 0;
+  std::uint64_t gc_marked_objects = 0;
+  std::uint64_t gc_reclaimed_objects = 0;
+  std::uint64_t gc_promoted_objects = 0;
+  std::uint64_t gc_requested = 0;
+  std::uint64_t gc_safepoint_collections = 0;
+  std::uint64_t write_barriers = 0;
+  std::uint64_t write_barrier_remembered = 0;
+  std::uint64_t write_barrier_rejected_lifetime = 0;
+  std::uint64_t write_barrier_rejected_isolation = 0;
+  std::uint64_t remembered_set_objects = 0;
+  std::uint64_t remembered_set_entries = 0;
   std::vector<RuntimeArenaStats> arenas;
+};
+
+struct RuntimeGcResult {
+  RuntimeGcCycle cycle = RuntimeGcCycle::Full;
+  std::uint64_t cycle_id = 0;
+  std::uint64_t roots = 0;
+  std::uint64_t marked = 0;
+  std::uint64_t reclaimed = 0;
+  std::uint64_t promoted = 0;
+  std::uint64_t remembered_entries = 0;
+};
+
+struct RuntimeWriteBarrierResult {
+  bool ok = true;
+  bool remembered = false;
+  std::string error_name;
+  std::string message;
 };
 
 std::uint64_t current_runtime_worker_id();
@@ -203,6 +245,13 @@ public:
 
   std::uint64_t drain_remote_frees();
   std::uint64_t drain_remote_frees(std::uint64_t worker_id);
+  RuntimeWriteBarrierResult write_barrier(const Value &owner,
+                                          const Value &value);
+  RuntimeGcResult collect_garbage(const std::vector<Value> &roots = {},
+                                  RuntimeGcCycle cycle = RuntimeGcCycle::Full,
+                                  bool from_safepoint = false);
+  void request_garbage_collection(RuntimeGcCycle cycle = RuntimeGcCycle::Full);
+  std::optional<RuntimeGcCycle> pending_gc_request() const;
   RuntimeHeapStats stats() const;
 
 private:
@@ -272,6 +321,11 @@ public:
   RuntimeHeapStats heap_stats() const;
   std::uint64_t drain_remote_frees();
   std::uint64_t drain_remote_frees(std::uint64_t worker_id);
+  RuntimeWriteBarrierResult write_barrier(const Value &owner,
+                                          const Value &value);
+  RuntimeGcResult collect_garbage(const std::vector<Value> &roots = {},
+                                  RuntimeGcCycle cycle = RuntimeGcCycle::Full);
+  void request_garbage_collection(RuntimeGcCycle cycle = RuntimeGcCycle::Full);
 
 private:
   struct Impl;

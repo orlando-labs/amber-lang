@@ -8,10 +8,13 @@
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -1480,6 +1483,198 @@ void test_runtime_heap_allocation_heavy_smoke() {
          "allocation-heavy smoke should use local arena frees");
 }
 
+void test_runtime_gc_full_cycle_preserves_root_address() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value root =
+      heap.make_list_value({amber::runtime::Value::integer(1)});
+  std::shared_ptr<amber::runtime::ListValue> root_ptr = root.as_list();
+  const amber::runtime::ListValue *address = root_ptr.get();
+
+  const amber::runtime::RuntimeGcResult result =
+      heap.collect_garbage({root}, amber::runtime::RuntimeGcCycle::Full);
+  expect(result.marked == 1, "full GC should mark the rooted list");
+  expect(result.reclaimed == 0, "full GC should not reclaim rooted list");
+  expect(root.as_list().get() == address,
+         "non-moving GC should preserve object address");
+  expect(root_ptr->header.generation ==
+             amber::runtime::ObjectGeneration::Mature,
+         "rooted young object should promote after surviving GC");
+  expect(root_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "rooted object should remain live after GC");
+}
+
+void test_runtime_gc_reclaims_unrooted_reference_cycle() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value left = heap.make_list_value({});
+  amber::runtime::Value right = heap.make_list_value({});
+  std::shared_ptr<amber::runtime::ListValue> left_ptr = left.as_list();
+  std::shared_ptr<amber::runtime::ListValue> right_ptr = right.as_list();
+  left_ptr->items.push_back(right);
+  right_ptr->items.push_back(left);
+
+  const amber::runtime::RuntimeGcResult result =
+      heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Full);
+  expect(result.reclaimed == 2,
+         "full GC should reclaim an unrooted heap reference cycle");
+  expect(left_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Deallocated,
+         "left cycle node should become a GC tombstone");
+  expect(right_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Deallocated,
+         "right cycle node should become a GC tombstone");
+  expect(left_ptr->items.empty() && right_ptr->items.empty(),
+         "GC tombstone rewrite should sever outgoing references");
+  expect(heap.stats().live_objects == 0,
+         "GC logical reclaim should remove cycle nodes from live stats");
+}
+
+void test_runtime_gc_write_barrier_remembers_mature_to_young_edge() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value parent = heap.make_list_value({});
+  std::shared_ptr<amber::runtime::ListValue> parent_ptr = parent.as_list();
+
+  heap.collect_garbage({parent}, amber::runtime::RuntimeGcCycle::Full);
+  expect(parent_ptr->header.generation ==
+             amber::runtime::ObjectGeneration::Mature,
+         "parent should be mature before remembered-set probe");
+
+  amber::runtime::Value child =
+      heap.make_list_value({amber::runtime::Value::integer(7)});
+  const amber::runtime::RuntimeWriteBarrierResult barrier =
+      heap.write_barrier(parent, child);
+  expect(barrier.ok && barrier.remembered,
+         "mature-to-young write should update remembered set");
+  parent_ptr->items.push_back(child);
+  expect(heap.stats().remembered_set_entries == 1,
+         "remembered set should expose one mature-to-young edge");
+
+  const amber::runtime::RuntimeGcResult young =
+      heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Young);
+  expect(young.reclaimed == 0,
+         "young GC should retain child reachable from remembered set");
+  expect(child.as_list()->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "remembered child should remain live");
+}
+
+void test_runtime_gc_write_barrier_rejects_invalid_edges() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value shared_owner = heap.make_tuple_value({});
+  amber::runtime::Value confined_child = heap.make_list_value({});
+
+  const amber::runtime::RuntimeWriteBarrierResult isolation =
+      heap.write_barrier(shared_owner, confined_child);
+  expect(!isolation.ok && isolation.error_name == "IsolationError",
+         "shared-to-confined write should fail isolation barrier");
+
+  amber::runtime::Value owner = heap.make_list_value({});
+  confined_child.as_list()->header.lifetime_state =
+      amber::runtime::ObjectLifetimeState::Deallocated;
+  confined_child.as_list()->header.flags |= amber::runtime::kObjectFlagDead;
+  const amber::runtime::RuntimeWriteBarrierResult lifetime =
+      heap.write_barrier(owner, confined_child);
+  expect(!lifetime.ok && lifetime.error_name == "UseAfterFreeError",
+         "write barrier should reject deallocated heap references");
+
+  const amber::runtime::RuntimeHeapStats stats = heap.stats();
+  expect(stats.write_barrier_rejected_isolation == 1,
+         "barrier stats should count isolation rejects");
+  expect(stats.write_barrier_rejected_lifetime == 1,
+         "barrier stats should count lifetime rejects");
+}
+
+void test_runtime_gc_safepoint_scans_vm_frame_roots() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  Constant one;
+  one.kind = ConstantKind::Integer;
+  one.int_value = 1;
+  module.const_pool.push_back(one);
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Method;
+  code.reg_count = 2;
+  code.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  code.instructions.push_back(
+      {Opcode::MakeList, {{1, false}, {0, false}, {1, false}}});
+  code.instructions.push_back({Opcode::Safepoint, {}});
+  code.instructions.push_back({Opcode::Return, {{1, false}}});
+  module.code_objects.push_back(code);
+
+  amber::runtime::RuntimeWorld world(module);
+  world.request_garbage_collection(amber::runtime::RuntimeGcCycle::Full);
+  const amber::runtime::ExecutionResult exec = world.execute(1);
+  expect(exec.ok(), "safepoint GC probe should execute");
+  expect(exec.value.is_list(), "safepoint GC probe should return list");
+  expect(exec.value.as_list()->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "safepoint GC should preserve live frame register root");
+
+  const amber::runtime::RuntimeHeapStats stats = world.heap_stats();
+  expect(stats.gc_safepoint_collections == 1,
+         "safepoint should run one requested GC cycle");
+  expect(stats.gc_full_cycles == 1,
+         "requested safepoint GC should be a full cycle");
+}
+
+void test_runtime_gc_parallel_smoke() {
+  amber::runtime::RuntimeHeap heap;
+  std::vector<amber::runtime::Value> shared_roots;
+  std::mutex roots_mutex;
+  std::atomic<int> ready{0};
+  std::atomic<bool> go{false};
+  std::vector<std::thread> threads;
+
+  for (std::uint64_t worker = 0; worker < 4; ++worker) {
+    threads.emplace_back(
+        [&heap, &shared_roots, &roots_mutex, &ready, &go, worker]() {
+          amber::runtime::RuntimeWorkerScope scope(30 + worker);
+          std::vector<amber::runtime::Value> local_roots;
+          for (std::int64_t i = 0; i < 64; ++i) {
+            local_roots.push_back(
+                heap.make_list_value({amber::runtime::Value::integer(i)}));
+          }
+          {
+            std::lock_guard<std::mutex> lock(roots_mutex);
+            shared_roots.insert(shared_roots.end(), local_roots.begin(),
+                                local_roots.end());
+          }
+          ++ready;
+          while (!go.load()) {
+            std::this_thread::yield();
+          }
+          std::vector<amber::runtime::Value> snapshot;
+          {
+            std::lock_guard<std::mutex> lock(roots_mutex);
+            snapshot = shared_roots;
+          }
+          heap.collect_garbage(snapshot, amber::runtime::RuntimeGcCycle::Full);
+        });
+  }
+
+  while (ready.load() != 4) {
+    std::this_thread::yield();
+  }
+  go = true;
+  for (std::thread &thread : threads) {
+    thread.join();
+  }
+
+  const amber::runtime::RuntimeHeapStats after_threads = heap.stats();
+  expect(after_threads.gc_full_cycles >= 4,
+         "parallel GC smoke should run full cycles from worker threads");
+  expect(after_threads.live_objects == 256,
+         "shared roots should keep all worker allocations live");
+
+  shared_roots.clear();
+  heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Full);
+  expect(heap.stats().live_objects == 0,
+         "final full GC should reclaim worker allocations after roots clear");
+}
+
 void test_runtime_world_heap_tracks_vm_allocations() {
   using namespace amber::bytecode;
 
@@ -2377,6 +2572,12 @@ int main() {
   test_runtime_heap_worker_arena_headers();
   test_runtime_heap_remote_free_queue_drains_on_owner();
   test_runtime_heap_allocation_heavy_smoke();
+  test_runtime_gc_full_cycle_preserves_root_address();
+  test_runtime_gc_reclaims_unrooted_reference_cycle();
+  test_runtime_gc_write_barrier_remembers_mature_to_young_edge();
+  test_runtime_gc_write_barrier_rejects_invalid_edges();
+  test_runtime_gc_safepoint_scans_vm_frame_roots();
+  test_runtime_gc_parallel_smoke();
   test_runtime_world_heap_tracks_vm_allocations();
   test_runtime_lifecycle_destroy_opcode_is_idempotent();
   test_runtime_lifecycle_dealloc_opcode_tombstones_instance_payload();

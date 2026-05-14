@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 
 namespace amber::runtime {
@@ -32,6 +34,14 @@ void increment_kind_allocation(RuntimeHeapStats &stats, HeapObjectKind kind) {
     return;
   }
 }
+
+bool value_has_heap_payload_tag(const Value &value);
+const ObjHeader *heap_header_from_value(const Value &value);
+ObjHeader *mutable_heap_header_from_value(const Value &value);
+bool header_is_deallocated(const ObjHeader &header);
+bool header_is_destroyed(const ObjHeader &header);
+std::optional<std::string> lifecycle_access_error_name(const ObjHeader &header);
+std::string lifecycle_access_error_message(const std::string &error_name);
 
 } // namespace
 
@@ -63,25 +73,42 @@ public:
     std::deque<RemoteFree> remote_frees;
   };
 
+  struct ObjectRecord {
+    void *ptr = nullptr;
+    HeapObjectKind kind = HeapObjectKind::Instance;
+    std::uint64_t owner_worker_id = 0;
+    std::uint64_t allocation_id = 0;
+    std::size_t allocation_size = 0;
+    bool logical_live = true;
+  };
+
   ~Impl() { drain_all_remote_frees(); }
 
-  template <typename T> std::shared_ptr<T> allocate(HeapObjectKind kind) {
+  template <typename T, typename Init>
+  std::shared_ptr<T> allocate(HeapObjectKind kind, Init init) {
     auto *raw = new T();
     const std::uint64_t worker_id = current_runtime_worker_id();
     const std::size_t allocation_size = sizeof(T);
-    const std::uint64_t allocation_id =
-        record_allocation(worker_id, kind, allocation_size);
+    const std::uint64_t allocation_id = reserve_allocation_id();
     raw->header.kind = kind;
     raw->header.owner.strand_id = worker_id;
     raw->header.allocation_id = allocation_id;
     raw->header.arena_worker_id = worker_id;
     raw->header.allocation_size = allocation_size;
+    raw->header.generation = ObjectGeneration::Young;
+    init(*raw);
 
     std::shared_ptr<Impl> impl = shared_from_this();
-    return std::shared_ptr<T>(
+    std::shared_ptr<T> handle(
         raw, [impl, worker_id, kind, allocation_id](T *ptr) {
           impl->release({ptr, destroy<T>, worker_id, kind, allocation_id});
         });
+    record_allocation(worker_id, kind, allocation_size, allocation_id, raw);
+    return handle;
+  }
+
+  template <typename T> std::shared_ptr<T> allocate(HeapObjectKind kind) {
+    return allocate<T>(kind, [](T &) {});
   }
 
   std::uint64_t drain_remote_frees(std::uint64_t worker_id) {
@@ -96,7 +123,14 @@ public:
       }
       stats_.remote_queue_depth -= count;
       stats_.remote_frees_drained += count;
-      decrement_live_locked(arena, count);
+      for (const RemoteFree &entry : pending) {
+        const auto record = objects_.find(entry.allocation_id);
+        if (record == objects_.end() || record->second.logical_live) {
+          decrement_live_locked(arena, 1);
+        }
+        objects_.erase(entry.allocation_id);
+        remove_remembered_edges_for_locked(entry.allocation_id);
+      }
     }
 
     RuntimeWorkerScope owner_scope(worker_id);
@@ -106,11 +140,252 @@ public:
     return static_cast<std::uint64_t>(pending.size());
   }
 
+  RuntimeWriteBarrierResult write_barrier(const Value &owner,
+                                          const Value &value) {
+    RuntimeWriteBarrierResult out;
+    const ObjHeader *owner_header = heap_header_from_value(owner);
+    const ObjHeader *value_header = heap_header_from_value(value);
+    if (owner_header == nullptr) {
+      return out;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++stats_.write_barriers;
+
+    const std::optional<std::string> owner_error =
+        lifecycle_access_error_name(*owner_header);
+    if (owner_error.has_value()) {
+      ++stats_.write_barrier_rejected_lifetime;
+      out.ok = false;
+      out.error_name = *owner_error;
+      out.message = lifecycle_access_error_message(*owner_error);
+      return out;
+    }
+    if (value_header == nullptr) {
+      return out;
+    }
+
+    const std::optional<std::string> value_error =
+        lifecycle_access_error_name(*value_header);
+    if (value_error.has_value()) {
+      ++stats_.write_barrier_rejected_lifetime;
+      out.ok = false;
+      out.error_name = *value_error;
+      out.message = lifecycle_access_error_message(*value_error);
+      return out;
+    }
+
+    const bool owner_is_shared =
+        owner_header->generation == ObjectGeneration::Shared ||
+        owner_header->owner.kind == OwnerTokenKind::Shareable ||
+        (owner_header->flags & kObjectFlagShareable) != 0U;
+    const bool value_is_confined =
+        value_header->owner.kind == OwnerTokenKind::Confined &&
+        value_header->generation != ObjectGeneration::Shared;
+    if (owner_is_shared && value_is_confined) {
+      ++stats_.write_barrier_rejected_isolation;
+      out.ok = false;
+      out.error_name = "IsolationError";
+      out.message = "shared object cannot reference confined object";
+      return out;
+    }
+
+    if (owner_header->generation == ObjectGeneration::Mature &&
+        value_header->generation == ObjectGeneration::Young &&
+        owner_header->allocation_id != 0 && value_header->allocation_id != 0) {
+      remembered_set_[owner_header->allocation_id].insert(
+          value_header->allocation_id);
+      ++stats_.write_barrier_remembered;
+      out.remembered = true;
+    }
+    return out;
+  }
+
+  RuntimeGcResult collect_garbage(const std::vector<Value> &roots,
+                                  RuntimeGcCycle cycle, bool from_safepoint) {
+    RuntimeGcResult result;
+    result.cycle = cycle;
+    result.roots = static_cast<std::uint64_t>(roots.size());
+    std::vector<Value> deferred_payload_release;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_gc_cycle_.reset();
+    ++stats_.gc_cycles;
+    if (from_safepoint) {
+      ++stats_.gc_safepoint_collections;
+    }
+    switch (cycle) {
+    case RuntimeGcCycle::Young:
+      ++stats_.gc_young_cycles;
+      break;
+    case RuntimeGcCycle::Full:
+      ++stats_.gc_full_cycles;
+      break;
+    case RuntimeGcCycle::Shared:
+      ++stats_.gc_shared_cycles;
+      break;
+    }
+
+    const std::uint64_t mark_epoch = ++gc_epoch_;
+    result.cycle_id = mark_epoch;
+    std::vector<std::uint64_t> stack;
+    std::unordered_set<std::uint64_t> visited;
+
+    auto enqueue_id = [&](std::uint64_t allocation_id) {
+      if (allocation_id == 0) {
+        return;
+      }
+      const auto found = objects_.find(allocation_id);
+      if (found == objects_.end() || !found->second.logical_live ||
+          found->second.ptr == nullptr) {
+        return;
+      }
+      if (visited.insert(allocation_id).second) {
+        stack.push_back(allocation_id);
+      }
+    };
+
+    auto enqueue_value = [&](const Value &value) {
+      const ObjHeader *header = heap_header_from_value(value);
+      if (header == nullptr) {
+        return;
+      }
+      enqueue_id(header->allocation_id);
+    };
+
+    for (const Value &root : roots) {
+      enqueue_value(root);
+    }
+
+    if (cycle == RuntimeGcCycle::Young) {
+      for (const auto &[owner_id, children] : remembered_set_) {
+        (void)owner_id;
+        for (std::uint64_t child_id : children) {
+          enqueue_id(child_id);
+        }
+      }
+    }
+
+    while (!stack.empty()) {
+      const std::uint64_t allocation_id = stack.back();
+      stack.pop_back();
+      auto found = objects_.find(allocation_id);
+      if (found == objects_.end() || !found->second.logical_live ||
+          found->second.ptr == nullptr) {
+        continue;
+      }
+      ObjectRecord &record = found->second;
+      ObjHeader *header = header_for_record(record);
+      if (header == nullptr) {
+        continue;
+      }
+      header->gc_mark_epoch = mark_epoch;
+      ++result.marked;
+      if (header_is_deallocated(*header)) {
+        continue;
+      }
+      std::vector<Value> children;
+      append_child_values(record, &children);
+      for (const Value &child : children) {
+        enqueue_value(child);
+      }
+    }
+
+    std::vector<std::uint64_t> reclaim_ids;
+    for (const auto &[allocation_id, record] : objects_) {
+      if (!record.logical_live) {
+        continue;
+      }
+      const ObjHeader *header = header_for_record(record);
+      if (header == nullptr) {
+        continue;
+      }
+      if (!cycle_collects_header(cycle, *header)) {
+        continue;
+      }
+      if (visited.find(allocation_id) == visited.end()) {
+        reclaim_ids.push_back(allocation_id);
+      }
+    }
+
+    for (std::uint64_t allocation_id : reclaim_ids) {
+      auto found = objects_.find(allocation_id);
+      if (found == objects_.end() || !found->second.logical_live) {
+        continue;
+      }
+      reclaim_record_locked(found->second, &deferred_payload_release);
+      ++result.reclaimed;
+    }
+
+    for (auto &[allocation_id, record] : objects_) {
+      (void)allocation_id;
+      if (!record.logical_live ||
+          visited.find(record.allocation_id) == visited.end()) {
+        continue;
+      }
+      ObjHeader *header = header_for_record(record);
+      if (header == nullptr || header_is_deallocated(*header)) {
+        continue;
+      }
+      if (header->generation == ObjectGeneration::Young &&
+          cycle != RuntimeGcCycle::Shared) {
+        ++header->gc_age;
+        header->generation = ObjectGeneration::Mature;
+        ++result.promoted;
+      }
+    }
+
+    cleanup_remembered_set_locked();
+    result.remembered_entries = remembered_entry_count_locked();
+    stats_.gc_marked_objects += result.marked;
+    stats_.gc_reclaimed_objects += result.reclaimed;
+    stats_.gc_promoted_objects += result.promoted;
+    return result;
+  }
+
+  void request_garbage_collection(RuntimeGcCycle cycle) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_gc_cycle_ = cycle;
+    ++stats_.gc_requested;
+  }
+
+  std::optional<RuntimeGcCycle> pending_gc_request() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_gc_cycle_;
+  }
+
   RuntimeHeapStats stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     RuntimeHeapStats out = stats_;
     out.arenas.clear();
     out.worker_count = static_cast<std::uint64_t>(arenas_.size());
+    out.young_objects = 0;
+    out.mature_objects = 0;
+    out.shared_objects = 0;
+    for (const auto &[allocation_id, record] : objects_) {
+      (void)allocation_id;
+      if (!record.logical_live) {
+        continue;
+      }
+      const ObjHeader *header = header_for_record(record);
+      if (header == nullptr) {
+        continue;
+      }
+      switch (header->generation) {
+      case ObjectGeneration::Young:
+        ++out.young_objects;
+        break;
+      case ObjectGeneration::Mature:
+        ++out.mature_objects;
+        break;
+      case ObjectGeneration::Shared:
+        ++out.shared_objects;
+        break;
+      }
+    }
+    out.remembered_set_objects =
+        static_cast<std::uint64_t>(remembered_set_.size());
+    out.remembered_set_entries = remembered_entry_count_locked();
     for (const auto &[worker_id, arena] : arenas_) {
       out.arenas.push_back(RuntimeArenaStats{
           worker_id, arena.allocations, arena.live_objects,
@@ -124,22 +399,43 @@ private:
     delete static_cast<T *>(ptr);
   }
 
+  static ObjHeader *header_for_record(const ObjectRecord &record) {
+    switch (record.kind) {
+    case HeapObjectKind::Instance:
+      return &static_cast<InstanceValue *>(record.ptr)->header;
+    case HeapObjectKind::List:
+      return &static_cast<ListValue *>(record.ptr)->header;
+    case HeapObjectKind::Tuple:
+      return &static_cast<TupleValue *>(record.ptr)->header;
+    case HeapObjectKind::Map:
+      return &static_cast<MapValue *>(record.ptr)->header;
+    case HeapObjectKind::Closure:
+      return &static_cast<ClosureValue *>(record.ptr)->header;
+    }
+    return nullptr;
+  }
+
   ArenaState &arena_for_worker(std::uint64_t worker_id) {
     return arenas_[worker_id];
   }
 
-  std::uint64_t record_allocation(std::uint64_t worker_id, HeapObjectKind kind,
-                                  std::size_t allocation_size) {
-    (void)allocation_size;
+  std::uint64_t reserve_allocation_id() {
     std::lock_guard<std::mutex> lock(mutex_);
-    const std::uint64_t allocation_id = next_allocation_id_++;
+    return next_allocation_id_++;
+  }
+
+  void record_allocation(std::uint64_t worker_id, HeapObjectKind kind,
+                         std::size_t allocation_size,
+                         std::uint64_t allocation_id, void *ptr) {
+    std::lock_guard<std::mutex> lock(mutex_);
     ArenaState &arena = arena_for_worker(worker_id);
     ++arena.allocations;
     ++arena.live_objects;
     ++stats_.allocations;
     ++stats_.live_objects;
     increment_kind_allocation(stats_, kind);
-    return allocation_id;
+    objects_[allocation_id] = ObjectRecord{
+        ptr, kind, worker_id, allocation_id, allocation_size, true};
   }
 
   void release(RemoteFree entry) {
@@ -152,7 +448,12 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         ArenaState &arena = arena_for_worker(entry.owner_worker_id);
         ++stats_.local_frees;
-        decrement_live_locked(arena, 1);
+        const auto record = objects_.find(entry.allocation_id);
+        if (record == objects_.end() || record->second.logical_live) {
+          decrement_live_locked(arena, 1);
+        }
+        objects_.erase(entry.allocation_id);
+        remove_remembered_edges_for_locked(entry.allocation_id);
       }
       entry.destroy(entry.ptr);
       return;
@@ -163,6 +464,204 @@ private:
     arena.remote_frees.push_back(entry);
     ++stats_.remote_frees_queued;
     ++stats_.remote_queue_depth;
+  }
+
+  bool cycle_collects_header(RuntimeGcCycle cycle,
+                             const ObjHeader &header) const {
+    switch (cycle) {
+    case RuntimeGcCycle::Young:
+      return header.generation == ObjectGeneration::Young;
+    case RuntimeGcCycle::Full:
+      return true;
+    case RuntimeGcCycle::Shared:
+      return header.generation == ObjectGeneration::Shared;
+    }
+    return true;
+  }
+
+  void append_child_values(const ObjectRecord &record,
+                           std::vector<Value> *out) const {
+    const ObjHeader *header = header_for_record(record);
+    if (header == nullptr || header_is_deallocated(*header)) {
+      return;
+    }
+    switch (record.kind) {
+    case HeapObjectKind::Instance: {
+      const auto *instance = static_cast<const InstanceValue *>(record.ptr);
+      out->insert(out->end(), instance->ivar_storage.begin(),
+                  instance->ivar_storage.end());
+      for (const auto &[name, value] : instance->ivars) {
+        (void)name;
+        out->push_back(value);
+      }
+      return;
+    }
+    case HeapObjectKind::List: {
+      const auto *list = static_cast<const ListValue *>(record.ptr);
+      out->insert(out->end(), list->items.begin(), list->items.end());
+      return;
+    }
+    case HeapObjectKind::Tuple: {
+      const auto *tuple = static_cast<const TupleValue *>(record.ptr);
+      out->insert(out->end(), tuple->items.begin(), tuple->items.end());
+      return;
+    }
+    case HeapObjectKind::Map: {
+      const auto *map = static_cast<const MapValue *>(record.ptr);
+      for (const MapEntry &entry : map->entries) {
+        out->push_back(entry.value);
+      }
+      return;
+    }
+    case HeapObjectKind::Closure: {
+      const auto *closure = static_cast<const ClosureValue *>(record.ptr);
+      out->insert(out->end(), closure->captures.begin(),
+                  closure->captures.end());
+      out->push_back(closure->self);
+      return;
+    }
+    }
+  }
+
+  std::shared_ptr<ShapeDescriptor> dead_shape_locked() {
+    if (dead_shape_ == nullptr) {
+      dead_shape_ = std::make_shared<ShapeDescriptor>();
+      dead_shape_->dead = true;
+    }
+    return dead_shape_;
+  }
+
+  void move_values_for_deferred_release(std::vector<Value> *from,
+                                        std::vector<Value> *deferred) {
+    deferred->insert(deferred->end(), std::make_move_iterator(from->begin()),
+                     std::make_move_iterator(from->end()));
+    from->clear();
+    from->shrink_to_fit();
+  }
+
+  void clear_payload_for_gc_locked(ObjectRecord &record,
+                                   std::vector<Value> *deferred) {
+    const std::shared_ptr<ShapeDescriptor> dead_shape = dead_shape_locked();
+    switch (record.kind) {
+    case HeapObjectKind::Instance: {
+      auto *instance = static_cast<InstanceValue *>(record.ptr);
+      move_values_for_deferred_release(&instance->ivar_storage, deferred);
+      for (auto &[name, value] : instance->ivars) {
+        (void)name;
+        deferred->push_back(std::move(value));
+      }
+      instance->ivars.clear();
+      instance->ivar_shape_version = 0;
+      instance->header.shape = dead_shape;
+      return;
+    }
+    case HeapObjectKind::List: {
+      auto *list = static_cast<ListValue *>(record.ptr);
+      move_values_for_deferred_release(&list->items, deferred);
+      list->frozen = false;
+      list->header.shape = dead_shape;
+      return;
+    }
+    case HeapObjectKind::Tuple: {
+      auto *tuple = static_cast<TupleValue *>(record.ptr);
+      move_values_for_deferred_release(&tuple->items, deferred);
+      tuple->header.shape = dead_shape;
+      return;
+    }
+    case HeapObjectKind::Map: {
+      auto *map = static_cast<MapValue *>(record.ptr);
+      for (MapEntry &entry : map->entries) {
+        deferred->push_back(std::move(entry.value));
+      }
+      map->entries.clear();
+      map->entries.shrink_to_fit();
+      map->frozen = false;
+      map->header.shape = dead_shape;
+      return;
+    }
+    case HeapObjectKind::Closure: {
+      auto *closure = static_cast<ClosureValue *>(record.ptr);
+      move_values_for_deferred_release(&closure->captures, deferred);
+      deferred->push_back(std::move(closure->self));
+      closure->self = Value::null();
+      closure->code_id = 0;
+      closure->header.shape = dead_shape;
+      return;
+    }
+    }
+  }
+
+  void reclaim_record_locked(ObjectRecord &record,
+                             std::vector<Value> *deferred_payload_release) {
+    ObjHeader *header = header_for_record(record);
+    if (header != nullptr) {
+      clear_payload_for_gc_locked(record, deferred_payload_release);
+      header->flags &= ~kObjectFlagDestroying;
+      header->flags |= kObjectFlagDestroyed | kObjectFlagDead;
+      header->lifetime_state = ObjectLifetimeState::Deallocated;
+    }
+    if (record.logical_live) {
+      ArenaState &arena = arena_for_worker(record.owner_worker_id);
+      decrement_live_locked(arena, 1);
+    }
+    record.logical_live = false;
+    remove_remembered_edges_for_locked(record.allocation_id);
+  }
+
+  void remove_remembered_edges_for_locked(std::uint64_t allocation_id) {
+    remembered_set_.erase(allocation_id);
+    for (auto it = remembered_set_.begin(); it != remembered_set_.end();) {
+      it->second.erase(allocation_id);
+      if (it->second.empty()) {
+        it = remembered_set_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  void cleanup_remembered_set_locked() {
+    for (auto it = remembered_set_.begin(); it != remembered_set_.end();) {
+      const auto owner = objects_.find(it->first);
+      if (owner == objects_.end() || !owner->second.logical_live) {
+        it = remembered_set_.erase(it);
+        continue;
+      }
+      const ObjHeader *owner_header = header_for_record(owner->second);
+      if (owner_header == nullptr ||
+          owner_header->generation != ObjectGeneration::Mature) {
+        it = remembered_set_.erase(it);
+        continue;
+      }
+      for (auto child = it->second.begin(); child != it->second.end();) {
+        const auto child_record = objects_.find(*child);
+        const ObjHeader *child_header =
+            child_record == objects_.end()
+                ? nullptr
+                : header_for_record(child_record->second);
+        if (child_record == objects_.end() ||
+            !child_record->second.logical_live || child_header == nullptr ||
+            child_header->generation != ObjectGeneration::Young) {
+          child = it->second.erase(child);
+        } else {
+          ++child;
+        }
+      }
+      if (it->second.empty()) {
+        it = remembered_set_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  std::uint64_t remembered_entry_count_locked() const {
+    std::uint64_t count = 0;
+    for (const auto &[owner, children] : remembered_set_) {
+      (void)owner;
+      count += static_cast<std::uint64_t>(children.size());
+    }
+    return count;
   }
 
   void decrement_live_locked(ArenaState &arena, std::uint64_t count) {
@@ -193,7 +692,14 @@ private:
               static_cast<std::uint64_t>(pending.size());
           stats_.remote_queue_depth -= count;
           stats_.remote_frees_drained += count;
-          decrement_live_locked(arena, count);
+          for (const RemoteFree &entry : pending) {
+            const auto record = objects_.find(entry.allocation_id);
+            if (record == objects_.end() || record->second.logical_live) {
+              decrement_live_locked(arena, 1);
+            }
+            objects_.erase(entry.allocation_id);
+            remove_remembered_edges_for_locked(entry.allocation_id);
+          }
           batches.push_back({worker_id, std::move(pending)});
         }
       }
@@ -211,8 +717,14 @@ private:
 
   mutable std::mutex mutex_;
   std::uint64_t next_allocation_id_ = 1;
+  std::uint64_t gc_epoch_ = 0;
   RuntimeHeapStats stats_;
   std::map<std::uint64_t, ArenaState> arenas_;
+  std::unordered_map<std::uint64_t, ObjectRecord> objects_;
+  std::unordered_map<std::uint64_t, std::unordered_set<std::uint64_t>>
+      remembered_set_;
+  std::shared_ptr<ShapeDescriptor> dead_shape_;
+  std::optional<RuntimeGcCycle> pending_gc_cycle_;
 };
 
 RuntimeHeap::RuntimeHeap() : impl_(std::make_shared<Impl>()) {}
@@ -221,10 +733,11 @@ RuntimeHeap::~RuntimeHeap() = default;
 
 std::shared_ptr<InstanceValue>
 RuntimeHeap::make_instance_value(std::uint32_t class_index) {
-  auto value = impl_->allocate<InstanceValue>(HeapObjectKind::Instance);
-  value->class_index = class_index;
-  value->header.class_index = class_index;
-  return value;
+  return impl_->allocate<InstanceValue>(
+      HeapObjectKind::Instance, [class_index](InstanceValue &value) {
+        value.class_index = class_index;
+        value.header.class_index = class_index;
+      });
 }
 
 std::shared_ptr<ClosureValue> RuntimeHeap::make_closure_value() {
@@ -232,31 +745,44 @@ std::shared_ptr<ClosureValue> RuntimeHeap::make_closure_value() {
 }
 
 Value RuntimeHeap::make_list_value(std::vector<Value> items, bool frozen) {
-  auto value = impl_->allocate<ListValue>(HeapObjectKind::List);
-  value->header.flags = frozen ? kObjectFlagFrozen | kObjectFlagShareable : 0U;
-  value->header.owner.kind =
-      frozen ? OwnerTokenKind::Shareable : OwnerTokenKind::Confined;
-  value->items = std::move(items);
-  value->frozen = frozen;
+  auto value = impl_->allocate<ListValue>(
+      HeapObjectKind::List, [frozen, &items](ListValue &value) {
+        value.header.flags =
+            frozen ? kObjectFlagFrozen | kObjectFlagShareable : 0U;
+        value.header.owner.kind =
+            frozen ? OwnerTokenKind::Shareable : OwnerTokenKind::Confined;
+        value.header.generation =
+            frozen ? ObjectGeneration::Shared : ObjectGeneration::Young;
+        value.items = std::move(items);
+        value.frozen = frozen;
+      });
   return {std::move(value)};
 }
 
 Value RuntimeHeap::make_tuple_value(std::vector<Value> items) {
-  auto value = impl_->allocate<TupleValue>(HeapObjectKind::Tuple);
-  value->header.flags = kObjectFlagFrozen | kObjectFlagShareable;
-  value->header.owner.kind = OwnerTokenKind::Shareable;
-  value->items = std::move(items);
+  auto value = impl_->allocate<TupleValue>(
+      HeapObjectKind::Tuple, [&items](TupleValue &value) {
+        value.header.flags = kObjectFlagFrozen | kObjectFlagShareable;
+        value.header.owner.kind = OwnerTokenKind::Shareable;
+        value.header.generation = ObjectGeneration::Shared;
+        value.items = std::move(items);
+      });
   return {std::move(value)};
 }
 
 Value RuntimeHeap::make_symbol_map_value(std::vector<MapEntry> entries,
                                          bool frozen) {
-  auto value = impl_->allocate<MapValue>(HeapObjectKind::Map);
-  value->header.flags = frozen ? kObjectFlagFrozen | kObjectFlagShareable : 0U;
-  value->header.owner.kind =
-      frozen ? OwnerTokenKind::Shareable : OwnerTokenKind::Confined;
-  value->entries = std::move(entries);
-  value->frozen = frozen;
+  auto value = impl_->allocate<MapValue>(
+      HeapObjectKind::Map, [frozen, &entries](MapValue &value) {
+        value.header.flags =
+            frozen ? kObjectFlagFrozen | kObjectFlagShareable : 0U;
+        value.header.owner.kind =
+            frozen ? OwnerTokenKind::Shareable : OwnerTokenKind::Confined;
+        value.header.generation =
+            frozen ? ObjectGeneration::Shared : ObjectGeneration::Young;
+        value.entries = std::move(entries);
+        value.frozen = frozen;
+      });
   return {std::move(value)};
 }
 
@@ -266,6 +792,25 @@ std::uint64_t RuntimeHeap::drain_remote_frees() {
 
 std::uint64_t RuntimeHeap::drain_remote_frees(std::uint64_t worker_id) {
   return impl_->drain_remote_frees(worker_id);
+}
+
+RuntimeWriteBarrierResult RuntimeHeap::write_barrier(const Value &owner,
+                                                     const Value &value) {
+  return impl_->write_barrier(owner, value);
+}
+
+RuntimeGcResult RuntimeHeap::collect_garbage(const std::vector<Value> &roots,
+                                             RuntimeGcCycle cycle,
+                                             bool from_safepoint) {
+  return impl_->collect_garbage(roots, cycle, from_safepoint);
+}
+
+void RuntimeHeap::request_garbage_collection(RuntimeGcCycle cycle) {
+  impl_->request_garbage_collection(cycle);
+}
+
+std::optional<RuntimeGcCycle> RuntimeHeap::pending_gc_request() const {
+  return impl_->pending_gc_request();
 }
 
 RuntimeHeapStats RuntimeHeap::stats() const { return impl_->stats(); }
@@ -1103,6 +1648,82 @@ private:
     return state_->heap.make_instance_value(class_index);
   }
 
+  bool apply_write_barrier(const Frame &frame, const Value &owner,
+                           const Value &value) {
+    const RuntimeWriteBarrierResult barrier =
+        state_->heap.write_barrier(owner, value);
+    if (!barrier.ok) {
+      set_fault(frame, barrier.error_name, barrier.message);
+      return false;
+    }
+    return true;
+  }
+
+  void append_value_root(std::vector<Value> *roots, const Value &value) const {
+    if (value_has_heap_payload_tag(value)) {
+      roots->push_back(value);
+    }
+  }
+
+  void append_frame_roots(std::vector<Value> *roots, const Frame &frame) const {
+    for (const Value &value : frame.regs) {
+      append_value_root(roots, value);
+    }
+    for (const Value &value : frame.captures) {
+      append_value_root(roots, value);
+    }
+    append_value_root(roots, frame.self);
+    append_value_root(roots, frame.block);
+    append_value_root(roots, frame.last_result);
+    if (frame.return_override.has_value()) {
+      append_value_root(roots, *frame.return_override);
+    }
+    for (const auto &[reg, value] : frame.pending_pattern_bindings) {
+      (void)reg;
+      append_value_root(roots, value);
+    }
+    for (const auto &[reg, state] : frame.prepared_seq_regs) {
+      (void)reg;
+      for (const Value &value : state.items) {
+        append_value_root(roots, value);
+      }
+    }
+    for (const auto &[reg, state] : frame.prepared_map_regs) {
+      (void)reg;
+      for (const MapEntry &entry : state.entries) {
+        append_value_root(roots, entry.value);
+      }
+    }
+  }
+
+  std::vector<Value> collect_gc_roots() const {
+    std::vector<Value> roots;
+    for (const Frame &frame : frames_) {
+      append_frame_roots(&roots, frame);
+    }
+    for (const Value &value : last_completed_regs_) {
+      append_value_root(&roots, value);
+    }
+    append_value_root(&roots, final_value_);
+    for (const ClassRuntimeState &klass : state_->classes) {
+      for (const auto &[name, value] : klass.cvars) {
+        (void)name;
+        append_value_root(&roots, value);
+      }
+    }
+    return roots;
+  }
+
+  void run_safepoint() {
+    state_->heap.drain_remote_frees();
+    const std::optional<RuntimeGcCycle> requested =
+        state_->heap.pending_gc_request();
+    if (!requested.has_value()) {
+      return;
+    }
+    state_->heap.collect_garbage(collect_gc_roots(), *requested, true);
+  }
+
   TraceFrame trace_frame_for(const Frame &frame, std::uint32_t pc) const {
     TraceFrame out;
     out.code_id = frame.code == nullptr ? 0U : frame.code->code_id;
@@ -1798,6 +2419,9 @@ private:
     }
     if (instance->header.shape == nullptr || instance->header.shape->dead) {
       set_fault(frame, "UseAfterFreeError", "access to deallocated object");
+      return false;
+    }
+    if (!apply_write_barrier(frame, Value::instance(instance), value)) {
       return false;
     }
     std::shared_ptr<const ShapeDescriptor> shape = instance->header.shape;
@@ -4382,7 +5006,7 @@ private:
       ++frame.pc;
       return;
     case Opcode::Safepoint:
-      state_->heap.drain_remote_frees();
+      run_safepoint();
       ++frame.pc;
       return;
     default:
@@ -4577,6 +5201,42 @@ std::uint64_t RuntimeWorld::drain_remote_frees(std::uint64_t worker_id) {
     return 0;
   }
   return impl_->state->heap.drain_remote_frees(worker_id);
+}
+
+RuntimeWriteBarrierResult RuntimeWorld::write_barrier(const Value &owner,
+                                                      const Value &value) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeWriteBarrierResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.write_barrier(owner, value);
+}
+
+RuntimeGcResult RuntimeWorld::collect_garbage(const std::vector<Value> &roots,
+                                              RuntimeGcCycle cycle) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return {};
+  }
+  std::vector<Value> all_roots = roots;
+  for (const ClassRuntimeState &klass : impl_->state->classes) {
+    for (const auto &[name, value] : klass.cvars) {
+      (void)name;
+      if (value_has_heap_payload_tag(value)) {
+        all_roots.push_back(value);
+      }
+    }
+  }
+  return impl_->state->heap.collect_garbage(all_roots, cycle);
+}
+
+void RuntimeWorld::request_garbage_collection(RuntimeGcCycle cycle) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return;
+  }
+  impl_->state->heap.request_garbage_collection(cycle);
 }
 
 std::string value_to_debug_string(const Value &value,
