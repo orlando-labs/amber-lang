@@ -1,2304 +1,573 @@
-> Редакция v20.1: поверх v20.0 зафиксирован **Callable Reference & Constructor Call Revision**. В core syntax добавлены callable references `&NameSpace.some_fn`, class-side callable references `&Class.method`, unbound instance method references `&Class#method`, канонический вызов callable-значений `fn(args...)`, а также callable class objects: `Class(args...)` является preferred constructor-call form и наблюдаемо эквивалентен `Class.new(args...)`. `&` не означает raw machine address; это создание immutable callable reference object, совместимого с `HCall` / `CALL`, open-world dispatch и frozen-world invalidation rules.
+# Amber Compilable Project Layer
 
+**Проектный слой компилируемого Amber v20.1-project**  
+Самодостаточный engineering blueprint для reference implementation  
+14 мая 2026; обновлено compile-closure patch 14 мая 2026
 
-# Amber
+## 0. Статус документа
 
-**Консолидированная спецификация (текущее зафиксированное состояние)**  
-Редакторская консолидация по истории разработки  
-29 апреля 2026
+Этот файл является отдельным проектным слоем поверх основной языковой спецификации Amber v20.1. Он не вводит новый surface syntax и не переоткрывает закрытые решения языка. Его задача — перевести уже зафиксированный Amber в набор инженерных контрактов, артефактов, этапов и acceptance-критериев, достаточных для реализации компилятора, байткодной VM, loader/verifier, no-GIL runtime и conformance suite.
 
+Каноническая граница такая:
 
-# О документе
+- основной файл `amber_spec_consolidated_v20_1_main.md` отвечает за язык, семантику и профили;
+- этот файл отвечает за то, как построить компилируемый Amber: pipeline, ABI, форматы, runtime-подсистемы, тесты, backlog и implementation matrix;
+- любые изменения здесь не должны менять наблюдаемое поведение языка без отдельного spec-format bump в основном документе.
 
-Этот документ сводит историю проектирования Amber в одну согласованную редакцию. Основание — три файла с историей обсуждения: `amber.lang.txt`, `amber.lang-2.txt`, `amber-lang-3.txt`.
+Дополнение **compile-closure patch** в конце файла закрывает оставшиеся инженерные лакуны, которые мешали бы двум независимым реализациям получить совместимый компилируемый Amber: source/literal completion, prelude/builtin registry, slot/allocation rules, call ABI, operator lowering, exception/error registry, bytecode binary encoding, verifier dataflow, stack/root maps, build graph, bootstrap и расширенную implementation matrix.
 
-Цель документа — не «додумать язык с нуля», а:
-1. зафиксировать то, что уже принято;
-2. развести нормативные части и незакрытые зоны;
-3. собрать единый пакет для следующего шага: парсер, рантайм, типизация и инструментирование.
+## 1. Цель проектного слоя
 
-## Редакторские правила консолидации
-
-История разработки содержит несколько противоречивых промежуточных черновиков. В этой редакции используется такой принцип:
-
-- при конфликте между файлами приоритет имеет `amber-lang-3.txt`, затем `amber.lang-2.txt`, затем `amber.lang.txt`;
-- внутри `amber-lang-3.txt` нормативными считаются прежде всего явно закрывающие формулировки вроде «фиксируем», «финальный синтаксис», «закрытая v1-спека»;
-- если в `amber-lang-3.txt` встречаются более поздние, но явно объяснительные или регрессивные примеры, которые противоречат уже закрытому нормативному блоку, это помечается как редакторская коллизия и разбирается отдельно;
-- всё, что не удалось честно довести до «зафиксировано», вынесено в раздел **Открытые вопросы**.
-
-## Статус
-
-Amber в текущем виде — **консолидированная спецификация с закрытым implementation gate, зафиксированным reference blueprint для runtime P0/P1 и закрытыми profile-level решениями второй волны**. Ядро синтаксиса и семантики уже достаточно устойчиво, чтобы писать не только прототип парсера и интерпретатора, но и первый байткодный runtime; инженерная граница старта поддержана каноническими AST/HIR/diagnostic dump-контрактами, обязательным каталогом diagnostic codes v1, layout-моделью corpus/golden-файлов и bootstrap order для reference toolchain. Ранее зафиксированные minimal type envelope для parser/HIR/runtime hooks, обязательный stdlib contract для chainable collections, формальная матрица диагностик, policy по underscore-спецформам, окончательная граница bare matcher expressions и v1-решение по field lifetime annotations, а также reference execution profile, reference lifetime profile, collector/pinning/FFI profile, compiled-module/loader profile, strict `case!`, source-level modules, minimal MOP, mixin/`include` profile и frozen-world boundary сохраняются без регрессий: register/slot bytecode VM, frame/closure/object ABI, pattern-matching opcode family, ownership model без GIL, explicit destruction/deallocation (`destroy!` + `memory.dealloc`), non-moving generational collector, pinning boundary для native interop, `.amberbc`-формат и verifier/loader state machine, static `package/import/export`, reopenable named classes, named mixins, declarative `include`, linearized ancestor composition, reflective `define_method`, builtin `send(...)`, `method_missing` fallback и двухфазная модель dispatch-world (`open` -> `frozen`). В v16 дополнительно закрываются optional Amber/Typed checker profile, package/distribution/signing/hot-reload policy, read-only reflection mirrors, class-side `extend`, advanced concurrency (`move`, `select`, supervisor policies, async I/O awaitables), weak/ephemeron/buffer/borrow story без field modifiers и canonical MIR/SSA + native/JIT/AOT + frozen-image profile. В v19.2 дополнительно закрыт optional Amber/Notebook Watch Profile: `Kernel.watch(target)` является compiler/kernel intrinsic для notebook-инвалидации, но не считается world mutation и не меняет production semantics. В v20 дополнительно закрывается слой Modern Pressure Profiles: capabilities/sandbox, effects, observability/replay, columnar BI, schemas/API contracts, Wasm components, accelerators, AI-agent tooling, contracts/property testing, privacy/lineage и durable workflows. В v20.1 поверх этого закрывается core-level callable reference / constructor-call revision: `&target`, `&Class#method`, canonical `fn(args...)` и callable class objects `Class(args...)`. Эти возможности не расширяют Modern Pressure Profiles и не являются host-only фичами: они входят в минимальный синтаксис и lowering core. После этой редакции незакрытых spec-level вопросов больше не остаётся: дальше остаются только реализация, тестовые корпуса, toolchain и выбор порядка включения профилей в конкретных hosts.
-
-# Часть I. Полноценная спека Amber в текущем зафиксированном виде
-
-## 1. Дизайн-якоря языка
-
-Amber — это язык с такими базовыми обязательствами:
-
-- от Python берутся отступы как способ задавать блоки и отказ от `end`;
-- от Ruby берутся объектная модель, сигилы полей `@` и `@@`, чейнинг методов, блоки как основной способ передавать замыкания, именование методов с суффиксами `?` и `!`, а также ориентация на метапрограммирование;
-- управляющие конструкции являются выражениями;
-- pattern matching — часть ядра, а не библиотечный сахар;
-- методы не требуют явного первого параметра `self` или `cls`;
-- callable-значения являются first-class: `&target` создаёт callable reference, `fn(args...)` является каноническим вызовом callable, а class object может вызываться как constructor `Class(args...)`;
-- базовая коллекционная модель — `map/select/reduce/...` как методы, а не питоновские внешние `map/filter`.
-
-## 2. Лексика, идентификаторы и блоки
-
-### 2.1. Отступы и блоки
-
-Блок открывается двоеточием `:` и продолжается отступом, как в Python.
-
-Это относится к:
-
-- `if / else if / elif / elsif / else`;
-- `case` / `case!`;
-- `while / until / do ... while / loop`;
-- `def`;
-- `class`;
-- `mixin`;
-- `class_method def`;
-- блокам, привязанным к вызовам (block suffix).
-
-Пустой блок без тела запрещён. Для намеренно пустого тела используются `pass` или `noop`.
-
-```amber
-def todo():
-  pass
-
-if feature_enabled?:
-  noop
-else:
-  log "disabled"
-```
-
-### 2.2. Идентификаторы
-
-Базовые правила:
-
-- имена методов, функций, локальных переменных, полей и констант являются UTF-8 identifier tokens;
-- базовый профиль идентификаторов v1 разрешает ASCII-буквы, `_`, ASCII-цифры не в первой позиции, а также греческие и кириллические буквы в первой и последующих позициях;
-- суффиксы `?` и `!` разрешены только в конце идентификатора;
-- никакой магии двойных подчёркиваний в обычных именах нет;
-- exact-token `_` в pattern-контексте означает wildcard и не создаёт биндинг;
-- `$_` — служебная read-only переменная «результат последнего выражения» в текущем scope;
-- `_1`, `_2`, ... — это нумерованные аргументы блока только в блоках без `|...|`;
-- обычные имена, начинающиеся с `_`, включая `_tmp` и `__cache`, считаются обычными идентификаторами, если не попадают под спец-формы `_`, `$_`, `_N`.
-
-Примеры валидных имён:
-
-```amber
-active?
-clear!
-empty?
-present?
-_tmp
-__cache
-масса
-коэффициент
-α
-β2
-скорость!
-```
-
-Примеры невалидного использования:
-
-```amber
-foo?bar     # ? не внутри имени
-bang!name   # ! не внутри имени
-```
-
-## 3. Общая модель выражений и операторов
-
-### 3.1. Выражения
-
-Amber ориентирован на выражения. В частности, выражениями являются:
-
-- литералы;
-- вызовы, чейнинг, индексация;
-- `if`;
-- `case` / `case!`;
-- циклы;
-- `class`, `mixin` и `def` (с оговорённой ниже семантикой результата).
-
-### 3.2. Truthiness
-
-Ложными считаются только:
-
-- `false`;
-- `null`.
-
-Всё остальное truthy, включая:
-
-- `0`;
-- `""`;
-- `[]`;
-- `{}`.
-
-### 3.3. Логические операторы
-
-Поддерживаются:
-
-- `not`
-- `and`
-- `or`
-
-Приоритет:
-
-1. `not`
-2. `and`
-3. `or`
-
-`and` и `or` работают по short-circuit-семантике и возвращают операнды, а не обязательно `Bool`.
-
-```amber
-a and b
-a or b
-not a
-```
-
-Семантика:
-
-- `A and B` возвращает `A`, если `A` falsy, иначе возвращает `B`;
-- `A or B` возвращает `A`, если `A` truthy, иначе возвращает `B`;
-- `not A` возвращает булев результат.
-
-### 3.4. Оператор принадлежности `in`
-
-`in` — это infix-оператор в выражениях.
-
-```amber
-elem in container
-```
-
-Приоритет `in` — на уровне сравнений: ниже арифметики, выше `and/or`.
-
-```amber
-x + 1 in xs and ok
-# читается как:
-# ((x + 1) in xs) and ok
-```
-
-Минимальный контракт:
-
-- если у правого операнда есть `contains?(lhs)` — вызывается он;
-- иначе — `TypeError`.
-
-Рекомендуемая семантика стандартной библиотеки:
-
-- `Array / Tuple / Set` — проверка наличия элемента;
-- `Map` — проверка ключа;
-- `Str` — проверка подстроки;
-- `Range` — попадание в диапазон.
-
-### 3.5. Presence-операции поверх Ruby-like truthiness
-
-Так как `0`, `""` и пустые коллекции truthy, в языке отдельно фиксируются value-presence операции:
-
-- `x ?? default` — null-coalescing, только для `null`;
-- `value.presence()` — вернёт `null`, если значение «blank», иначе само значение;
-- `value.nonempty()` — вернёт `null`, если значение пустое;
-- `value.nonzero()` — вернёт `null`, если значение равно нулю.
-
-```amber
-name  = input.strip().presence() or "anon"
-limit = cfg.limit.nonzero() or 100
-items = arr.nonempty() or default_items
-```
-
-## 4. Postfix-выражения, чейнинг и block suffix
-
-### 4.1. Базовые postfix-операции
-
-В call/postfix-зоне выражений поддерживаются:
-
-- доступ к члену;
-- вызов метода;
-- вызов callable-объекта через `callee(args...)`;
-- создание callable reference через prefix-form `&target`;
-- индексация;
-- safe-variants через `.?.`;
-- block suffix после каждого применимого вызовного сегмента.
-
-Базовые формы:
-
-```amber
-obj.field
-obj.method(arg1, arg2)
-obj.method arg1, arg2
-obj[index]
-fn = &NameSpace.some_fn
-fn(args)
-klass = Point
-klass(args)
-```
-
-### 4.2. Block suffix
-
-У блока есть две формы:
-
-1. с явными параметрами;
-2. без списка параметров, но с `_1`, `_2`, ... внутри тела.
-
-```amber
-numbers.map |x|: x * 2
-numbers.map: _1 * 2
-```
-
-Блок **всегда относится к ближайшему вызову слева**, а не «перепрыгивает» на следующий сегмент цепочки.
-
-```amber
-numbers.map: _1 * 2 .select: _1 > 0
-# читается как:
-# (numbers.map { ... }).select { ... }
-```
-
-### 4.3. One-liner block boundary rule
-
-Чтобы one-liner-блоки были однозначны в чейнинге, фиксируется лексическое правило.
-
-- обычный доступ/вызов: **без пробела перед точкой**;
-- продолжение цепочки после one-liner блока: **точка с пробелом слева**.
-
-```amber
-numbers.map: _1 * 2 .select: _1 > 0 .reduce 0: _1 + _2
-```
-
-Внутри one-liner блока чейнинг разрешён, но только без пробела перед точкой:
-
-```amber
-users.map: _1.email.downcase().strip() .uniq()
-```
-
-То есть:
-
-- `_1.email.downcase()` — часть тела блока;
-- ` .uniq()` — продолжение внешней цепочки.
-
-### 4.4. Скобки в чейнинге
-
-В этой редакции статус скобочной формы **закрыт**:
-
-```amber
-numbers.map(_1 * 2).select(_1 > 0)
-```
-
-трактуется **только как обычный вызов с аргументами в скобках**, а не как альтернативная компактная форма блока.
-
-Следствия:
-
-- `_1`, `_2`, ... существуют только внутри block suffix без `|...|`;
-- запись `map(_1 * 2)` в v1 **невалидна**, потому что `_1` вне блока не существует;
-- для компактного трансформационного стиля нужно писать либо `map: _1 * 2`, либо `map |x|: x * 2`.
-
-То есть допустимы:
-
-```amber
-numbers.map: _1 * 2
-numbers.map |x|: x * 2
-```
-
-А это не входит в v1:
-
-```amber
-numbers.map(_1 * 2)   # invalid in v1
-```
-
-Такое решение сознательно выбрано ради:
-
-- детерминированной грамматики;
-- более простого Pratt/recursive-descent парсера;
-- более предсказуемой компиляции в AST/HIR;
-- отсутствия скрытой «второй формы блока».
-
-### 4.5. Safe navigation `.?.`
-
-
-Amber использует `.?.` как оператор безопасной навигации, чтобы не конфликтовать с рубишными именами методов, оканчивающимися на `?`.
-
-Поддерживаются:
-
-```amber
-expr.?.method(...)
-expr.?.field
-expr.?.[key]
-fn.?.(args)
-users.?.map: _1.email
-```
-
-Семантика: если receiver равен `null`, результат safe-сегмента — `null`, и дальнейшее вычисление соответствующего safe-шагa не продолжается.
-
-
-### 4.6. Callable references `&...` и канонический callable-call
-
-Amber v20.1 фиксирует first-class callable references как часть core syntax.
-
-Каноническая форма вызова callable-значения:
-
-```amber
-fn(args...)
-```
-
-Форма `fn.()` в язык не вводится и не является альтернативным spelling'ом. Точка остаётся только operator'ом member access / method send, а `fn(args...)` понижается в `HCall`.
-
-Prefix `&` создаёт **callable reference object**, а не raw machine address. Пользователь не получает числовой адрес функции, FFI pointer или стабильный code pointer. Runtime вправе представлять callable reference как closure, descriptor object, send-reference, loader-backed entry или иной объект, если выполняется наблюдаемый callable contract.
-
-Поддерживаемые v1-формы:
-
-```amber
-fn = &NameSpace.some_fn      # module/top-level callable binding или export
-cm = &User.find              # class-side method reference: receiver = User, selector = :find
-m  = &User#full_name         # unbound instance method reference
-```
-
-Семантика:
-
-- `&NameSpace.some_fn` создаёт callable reference на callable binding / module export. Если target статически не резолвится или очевидно не является callable, frontend обязан диагностировать это до runtime; в dynamic path нарушение завершается `TypeError` или `NoMethodError` по обычным правилам резолюции.
-- `&Class.method` создаёт bound class-side send-reference: вызов `cm(args...)` наблюдаемо эквивалентен `Class.method(args...)` и участвует в обычных lookup, `method_missing`, open-world invalidation и frozen-world guard rules.
-- `&Class#method` создаёт unbound instance method reference. Вызов требует явный receiver первым positional-аргументом:
-
-```amber
-m = &User#full_name
-m(user)
-m(user, arg1, arg2)
-```
-
-Для `&Class#method` runtime сначала проверяет, что первый аргумент удовлетворяет `Class === receiver`; затем вызывает instance-side selector на этом receiver с оставшимися аргументами и тем же optional block. Если receiver отсутствует или не удовлетворяет owner-class constraint, это `TypeError`. Если method lookup не находит selector и `method_missing` не срабатывает, это `NoMethodError`.
-
-В v1 `&` принимает только reference-target, а не произвольное выражение. Невалидны:
-
-```amber
-&obj.method      # instance-bound method reference не входит в v1 spelling
-&foo()           # нельзя взять reference результата вызова через &
-&(foo + bar)     # нельзя брать reference произвольного выражения
-```
-
-Если нужен bound instance callable, v1 использует обычный closure/block-level adapter, а не новый surface spelling. Более явные формы вроде `obj.&method` могут быть добавлены отдельным будущим RFC, но не являются частью v20.1.
-
-## 5. Блоки, лямбда-аргументы и placeholders
-
-### 5.1. Каноническая форма блока
-
-Основная форма блока — ruby-like:
-
-```amber
-collection.each |x|:
-  puts x
-```
-
-One-liner:
-
-```amber
-collection.map |x|: x * 2
-```
-
-### 5.2. Блок без `|...|`
-
-Если список параметров не указан, внутри блока доступны placeholders `_1`, `_2`, ...
-
-```amber
-numbers.map: _1 * 2
-numbers.reduce 0: _1 + _2
-```
-
-Правила:
-
-- placeholders доступны только в блоке без `|...|`;
-- `_k` read-only;
-- номера должны быть плотными: нельзя использовать `_1` и `_3`, пропустив `_2`;
-- арность блока определяется максимальным использованным `_k`;
-- для стандартных методов арность блока должна совпадать с их контрактом.
-
-### 5.3. Явные параметры блока как паттерны
-
-В блоке с `|...|` список аргументов — это список паттернов.
-
-```amber
-ary.map |a, (b, c), {d:, e:}|:
-  puts a, b, c, d, e
-```
-
-Следствия:
-
-- разрешена декомпозиция tuple/list;
-- разрешена декомпозиция map/object;
-- если аргументы не сматчились с паттернами, это `MatchError`.
-
-## 6. Специальная переменная `$_`
-
-`$_` — это встроенная read-only переменная «результат последнего выражения» в текущем scope.
-
-`_` в этой редакции **не** является last-result-переменной: это wildcard в pattern-контекстах и не читается как обычное имя.
-
-Scope-уровни:
-
-- функция;
-- метод;
-- блок;
-- фибра / таск.
-
-Правила:
-
-- после любого expression-statement `$_` обновляется значением этого выражения;
-- присваивание тоже обновляет `$_`;
-- `pass` и `noop` дают `null`;
-- если функция или блок завершаются без `return`, возвращается текущее `$_`.
-
-Примеры:
-
-```amber
-1 + 2
-puts $_
-# 3
-
-def normalize(str):
-  str.strip()
-  log $_
-  $_.downcase()
-  $_
-```
-
-### 6.1. Конструкции, которые обновляют `$_`
-
-Фиксированные случаи:
-
-- `x = expr` -> `$_ = x`
-- `@x = expr` -> `$_ = присвоенное значение`
-- `@@x = expr` -> `$_ = присвоенное значение`
-- `pass` / `noop` -> `$_ = null`
-- `def name(...): ...` как выражение даёт `:name`
-- `class Name: ...` как выражение даёт созданный объект класса
-- `mixin Name: ...` как выражение даёт созданный mixin object
-- module directives (`package`, `import`, `from`, `export`) не меняют `$_`
-
-## 7. Управляющие конструкции как выражения
-
-### 7.1. `if`, `else if`, `elif`, `elsif`, `else`
-
-Приоритетная каноническая форма — `else if`, но разрешены также `elif` и `elsif`.
-
-```amber
-if cond1:
-  body1
-else if cond2:
-  body2
-else:
-  body3
-```
-
-`if` — выражение.
-
-Значение:
-
-- последнее выражение выполненной ветки;
-- если ни одна ветка не выполнилась и `else` нет — `null`.
-
-### 7.2. `unless`
-
-`unless` — симметричная форма для отрицательного условия.
-
-```amber
-unless user:
-  raise "no user"
-```
-
-Семантика значения — как у `if`.
-
-### 7.3. Циклы
-
-Поддерживаются:
-
-- `while`
-- `until`
-- `do ... while`
-- `loop:`
-
-```amber
-while cond:
-  work()
-
-until done?:
-  step()
-
-do:
-  x += 1
-while x < 10
-
-loop:
-  tick()
-```
-
-#### Значение цикла
-
-Цикл — выражение.
-
-- если выход произошёл через `break value`, значением цикла является `value`;
-- если выход произошёл по условию или по голому `break`, значением цикла является `null`.
-
-```amber
-result = loop:
-  if ready?:
-    break :ok
-# result == :ok
-```
-
-### 7.4. `break`
-
-`break` может нести значение:
-
-```amber
-break :some_symbol
-```
-
-## 8. Функции, методы, классы и объектная модель
-
-### 8.1. `def`
-
-Поддерживаются многострочная и one-liner формы.
-
-```amber
-def add(a, b):
-  a + b
-
-def double(x): x * 2
-```
-
-### 8.2. `class` и наследование
-
-```amber
-class User:
-  pass
-
-class Admin < User:
-  pass
-```
-
-### 8.3. `class_method def`
-
-Классовые методы объявляются отдельным ключевым словом.
-
-```amber
-class User:
-  class_method def find(id):
-    ...
-```
-
-### 8.4. Конструктор `init`, `new` и constructor-call sugar
-
-Конструктор называется `init`.
-
-```amber
-class Point:
-  def init(@x, @y):
-    pass
-```
-
-`new(...)` остаётся явным классовым путём создания объекта: он выделяет объект и вызывает `init(...)`, если тот существует.
-
-Amber v20.1 дополнительно фиксирует preferred constructor-call form:
-
-```amber
-p1 = Point.new(10, 20)  # explicit construction path
-p2 = Point(10, 20)      # preferred constructor-call sugar
-```
-
-Нормативно class object является callable. Поэтому форма:
-
-```amber
-ClassName(args...)
-```
-
-наблюдаемо эквивалентна:
-
-```amber
-ClassName.new(args...)
-```
-
-Та же семантика применяется к динамически полученному class object:
-
-```amber
-factory = Point
-p = factory(10, 20)
-```
-
-То есть `HCall` / `CALL` по class object выполняет constructor path через selector `:new` с теми же positional/keyword-аргументами и optional block. `.new(...)` не удаляется: он остаётся частью явного MOP/reflection story и может использоваться через ordinary send, `send(Point, :new, ...)` или callable reference `&Point.new`.
-
-### 8.5. Поля `@` и `@@`
-
-- `@name` — поле экземпляра;
-- `@@name` — поле класса / class storage.
-
-### 8.6. Auto-assign в параметрах
-
-Параметр, записанный как `@x` или `@@x`, одновременно:
-
-- объявляет обычный внешний параметр `x`;
-- просит автоматически присвоить его в соответствующее поле после биндинга аргументов.
-
-```amber
-def init(@name, @email, @active = true):
-  validate_email(@email)
-```
-
-### 8.7. Параметры и сигнатуры
-
-Формы параметров:
-
-#### Позиционные
-
-```amber
-x
-x = expr
-@x
-@x = expr
-x as T
-x as T = expr
-@x as T
-@x as T = expr
-```
-
-#### Keyword
-
-```amber
-name:
-name: expr
-@name:
-@name: expr
-name as T:
-name as T: expr
-@name as T:
-@name as T: expr
-```
-
-Внешнее имя keyword-параметра всегда без `@`/`@@`.
-
-```amber
-def init(@host:, @port: 5432):
-  pass
-
-Connection.new(host: "db", port: 1000)
-```
-
-### 8.8. Значения по умолчанию
-
-Ключевая отличительная черта относительно Python:
-
-- default-выражения вычисляются **на каждом вызове**;
-- default-выражения могут ссылаться на `@...` и `@@...`.
-
-```amber
-def init(@env: @@default_env, timeout = @timeout):
-  pass
-```
-
-### 8.9. Порядок вычисления аргументов, дефолтов и auto-assign
-
-Нормативный порядок:
-
-1. на стороне вызывающего вычисляются receiver и фактические аргументы слева направо;
-2. выполняется preflight: арность, keywords, неизвестные ключи, дубли;
-3. явные аргументы связываются с параметрами;
-4. default-значения вычисляются слева направо по сигнатуре;
-5. выполняется typecheck для параметров с `as Type`;
-6. только после этого происходит commit auto-assign в `@...` / `@@...`;
-7. затем исполняется тело.
-
-Важное правило:
-
-- внутри default-выражений `@x` и `@@x` означают **старое состояние объекта / класса**, а не уже «подготовленное» значение параметра;
-- если default одного параметра зависит от другого параметра, нужно ссылаться на локальное имя параметра, а не на `@field`.
-
-Пример:
-
-```amber
-def init(@x, @y = x):
-  pass
-```
-
-Здесь `y` зависит от локального параметра `x`, а не от поля `@x`.
-
-Если ни одна multi-clause ветка не подошла, auto-assign не коммитится.
-
-### 8.10. Пакеты, imports и exports
-
-Amber v1 фиксирует **static source-level module system**, отделённый от будущего MOP/`include`-слоя.
-
-Один исходный файл соответствует одной compilation unit.
-
-#### Заголовок пакета
-
-Импортируемый модуль может начинаться с file-header декларации:
-
-```amber
-package net.http
-```
-
-Нормативно:
-
-- `package` может появляться только как первая непустая non-comment top-level форма файла;
-- в одном файле допускается не более одной `package`-декларации;
-- `package` задаёт **logical module id** compilation unit;
-- `package` не открывает блок и не требует дополнительного отступа;
-- если `package` отсутствует, единица компиляции считается script/entry unit и не обязана быть импортируемой по имени в v1.
-
-#### Imports
-
-Поддерживаются только статические top-level формы:
-
-```amber
-import net.http
-import net.http as http
-
-from net.http import Client, RequestError
-from net.http import Client as HttpClient
-```
-
-Нормативно:
-
-- `import` и `from ... import ...` разрешены только на top-level;
-- import-секция идёт после optional `package` и до первого non-import top-level item;
-- bare `import a.b.c` создаёт локальный read-only binding с именем последнего сегмента пути, то есть `c`;
-- `import a.b.c as x` создаёт локальный binding `x`;
-- `from a.b.c import Name as Alias` создаёт локальный read-only binding `Alias`, связанный с export `Name` из целевого модуля;
-- все imports входят в статический dependency graph и сериализуются в `.amberbc` через `DEPS`;
-- относительные импорты (`.foo`, `..bar`) в v1 не вводятся;
-- `from ... import *` в v1 не вводится;
-- присваивание импортированному имени или import-alias — compile-time error.
-
-Imported bindings являются **live read-only aliases** к export-cells зависимого модуля. Namespace-object, получаемый через `import`, наблюдает те же live exports через `.`-доступ.
-
-#### Export model
-
-Экспорт оформляется отдельной top-level формой:
-
-```amber
-export Client, get, RequestError
-export HttpClient as Client
-```
-
-Нормативно:
-
-- top-level bindings приватны по умолчанию;
-- только явно экспортированные имена видимы из других модулей;
-- `export` разрешён только на top-level;
-- `export X` публикует top-level binding `X` под тем же именем;
-- `export Local as Public` публикует binding `Local` под внешним именем `Public`;
-- `export` может ссылаться как на локально объявленное top-level имя, так и на импортированный alias, тем самым поддерживая explicit re-export;
-- два экспорта с одинаковым public-именем в одном модуле — compile-time error;
-- экспорт имени, которое к концу module-binding phase не резолвится в top-level binding, — compile-time error.
-
-#### Namespace-object и циклы
-
-`import net.http as http` связывает `http` с module namespace object.
-
-Нормативно:
-
-- module namespace object открывает только export-таблицу модуля;
-- `from`-импорт обязан проверяться против `EXPT` целевого модуля при link/load phase;
-- отсутствие запрошенного export даёт `ImportError`;
-- при циклической загрузке ранний доступ к ещё неинициализированному export обязан следовать уже зафиксированной loader-semantics: наблюдается `initializing`, а раннее чтение может завершиться `ModuleInitError`.
-
-#### Что не входит в это решение
-
-- `require` не имеет специальной loader-семантики в v1; если такое имя встречается в коде, оно трактуется как обычный вызов/идентификатор;
-- `include` не является формой загрузки модулей; поведенческая композиция описывается отдельно в mixin/`include` profile ниже;
-- runtime/dynamic import как отражательная операция не входит в source-level v1-core.
-
-### 8.11. `mixin`
-
-Amber v13 фиксирует **named mixin object profile**, отделённый и от package/import system, и от ordinary class inheritance.
-
-Примеры:
-
-```amber
-mixin Timestamped:
-  def touch!():
-    @updated_at = clock.now()
-
-mixin AuditFields:
-  include Timestamped
-
-  def audit_label():
-    "#{@created_by}:#{@updated_at}"
-```
-
-Нормативно:
-
-- named `mixin`-форма создаёт или reopen-ит **mixin object**;
-- если имя ещё не связано в текущем lexical owner — создаётся новый mixin object;
-- если имя уже связано с mixin object — форма означает **reopen** этого mixin'а;
-- если имя связано не с mixin object — это `TypeError` либо более точная диагностируемая ошибка;
-- `mixin` не поддерживает superclass clause в v1;
-- один syntactic mixin-body коммитится **атомарно** по тем же правилам publish-point transaction, что и class-body;
-- mixin object является именованным binding'ом и может импортироваться/экспортироваться обычным `import` / `from ... import ...` / `export`;
-- mixin body допускает `def`, nested `class`, nested `mixin`, `include` и `pass`;
-- `class_method def` внутри mixin body в v1 запрещён как compile-time error;
-- методы mixin'а живут на **instance-side** и участвуют в lookup только после включения через `include`.
-
-`mixin Name: ...` как выражение даёт соответствующий mixin object.
-
-### 8.12. `include` и ancestor composition
-
-`include` в v13 — это **declarative body form**, а не loader-форма и не namespace-import.
-
-Surface syntax:
-
-```amber
-class User:
-  include Timestamped, AuditFields
-
-mixin AuditFields:
-  include Comparable
-```
-
-Нормативно:
-
-- `include` разрешён только непосредственно внутри body `class` или `mixin`;
-- `include` запрещён на module top-level, внутри `def`, внутри block body и в expression-position;
-- каждый операнд `include` обязан резолвиться в mixin object; попытка включить класс, module namespace object или произвольное значение даёт `TypeError` (или compile-time error, если это статически очевидно);
-- `include` влияет только на **instance-side** method lookup;
-- `include` не создаёт новых lexical bindings и не импортирует top-level exports в scope;
-- packages/imports отвечают за namespace, а `include` отвечает только за поведенческую композицию;
-- повторное включение уже присутствующего mixin'а в результирующей ancestor linearization является идемпотентным no-op;
-- прямые или косвенные циклы в include-графе запрещены и обязаны завершаться `IncludeCycleError` (компилятор/loader вправе диагностировать их раньше, если цикл статически прозрачен).
-
-#### Lookup order
-
-Для lookup используется linearized ancestor order.
-
-Нормативная интуиция:
-
-- локальные методы класса всегда доминируют над mixin-методами;
-- более поздний `include` доминирует над более ранним;
-- сам mixin доминирует над mixins, которые он включает;
-- superclass chain идёт после локального класса и его linearized mixins.
-
-Reference linearization:
+Компилируемый Amber должен иметь воспроизводимый путь:
 
 ```text
-ancestors(Class C):
-  [C]
-  + expand(reverse(C.direct_includes))
-  + ancestors(C.superclass)
-
-ancestors(Mixin M):
-  [M]
-  + expand(reverse(M.direct_includes))
-
-expand(mixins):
-  depth-first, preserving the first occurrence
+source.am
+  -> tokens/spans
+  -> amber.ast.v1
+  -> amber.diag.v1
+  -> amber.hir.v1
+  -> pattern decision program
+  -> amber.bc.v1
+  -> .amberbc
+  -> verifier
+  -> loader/linker/init
+  -> register/slot VM
+  -> optional MIR/SSA/native/frozen image
 ```
 
-Где `expand(...)` обязан:
+Минимальный успешный результат P0/P1: программа Amber компилируется в `.amberbc`, проходит verifier, загружается loader'ом, исполняется в reference VM, даёт стабильные diagnostics/stack traces и подтверждается corpus/golden tests.
 
-- обходить direct includes справа налево относительно source order;
-- добавлять mixin в результат до его собственных included mixins;
-- игнорировать поздние дубликаты уже встреченного mixin'а;
-- бросать `IncludeCycleError`, если текущий DFS-path повторно входит в уже активный mixin.
+## 2. Архитектурные инварианты
 
-Следствие для разрешения конфликтов по selector'у:
+1. **AST syntax-faithful.** Parser не имеет права прятать surface-формы в обычные вызовы: block suffix, `.?.`, `&target`, `case!`, `include`, `extend`, `package/import/export`, `Kernel.watch(...)` должны быть представлены явно.
+2. **HIR semantic-core.** HIR обязан устранить surface-sugar: safe-nav раскладывается в null-guards, block suffix становится closure, many-def становится clause-style def, `$_` становится frame slot, auto-assign — post-dispatch commit step.
+3. **Bytecode register/slot.** Reference VM не стековая; locals, temporaries, `last_result`, captures и handler-state живут в регистрово-слотовой модели.
+4. **No-GIL через strand isolation.** Параллелизм даётся несколькими strand'ами на worker threads; ordinary mutable objects остаются strand-confined, cross-strand идут только shareable/sync values.
+5. **Open-world до freeze.** `class` reopen, `mixin` reopen, `define_method`, `include/extend` и loader world-mutations легальны до freeze barrier и запрещены после неё.
+6. **Verifier before execution.** `.amberbc` не исполняется в reference profile без verifier-pass.
+7. **Diagnostics deterministic.** Все compiler diagnostics, disasm, stack traces и golden outputs не зависят от raw pointer values, абсолютных путей и случайного порядка map-итерации.
+8. **Runtime safety observable.** Destroyed/deallocated/tombstone/pin/ownership ошибки должны доходить до канонических runtime errors, а не превращаться в undefined behavior.
 
-1. local class method;
-2. last included direct mixin и его include-цепочка;
-3. более ранние direct mixins и их include-цепочки;
-4. superclass и его linearized includes.
+## 3. Минимальные внешние артефакты
 
-Те же правила применяются и к `method_missing`.
+| Артефакт | Формат | Владелец | Назначение | Обязателен для P0/P1 |
+|---|---|---:|---|---:|
+| Token stream dump | internal/debug | lexer | отладка spans, INDENT/DEDENT, `CHAIN_DOT` | да |
+| AST dump | `amber.ast.v1` JSON | parser | golden parser tests, IDE, formatter | да |
+| Diagnostic dump | `amber.diag.v1` JSON | binder/checker | negative corpus, CI gates | да |
+| HIR dump | `amber.hir.v1` JSON | lowering | semantic golden tests | да |
+| Pattern IR dump | `amber.pattern.v1` JSON/disasm | pattern compiler | проверка decision programs | да |
+| Bytecode container | `amber.bc.v1` inside `.amberbc` | bytecode emitter | исполнимый модуль | да |
+| Bytecode disasm | deterministic text | disassembler | golden compile tests | да |
+| Loader trace | deterministic optional text/json | loader | dependency/init/frozen failures | да для loader tests |
+| Runtime stack trace | deterministic text | VM | unhandled exceptions | да |
+| MIR dump | `amber.mir.v1` | native lane | SSA/native/JIT профили | нет, P3 |
+| Frozen image | `.amberimg` | frozen lane | deployable artifact | нет, P3/P4 |
 
-#### Relation to reopen / frozen-world
-
-`include` является world mutation, если он меняет direct include-set класса или mixin'а.
-
-Нормативно:
-
-- include-директивы внутри одного syntactic class/mixin body коммитятся атомарно вместе с методами этого body;
-- reopen `class`/`mixin` может добавлять новые include-директивы;
-- после freeze barrier любая такая операция обязана давать `WorldFrozenError`;
-- class-side mixins / `extend` не входят в минимальный v13-профиль этой подчасти; финальная v16-норма позже добавляет отдельную declarative form `extend` на class-side, см. Q15 и последующие реализационные части.
-
-### 8.13. Open classes
-
-
-Amber v13 сохраняет **minimal open-class model** и сочленяет его с именованными mixin'ами.
-
-Named `class`-форма:
-
-- если имя ещё не связано в текущем lexical owner — создаёт новый class object;
-- если имя уже связано с class object — **reopen**-ит его;
-- если имя связано не с классом — это `TypeError` либо более точная диагностируемая ошибка времени выполнения.
-
-Пример:
-
-```amber
-class User:
-  def full_name(): "#{@first} #{@last}"
-
-class User:
-  def admin?(): false
-```
-
-Нормативно:
-
-- reopenable `class` не является новым синтаксисом: используется та же surface-form `class Name: ...`;
-- superclass clause может присутствовать у первоначального объявления;
-- при reopen superclass clause либо опускается, либо должен резолвиться в тот же superclass; несовместимость даёт `SuperclassMismatchError` (компилятор вправе диагностировать это раньше);
-- один syntactic class-body коммитится **атомарно**: методы/классовые методы, определённые внутри, становятся видимы целиком после успешного завершения body;
-- поздний reopen **заменяет** целый method entry по данному selector'у на соответствующей стороне dispatch, а не «добавляет ещё одну clause» к уже существующему multi-clause `def`;
-- clause aggregation по правилам §10 работает только внутри одного syntactic def-group / class-body, а не через отдельные reopen-операции.
-
-### 8.14. Reflective `define_method`
-
-Минимальный reflective API v13 задаётся builtin-функцией:
-
-```amber
-define_method(User, :greet) |name|:
-  "Hello, #{name}"
-```
-
-Нормативно:
-
-- специальная семантика действует только когда имя `define_method` резолвится в builtin prelude binding; локальное затенение превращает форму в обычный вызов;
-- первый аргумент обязан быть class object или mixin object;
-- второй аргумент обязан быть `Symbol` или `Str`;
-- реализация метода задаётся либо block suffix, либо явным третьим callable-аргументом, но не обоими сразу;
-- в v1 `define_method` определяет или заменяет **instance method** в target class/mixin;
-- если используется block-form, сигнатура устанавливаемого метода берётся из параметров блока; доступны обычный `self` и обычный method-call context;
-- reflective `define_method` не добавляет clause к существующему multi-clause методу: он заменяет целый method entry для selector'а;
-- class-side reflective `define_method`, remove/alias/visibility hooks и richer class-side composition сверх later-added declarative `extend` в минимальный v13-профиль не входят.
-
-Успешный `define_method` считается world mutation и обязан обновлять dispatch invalidation metadata по правилам части X.
-
-### 8.15. Reflective `send`
-
-Reflective dispatch фиксируется как builtin-функция:
-
-```amber
-send(user, :full_name)
-send(user, selector, arg1, arg2)
-```
-
-Нормативно:
-
-- специальная семантика действует только когда имя `send` резолвится в builtin prelude binding;
-- первый аргумент — receiver;
-- второй аргумент — selector, обязанный быть `Symbol` или `Str`;
-- дальнейшие позиционные/keyword-аргументы и optional block suffix передаются как у обычного метода;
-- после резолюции selector'а правила lookup / guard / block forwarding совпадают с обычным method call;
-- если selector является compile-time literal symbol/string, lowering вправе понизить `send(...)` в обычный `HSend` / `SEND`;
-- если selector неизвестен статически, lowering обязан использовать reflective slow-path (`HSendDyn` / `SEND_DYN`).
-
-### 8.16. `method_missing`
-
-`method_missing` получает в v13 минимальную, но нормативную семантику.
-
-Правило для обычного `obj.foo(...)` и reflective `send(obj, sel, ...)`:
-
-1. сначала выполняется обычный method lookup;
-2. если target найден — вызов идёт обычным путём;
-3. если target не найден — lookup пытается найти selector `method_missing`;
-4. если `method_missing` найден, он вызывается с первым positional-аргументом = missing selector (`Symbol`), затем со всеми исходными аргументами и тем же block/value context;
-5. если и `method_missing` не найден — бросается `NoMethodError`.
-
-Дополнительно:
-
-- `method_missing` — обычное имя метода, а не keyword;
-- `method_missing` сам **не** получает рекурсивного fallback на ещё один `method_missing`, если lookup этого selector'а тоже не удался;
-- изменение или переопределение `method_missing` считается dispatch-relevant world mutation.
-
-### 8.17. World mutation и frozen-world boundary
-
-Amber v13 разводит **data mutation** и **world mutation**.
-
-К world mutation относятся:
-
-- создание нового named class object;
-- создание нового named mixin object;
-- reopen существующего класса или mixin'а;
-- `define_method`;
-- `include`, меняющий direct include-set;
-- любая операция, меняющая method table / ancestor-composition / dispatch fallback policy;
-- загрузка нового Amber-модуля в тот же frozen dispatch-world после freeze barrier.
-
-Не считаются world mutation:
-
-- запись в `@field` / `@@field`;
-- изменение обычных объектов данных;
-- allocation/deallocation как таковые;
-- обычный вызов `send(...)`, если он не меняет мир.
-
-Reference model использует два состояния dispatch-world:
+## 4. Reference repository layout
 
 ```text
-open -> frozen
+amber/
+  crates-or-packages/
+    amber_lexer/
+    amber_parser/
+    amber_ast/
+    amber_binder/
+    amber_hir/
+    amber_patterns/
+    amber_bytecode/
+    amber_vm/
+    amber_loader/
+    amber_stdlib/
+    amber_test/
+    amber_cli/
+  spec/
+    amber_spec_consolidated_v20_1_main.md
+    amber_compilable_project_layer_v20_1.md
+  tests/
+    parser/
+    binder/
+    hir/
+    bytecode/
+    runtime/
+    loader/
+    scheduler/
+    stdlib/
+    notebook/
+    profiles/
+  corpus/
+    positive/
+    negative/
+    golden/
+  tools/
+    fixture_normalizer/
+    disasm_diff/
+    diag_lint/
 ```
 
-Нормативно:
+Этот layout не предписывает язык реализации. Он фиксирует ответственность модулей и границы контрактов, чтобы Rust/Zig/C++/Go/другая реализация могла сохранять те же внешние артефакты.
 
-- обычный dynamic Amber может жить в состоянии `open` неограниченно долго;
-- **Amber/Frozen** — это build/runtime profile, а не отдельный source-keyword;
-- loader/linker/module-init выполняются при world-state = `open`;
-- freeze transition инициируется host/toolchain после успешной загрузки и инициализации выбранного набора модулей;
-- после перехода в `frozen` любая world mutation обязана бросать `WorldFrozenError` либо быть отклонена раньше verifier/loader/toolchain-слоем;
-- `send(...)` и `method_missing` остаются **законными** и после freeze, но компилятор не обязан их де-виртуализовать: такие места могут оставаться на reflective slow-path.
+## 5. Compiler pipeline: детальный контракт стадий
 
-### 8.18. Что не входит в minimal MOP v13
+### 5.1. F0 — lexer, spans, indentation
 
-Сознательно вне минимального v1-профиля остаются:
+**Вход:** UTF-8 source.  
+**Выход:** token stream + stable source spans.
 
-- class-side mixins / `extend`;
-- reflective remove/alias/visibility API;
-- общий introspection/reflection API поверх method tables, ancestors и source locations;
-- hot reload и package-manager policy;
-- «позднее добавление clause» к уже существующему методу через reopen/`define_method`.
+Обязательные детали:
 
-Подробная нормативная модель MOP/frozen-boundary закреплена в части X.
+- `INDENT`/`DEDENT` как structural tokens;
+- `case!` как отдельный keyword token;
+- `.?.` как отдельный safe-navigation token;
+- `CHAIN_DOT` только в режиме one-liner block body при глубине скобок 0 и пробеле слева;
+- contextual treatment для `pattern` и `as` не в lexer, а в parser/binder;
+- spans line/column + byte offsets, пригодные для diagnostics и source maps.
 
-## 9. Pattern matching v1
+Acceptance:
 
-### 9.1. Где работает pattern matching
+- token golden покрывает indentation, `.?.`, `CHAIN_DOT`, `$_`, `_1`, `&Class#method`;
+- token dump deterministic;
+- malformed indentation даёт compiler diagnostic, а не panic.
 
-Паттерны используются в:
+### 5.2. F1 — parser и AST
 
-- `case` / `case!`;
-- деструктурирующем присваивании `PATTERN = expr`;
-- параметрах блоков `|...|`;
-- `when`-клаузах multi-clause `def`.
+**Вход:** token stream.  
+**Выход:** `amber.ast.v1`.
 
-Не каждая pattern-form доступна во всех этих контекстах: bare matcher expressions и dynamic pattern objects имеют отдельные ограничения, описанные ниже.
+Обязательные детали:
 
-### 9.2. `case` и `case!`
+- Pratt parser для expression/postfix зоны;
+- syntax-faithful nodes для callable refs, safe-nav tails, block suffix, package/import/export, class/mixin/include/extend;
+- `case`/`case!` сохраняют `strict` flag;
+- `AstPatDynamic` хранит `matcher_expr` и optional `export_map_pattern`;
+- parser не понижает `Kernel.watch`, `send`, lifecycle calls или async calls в intrinsics.
 
-Каноническая форма, закреплённая поздними нормативными блоками `amber-lang-3`, такая:
+Acceptance:
 
-```amber
-case expr:
-  when PATTERN if GUARD:
-    body
-  when PATTERN:
-    body
-  else:
-    body
-```
+- `amberc parse --json` стабилен;
+- positive parser corpus green;
+- invalid surface forms (`fn.()`, `map(_1 * 2)`, `&foo()`, `&(expr)`) дают ожидаемые syntax diagnostics.
 
-Строгая форма:
+### 5.3. F2 — binder, scopes, signatures, diagnostics
 
-```amber
-case! expr:
-  when PATTERN if GUARD:
-    body
-  when PATTERN:
-    body
-  else:
-    body
-```
+**Вход:** AST.  
+**Выход:** resolved AST metadata + `amber.diag.v1`.
 
-`case` и `case!` — match-expression'ы с одинаковой clause-grammar и одинаковым pattern-engine.
+Обязательные детали:
 
-Алгоритм общий:
+- scope graph для locals/top-level/imports/classes/mixins;
+- read-only imported aliases;
+- signature validation: duplicate params, keyword conflicts, default references to right-side params, self-reference defaults;
+- object-body placement checks: `include`, `extend`, `class_method def` inside mixin;
+- pattern pre-checks: duplicate binds, OR binding set equality, rest position;
+- callable reference target validation;
+- notebook watch target validation when profile enabled.
 
-1. вычислить `expr` -> `value`;
-2. идти по веткам сверху вниз;
-3. для каждой ветки попытаться сматчить `PATTERN` на `value`;
-4. если матч успешен — вычислить guard `if ...`, если он есть;
-5. первая ветка, у которой match + guard, побеждает;
-6. если нет совпадения:
-   - если есть `else` — выполняется `else`;
-   - иначе для обычного `case` результатом является `null`, и `$_` становится `null`;
-   - иначе для `case!` поднимается `MatchError`.
+Acceptance:
 
-Нормативно:
+- negative corpus сходится по diagnostic codes;
+- diagnostics include `code`, `severity`, `span`, `message`, optional `notes`;
+- binder не выполняет user code.
 
-- `case!` является strict-form того же `case`, а не отдельным паттерн-языком;
-- lowering для `case!` обязан использовать тот же `HMatchDispatch`, меняя только `fail_mode`;
-- `case!` лексируется как отдельная keyword-form, а не как `case` + postfix `!`.
+### 5.4. F3 — HIR lowering и pattern compiler
 
-> Редакторское примечание: внутри истории есть и более строгая ветка, где `case` без `else` бросает `MatchError`. Более поздняя закрытая v1-формулировка в `amber-lang-3` переводит обычный `case` в safe-form со значением `null`. В этой редакции tension закрыт так: обычный `case` остаётся safe-form, а строгий вариант доступен как отдельная surface-form `case!`.
+**Вход:** AST + binder metadata.  
+**Выход:** `amber.hir.v1` + pattern IR.
 
-### 9.3. Допустимые паттерны v1
+Обязательные lowering rules:
 
-#### Wildcard
+- block suffix -> explicit `HClosure`;
+- `_1.._N` -> explicit closure params with dense arity;
+- safe-nav -> `HSafe*` or explicit null-guard HIR, but never raw postfix magic below HIR;
+- `$_` -> `HLastGet/HLastSet`;
+- `case`/`case!` -> `HMatchDispatch` with `fail_mode`;
+- clause-style `def` -> `HMethod` with bind/dispatch/commit/body stages;
+- `send` builtin -> `HSend` or `HSendDyn` only when binding resolves to prelude builtin;
+- `Kernel.watch(...)` -> watch intrinsics only when Notebook profile and builtin resolution match;
+- callable refs -> `HCallableRef` or `HUnboundMethodRef`;
+- constructor calls stay `HCall`, unless static rewrite to `HSend(:new)` is proven observationally equivalent.
 
-```amber
-_
-```
+Acceptance:
 
-`_` ничего не биндит и может встречаться сколько угодно раз.
+- `amberc lower --json` stable;
+- HIR golden covers safe-nav, `case!`, pattern assignment, block suffix, callable refs, constructor-call, watch profile;
+- failed pattern compilation never leaves partial bindings committed.
 
-#### Binding-name
+### 5.5. V0 — bytecode emitter, `.amberbc`, disassembler
 
-```amber
-name
-_tmp
-```
+**Вход:** HIR + pattern IR.  
+**Выход:** `.amberbc` + deterministic disasm.
 
-Lowercase / underscore-start identifier связывает новое имя.
+Обязательные детали:
 
-Ограничение: дубликаты имён в одном паттерне запрещены.
+- `BcModule`, `BcMethod`, `BcCode`, constant/symbol tables;
+- versioned bytecode format with section table;
+- no raw pointers in serialized module;
+- bytecode includes source map/debug sections sufficient for stack traces;
+- disasm line-stable and suitable for golden diff.
 
-```amber
-(x, x)   # compile-time error
-```
+Acceptance:
 
-#### Литералы
+- compile -> disasm -> golden passes;
+- `.amberbc` read/write round-trip preserves code/debug sections;
+- verifier rejects malformed bytecode before VM execution.
 
-```amber
-null
-true
-false
-42
-"str"
-:ok
-```
+### 5.6. V1 — register/slot VM core
 
-Матч по значению.
+**Вход:** verified `BcModule`.  
+**Выход:** executed program or deterministic runtime failure.
 
-#### Tuple-паттерны
+Обязательные детали:
 
-```amber
-(a, b)
-(x, _, y)
-(head, *tail)
-```
+- frame stack with code pointer, local registers, captures/upvalues, `last_result`, handlers, current task;
+- dispatch opcodes: `SEND`, `SEND_DYN`, `CALL`, `RETURN`, `RAISE`, `JUMP`, `JUMP_IF_*`;
+- `CALL` handles ordinary callable objects and class objects via constructor path;
+- closures capture by upvalue cells;
+- exceptions unwind frames and structured children correctly;
+- stack trace does not leak memory addresses.
 
-`*tail` допускается только один раз и только в конце.
+Acceptance:
 
-#### List / Array-паттерны
+- single-worker runtime corpus green;
+- `$_` semantics confirmed across function/block/task frames;
+- reflective dispatch and method_missing behavior match language spec.
 
-```amber
-[]
-[a, b, c]
-[head, *tail]
-```
+### 5.7. V2 — object model, lifetime, allocator, collector boundary
 
-#### Map / Object-паттерны
-
-```amber
-{id:, name:}
-{id: user_id, email: mail}
-{email: _}
-```
-
-#### Map-rest
-
-```amber
-{a:, b:, **rest}
-{a:, b:, **_}
-{a:, b:, **null}
-```
-
-Семантика:
-
-- без `**...` лишние ключи допускаются;
-- `**rest` — захватить остальные ключи в map;
-- `**_` — явно проигнорировать остаток;
-- `**null` — строгий матч: лишних ключей быть не должно.
-
-#### Pin-pattern
-
-```amber
-^x
-```
-
-Матч только если значение равно уже существующему `x`.
-
-#### As-pattern и typed binding
-
-```amber
-whole as PATTERN
-n as Int
-Point(x: x as Int, y: y as Int)
-```
-
-Сначала whole-value биндится в `whole`, затем на то же значение применяется `PATTERN`.
-
-В pattern-контексте `as` остаётся именно as-pattern, а не type-annotation sugar.
-
-#### OR-pattern
-
-```amber
-p1 | p2
-```
-
-Пробуются альтернативы слева направо.
-
-Ограничение: все альтернативы OR-паттерна должны биндить один и тот же набор имён.
-
-Внутри `|...|` у block-параметров OR-паттерны должны быть дополнительно обёрнуты в скобки, чтобы не конфликтовать с разделителями блока:
-
-```amber
-ary.map |((0, x) | (x, 0))|: x
-```
-
-#### Constant / Type pattern
-
-Идентификатор, начинающийся с Uppercase, трактуется как constant/type pattern:
-
-```amber
-Int
-Str
-User
-Point
-```
-
-Семантика:
-
-```amber
-T === value
-```
-
-#### Typed destructuring
-
-```amber
-T(p1, p2, ...)
-T(x:, y:, ...)
-```
-
-Семантика:
-
-- сначала `T === value`;
-- затем вызывается `deconstruct()` или `deconstruct_keys(keys)`.
-
-#### Dynamic pattern object (explicit-binding profile)
-
-```amber
-pattern(expr)
-pattern(expr) with {id:, **null}
-```
-
-Семантика:
-
-- `pattern(expr)` вычисляет `expr` и трактует результат как dynamic matcher object;
-- `pattern(expr)` без `with` не вводит новых имён;
-- `pattern(expr) with MAP_PATTERN` сначала исполняет dynamic matcher, затем матчится against returned bindings-map;
-- наружу попадают только имена, явно связанные `MAP_PATTERN`;
-- скрытая инъекция локалов из matcher object запрещена.
-
-Контекстные ограничения v1:
-
-- dynamic pattern objects разрешены в `case`, `case!` и в clause-style `def`;
-- dynamic pattern objects запрещены в block params и pattern assignment.
-
-### 9.4. Протокол `===`, `deconstruct()`, `deconstruct_keys(keys)`, `match(value)`
-
-#### `===`
-
-Используется для type/constant patterns и bare matcher expressions в `case` / `case!`.
-
-Для классов ожидается ruby-like семантика `Class#=== ~= is_a?`.
-
-Если `===` возвращает не булево значение — это ошибка протокола (`TypeError`).
-
-#### `deconstruct()`
-
-Контракт:
-
-- возвращает sequence/list/tuple-like значение;
-- либо `null` для no-match.
-
-Если возвращён не-список — `TypeError`.
-
-#### `deconstruct_keys(keys)`
-
-Контракт:
-
-- возвращает map;
-- либо `null` для no-match.
-
-Если возвращён не-map — `TypeError`.
-
-Какие `keys` передавать:
-
-- если map-паттерн перечисляет только конкретные ключи — можно передать список этих ключей;
-- если используется `**rest` или `**null`, нужно получить полное раскрытие, чтобы проверить остаток.
-
-#### `match(value)`
-
-Используется только для dynamic pattern objects вида `pattern(expr)`.
-
-Контракт:
+Obligatory runtime structures:
 
 ```text
-matcher.match(value) -> DynamicMatchResult
-DynamicMatchResult(success: Bool, bindings: Map)
-```
-
-Нормативные требования:
-
-- при `success = false` `bindings` обязаны быть пустыми;
-- при `success = true` и отсутствии `with ...` `bindings` также обязаны быть пустыми;
-- если `with MAP_PATTERN` присутствует, returned `bindings` матчится как обычный map-pattern;
-- только имена, связанные `MAP_PATTERN`, попадают в локальный scope;
-- любое нарушение контракта является `TypeError`.
-
-### 9.5. Безголовые `{...}` и `[...]`
-
-Для «голых» map/list паттернов порядок такой:
-
-#### `{...}`
-
-1. если значение — нативный `Map/Hash`, матчим напрямую;
-2. иначе, если объект умеет `deconstruct_keys`, вызываем его и матчим результат;
-3. иначе — no-match.
-
-#### `[...]`
-
-1. если значение — нативный `Array/List`, матчим напрямую;
-2. иначе, если объект умеет `deconstruct`, вызываем его и матчим результат;
-3. иначе — no-match.
-
-### 9.6. Matcher expressions в `case` / `case!`
-
-Только в `case` и `case!` разрешается fallback-форма, когда `when ...` содержит не структурный паттерн, а выражение-матчер.
-
-```amber
-case x:
-  when 1..10:
-    :small
-  when String:
-    :str
-  when {id:, **null}:
-    :obj
-  else:
-    :other
-```
-
-Если после `when` запись не разбирается как `Pattern`, она трактуется как `MatcherExpr`, и проверяется:
-
-```amber
-MatcherExpr === value
-```
-
-Отдельно от bare matcher expressions в v1 разрешены dynamic pattern objects явной формы:
-
-```amber
-when pattern(route("/users/:id")) with {id:, **null}:
-  ...
-```
-
-Различие нормативно:
-
-- bare matcher expression не экспортирует bindings;
-- `pattern(expr)` может участвовать в matching как runtime-configured matcher object;
-- bindings наружу возможны только через явный `with MAP_PATTERN`.
-
-В `def`-клаузах, block params и в деструктурирующем присваивании bare matcher expressions запрещены. Dynamic pattern objects в v1 разрешены только в clause-style `def`, `case` и `case!`.
-
-## 10. Multi-clause def
-
-### 10.1. Каноническая форма
-
-Для богатых сигнатур фиксируется каноническая clause-style форма:
-
-```amber
-def f(base_signature):
-  when CLAUSE_PATTERN if GUARD:
-    body
-  when CLAUSE_PATTERN:
-    body
-  else:
-    body
-```
-
-Именно эта форма обязательна для сигнатур, где есть:
-
-- defaults;
-- keyword-параметры;
-- `@`/`@@` auto-assign;
-- типовые аннотации.
-
-### 10.2. Что матчится в `CLAUSE_PATTERN`
-
-Правило:
-
-- если `CLAUSE_PATTERN` — map pattern `{...}`, матч идёт по `ArgsMap` — карте всех аргументов по именам параметров;
-- если `CLAUSE_PATTERN` — tuple pattern `( ... )`, матч идёт по `ArgsTuple` — кортежу позиционных аргументов;
-- иначе форма разрешена только если в сигнатуре ровно один позиционный параметр; тогда матч идёт по нему.
-
-Примеры:
-
-```amber
-def fmt(x, mode: :short):
-  when {mode: :short}:
-    "S: #{x}"
-  when {mode: :long}:
-    "LONG: #{x}"
-  else:
-    "??"
-
-def add(x, y):
-  when (0, y): y
-  when (x, 0): x
-  else: x + y
-
-def area(shape):
-  when Point(x, y): x * y
-  when Rect(w:, h:): w * h
-  else: 0
-```
-
-### 10.3. Семантика вызова multi-clause def
-
-Порядок:
-
-1. preflight;
-2. bind явных аргументов;
-3. defaults слева направо;
-4. typecheck;
-5. dispatch по `when`-клауза;
-6. если клауза выбрана — commit auto-assign;
-7. выполнить тело выбранной ветки.
-
-Если ни одна клауза не подошла и `else` нет — `MatchError`, а поля не меняются.
-
-### 10.4. Sugar «несколько def подряд»
-
-Сохраняется ограниченный erlang/elixir-style sugar для простого случая:
-
-```amber
-def fact(0): 1
-def fact(n) if n > 0: n * fact(n - 1)
-```
-
-Этот сахар разрешается только для v1-случая:
-
-- только позиционные параметры;
-- без defaults;
-- без `@`/`@@` auto-assign;
-- без keyword-параметров;
-- без `as Type` в заголовке;
-- guard — через `if`.
-
-Внутренне он компилируется в каноническую clause-style форму.
-
-## 11. Ошибки и диагностики
-
-### 11.1. Compile-time errors
-
-- дубликаты имён в одном паттерне;
-- разный набор биндингов в альтернативах OR-паттерна;
-- `*rest` / `**rest` вне конца паттерна;
-- неоднозначный `CLAUSE_PATTERN` при многопозиционной сигнатуре;
-- смешивание `_1/_2/...` с явным списком параметров блока;
-- неплотная нумерация placeholders;
-- `include` вне class/mixin body;
-- `class_method def` внутри mixin body;
-- недопустимый callable reference target: `&foo()`, `&(expr)`, `&obj.method` в v1;
-- использование `#` вне формы unbound callable reference `&Class#method`.
-
-### 11.2. Runtime errors
-
-Начиная с этой редакции runtime error surface считается нормализованной на уровне **канонических имён**. Ранее встречавшиеся формулировки вида «либо эквивалентная ошибка» считаются закрытыми в пользу перечисленных ниже names. Если ситуация статически очевидна, компилятор/loader вправе выдать более раннюю compile-time diagnostic и не доводить программу до runtime; но если ошибка остаётся runtime-observable, conformance suite обязан видеть именно каноническое имя.
-
-#### `MatchError`
-
-Выбрасывается в случаях:
-
-- pattern assignment не сматчился;
-- параметры блока не сматчились при вызове;
-- multi-clause `def` не нашёл ветку и `else` отсутствует.
-
-`case` без совпадения и без `else` в текущей редакции не бросает исключение: он возвращает `null`.
-
-#### `TypeError`
-
-Выбрасывается при нарушении протоколов:
-
-- `===` вернул не булево значение;
-- `deconstruct()` вернул не sequence;
-- `deconstruct_keys()` вернул не map;
-- `in` применён к объекту, который не является контейнером и не поддерживает `contains?`;
-- `include` или `extend` пытается использовать значение, не являющееся mixin object;
-- `HCall` / `CALL` применён к значению, которое не является callable object и не является class object;
-- unbound method reference `&Class#method` вызван без явного receiver или с receiver, для которого `Class === receiver` возвращает `false`.
-
-#### `WatchTargetError`
-
-Выбрасывается в Amber/Notebook Watch Profile, когда `Kernel.watch(...)` вызывается на форме, которая не является допустимым syntactic watch-target, либо когда runtime API получает target, для которого нельзя построить watch binding/object handle.
-
-Если недопустимость цели статически очевидна, frontend обязан предпочесть compile-time diagnostic. Runtime `WatchTargetError` нужен для host/kernel API, dynamic notebook execution и случаев, где intrinsic-form была построена после parsing/binding.
-
-#### `NoMethodError`
-
-Выбрасывается, когда обычный method lookup не нашёл target и fallback через `method_missing` тоже не сработал.
-
-#### `ImportError`
-
-Выбрасывается, когда source-level `import` / `from ... import ...` не может быть удовлетворён на loader/linker path: отсутствует требуемый модуль, отсутствует запрошенный export или нарушен обязательный dependency contract.
-
-#### `ModuleInitError`
-
-Выбрасывается, когда код пытается наблюдать export модуля в состоянии `initializing` до завершения его init-phase.
-
-#### `IsolationError`
-
-Выбрасывается при нарушении shareable/strand-confined boundary: например, при cross-strand захвате non-shareable значения, отправке его через `Channel` или доступе к confined object из чужого strand.
-
-#### `DestroyedAccessError`
-
-Выбрасывается, когда обычный send / field access / indexing обращается к объекту в состоянии `destroyed`.
-
-#### `UseAfterFreeError`
-
-Выбрасывается, когда обычный send / field access / indexing обращается к уже `deallocated` объекту либо pin/lifecycle API наблюдает stale pointer state.
-
-#### `LifetimeError`
-
-Выбрасывается при незаконных user-visible lifecycle-операциях, которые не сводятся к ordinary use-after-free: например, при попытке пользовательского `destroy!`/`dealloc` для неподходящего runtime object.
-
-#### `IncludeCycleError`
-
-Выбрасывается, когда direct/indirect `include`-граф образует цикл. Компилятор или loader вправе диагностировать такой случай раньше, если цикл статически очевиден.
-
-#### `WorldFrozenError`
-
-Выбрасывается, когда код в frozen-profile пытается выполнить world mutation после freeze barrier: reopen класса или mixin'а, `define_method`, `include`/`extend`, меняющие ancestor graph, либо позднюю загрузку Amber-модуля в уже frozen dispatch-world.
-
-#### `SuperclassMismatchError`
-
-Выбрасывается, когда reopen формы `class Name < Base:` пытается переоткрыть существующий класс с несовместимым superclass. Компилятор вправе диагностировать такой случай раньше, если он статически очевиден.
-
-#### `TimeoutError`
-
-Выбрасывается, когда `wait(timeout: ...)` или иной нормативный deadline-aware runtime path не успевает завершиться до дедлайна.
-
-#### `CancelledError`
-
-Выбрасывается, когда task наблюдает ранее поставленный cancellation flag в safe-point и не завершилась естественным образом раньше этого места.
-
-#### `ChannelClosedError`
-
-Выбрасывается, когда код пытается `send()` в уже закрытый channel либо делает `recv()` из закрытого и уже пустого channel.
-
-#### `DeadlockError`
-
-Выбрасывается, когда non-reentrant `Mutex` наблюдает повторный `lock()` тем же владельцем без промежуточного `unlock()`.
-
-#### `CapabilityError`
-
-Выбрасывается в Amber/Capabilities & Sandbox Profile, когда код пытается выполнить host-resource operation без выданной capability: filesystem, network, environment, process, clock, random, FFI, GPU/device, database, secret store или другой host-gated ресурс.
-
-Если отсутствие capability статически очевидно по manifest/effect contract, toolchain обязан предпочесть compile-time diagnostic или load-time rejection. Runtime `CapabilityError` нужен для dynamic hosts, plugin execution, notebooks и позднего capability negotiation.
-
-#### `EffectViolationError`
-
-Выбрасывается в Amber/Effects Profile, когда callable объявлен с более узким effect row, чем фактически наблюдаемое действие, либо когда caller/host запрещает effect, который runtime пытается выполнить.
-
-Статически доказуемые нарушения должны диагностироваться до исполнения; runtime error остаётся обязательным observable fallback для dynamic, reflective и host-injected paths.
-
-#### `DeterminismError`
-
-Выбрасывается в Amber/Reproducible Execution Profile, когда deterministic scope пытается использовать недетерминированный источник без recorded/virtualized provider: реальное время, случайность, unordered external I/O, racing schedule edge или host callback вне replay log.
-
-#### `ReplayDivergenceError`
-
-Выбрасывается при replay, если фактическое исполнение расходится с recorded trace: другой task interleaving, другой external input digest, другое значение виртуального clock/random source, несовпадение dependency fingerprint или нарушение canonical event ordering.
-
-#### `SchemaViolationError`
-
-Выбрасывается в Amber/Schema & API Contracts Profile, когда значение не удовлетворяет declared schema при encode/decode, migration, wire-boundary validation или API contract validation.
-
-#### `ContractViolationError`
-
-Выбрасывается в Amber/Contracts Profile, когда `require`, `ensure`, invariant или property-test shrinker находит нарушение объявленного контракта. Для property-based testing ошибка должна включать минимизированный counterexample, если shrinker смог его построить.
-
-#### `PolicyViolationError`
-
-Выбрасывается в Amber/Privacy, Taint & Lineage Profile, когда данные с запрещённой меткой покидают разрешённый boundary, экспортируются без redaction, соединяются с несовместимым policy context или теряют обязательную lineage metadata.
-
-#### `WorkflowError`
-
-Выбрасывается в Amber/Durable Workflow Profile, когда durable step history, idempotency key, compensation, retry policy или replayable workflow log нарушают нормативный workflow contract.
-
-#### `AcceleratorError`
-
-Выбрасывается в Amber/Accelerator Profile, когда GPU/SIMD/device kernel нарушает разрешённый kernel subset, обращается к неподдерживаемому типу, использует host-only object, наблюдает device-lifetime fault или получает несовместимый device capability.
-
-
-## 12. Типовая система v14: minimal type envelope для implementation gate
-
-Типовая система по-прежнему **не является завершённой нормативной частью full-checker'а**, но v14 закрывает минимальный контур, достаточный для parser/HIR/runtime hooks и старта reference implementation.
-
-Принятые решения:
-
-- язык остаётся gradual / optional typed;
-- без аннотаций код ведёт себя как динамический;
-- с аннотациями допускаются runtime type-hooks уже в первой реализации;
-- `as` сохраняется как единая surface-form для binding annotation и checked cast;
-- `name as {id:, name:}` и `name as Int` в pattern-контексте остаются as-pattern, а не типизацией, потому что справа pattern-term, а не type-term.
-
-### 12.1. Return type syntax
-
-Разрешается следующая форма:
-
-```amber
-def parse(src as Str) -> Ast:
-  ...
-
-class Parser:
-  class_method def load(path as Str) -> Parser:
-    ...
-```
-
-Нормативно:
-
-- `-> TypeTerm` допускается после списка параметров `def` и `class_method def`;
-- return type относится ко всему callable;
-- return boundary использует тот же type-hook contract, что и параметрический `as TypeTerm`.
-
-### 12.2. Минимальная grammar `TypeTerm`
-
-```ebnf
-TypeTerm        ::= TypeUnion
-TypeUnion       ::= TypeSuffix { "|" TypeSuffix }
-TypeSuffix      ::= TypePrimary [ "?" ]
-TypePrimary     ::= ConstPath
-                  | ConstPath "[" TypeTerm { "," TypeTerm } [ "," ] "]"
-                  | "(" TypeTerm { "," TypeTerm } [ "," ] ")"
-                  | "{" TypeField { "," TypeField } [ "," ] [ "," "**" TypeTerm ] "}"
-TypeField       ::= Name ":" TypeTerm
-```
-
-### 12.3. Минимальная семантика `TypeTerm`
-
-Нормативно:
-
-- `T?` — sugar для `T | Null`;
-- `(A, B, C)` — tuple type фиксированной арности;
-- `Vec[Int]`, `Map[Str, Int]` и подобные формы допустимы как generic-looking surface syntax без обещания полной variance-модели в v1;
-- `{id: Int, name: Str}` — record/map type, который требует наличие указанных ключей;
-- `**T` в record-type означает, что дополнительные ключи допустимы, а их значения обязаны удовлетворять `T`;
-- record-types в implementation gate считаются **open by default**; политика exact-record остаётся вопросом второй волны.
-
-### 12.4. Что обязана делать первая реализация
-
-Первая реализация обязана:
-
-- парсить `TypeTerm` syntax-faithfully;
-- сохранять type-term в AST и HIR;
-- выполнять runtime checks на границах:
-  - parameter bind,
-  - `expr as TypeTerm`,
-  - return boundary.
-
-Первая реализация **не обязана** иметь полный статический вывод типов, variance-анализ generics, typing для `and/or`, typing для `$_`, narrowing через `case` и полную интеграцию типов с MOP.
-
-## 13. Модель concurrency / threading v1: без GIL
-
-В этой редакции concurrency больше **не считается открытым архитектурным вопросом**. Для v1 фиксируется модель, которая одновременно:
-
-- не использует глобальный interpreter lock;
-- сохраняет простой кооперативный стиль `async`/`task.async` из ранних черновиков;
-- остаётся компилируемой в bytecode VM и совместимой с дальнейшим AOT-profile;
-- не требует делать все обычные объекты неявно thread-safe.
-
-### 13.1. Три уровня исполнения
-
-Amber v1 различает три уровня runtime:
-
-1. **Worker** — системный поток ОС.
-2. **Strand** — однопоточная последовательная область исполнения с собственной runnable-очередью.
-3. **Task** — кооперативная fiber внутри strand.
-
-Ключевое инвариантное правило:
-
-- внутри одного **strand** одновременно исполняется **не более одной task**;
-- разные **strand** могут исполняться **параллельно на разных worker'ах**;
-- следовательно, у Amber **нет GIL**, но при этом обычная shared mutable state остаётся простой внутри одного strand.
-
-Именно strand, а не весь процесс VM, является единицей последовательности и обычного «безопасного разделения по ссылке».
-
-### 13.2. Surface API
-
-Нормативные формы v1:
-
-```amber
-async |task|:
-  rows = []
-
-  committer = task.async |committer|:
-    loop:
-      committer.sleep 5.0
-      commit rows
-      rows.clear!
-
-  parser = task.spawn |worker|:
-    parse_big_file(path)
-
-  task.async |consumer|:
-    while msg = redis.brpop("some_queue"):
-      rows << msg
-      committer.resume if rows.count >= 10_000
-
-  parser.wait()
-```
-
-Зафиксированные операции:
-
-- `async |task|:` — создаёт корневой **strand scope** и root-task;
-- `task.async |child|:` — создаёт дочернюю task **в том же strand**;
-- `task.spawn |child|:` — создаёт дочернюю task **в новом strand**, который может быть выполнен на любом worker'е;
-- `task.sleep(seconds)` — переводит текущую task в sleeping-state до дедлайна;
-- `task.yield()` — добровольная передача управления планировщику;
-- `handle.resume()` — делает sleeping/waiting task runnable;
-- `handle.wait()` — дожидается завершения child-task и возвращает её результат;
-- `handle.wait(timeout: seconds)` — то же, но бросает `TimeoutError`, если дедлайн истёк;
-- `handle.cancel()` — кооперативный запрос на отмену.
-
-`task.async` и `task.spawn` возвращают `TaskHandle`.
-
-### 13.3. Нормативная разница между `task.async` и `task.spawn`
-
-#### `task.async`
-
-- child-task живёт в **том же strand**;
-- может свободно видеть и менять обычные mutable-объекты, захваченные по ссылке;
-- выполняется кооперативно вместе с sibling-task'ами;
-- не даёт параллельного доступа к обычным объектам, потому что strand serializes execution.
-
-Именно поэтому старый паттерн с общим `rows = []` считается валидным: обе task находятся в одном strand.
-
-#### `task.spawn`
-
-- child-task запускается в **другом strand**;
-- новый strand может быть запущен на другом worker'е параллельно;
-- прямой захват обычных mutable-объектов из родительского strand запрещён;
-- пересекать границу strand могут только **shareable** значения и специальные synchronization objects.
-
-Это и есть нормативная основа модели **without GIL**: параллелизм разрешён между strand'ами, а не через совместный небезопасный доступ ко всем объектам VM.
-
-### 13.4. Shareable / non-shareable значения
-
-Для v1 значения делятся на две группы.
-
-#### Shareable
-
-Могут свободно пересекать границы strand:
-
-- `null`, `true`, `false`;
-- числа;
-- символы;
-- frozen/immutable строки;
-- frozen tuples/lists/maps;
-- константные метаобъекты языка;
-- closure-объекты, чьи captures целиком shareable;
-- `TaskHandle`, `Channel`, `Mutex`, `Atomic`.
-
-#### Strand-confined
-
-По умолчанию не могут быть захвачены в `task.spawn` и не могут быть отправлены через cross-strand API без явного преобразования:
-
-- обычные `Array` / `Map`;
-- пользовательские объекты с mutable-состоянием;
-- closure, захватывающие non-shareable ссылки.
-
-Минимальное нормативное правило v1:
-
-- если `task.spawn` или `Channel.send` получает non-shareable значение, реализация должна либо выдать compile-time error (когда это очевидно), либо бросить `IsolationError` на runtime.
-
-В v1 **не вводится** скрытое копирование mutable-объектов и **не вводится** прозрачная thread-safe-обёртка для всех объектов языка.
-
-### 13.5. Минимальная stdlib / runtime база для no-GIL модели
-
-Чтобы модель была practically usable, в обязательный runtime contract v1 входят:
-
-- `TaskHandle`
-- `Channel`
-- `Mutex`
-- `Atomic`
-
-Минимальные контракты:
-
-```amber
-ch = Channel.new(capacity: 0)
-ch.send(value)
-value = ch.recv()
-ch.close()
-
-m = Mutex.new()
-m.lock()
-m.unlock()
-
-a = Atomic.new(0)
-a.get()
-a.set(1)
-a.compare_and_set(1, 2)
-```
-
-Нормативно:
-
-- payload для `Channel` должен быть shareable;
-- `Mutex` и `Atomic` могут разделяться между strand'ами;
-- использование `Mutex`/`Atomic` не вводит GIL: это локальная синхронизация конкретных объектов, а не глобальный lock VM;
-- `Channel` в v1 обязан иметь explicit `close()`;
-- `send()` в закрытый channel обязан бросать `ChannelClosedError`;
-- `recv()` из закрытого buffered-channel обязан вернуть уже поставленные элементы; `recv()` из закрытого и пустого channel обязан бросать `ChannelClosedError`;
-- порядок элементов в одном channel — FIFO; очереди ожидающих `send`/`recv` на одном channel normative FIFO; более сильная глобальная fairness не гарантируется;
-- `Mutex` в v1 non-reentrant; повторный `lock()` тем же владельцем без промежуточного `unlock()` обязан завершаться `DeadlockError`;
-- `Atomic.get()`, `Atomic.set(...)` и `Atomic.compare_and_set(...)` в v1 обладают seq-cst semantics.
-
-Эти решения сознательно выбирают простой reference contract для реализации и corpus; более слабые memory orders и альтернативные closed-channel profiles не являются частью v1.
-
-### 13.6. Scheduling semantics
-
-#### Состояния task
-
-Минимальный state-machine v1:
-
-- `new`
-- `runnable`
-- `running`
-- `sleeping`
-- `waiting`
-- `done`
-- `failed`
-- `cancelled`
-
-#### Правило планирования
-
-- worker берёт runnable-strand из глобальной очереди;
-- внутри strand исполняется одна runnable-task;
-- переключение между task'ами внутри strand происходит только в scheduler points:
-  - `sleep`
-  - `yield`
-  - `wait`
-  - blocking `Channel` ops
-  - acquisition `Mutex`
-  - back-edge циклов
-  - call boundary, если реализация использует safe-point poll.
-
-Strand может мигрировать между worker'ами **только между task-steps**, но это не нарушает модель, потому что внутри strand всё равно не бывает параллельного исполнения.
-
-### 13.7. Семантика `resume`
-
-`resume` окончательно фиксируется так:
-
-- это **не немедленный jump** в target-task;
-- это **enqueue / wake signal** для target-task;
-- текущая task продолжает исполняться до ближайшего scheduler point или конца своего текущего шага.
-
-Алгоритм v1:
-
-```text
-resume(handle):
-  if handle.state in {done, failed, cancelled}:
-    return false
-  if handle.wake_pending:
-    return true
-  handle.wake_pending = true
-  mark_runnable(handle.task)
-  enqueue(handle.strand)
-  return true
-```
-
-Следствия:
-
-- повторные `resume()` **коалесцируются** в один pending wake-token;
-- `resume()` завершённой task возвращает `false`;
-- `resume()` runnable/running task является допустимым no-op и возвращает `true`.
-
-### 13.8. `wait`, exceptions, cancellation, timeout
-
-#### `wait`
-
-`handle.wait()`:
-
-- если child уже завершён успешно — сразу возвращает cached result;
-- если child `failed` — повторно бросает сохранённое исключение в текущей task;
-- если child ещё работает — текущая task переводится в `waiting` и scheduler переключает strand дальше.
-
-#### Исключения
-
-Unhandled exception child-task:
-
-- сохраняется в `TaskHandle`;
-- переводит child в `failed`;
-- поднимается при `wait()`;
-- если parent выходит из structured-scope, не дождавшись failed-child явно, runtime обязан rethrow first unhandled child failure на выходе из scope.
-
-#### Structured concurrency
-
-Каждый `async`-scope и каждая task образуют **structured child set**:
-
-- при выходе из task-body runtime автоматически join'ит незавершённых детей;
-- если один child падает и ошибка не была обработана локально, siblings получают `cancel()`;
-- после этого first failure rethrow'ится в parent.
-
-Detached / orphan task в v1 не вводятся.
-
-#### Cancellation
-
-`handle.cancel()`:
-
-- ставит cancellation flag;
-- делает target runnable, если он sleeping/waiting;
-- не прерывает task посреди произвольной инструкции;
-- наблюдается только в safe-points.
-
-Нормативно: при обнаружении cancellation в safe-point runtime бросает `CancelledError`, если код не завершился раньше естественным образом.
-
-#### Timeout
-
-`handle.wait(timeout: seconds)` эквивалентен ожиданию с дедлайном. Если deadline истёк до завершения child:
-
-- текущая task получает `TimeoutError`;
-- child автоматически **не отменяется**, если только вызывающий явно не сделал `cancel()`.
-
-### 13.9. Память и happens-before
-
-Для v1 фиксируется следующая минимальная модель видимости:
-
-- внутри одного strand действует ordinary program order;
-- между strand'ами happens-before возникает только через explicit synchronization edges.
-
-Нормативные меж-strand edges:
-
-- successful `Channel.send(v)` happens-before successful `recv()`, который возвращает именно это значение `v`;
-- `Channel.close()` happens-before любое последующее наблюдение closed-state на том же channel;
-- `Mutex.unlock()` happens-before следующий успешный `lock()`, который захватывает тот же mutex;
-- успешное завершение task happens-before успешный `handle.wait()`, который наблюдает этот result или rethrow'ит сохранённую failure;
-- все операции `Atomic.get/set/compare_and_set` участвуют в одном global seq-cst order данного исполнения.
-
-Следствия:
-
-- запись в ordinary non-shareable objects не становится меж-strand visible без одного из перечисленных edges;
-- меж-strand races на ordinary confined objects остаются запрещены самой isolation model, а не «разрешены, но racy»;
-- спецификация v1 не обещает более сильной fairness или более тонкой memory-order granularity, чем перечислено выше.
-
-### 13.10. `$_` и лексические данные
-
-Сохраняется более раннее решение:
-
-- у каждого call frame есть собственный `last_result` slot;
-- у каждой task/fiber — свой стек frame'ов;
-- переключение между task'ами не смешивает `$_`.
-
-Следовательно:
-
-- `$_` не является global/thread-local переменной процесса;
-- `$_` не протекает между sibling-task'ами даже внутри одного strand;
-- `$_` naturally lowers to frame slot и не конфликтует с no-GIL execution.
-
-
-### 13.11. Обязательный stdlib contract v1: chainable collections
-
-Чтобы surface syntax языка опирался на единый нормативный runtime API, в v14 фиксируется обязательный коллекционный профиль стандартной библиотеки.
-
-Для `Array`, `Tuple`, `Range`, `Set` и `LazySeq` обязательны:
-
-- `each`
-- `map`
-- `flat_map`
-- `select`
-- `reject`
-- `reduce`
-- `find`
-- `any?`
-- `all?`
-- `none?`
-- `first`
-- `count`
-- `group_by`
-- `to_a`
-- `lazy`
-
-Нормативно:
-
-- `each` возвращает receiver;
-- `map`, `flat_map`, `select`, `reject` и `group_by` по умолчанию eager;
-- `.lazy` переводит дальнейшую цепочку в lazy-profile;
-- `to_a` материализует `LazySeq`.
-
-`reduce` поддерживает две формы:
-
-```amber
-xs.reduce(init) |acc, x|: ...
-xs.reduce |acc, x|: ...
-```
-
-Нормативно:
-
-- форма с `init` всегда допустима;
-- форма без `init` допустима только для непустой последовательности;
-- на пустой последовательности без `init` должен выбрасываться `EmptyCollectionError`.
-
-Для `Map` обязательны:
-
-- `each |k, v|:`
-- `map |k, v|:`
-- `select |k, v|:`
-- `reject |k, v|:`
-- `transform_values |v|:`
-- `keys`
-- `values`
-- `entries`
-
-Нормативно:
-
-- `Map#map` возвращает `Array`;
-- `Map#select` и `Map#reject` возвращают `Map`;
-- `Map#transform_values` возвращает `Map`.
-
-
-## 14. Что входит в язык по намерению, но ещё не нормализовано до ядра
-
-
-### 14.1. Amber/Notebook Watch Profile [закрыто в v19.2]
-
-Amber/Notebook вводит optional instrumentation layer для интерактивных kernel/runtime окружений: notebooks, BI notebooks, reactive dashboards, IDE scratchpads и другие hosts, которым нужна корректная invalidation зависимых блоков.
-
-Профиль не меняет core language semantics и не является обязательной частью production runtime. Обычный `ambervm run`, frozen images, AOT/JIT profile и `.amberbc` loader могут не включать watch-инструментацию, если host/toolchain не заявил поддержку notebook profile.
-
-#### Назначение
-
-Surface API:
-
-```amber
-handle = Kernel.watch(target)
-Kernel.unwatch(handle)
-Kernel.watched?(target)
-Kernel.revision(target)
-Kernel.watch_state(target)
-```
-
-Главная форма:
-
-```amber
-Kernel.watch(x)
-```
-
-в notebook profile делает две вещи:
-
-1. переводит binding `x` в watchable storage cell;
-2. если текущее значение binding'а является live heap object, переводит этот объект в watchable representation для отслеживания изменений instance variables.
-
-Пример:
-
-```amber
-user = User.new(name: "Ann", age: 20)
-Kernel.watch(user)
-
-label = "#{user.name}"
-# cell dependency:
-#   binding:user@rev0
-#   object:user.@name@rev0
-
-user.age = 21
-# label-cell не инвалидируется
-
-user.name = "Bob"
-# label-cell инвалидируется
-```
-
-#### `Kernel.watch(...)` как intrinsic
-
-`Kernel.watch(target)` имеет special semantics только если одновременно выполнены условия:
-
-1. `Kernel` резолвится в builtin notebook kernel object;
-2. `watch` резолвится в builtin intrinsic selector;
-3. первый аргумент синтаксически является допустимым watch-target.
-
-Если пользователь затенил `Kernel`, форма становится обычным method call и не получает доступа к binding-cell:
-
-```amber
-Kernel = MyKernel.new()
-Kernel.watch(x)   # ordinary send, не intrinsic
-```
-
-`Kernel.watch(...)` не является ordinary method call в полном смысле: runtime должен получить не только значение `x`, но и binding/ivar target. Поэтому frontend обязан распознавать эту форму после name resolution и понижать её в dedicated HIR/bytecode hook либо в эквивалентный VM intrinsic.
-
-#### Допустимые watch-targets v1
-
-В v19.2 notebook profile допустимы только syntactic watch-targets:
-
-```amber
-Kernel.watch(x)       # local / top-level binding
-Kernel.watch(@x)      # instance variable текущего self
-Kernel.watch(@@x)     # class variable текущего owner
-```
-
-В v1 запрещены:
-
-```amber
-Kernel.watch(foo())        # нет binding target
-Kernel.watch(user.name)    # неоднозначно: field read или method call
-Kernel.watch(xs[0])        # indexing является protocol call
-Kernel.watch(1 + 2)        # expression value, не storage target
-```
-
-Такие формы обязаны давать compile-time diagnostic, если распознаны frontend'ом, либо runtime `WatchTargetError` в dynamic host path.
-
-Наблюдение nested object'ов делается явно через отдельный binding:
-
-```amber
-address = user.address
-Kernel.watch(address)
-```
-
-#### Binding watch
-
-Watching a binding replaces its storage with watchable cell:
-
-```text
-LocalSlot<Value>
-  -> LocalSlot<WatchCell>
-
-WatchCell(
-  value,
-  binding_id,
-  revision,
+ObjectHeader(
+  class_ptr,
+  shape_ptr,
   flags,
-  subscribers
+  owner_strand,
+  lifetime_state,
+  gc_bits,
+  pin_count,
+  object_id?
+)
+
+Shape(shape_id, ivar_slots, parent_shape?, shape_version)
+
+DispatchOwnerRuntime(
+  method_table,
+  method_version,
+  direct_includes,
+  owner_flags,
+  ivar_schema?,
+  superclass?
 )
 ```
 
-Нормативная семантика:
+Mandatory behavior:
 
-```text
-LOAD_LOCAL watched x during dependency capture:
-  record_dependency(binding_id, revision)
-  return cell.value
+- `destroy!` and `memory.dealloc` lower to lifecycle intrinsics/opcodes when builtin identity is known;
+- live -> destroying -> destroyed -> deallocated state machine;
+- tombstone header remains safe to inspect through lifetime intrinsics;
+- `DeadShape` invalidates ivar/method fast paths;
+- non-moving generational collector with remembered sets and safe-points;
+- per-worker allocation fast path + remote-free queues;
+- pinning blocks reclamation/deallocation and exposes only opaque handles or buffer spans.
 
-STORE_LOCAL watched x = value:
-  old = cell.value
-  cell.value = value
-  cell.revision += 1
-  emit_watch_event(binding_id, old, value)
-```
+Acceptance:
 
-Если новое значение является live heap object и watch handle был создан с object-tracking enabled, runtime может автоматически перевести новый объект в watchable representation.
+- use-after-free/destroyed access corpus green;
+- double destroy/dealloc idempotence tested;
+- collector does not move objects in reference profile;
+- pinning tests cover opaque and buffer modes.
 
-Closure/upvalue semantics сохраняются: если binding уже был captured closure'ом, `Kernel.watch(x)` обязан заменить shared capture-cell на watchable cell, а не создать вторую независимую ячейку. Все closure, захватившие `x`, продолжают видеть одну и ту же storage cell.
+### 5.8. V3 — no-GIL scheduler, strands, sync primitives
 
-#### Object watch
+Mandatory behavior:
 
-Если текущее значение watched binding'а является live heap object, runtime может перевести объект в watchable representation. User-visible identity не меняется:
+- worker pool executes runnable strands;
+- one task runs per strand at a time;
+- `task.async` stays same-strand, `task.spawn` creates new strand;
+- shareability checks on spawn/channel sends;
+- structured concurrency: auto-join, failure propagation, sibling cancellation;
+- `Channel`, `Mutex`, `Atomic` semantics match spec;
+- safe-points include sleep/yield/wait/channel/mutex/back-edge/call-boundary polling.
 
-```amber
-Kernel.watch(user)
-user.object_id == old_id   # true
-user.class == User         # true
-User === user              # true
-```
+Acceptance:
 
-Реализация может использовать object-header flag, watched shape transition, side-table или эквивалентный механизм. Наблюдаемое требование одно: identity, class, equality и dispatch semantics не меняются.
+- multi-worker tests demonstrate parallel strands without global interpreter lock;
+- isolation violations produce `IsolationError`;
+- FIFO channel behavior and non-reentrant mutex `DeadlockError` confirmed.
 
-Минимальное состояние:
+### 5.9. V4 — loader/linker/verifier
 
-```text
-WatchObjectState(
-  object_id,
-  object_revision,
-  field_revisions: Map<ivar_name, revision>,
-  subscribers
-)
-```
+Mandatory behavior:
 
-Успешная запись в watched ivar:
+- module states: unloaded/loading/linking/initializing/initialized/failed;
+- static deps from `DEPS` section;
+- `EXPT` checks for from-import;
+- cyclic initialization surfaces `ModuleInitError` on early export observation;
+- loader participates in `world_epoch` and freeze barrier;
+- load-time verifier checks register bounds, jump targets, handler tables, pattern slots, safe-points and shareable sections.
 
-```text
-STORE_IVAR obj.@field = value:
-  old = obj.@field
-  obj.@field = value
-  watch.object_revision += 1
-  watch.field_revisions[field] += 1
-  emit_watch_event(object_id, field, old, value)
-```
+Acceptance:
 
-Если write barrier, lifetime check, ownership/strand check или deallocation check падает, запись не происходит и watch event не публикуется.
+- loader fixtures cover dependency linking, missing exports, cyclic init, verifier errors, frozen-loader barrier;
+- VM can run `.amberbc` without compiler process.
 
-#### Dependency capture для notebook cells
+### 5.10. V5 — stdlib, corpus, conformance
 
-Notebook host может исполнять ячейку под dependency-capture mode:
+Mandatory behavior:
 
-```text
-Kernel.begin_dependency_capture(cell_id)
-execute cell
-Kernel.end_dependency_capture() -> DependencySet
-```
+- chainable collections API for `Array`, `Tuple`, `Range`, `Set`, `LazySeq`, `Map`;
+- runtime errors canonical names;
+- `ambertest` runner reads `meta.json`, selects phase, compares golden outputs;
+- corpus includes parser/binder/HIR/bytecode/runtime/loader/scheduler/notebook/profile lanes.
 
-Во время capture:
+Acceptance:
 
-- чтение watched binding'а записывает dependency на `(binding_id, revision)`;
-- чтение watched ivar записывает dependency на `(object_id, ivar_name, field_revision)`;
-- чтение object-wide state может записывать dependency на `(object_id, object_revision)`;
-- method call сам по себе dependency не создаёт, но reads внутри метода создают dependencies, если проходят через watched cells/ivars;
-- запись в watched binding/ivar bump'ает revision и публикует invalidation event.
+- full dynamic P0/P1 corpus green;
+- no conformance test depends on host-specific absolute paths or pointer values.
 
-Инвалидатор notebook host сравнивает recorded revision с текущей revision. Если revision изменилась, зависимый cell становится stale и должен быть перевычислен или помечен как invalidated в host UI.
+## 6. Runtime ABI minimum
 
-#### Relation to world/frozen
+| Area | Required structure | Key fields | Fast path | Slow/error path |
+|---|---|---|---|---|
+| Frame | `Frame` | code, locals, upvalues, last_result, handlers, task | direct register access | unwind/exception handler |
+| Closure | `Closure` | code, captures, arity metadata | direct call if arity known | `CALL` protocol error |
+| Class | `ClassObject` | method table, superclass, includes, versions | monomorphic `CallIC` | lookup + method_missing |
+| Mixin | `MixinObject` | method table, direct includes, version | linearized lookup cache | include cycle/type error |
+| Instance | `ObjectHeader + slots` | class, shape, owner, lifetime | shape/ivar IC | shape transition/dead check |
+| Module | `ModuleRecord` | state, exports, deps, code | initialized export cell | `ImportError`/`ModuleInitError` |
+| Task | `Task` | id, strand, state, stack, result/failure, cancel flag | same-strand resume | cancellation/timeout/failure propagation |
+| Strand | `Strand` | run queue, timers, waiting handles, worker hint | local run queue | migration/wake from other worker |
+| Pin | `PinToken` | object, mode, generation, active flag | active pin guard | stale/double-unpin/lifetime error |
+| Watch | `WatchCell/WatchObjectState` | revision, subscribers, field revisions | revision compare | dependency invalidation event |
 
-Watching является data instrumentation, а не world mutation. `Kernel.watch(...)` не меняет:
+## 7. Bytecode ISA minimum
 
-- method tables;
-- class graph;
-- superclass relations;
-- include/extend linearization;
-- `method_missing` policy;
-- loader state;
-- dispatch-world freeze state.
+The reference ISA must contain at least these families:
 
-Следовательно:
+| Family | Instructions | Purpose |
+|---|---|---|
+| Data/frame | `LOADK`, `LOADNULL`, `MOVE`, `GETLAST`, `SETLAST`, `LOAD_LOCAL`, `STORE_LOCAL` | locals and expression results |
+| Object state | `LOAD_IVAR`, `STORE_IVAR`, `LOAD_CVAR`, `STORE_CVAR`, `LOAD_CONST` | class/object/module state |
+| Calls | `SEND`, `SEND_DYN`, `CALL`, `MAKE_CLOSURE`, `RETURN` | method/callable/class-object calls |
+| Control | `JUMP`, `JUMP_IF_TRUE`, `JUMP_IF_FALSE`, `JUMP_IF_NULL`, `RAISE`, `TRY_BEGIN`, `TRY_END`, `SAFEPOINT` | branching/exceptions/scheduler |
+| Pattern | `P_MATCH_*`, `P_BIND`, `P_COMMIT`, `P_FAIL`, `P_GUARD` | compiled pattern decisions |
+| Lifecycle | `OBJ_DESTROY`, `OBJ_DEALLOC` | explicit lifetime operations |
+| Concurrency | `SPAWN_SAME`, `SPAWN_NEW`, `SLEEP`, `YIELD`, `WAIT`, `RESUME`, `CANCEL`, `CHANNEL_*`, `MUTEX_*`, `ATOMIC_*` | no-GIL runtime |
+| Watch optional | `WATCH_BINDING`, `WATCH_IVAR`, `WATCH_CVAR`, `WATCH_REVISION`, `WATCH_EVENT` | notebook profile |
+| Module/loader helper | implementation-specific | init/export cells, loader barriers | may be VM-private |
 
-```text
-world_epoch  не меняется
-watch_epoch  может меняться
-```
+Safe-nav does not need dedicated bytecode opcodes; it must be lowered to null checks and ordinary sends/calls before or during bytecode emission.
 
-В frozen-world profile watch допустим только при включённой host-level notebook instrumentation. Frozen-world гарантирует стабильность dispatch-world, но не делает пользовательские данные immutable.
+## 8. Implementation matrix v20.1-project
 
-#### Lifetime, ownership, GC и barriers
+### 8.1. Priority bands
 
-Watch-hook является частью checked write path и выполняется после успешных runtime checks:
+| Band | Meaning | Goal |
+|---|---|---|
+| P0 | Frontend semantic core | parse/check/lower to stable AST/HIR/diag |
+| P1 | Executable VM core | compile `.amberbc`, verify, run in VM |
+| P2 | Full dynamic runtime | memory, scheduler, loader, stdlib, corpus |
+| P3 | Profiles after dynamic core | typed, packages, reflection, advanced concurrency |
+| P4 | Optimizing/frozen/native | MIR/SSA, JIT/AOT, `.amberimg` |
+| P5 | Modern pressure profiles | capabilities/effects/replay/data/schema/wasm/accelerator/AI/contracts/privacy/workflows |
 
-```text
-STORE_IVAR watched_obj, field, value:
-  check object not destroyed/deallocated
-  check owner/strand permissions
-  run write barrier
-  write value
-  bump watch revision
-  emit watch event
-```
+### 8.2. Work-package matrix
 
-Если объект находится в `destroyed` state, применяются обычные `DestroyedAccessError` rules. Если объект уже deallocated или handle stale, применяются обычные `UseAfterFreeError` rules. Cross-strand попытки watch/read/write confined object из чужого strand завершаются `IsolationError`.
+| WP | Priority | Scope | Deliverables | Dependencies | Tests / DoD |
+|---|---:|---|---|---|---|
+| W0 | P0 | Repo/tooling baseline | CLI skeleton, fixture normalizer, golden runner, format-version registry | none | `amberc --version`, `ambertest` smoke, deterministic fixture normalization |
+| W1 | P0 | Lexer/parser/AST | tokens/spans, Pratt parser, `amber.ast.v1`, parser diagnostics | W0 | parser positive/negative corpus green |
+| W2 | P0 | Binder/signatures/diagnostics | scope graph, imports/exports, signature/default checks, `amber.diag.v1` | W1 | binder negative corpus exact codes |
+| W3 | P0 | Patterns/HIR/lowering | pattern compiler, `amber.hir.v1`, block/safe-nav/`$_`/callable-ref lowering | W1-W2 | HIR golden + pattern behavior tests |
+| W4 | P1 | Bytecode artifacts | `BcModule/BcMethod/BcCode`, `.amberbc`, verifier skeleton, disasm | W3 | compile/disasm golden, verifier rejects malformed modules |
+| W5 | P1 | VM core/dispatch | frame loop, registers, call/send/callable/class call, exceptions, inline caches | W4 | single-worker runtime green |
+| W6 | P2 | Object/memory/lifetime/GC/pinning | headers, shapes, allocator, tombstones, non-moving GC, `PinToken`, FFI boundary | W5 | lifetime/GC/pinning corpus green |
+| W7 | P2 | Scheduler/concurrency | workers, strands, tasks, `async/spawn`, `Channel/Mutex/Atomic`, cancellation | W5-W6 | parallel strand tests + isolation tests |
+| W8 | P2 | Loader/stdlib/full corpus | loader state machine, deps/exports, chainable stdlib, full conformance runner | W4-W7 | modules/stdlib/full dynamic corpus green |
+| W9 | P3 | Typed/open-world/packages | optional typed checker, mirrors, package manifest, signing, hot reload, class-side `extend` runtime path | W8 | typed corpus does not alter dynamic semantics |
+| W10 | P3/P4 | Advanced concurrency/native/frozen | `move`, `select`, async I/O, MIR/SSA, JIT/AOT, `.amberimg` | W8-W9 | frozen/native smoke + MIR validation |
+| W11 | P5 | Modern profile runtime | capabilities, effects, replay, schema, dataframe, wasm, accelerators, AI tooling, contracts, privacy, workflows | W8, then W9/W10 as needed | profile-specific conformance lanes green |
+| W12 | cross | Documentation/spec sync | generated anchor map, changelog, migration notes, implementation status dashboard | all active WPs | docs match artifacts; no stale references |
 
-GC обязан считать watch side-tables и subscriber lists обычными runtime roots или weak/ephemeron-indexed structures, чтобы watch-инструментация не удерживала пользовательские объекты дольше, чем это явно требует host policy.
+### 8.3. Subpackage decomposition
 
-#### Performance contract
+| WP | Subtasks |
+|---|---|
+| W0 | W0.1 repo skeleton; W0.2 CI smoke; W0.3 golden layout; W0.4 format registry; W0.5 contribution rules |
+| W1 | W1.1 lexer; W1.2 Pratt core; W1.3 module/class/mixin grammar; W1.4 pattern grammar; W1.5 AST serializer |
+| W2 | W2.1 scope graph; W2.2 signature pipeline; W2.3 import/export checks; W2.4 object placement checks; W2.5 diagnostic renderer |
+| W3 | W3.1 pattern prechecker; W3.2 pattern IR; W3.3 AST->HIR; W3.4 builtin intrinsic resolution; W3.5 HIR serializer |
+| W4 | W4.1 bytecode schema; W4.2 verifier; W4.3 disasm; W4.4 emitter; W4.5 `.amberbc` round-trip |
+| W5 | W5.1 VM loop; W5.2 call frames; W5.3 send/call caches; W5.4 closures/upvalues; W5.5 exceptions/unwind |
+| W6 | W6.1 object headers/shapes; W6.2 lifetime ops; W6.3 allocator; W6.4 collector; W6.5 pinning/FFI |
+| W7 | W7.1 task/strand state machines; W7.2 worker pool; W7.3 structured concurrency; W7.4 channels/sync; W7.5 cancellation/timeouts |
+| W8 | W8.1 loader graph; W8.2 module init/export cells; W8.3 stdlib collections; W8.4 full corpus; W8.5 notebook watch optional |
+| W9 | W9.1 typed checker; W9.2 mirrors/reflection; W9.3 package/signing; W9.4 hot reload; W9.5 open-world transactions |
+| W10 | W10.1 `move`; W10.2 `select`; W10.3 async I/O; W10.4 MIR/SSA; W10.5 native/JIT; W10.6 frozen image |
+| W11 | W11.1 capabilities; W11.2 effects; W11.3 replay; W11.4 dataframe/schema; W11.5 wasm/accelerator; W11.6 AI/contracts/privacy/workflow |
 
-Watchable mode заведомо медленнее ordinary execution:
+## 9. Milestone gates
 
-- watched local/upvalue нельзя свободно scalar-replace'ить;
-- watched ivar read/write должен проходить через dependency/revision hook;
-- ivar inline cache должен учитывать `watched` flag или site mode;
-- shape transition может уходить на slow path;
-- dependency capture mode добавляет read barriers для watched targets.
+| Milestone | Closes | Gate criteria | Release meaning |
+|---|---|---|---|
+| M0 | W0 | repo, CLI stubs, corpus layout, CI smoke | implementation can start without format drift |
+| M1 | W1-W2 | parser + binder + diagnostics golden green | stable frontend contract |
+| M2 | W3-W4 | HIR + pattern IR + bytecode/disasm/verifier skeleton green | source compiles to verified artifacts |
+| M3 | W5 + W6.1-W6.2 | single-worker VM, object basics, lifetime baseline | executable dynamic subset |
+| M4 | W6.3-W7 | allocator/collector/pinning + scheduler | no-GIL reference runtime |
+| M5 | W8 | loader, modules, stdlib, full dynamic corpus | P0/P1 reference implementation green |
+| M6 | W9 | typed/profile packaging/open-world transactions | second-wave profile baseline |
+| M7 | W10.1-W10.3 | advanced concurrency | production-grade async/concurrency profile |
+| M8 | W10.4-W10.6 | MIR/native/frozen | native/frozen path exists |
+| M9 | W0-W12 | full corpus + docs + reproducibility | release-grade reference baseline |
+| M10 | W11 | modern profiles conformance | platform profile suite usable |
 
-Это не считается regression production runtime, потому что профиль является opt-in и host-level.
+Rule: typed/native/profile lanes must not block M5. Dynamic reference runtime must become green before optional checker/native constraints can become normative for implementation.
 
-#### Minimal implementation contract
+## 10. Parallel lanes
 
-Reference VM может реализовать notebook watch через:
+| Lane | Work packages | Can start | Blocks | Notes |
+|---|---|---|---|---|
+| A Frontend | W1-W3 | after W0 | W4-W11 | critical first lane |
+| B Artifacts/corpus | W0, W4 parts, W8 corpus | immediately | all gates | prevents manual golden drift |
+| C VM/object/memory | W5-W6 | after W4 skeleton | W7-W8 | main runtime critical path |
+| D Scheduler/loader/stdlib | W7-W8 | after VM/lifetime baseline | M5 | cannot skip verifier/collector boundary |
+| E Typed/packages/open-world | W9 | after M5 | M6 | must not redefine dynamic semantics |
+| F Native/frozen | W10.4-W10.6 | after freeze-aware W9 | M8 | native only on frozen boundary |
+| G Modern profiles | W11 | after M5, profile by profile | M10 | metadata-first, opt-in |
+| H Docs/spec-sync | W12 | always | release | keeps main spec and project layer aligned |
 
-- `WatchCell` для locals/upvalues/top-level export cells;
-- object-header `watched` flag + side-table `WatchObjectState`;
-- `watch_epoch` для tooling/invalidation;
-- dependency collector в текущем task/frame;
-- watch event queue, потребляемую notebook host'ом.
+## 11. First implementation sequence
 
-Реализация вправе выбрать другой representation, если выполняет тот же observable contract: stable identity, корректные revisions, отсутствие world mutation и корректные invalidation events.
+### Cycle A — frontend bootstrap
 
-После закрытия implementation gate следующие вещи остаются за пределами минимального reference-профиля и относятся ко второй волне дизайна, toolchain или экосистемы:
+1. W0.1 repository skeleton.
+2. W0.2 CLI stubs: `amberc`, `ambervm`, `ambertest`.
+3. W0.3 fixture/golden layout.
+4. W1.1 lexer/spans.
+5. W1.2 Pratt expression parser.
+6. W1.3 module/class/mixin parser.
+7. W1.5 AST serializer.
 
-- DSL-макросы в ruby-style;
-- package manager / registry / artifact distribution / signing / hot reload;
-- richer class-side composition DSL beyond уже зафиксированного declarative `extend`;
-- расширенный reflection/introspection API поверх method tables, source locations и ancestor graph;
-- full static checker, inference, variance, typing для `and/or`, typing для `$_` и точное type-narrowing через `case`;
-- MIR/SSA, optimizer, native backend, JIT и frozen-image deployment.
+### Cycle B — semantic frontend
 
+1. W2.1 scope graph.
+2. W2.2 signatures/defaults.
+3. W2.3 import/export checks.
+4. W2.4 include/extend/class_method placement checks.
+5. W3.1 pattern prechecker.
+6. W3.2 pattern IR.
+7. W3.3 HIR node set.
+
+### Cycle C — compiled artifact
+
+1. W3.4 lowering rules for `$_`, safe-nav, block suffix, callable refs, constructor-call, `send`, watch intrinsics.
+2. W3.5 HIR serializer.
+3. W4.1 `.amberbc` schema.
+4. W4.2 verifier.
+5. W4.3 deterministic disassembler.
+6. W4.4 bytecode emitter baseline.
+
+### Cycle D — executable VM baseline
+
+1. W5.1 VM loop.
+2. W5.2 frame/register ABI.
+3. W5.3 `SEND/SEND_DYN/CALL` and caches.
+4. W5.4 closures/upvalues.
+5. W5.5 exceptions/unwind.
+6. W6.1 object headers/shapes.
+7. W6.2 `destroy!`/`memory.dealloc` baseline.
+
+### Cycle E — real runtime
+
+1. W6.3 allocator and tombstones.
+2. W6.4 non-moving collector and barriers.
+3. W6.5 pinning/FFI boundary.
+4. W7.1-W7.5 scheduler/concurrency.
+5. W8.1-W8.4 loader/stdlib/full corpus.
+
+After Cycle E the project should have a usable P0/P1 reference implementation.
+
+## 12. Acceptance checklist by subsystem
+
+| Subsystem | Must prove |
+|---|---|
+| Parser | source spans stable; one-liner block boundary correct; invalid callable refs rejected |
+| Binder | imports read-only; defaults ordered; pattern binds checked; diagnostics canonical |
+| HIR | all surface sugar explicit; `case` and `case!` share engine; auto-assign commit after clause choice |
+| Bytecode | no raw pointers; safe-points on back-edges; verifier catches invalid registers/jumps/handlers |
+| VM | `CALL` handles class objects; `SEND_DYN` and `method_missing` legal after freeze; stack traces deterministic |
+| Object model | shape caches invalidated; open class/mixin transactions atomic; include linearization stable |
+| Lifetime | dead/destroyed/deallocated states observable with canonical errors; tombstone safe |
+| GC | non-moving; remembered sets; no ownership-mode mutation by collector |
+| Pinning/FFI | opaque handles for objects; spans only for supported buffers; stale pins rejected |
+| Scheduler | no global interpreter lock; one task per strand; cross-strand isolation enforced |
+| Loader | `.amberbc` verifier before execution; dependency/init states deterministic; frozen barrier enforced |
+| Stdlib | chainable collection contracts pass; concurrency primitives match FIFO/seq-cst rules |
+| Notebook | watch does not bump `world_epoch`; dependency capture invalidates by revisions |
+| Profiles | opt-in metadata-first behavior; core semantics unchanged |
+
+## 13. Risk matrix
+
+| Risk | Impact | Early warning | Mitigation |
+|---|---|---|---|
+| Parser lowers too early | AST/IDE/golden instability | AST lacks block/safe/callable metadata | enforce syntax-faithful AST tests |
+| HIR too close to surface syntax | VM emitter becomes ad hoc | bytecode emitter special-cases parser nodes | require all sugar elimination at HIR gate |
+| Dynamic dispatch hidden in native assumptions | frozen/native unsoundness | native path touches open-world sites | native only after freeze + reflective stubs |
+| Verifier too weak | VM crashes on malformed modules | fuzzed `.amberbc` panics runtime | load-time verifier mandatory |
+| GC before ownership model | no-GIL heap races | collector changes object visibility | finish owner/strand fields before GC |
+| Pinning exposes layout | FFI ABI freezes object internals | native code reads ivar offsets | only opaque handle except explicit buffer spans |
+| Typed checker starts too early | checker changes language semantics | dynamic tests fail only with checker disabled | typed profile starts after M5 |
+| Corpus not canonical | CI drift and flaky tests | golden differs by machine/path | normalize paths/order and stable serializers |
+| Watch treated as world mutation | notebook profile invalidates optimizer incorrectly | `Kernel.watch` bumps `world_epoch` | separate `watch_epoch` and `world_epoch` |
+| Modern profiles leak into core | surface complexity explosion | profile syntax required for ordinary code | profiles opt-in and metadata-first |
+
+## 14. Definition of done for a work package
+
+A work package is not done until all of these are true:
+
+1. Public artifact format, if any, is versioned.
+2. Positive and negative tests exist.
+3. Diagnostics and stack traces are deterministic.
+4. The corresponding golden fixtures are updated through the fixture normalizer, not by hand-editing unstable output.
+5. The implementation has no generic internal-error fallback for spec-defined failures.
+6. Documentation names the exact spec/project anchors used.
+7. Format-impact is declared: no change, compatible extension, or explicit format bump.
+8. Cross-lane dependencies are reflected in the milestone board.
+
+## 15. Project-local coding contracts
+
+These are implementation contracts, not language semantics:
+
+- No stage may consume a later-stage representation directly. Parser cannot emit HIR; HIR cannot directly mutate bytecode module sections.
+- Every serialized artifact must include `format`, `version`, `source_digest`, and `feature_flags` when relevant.
+- Compiler phases must be deterministic under the same source and feature flags.
+- Runtime slow paths must preserve the same observable errors as fast paths.
+- Inline caches must be invalidated by `method_version`, `shape_version`, and `world_epoch` as applicable.
+- All host/profile features must be behind explicit feature flags in artifacts and CLI.
+
+## 16. Immediate next actions
+
+The next concrete implementation move is to open the first repo issues in this order:
+
+1. `ISS-001` repo skeleton and CLI crates/packages.
+2. `ISS-002` canonical fixture layout and `ambertest` smoke runner.
+3. `ISS-003` format-version registry for AST/HIR/diag/bytecode.
+4. `ISS-004` lexer tokens/spans including indentation, `.?.`, `case!`, `CHAIN_DOT`.
+5. `ISS-005` Pratt parser for expressions/postfix/calls/block suffix.
+6. `ISS-006` parser for module/class/mixin/include/extend/signature forms.
+7. `ISS-007` `amber.ast.v1` serializer and golden normalizer.
+8. `ISS-008` scope graph and imported read-only aliases.
+9. `ISS-009` signature/default binding pipeline.
+10. `ISS-010` diagnostic engine with canonical code catalog.
+
+These ten issues close the practical bootstrap gap from document to working frontend.
+
+---
+
+# Приложение A. Перенесённый P0 implementation package из основного файла
+
+Ниже сохранён исходный нормативно-проектный материал из `amber_spec_consolidated_v20_1.md`, перенесённый сюда, чтобы основной файл больше не дублировал длинный implementation layer.
 
 # Часть II. Пакет реализации P0
 
@@ -3863,392 +2132,11 @@ Kernel.watch(@@x)  -> HWatchCvar(current_owner, "x", options)
 Именно это теперь считается рекомендуемой архитектурой Amber frontend.
 
 
-# Часть III. Открытые вопросы и редакторские следы закрытых решений
+---
 
-Ниже собраны остаточные незакрытые зоны, а также несколько редакторских следов решений, закрытых уже к редакции v11, чтобы не потерять контекст дальнейших обсуждений.
+# Приложение B. Перенесённые разделы IV-XV из основного файла
 
-## Q1. Политика стиля для имён с подчёркиванием [закрыто в v14]
-
-В v14 политика закрывается так:
-
-- `_`, `$_`, `_1`, `_2`, ... — специальные формы языка;
-- все остальные идентификаторы синтаксически допустимы;
-- имена, слишком похожие на спец-формы, не становятся compile-time error и могут подпадать только под lint/tooling policy.
-
-То есть вопрос закрывается не дополнительными запретами grammar-level, а разведением language core и style-level lint.
-
-## Q2. Финальный модульный / импортный синтаксис [закрыто в v11]
-
-В v11 source-level module syntax зафиксирован в static-profile:
-
-- `package module.path` задаёт logical module id импортируемого файла;
-- `import module.path [as Alias]` и `from module.path import Name [as Alias]` — единственные специальные формы загрузки/связывания;
-- `export Name [as Public]` формирует export table исходного модуля;
-- relative imports и star-import в v1 не вводятся;
-- `require` не является loader-формой;
-- `include` зафиксирован отдельно как mixin-composition form и не участвует в loader semantics.
-
-В v16 ecosystem/toolchain-level хвосты тоже закрываются: manifest/registry/signing/hot-reload policy стандартизованы отдельно, без изменения source-level module syntax.
-
-## Q3. Глубина нормализации метапрограммирования [закрыто в v13]
-
-В v13 зафиксирован **minimal MOP profile**:
-
-- reopenable named classes;
-- reflective `define_method`;
-- builtin `send(...)`;
-- `method_missing` fallback;
-- world-mutation model и frozen-world boundary;
-- named mixins;
-- declarative `include` и linearized ancestor composition;
-- жёсткое разведение namespace imports и behavioral composition.
-
-Сознательно **не** входят в это решение:
-
-- class-side mixins / `extend`;
-- reflective remove/alias/visibility API;
-- расширенный introspection/reflection API;
-- позднее добавление clause к существующему методу через reopen/`define_method`;
-- DSL/macros и hot reload.
-
-То есть вопрос глубины MOP закрыт не «полным Ruby-MOP», а минимальным, компиляторно-дружелюбным профилем.
-
-## Q4. Типовая система: grammar, semantics, inference [закрыто в v16]
-
-В v16 типовая система закрывается как optional **Amber/Typed** profile поверх того же source language.
-
-Принятые решения:
-
-- typed profile включается на уровне package/build profile, а не новым source-keyword;
-- exported `def`, `class_method def` и публичные constructor/boundary API в typed-package обязаны иметь явные parameter и return annotations;
-- локалы, block params, внутренние/private callables и field-types допускают local inference;
-- generics в v16 считаются **invariant**;
-- record-types остаются open by default, а exact-record пишется через `**Never`;
-- `and` / `or` получают truthiness-aware flow typing (`false | null` — falsy-set Amber);
-- `$_` имеет flow-type последнего выражения текущего scope; в начале scope его typed-view считается `Null`;
-- `case` / `case!` делают pattern-based narrowing по subject; `case!` без `else` в typed profile требует exhaustiveness;
-- reflective boundaries (`send(...)` с dynamic selector, `method_missing`, runtime `define_method`, reopen/`include`/`extend` через внешний open-world path) считаются `Any`-boundary, если сборка не находится в frozen typed profile.
-
-Этим grammar/semantics/inference-вопросы закрываются на уровне спецификации. Дальше остаётся только реализация checker'а, flow engine и tooling.
-
-## Q5. Concurrency после фиксации v1-core [закрыто в v16]
-
-Базовая no-GIL модель v1 сохраняется, а вторая волна закрывается следующими решениями:
-
-- ownership transfer вводится через explicit `move(expr)` на cross-strand boundaries (`task.spawn`, `Channel.send`, `select` send-arm и другие ownership APIs);
-- moved-from binding после успешного transfer больше не может читаться: статически очевидные случаи — compile error typed/lint-layer, иначе runtime `MovedValueError`;
-- multi-channel wait вводится как expression `select:` с `when`, optional `timeout` и optional `else` arms;
-- supervisor policy стандартизуется как keyword `policy:` для `async` и `task.spawn`; обязательные значения: `:cancel_scope` (default), `:one_for_one`, `:one_for_all`, `:rest_for_one`;
-- async I/O интегрируется через standard awaitables/readiness tokens из `amber.io`, совместимые с `select`;
-- distributed / multi-process runtime **не входит** в core language spec и остаётся library/host-level story поверх тех же message/ownership правил.
-
-То есть concurrency-вопросы больше не открыты на языке: дальше остаётся только реализация scheduler/runtime и библиотек.
-
-## Q6. Динамические pattern-objects [закрыто в v10]
-
-В v10 dynamic pattern objects включены в v1, но только в **explicit-binding profile**.
-
-Принятое решение:
-
-- разрешить `pattern(expr)` и `pattern(expr) with MAP_PATTERN`;
-- запретить скрытую инъекцию локалов;
-- разрешить feature только в `case`, `case!` и clause-style `def`;
-- оставить block params и pattern assignment вне v1 для этой формы.
-
-Richer matcher protocols, typed bindings-map и library-level combinators остаются допустимой будущей библиотечной эволюцией, но больше не считаются незакрытым spec-level вопросом.
-
-## Q7. Формальный статус `matcher expressions` вне `case` / `case!` [закрыто в v14]
-
-В v14 это закрывается так:
-
-- bare matcher expressions разрешены только в `case` / `case!`;
-- в `def`-клаузаx, block params и pattern assignment они не вводятся;
-- любые дальнейшие расширения этой формы возможны только отдельным RFC второй волны.
-
-## Q8. Финальный раздел по стандартной библиотеке коллекций [закрыто в v14]
-
-В v14 обязательный коллекционный профиль нормализован как часть спецификации:
-
-- для `Array`, `Tuple`, `Range`, `Set` и `LazySeq` зафиксирован минимальный `Enumerable`-подобный contract;
-- для `Map` зафиксированы `each/map/select/reject/transform_values/keys/values/entries`;
-- для `reduce` зафиксированы формы с `init` и без `init`, включая `EmptyCollectionError` на пустой коллекции без `init`.
-
-Следующая волна может расширять stdlib, но старт reference implementation больше не зависит от незакрытого коллекционного API.
-
-## Q9. Нужна ли строгая match-форма поверх безопасного `case` [закрыто в v10]
-
-Да. В v10 принят `case!` как строгая surface-form поверх того же `case`-engine.
-
-Принятое решение:
-
-- `case` без `else` остаётся safe-form и возвращает `null`;
-- `case!` без `else` бросает `MatchError`;
-- grammar `when PATTERN if GUARD:` и lowering остаются общими;
-- отдельный `match!` в v1 не вводится.
-
-## Q10. Формальная матрица диагностик компилятора [закрыто в v14]
-
-В v14 вводится обязательное трёхчастное разведение диагностик:
-
-- `compile_error` — hard fail языка;
-- `warning` — обязательное предупреждение компилятора, не останавливающее сборку;
-- `lint` — tooling-level правила, не входящие в language acceptance.
-
-Минимальный обязательный каталог `compile_error` охватывает pattern/binder, module/import/export и class/mixin/MOP placement rules; обязательным `warning` v1 считается чтение `@field` из default-expression при наличии позднего auto-assign в то же поле.
-
-
-## Q11. Где проходит граница между fully dynamic Amber и native/AOT profile [закрыто в v12]
-
-Граница теперь зафиксирована так:
-
-- обычный dynamic Amber может жить в dispatch-world состоянии `open` неограниченно долго;
-- Amber/Frozen — build/runtime profile, в котором после loader/linker/module-init выполняется freeze transition;
-- после freeze любая world mutation (`class`/`mixin` reopen, `define_method`, `include`, меняющий ancestor graph, поздняя Amber module load в тот же world) запрещена и даёт `WorldFrozenError`;
-- `send(...)` и `method_missing` после freeze остаются легальными, но рассматриваются как reflective slow-path, а не как источник новых world mutations;
-- язык не требует обязательного deopt-механизма: реализации вправе либо держать такие места на generic path, либо строить JIT/deopt поверх того же language contract.
-
-В v16 и backend/toolchain boundary тоже закрывается: canonical MIR/SSA, native/JIT/AOT profile и `.amberimg` фиксируются как отдельный post-v1 profile.
-
-
-
-## Q12. Остаточные вопросы после фиксации collector/pinning/FFI profile [закрыто в v16]
-
-Reference profile по-прежнему закрывает: non-moving generational collector, pin tokens, pinned scopes, opaque-handle FFI boundary, safe-point handshake и запрет implicit GC-finalizer semantics для пользовательского `destroy!`.
-
-В v16 вторая волна памяти фиксируется так:
-
-- weak refs и ephemerons стандартизуются как runtime/library types `WeakRef[T]` и `Ephemeron[K, V]` в пакете `amber.memory`;
-- surface borrow annotations в source grammar **не добавляются**; borrowing остаётся API-level через block-scoped helpers вроде `memory.borrow(obj) |view|: ...`;
-- zero-copy typed buffers/slices стандартизуются как runtime classes (`Bytes`, `Buffer[T]`, `Slice[T]`) с pin-aware semantics;
-- collector telemetry/tuning и host embedding API относятся к host/runtime profile, а не к core language syntax.
-
-Этим memory/FFI second wave закрывается на уровне спецификации: дальше остаются только runtime и embedding implementation details.
-
-## Q13. Остаточные вопросы после фиксации module format / loader / verifier profile [закрыто в v16]
-
-Reference profile по-прежнему закрывает: `.amberbc`-артефакт, section model, loader state machine, dependency manifest, export/import symbol tables и минимальный verifier contract.
-
-В v16 distribution/toolchain policy фиксируется так:
-
-- package manifest стандартизуется как `amber.toml`;
-- registry/publish unit — signed package bundle `.amberpkg`, который содержит manifest, compiled modules, export tables, digests и optional source/debug payload;
-- source files внутри пакета обязаны иметь `package`, равный manifest package либо находящийся под тем же dotted-prefix;
-- reproducible builds и content digests обязательны для publishable artifacts; trust chain строится на embedded Ed25519 signatures + lockfile digests;
-- hot reload разрешён только в open-world dev profile и только как atomic package-swap; в frozen profile он запрещён;
-- incompatible reload, меняющий public export surface или нарушающий manifest/ABI contract, обязан завершаться `ReloadIncompatibleError`.
-
-Этим distribution ecosystem закрывается на уровне спецификации; дальше остаётся только реализация registry/client/publisher/tooling.
-
-## Q14. Нужны ли полевые lifetime-аннотации (`owned`, `weak`, `borrowed`) [окончательно закрыто в v16]
-
-В v16 это решение доводится до окончательного вида:
-
-- source-level field modifiers `owned`, `weak`, `borrowed` **не будут добавляться** в Amber source grammar;
-- lifecycle языка остаётся построенным вокруг ordinary object model, `destroy!`, `memory.dealloc`, weak/ephemeron wrappers и block-scoped borrow helpers;
-- ownership/borrowing/weakness выражаются не модификаторами полей, а runtime/library objects и host-interop API.
-
-То есть Amber окончательно закрывает memory story без field-level lifetime annotations.
-
-## Q15. Class-side mixins / `extend` [закрыто в v16]
-
-В v16 class-side composition фиксируется как отдельный declarative profile:
-
-- `extend` разрешён только непосредственно внутри body `class` и её reopen-форм;
-- каждый operand `extend` обязан резолвиться в mixin object;
-- instance-methods mixin'а при `extend` становятся методами class object receiver'а;
-- локальные `class_method def` доминируют над методами, пришедшими через `extend`;
-- при нескольких `extend` действует то же правило, что и для `include`: later direct extend wins;
-- `extend` является world mutation и подчиняется тем же freeze/invalidation правилам, что и `include`.
-
-`extend` в `mixin` body и произвольный reflective class-side alias/remove API по-прежнему не входят в язык.
-
-## Q16. Расширенный reflection / introspection API [закрыто в v16]
-
-В v16 расширенная рефлексия стандартизуется как read-only stdlib/runtime package `amber.reflect`.
-
-Принятые решения:
-
-- reflection выдаёт immutable mirror objects (`ClassMirror`, `MixinMirror`, `MethodMirror`, `PackageMirror`, `WorldMirror`);
-- mirror API покрывает name/kind/superclass/ancestors/includes-or-extends, method tables, selector ownership, source locations, parameter metadata и optional typed signature metadata;
-- mirrors являются snapshot-views и не дают прав на world mutation;
-- mutation path по-прежнему ограничен ранее зафиксированными механизмами (`class`/`mixin` reopen, `include`, `extend`, `define_method`).
-
-То есть вопрос introspection закрывается без возврата к "полной Ruby-MOP".
-
-## Q17. Native backend / JIT / frozen-image profile [закрыто в v16]
-
-В v16 backend boundary фиксируется так:
-
-- canonical optimizer/backend IR — `MIR` в SSA-форме поверх уже зафиксированного HIR;
-- bytecode VM остаётся reference execution engine, а native/JIT backend — дополнительным профилем;
-- native compilation допускается только для frozen-world artifacts/images;
-- reflective sites (`SEND_DYN`, `method_missing`, open-world mutation paths) остаются runtime stubs/guards и не требуют обязательного deopt-механизма;
-- deployable frozen image стандартизуется как `.amberimg`, bundling manifest, package table, code payload (bytecode and/or native), debug map и signatures.
-
-После этого AOT/JIT вопрос тоже закрыт на уровне языка и artifact model: дальше остаётся только реализация MIR/backend/image-builder.
-
-
-
-## Q18. Capability and sandbox profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Capabilities & Sandbox** profile.
-
-Принятые решения:
-
-- package, plugin, notebook cell, workflow step и Wasm component не получают host resources по умолчанию;
-- filesystem, network, env, process, clock, random, FFI, GPU/device, database и secret-store доступы выдаются через manifest-declared capability grants;
-- capability grant является host-issued token, а не ordinary user object, который можно подделать в Amber коде;
-- `amber.toml` получает секцию `[capabilities]`, а `.amberbc`/`.amberpkg` могут хранить declared capability requirements в optional metadata section;
-- отсутствие required capability является compile/load-time diagnostic, если доказуемо, и `CapabilityError`, если обнаружено только runtime;
-- sandbox profile не меняет core language semantics и не считается world mutation.
-
-Этим закрывается вопрос безопасного исполнения untrusted notebooks, BI snippets, plugins, serverless functions и AI-agent generated code.
-
-## Q19. Effect and purity profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Effects** profile поверх Amber/Typed.
-
-Принятые решения:
-
-- callable может объявлять effect row через suffix `!{...}` после return type или после parameter list, если return type отсутствует;
-- минимальные effect labels: `pure`, `alloc`, `mut`, `world`, `watch`, `async`, `strand`, `fs`, `net`, `env`, `time`, `random`, `ffi`, `db`, `gpu`, `unsafe`, `reflect`, `workflow`;
-- пустая строка effects `!{}` означает deterministic/pure-without-observable-effects boundary, кроме allocation, если host profile явно считает allocation unobservable;
-- effect rows используются checker'ом, optimizer'ом, notebook invalidator, sandbox loader и replay runtime;
-- dynamic/reflective boundaries, которые невозможно проверить статически, поднимаются до conservative effect row `!{unsafe, reflect}` либо требуют explicit annotation.
-
-Этим закрывается вопрос формального различения pure computation, data mutation, world mutation и host I/O без добавления checked exceptions.
-
-## Q20. Observability and replay profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Observability & Replay** profile.
-
-Принятые решения:
-
-- runtime events получают canonical names, attributes, source spans, task/strand ids, world/watch epochs и optional trace context;
-- обязательные event families: task, strand, channel, mutex, atomic, gc, loader, world, watch, ffi, capability, effect, schema, workflow;
-- `trace.span "name": ...` является library/intrinsic boundary, который может lower'иться в HIR event scope;
-- deterministic execution scope виртуализирует clock, random, scheduler order и external input providers;
-- replay trace `.ambertrace` хранит event log, dependency fingerprints, virtual sources, watch revisions и package/build digests;
-- replay divergence является `ReplayDivergenceError`, а forbidden nondeterminism внутри deterministic scope — `DeterminismError`.
-
-Этим закрывается вопрос воспроизводимых notebooks, BI refresh jobs, CI flakes и production debugging без изменения обычного scheduler contract.
-
-## Q21. DataFrame / columnar BI profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/DataFrame & Columnar BI** profile.
-
-Принятые решения:
-
-- stdlib получает normative table abstractions: `Table`, `Column[T]`, `Series[T]`, `Schema`, `LazyTable`, `QueryPlan`, `GroupedTable`;
-- `Table` operations являются relational/vectorized operations, а не ordinary object iteration;
-- lazy query plans обязаны быть inspectable, hashable по lineage fingerprint и совместимыми с notebook dependency capture;
-- column-level revision keys расширяют v19.2 watch profile: cell may depend on `table_id.column(:amount).revision`;
-- columnar memory ABI может быть Arrow-compatible, но core Amber не зависит от конкретного external memory format.
-
-Этим закрывается BI/story для аналитических notebooks, reactive dashboards и high-volume ETL без превращения `Array#map` в скрытый relational engine.
-
-## Q22. Schema, serialization and API contracts profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Schema & API Contracts** profile.
-
-Принятые решения:
-
-- `schema Name vN:` является declarative profile form, сериализуемой в AST/HIR metadata и optional `.amberbc` section;
-- schema fields имеют required/optional/default/deprecated/renamed metadata;
-- schema evolution поддерживает explicit migration hooks и compatibility checks;
-- codecs (`Json.codec(T)`, `Binary.codec(T)`, host codecs) обязаны выполнять boundary validation;
-- API contract generator может эмитить OpenAPI-like descriptions для HTTP/RPC boundaries;
-- schema violations дают `SchemaViolationError`.
-
-Этим закрывается вопрос stable wire contracts для backend, services, plugin APIs и data pipelines.
-
-## Q23. Wasm component and host plugin profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Wasm Component** profile.
-
-Принятые решения:
-
-- `.amberwasm` является deployable component artifact поверх frozen-world subset;
-- imports/exports мапятся на WIT-like component interface descriptions;
-- Amber capabilities мапятся на host/WASI-style resource permissions;
-- raw FFI внутри Wasm profile запрещён по умолчанию;
-- reflective world mutation после component instantiation запрещена;
-- host plugin execution должен сочетать schema contracts, capabilities и effect rows.
-
-Этим закрывается portable sandbox story для BI plugins, edge/serverless snippets и embeddable extensions.
-
-## Q24. Accelerator / GPU / SIMD profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Accelerator** profile.
-
-Принятые решения:
-
-- `Tensor`, `DeviceBuffer[T]`, `Device`, `Kernel` и `DeviceStream` являются runtime/library types;
-- accelerator kernels используют restricted closure subset: primitive numeric types, tensors, buffers, slices, constants и pure helper calls;
-- arbitrary object access, dynamic dispatch, allocation, reflection, exceptions через host stack и hidden I/O внутри kernel запрещены;
-- host/device transfer semantics explicit: copy, borrow/pin, map, unmap, synchronize;
-- accelerator operations несут effect `gpu` или более конкретный device effect;
-- нарушения kernel subset или device lifetime дают `AcceleratorError`.
-
-Этим закрывается путь к GPU/SIMD/accelerator workloads без переноса полной dynamic object model на устройство.
-
-## Q25. AI-agent tooling and provenance profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/AI-Agent Tooling & Provenance** profile.
-
-Принятые решения:
-
-- compiler/toolchain обязан уметь эмитить machine-readable symbol graph, semantic spans, type/effect summaries и refactoring-safe anchors;
-- agent patches должны применяться через structured patch protocol, а не только raw text diff, если host включил этот profile;
-- patch transaction фиксирует author, tool id, prompt/request digest, changed symbols, tests run, diagnostics before/after и capability grants;
-- provenance log может сериализоваться в `.amberprov` и/или optional package metadata;
-- compiler обязан иметь `amber patch check` mode, который проверяет semantic patch до применения.
-
-Этим закрывается вопрос безопасного AI-assisted maintenance без превращения source tree в неотслеживаемый набор textual edits.
-
-## Q26. Contracts and property testing profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Contracts & Property Testing** profile.
-
-Принятые решения:
-
-- `require`, `ensure`, `invariant` и `old(expr)` являются contract-profile forms;
-- contracts могут исполняться runtime, использоваться typed checker'ом и документироваться tooling'ом;
-- property tests используют генераторы, shrinkers, seeds и replayable counterexamples;
-- failed contract даёт `ContractViolationError`;
-- contracts не являются optimizer assumptions в unsafe mode, если build не включил explicit `assume_contracts`.
-
-Этим закрывается вопрос бизнес-инвариантов и AI-generated code validation без включения dependent types в core.
-
-## Q27. Privacy, taint and data lineage profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Privacy, Taint & Lineage** profile.
-
-Принятые решения:
-
-- значения, поля schema, columns и tables могут иметь `DataLabel` / taint tags (`pii`, `secret`, `regulated`, custom labels);
-- taint propagation работает через ordinary operations, table query plans, codecs and API exports;
-- export boundary обязан проверять policy context;
-- redaction protocol должен быть explicit и observable;
-- lineage graph связывает source datasets, transformations, notebook cells, watch revisions и exported artifacts;
-- policy violations дают `PolicyViolationError`.
-
-Этим закрывается enterprise/BI вопрос: какие данные откуда пришли, какие ячейки/отчёты зависят от sensitive inputs и где запрещён export.
-
-## Q28. Durable workflow profile [закрыто в v20]
-
-В v20 фиксируется optional **Amber/Durable Workflow** profile.
-
-Принятые решения:
-
-- `workflow Name:` является profile-level declarative form для long-running, replayable, restart-safe computations;
-- workflow состоит из named `step` blocks с explicit effects, retries, deadlines, idempotency keys and optional compensation;
-- workflow history является append-only replay log;
-- step body должен быть deterministic относительно recorded inputs или объявлять external effects;
-- durable workflow не заменяет обычные `Task`/`Strand`; он строится поверх scheduler, effects, schema, capabilities and replay;
-- нарушения durable history/compensation/retry contract дают `WorkflowError`.
-
-Этим закрывается gap между runtime concurrency и production-grade ETL/backend/agentic workflows, которые должны переживать рестарт, deploy и retry.
+Ниже сохранены перенесённые разделы о матрице дальнейшей разработки, компилируемости, VM/runtime ABI, lifetime/collector/loader/MOP/frozen-world, reference implementation blueprint, backlog, milestone gating и tracking issues. Новая матрица v20.1-project в верхней части этого файла является редакторски доработанным входом для практической реализации; эти перенесённые разделы остаются source anchors и детальными нормативными следами.
 
 # Часть IV. Матрица дальнейшей разработки
 
@@ -9261,1576 +7149,1658 @@ Title: SPEC-SYNC <artifact> <mismatch>
 - у reference repo появляется стабильная точка заморозки для AST/HIR/diag/bytecode/runtime interfaces;
 - typed/native/concurrency-second-wave workstreams остаются намеренно вторичными и не блокируют dynamic reference runtime.
 
+---
 
-# Часть XVI. Modern Pressure Profiles v20
+## 12. v20.1-project compile-closure patch: недостающие контракты для полностью компилируемого Amber
 
-## 1. Назначение v20
+### 12.1. Статус и цель добавления
 
-v20 не меняет уже зафиксированное ядро Amber. Его назначение — закрыть современные pressure-points, которые стали критичными для языков, запускаемых в notebooks, BI-платформах, sandboxed plugins, CI/CD, serverless/edge, AI-agent workflows, production observability и accelerator-heavy data workloads.
+Этот раздел добавлен как **compile-closure patch** к проектному слою. Он не заменяет уже описанные pipeline, ABI, `.amberbc`, VM, loader, no-GIL runtime и матрицы `W0..W10`. Его задача — закрыть те места, где язык уже семантически спроектирован, но независимая реализация всё ещё могла бы разойтись в деталях:
 
-Главное правило v20:
+- как именно токенизируются комментарии, range expressions, строки, интерполяция и числовые литералы;
+- как формируются module init, export-cells, prelude bindings и top-level slots;
+- как устроены name resolution, `UNINIT` sentinel, captured cells и локальные слоты;
+- как `CALL`, keyword arguments, block arguments, callable objects, operators and type hooks проходят через единый ABI;
+- как runtime exceptions, diagnostics, source maps, root maps, verifier dataflow и bytecode encoding становятся machine-readable контрактами;
+- как bootstrap, stdlib, incremental build и conformance suite делают Amber не только "запускаемым", но и воспроизводимо компилируемым.
 
-```text
-Новая возможность сначала оформляется как optional profile.
-Core syntax/runtime меняются только если без этого нельзя выразить профиль через уже существующие AST/HIR/bytecode/tooling контракты.
-```
+**Ключевая формулировка:** полностью компилируемый Amber — это не только `source -> bytecode -> VM`. Это ещё и стабильный набор форматов, ошибок, bootstrap-артефактов, verifier-инвариантов и тестов, позволяющий собрать один и тот же проект на разных машинах с одинаковым наблюдаемым результатом.
 
-v20 вводит следующие normative profile families:
+### 12.2. Что теперь считается "полностью компилируемым Amber"
 
-```text
-Amber/Capabilities & Sandbox
-Amber/Effects
-Amber/Observability & Replay
-Amber/DataFrame & Columnar BI
-Amber/Schema & API Contracts
-Amber/Wasm Component
-Amber/Accelerator
-Amber/AI-Agent Tooling & Provenance
-Amber/Contracts & Property Testing
-Amber/Privacy, Taint & Lineage
-Amber/Durable Workflow
-```
+Amber считается полностью компилируемым на уровне reference profile, если выполняются все условия:
 
-Эти профили могут включаться независимо, но рассчитаны на композицию:
+1. **Deterministic frontend:** один и тот же source tree даёт одинаковые token/AST/HIR/diagnostic dumps независимо от абсолютного пути, hash-map порядка и адресов памяти.
+2. **Closed name binding:** каждое имя после binder phase классифицировано как local slot, upvalue cell, module cell, import alias, class/mixin binding, prelude binding или compile-time unresolved name.
+3. **Executable module graph:** каждый source module компилируется в `.amberbc`, зависимости выражены через `DEPS`, exports через `EXPT`, а top-level executable code живёт в module-init entrypoint.
+4. **Verified bytecode:** VM не исполняет `.amberbc`, пока verifier не проверил sections, registers, jumps, handler tables, initializedness, safepoint/root maps and profile flags.
+5. **Stable runtime ABI:** calls, sends, closures, blocks, callable references, class-object calls, keyword args, default thunks, type hooks and exceptions проходят через единый call/frame ABI.
+6. **Precise observable failures:** user-visible ошибки имеют канонические классы, stack traces и source spans; VM bugs, malformed bytecode and unsupported profiles не маскируются под language errors.
+7. **Bootstrap closure:** prelude, core classes, stdlib collections, loader, diagnostic registry and bytecode registry имеют фиксированный порядок сборки.
+8. **Conformance closure:** corpus покрывает compile-only, compile+disasm, compile+load, compile+run, scheduler, loader, diagnostics, stdlib and profile gates.
+9. **Optimization-preserving semantics:** dynamic bytecode VM является source of truth; MIR/native/JIT/frozen image допускаются только как семантически эквивалентные lowerings с root maps, exception maps and reflective slow paths.
 
-- capabilities ограничивают, что код имеет право делать;
-- effects описывают, что код может сделать;
-- observability/replay объясняют, что код сделал;
-- schema/contracts описывают, какие значения пересекают boundaries;
-- DataFrame/lineage/watch дают granular BI invalidation;
-- Wasm/plugin profile делает execution portable and sandboxed;
-- AI-agent provenance делает изменения source/tooling проверяемыми;
-- durable workflow превращает replay/effects/capabilities в production orchestration model.
+### 12.3. Матрица недостающей информации и закрытия
 
-## 2. Общие правила профилей v20
+| Область | Риск без уточнения | Закрывающий контракт в этом разделе | Блокирует |
+|---|---|---|---|
+| Source/literals/comments | parser разных реализаций расходится на `#`, `1..10`, interpolation, underscores | §12.4 | F0/F1 |
+| Name resolution/slots | разные semantics для locals/upvalues/imports/top-level | §12.5 | F2/F3/V1 |
+| Prelude/builtins | intrinsic recognition зависит от ad hoc имён | §12.6 | F2/F3/V1/V4 |
+| Call ABI | `fn(args)`, class calls, blocks and keywords не имеют единого runtime path | §12.7 | F3/V0/V1 |
+| Operators | `+`, `==`, `in`, `and/or` могут понизиться несовместимо | §12.8 | F3/V0 |
+| Module init/class body | exports, reopen and atomic publish расходятся между compiler and loader | §12.9 | V4/W9 |
+| Value model | constant pool, identity, shareability and serialization могут зависеть от pointer layout | §12.10 | V0/V1/V6 |
+| Runtime errors | часть фактических ошибок не попала в canonical registry | §12.11 | diagnostics/runtime corpus |
+| Type hooks | `TypeTerm` хранится, но runtime check protocol не закрыт | §12.12 | F3/V1/W9 |
+| Bytecode encoding | `.amberbc` sections описаны, но binary canonicalization не полная | §12.13 | V0/V4 |
+| Verifier/dataflow | register initializedness, GC roots, safepoints require precise contract | §12.14 | V1/V6 |
+| Pattern decision program | P_* opcode family есть, но transaction boundaries need canonical form | §12.15 | F3/V0 |
+| Debug/source maps | stack trace and diagnostics risk non-determinism | §12.16 | tooling/conformance |
+| Build graph/cache | multi-module builds and incremental compilation can drift | §12.17 | V4/W8/W11 |
+| Stdlib/bootstrap | core types and prelude order can become circular | §12.18 | W8/release |
+| Profile gating/security | unsupported Modern Pressure Profiles could silently load | §12.19 | loader/release |
+| Native/AOT path | future backend may omit deopt/root/exception maps | §12.20 | W10+ |
+| Implementation matrix | no tasks for the new closure items | §12.21-§12.23 | planning |
 
-### 2.1. Профильность
+### 12.4. Source unit, comments, literals and lexical completion
 
-Каждый v20 profile является opt-in:
+#### 12.4.1. Source unit normalization
 
-```toml
-[profiles]
-typed = true
-notebook_watch = true
-capabilities = true
-effects = true
-observability = true
-replay = true
-columnar_bi = true
-schema = true
-wasm_component = false
-accelerator = false
-agent_tooling = true
-contracts = true
-privacy = true
-workflow = false
-```
-
-Host/toolchain может поддерживать subset профилей. Если source/package требует профиль, который toolchain не поддерживает, build/load обязан завершиться diagnostic до исполнения.
-
-### 2.2. Неизменность core semantics
-
-v20 profiles не меняют:
-
-- truthiness;
-- dispatch lookup;
-- pattern matching semantics;
-- no-GIL strand/task model;
-- ordinary object identity;
-- open/frozen world boundary;
-- `.amberbc` mandatory sections;
-- production behavior ordinary `ambervm run`, если профиль не включён.
-
-Профиль может добавить metadata, validation, instrumentation или restricted subset, но не может silently изменить meaning обычного core-кода.
-
-### 2.3. Metadata-first подход
-
-Все новые profile facts должны быть представлены в одном или нескольких слоях:
+Reference frontend reads source as UTF-8 bytes and normalizes only line endings:
 
 ```text
-AST metadata      — для IDE/formatter/refactor/source tools
-HIR metadata      — для checker/lowering/interpreter
-bytecode metadata — для verifier/loader/runtime
-package metadata  — для registry/sandbox/provenance
-trace metadata    — для observability/replay/audit
+CRLF -> LF
+CR   -> LF
 ```
 
-Профили не должны требовать, чтобы production VM всегда несла весь overhead. Verifier обязан уметь отвергнуть неподдерживаемую optional section, если она помечена как required.
+No Unicode normalization is performed by the compiler. Identifiers are compared by exact normalized source bytes after UTF-8 validation. A UTF-8 decoding failure is a compile-time diagnostic, not runtime behavior.
 
-## 3. Amber/Capabilities & Sandbox Profile
-
-### 3.1. Цель
-
-Capability profile отвечает на вопрос:
-
-```text
-Какие host resources этот код имеет право использовать?
-```
-
-Это отличается от package signing. Подпись отвечает, кто произвёл artifact; capability profile отвечает, что artifact может делать во время исполнения.
-
-### 3.2. Manifest contract
-
-`amber.toml` получает секцию:
-
-```toml
-[capabilities]
-fs.read = ["./data", "./config"]
-fs.write = ["./out"]
-net.connect = ["api.example.com:443"]
-env.read = ["AMBER_ENV"]
-time = true
-random = true
-ffi = false
-process.spawn = false
-secrets.read = ["analytics/api-token"]
-gpu = false
-```
-
-Нормативно:
-
-- отсутствующая capability означает deny by default;
-- wildcard grants допустимы только если host policy их разрешает;
-- package manifest объявляет requested capabilities;
-- host launch policy выдаёт actual capabilities;
-- runtime видит только intersection requested ∩ granted;
-- попытка использовать невыданную capability даёт `CapabilityError`.
-
-### 3.3. Runtime API
-
-Минимальный runtime API:
+A source file may start with a shebang line:
 
 ```amber
-caps = Kernel.capabilities()
-caps.allowed?(:fs_read, path: "./data/orders.csv")
-
-Kernel.with_capabilities(caps.subset(fs_read: ["./data"])):
-  Csv.read("./data/orders.csv")
+#!/usr/bin/env amber
 ```
 
-Capability token не является ordinary mutable object. Его нельзя сконструировать user code'ом, сериализовать в source literal или получить через reflection mirrors без host grant.
+If `#!` appears at byte offset `0`, the entire first line is treated as a comment. Elsewhere `#!` has no special meaning.
 
-### 3.4. Capability taxonomy v20
+Canonical source extensions for tooling:
 
-Минимальные canonical names:
+- `.amber` — preferred source extension;
+- `.am` — accepted shorthand in reference tooling;
+- extension does not define module id; `package` does.
 
-```text
-fs.read
-fs.write
-fs.metadata
-net.connect
-net.listen
-env.read
-env.write
-process.spawn
-process.signal
-time.now
-time.sleep
-random.secure
-random.pseudo
-ffi.call
-ffi.load
-db.connect
-secrets.read
-device.gpu
-device.accelerator
-notebook.watch
-trace.emit
-workflow.persist
-```
+A missing final newline is accepted. Diagnostics should render the last line as if it had a virtual line terminator for caret reporting, but source byte offsets must remain exact.
 
-Toolchain может добавлять vendor-specific names только под reverse-DNS prefix:
+#### 12.4.2. Comment rule and `#` conflict
 
-```text
-com.example.crm.read
-cloud.vendor.queue.publish
-```
-
-### 3.5. Interaction with imports and packages
-
-A module import не выдаёт capabilities. Capabilities принадлежат execution context, package grant или host plugin instance.
+Amber already uses `#` inside unbound callable references:
 
 ```amber
-import net.http as http
-
-http.get("https://example.com")
-# legal only if current context has net.connect capability
+m = &User#full_name
 ```
 
-Module namespace object не должен быть способен обходить capability checks.
-
-### 3.6. Sandbox boundaries
-
-Sandboxed execution units:
+Therefore comments are lexical only under this rule:
 
 ```text
-notebook cell
-BI query block
-Wasm component instance
-serverless function invocation
-workflow step
-AI-agent patch test run
-plugin callback
+# starts a comment when it appears outside strings/interpolation and either:
+  - it is the first non-space character of a line; or
+  - the previous source character is whitespace.
 ```
 
-Каждый boundary имеет:
-
-```text
-capability set
-resource limits
-effect allowance
-trace context
-schema contract
-optional taint policy
-```
-
-## 4. Amber/Effects Profile
-
-### 4.1. Цель
-
-Effects profile отвечает на вопрос:
-
-```text
-Какие наблюдаемые действия может выполнить callable?
-```
-
-Capability profile является runtime permission model; effects profile является static/dynamic semantic contract.
-
-### 4.2. Surface syntax
-
-С return type:
+Consequences:
 
 ```amber
-def normalize(row as Row) -> Row !{}:
-  row.trimmed()
-
-def fetch_user(id as UserId) -> User !{net, async}:
-  http.get("/users/#{id}").await()
+x = 1 # comment       # comment
+# full-line comment   # comment
+&User#full_name       # HASH separator inside callable reference
+foo#bar               # token HASH between names; invalid unless a future form claims it
 ```
 
-Без return type:
+This keeps inline comments usable and makes `&Class#method` unambiguous without context-sensitive lexer backtracking.
 
-```amber
-def log_event(e) !{fs.write, time}:
-  File.append("events.log", "#{clock.now()} #{e}")
-```
+#### 12.4.3. Integer literals
 
-Для block/callable types в typed profile:
+Reference v1 integer literals are signed only through unary `+` / `-`; the literal token itself is non-negative.
 
-```amber
-Processor = Fn[Row -> Row !{}]
-Fetcher   = Fn[UserId -> User !{net, async}]
-```
-
-### 4.3. Canonical effect labels
-
-Минимальный v20 set:
+Supported v1 forms:
 
 ```text
-alloc       allocation observable to host/profile
-mut         ordinary data mutation
-world       dispatch-world mutation
-watch       notebook watch/revision mutation
-async       creates/awaits task or awaitable
-strand      crosses strand boundary or uses synchronization
-fs          filesystem I/O
-net         network I/O
-env         environment read/write
-time        real or virtual clock
-random      random source
-ffi         native/foreign call
-reflect     dynamic reflection / SEND_DYN / mirrors
-unsafe      unchecked host/runtime escape hatch
-db          database or external storage
-gpu         accelerator/device operation
-schema      schema encode/decode/migration boundary
-trace       telemetry emission
-workflow    durable workflow persistence/replay
+0
+123
+1_000_000
+0xFF
+0b1010_0101
+0o755
 ```
 
-`pure` is represented by `!{}` in strict profile. Hosts may define `alloc` as unobservable for local pure computation, but must be consistent in checker diagnostics.
+Rules:
 
-### 4.4. Sub-effecting
+- `_` may appear between digits, never at the start/end and never doubled;
+- parse-time integer has arbitrary precision;
+- runtime `Int` is mathematically unbounded in observable semantics;
+- VM may use tagged small-int and heap BigInt internally;
+- constant pool stores canonical integer magnitude/sign, not target-machine word bytes.
 
-Effect row `A` is allowed at call site requiring `B` only if:
+Overflow in tagged fast-path must promote, not wrap.
+
+#### 12.4.4. Float literals
+
+Supported v1 forms:
 
 ```text
-A subset_of B
+1.0
+0.5
+1e9
+1.2e-3
 ```
 
-Example:
+Rules:
+
+- `Float` is IEEE-754 binary64 in reference profile;
+- `_` follows the same placement rule as integer literals inside digit runs;
+- `NaN`, `Infinity` and `-Infinity` are not literal tokens; they are prelude constants if exposed by stdlib;
+- constant pool stores canonical binary64 payload with deterministic NaN normalization.
+
+If a future Decimal type is added, it must use a different literal marker or explicit constructor; v1 decimal-looking literals are `Float`.
+
+#### 12.4.5. Strings and interpolation
+
+String literals are immutable UTF-8 `Str` values.
+
+Required escapes:
+
+```text
+\n \r \t \\ \" \# \u{HEX}
+```
+
+Interpolation syntax:
 
 ```amber
-def p(x as Int) -> Int !{}: x + 1
-
-def run(f as Fn[Int -> Int !{}]):
-  f(1)
-
-run(p)       # ok
-run(clocky)  # error if clocky has !{time}
+"hello #{name}"
+"sum = #{a + b}"
 ```
 
-### 4.5. Dynamic boundaries
+Lowering:
 
-These constructs force conservative effects unless statically resolved:
+```text
+InterpString(parts[])
+  -> StringBuilder.new()
+  -> append literal parts in source order
+  -> for each expression part:
+       evaluate expression left-to-right
+       call to_s protocol
+       append result
+  -> freeze immutable Str
+```
 
-- `send(receiver, selector_expr, ...)` with non-literal selector;
-- `method_missing` fallback;
-- reflective mirrors crossing into dynamic lookup;
-- FFI callbacks;
-- host callbacks;
-- `eval`-like functionality, if any host provides it;
-- dynamic package/plugin loading in open-world profile.
+Interpolation expressions use normal expression grammar and normal source spans. A failure inside interpolation appears in stack traces as the original string expression span, not as generated helper code.
 
-A typed/effects build may require explicit annotation:
+#### 12.4.6. Symbols
+
+Symbol literal syntax remains:
 
 ```amber
-def dynamic_call(obj, sel) -> Any !{reflect, unsafe}:
-  send(obj, sel)
+:ok
+:full_name
 ```
 
-### 4.6. Effects and optimizer
+Reference rules:
 
-Optimizer may use effect rows for:
+- symbol literals intern in the current dispatch world;
+- `.amberbc` stores symbol table entries as strings, never as runtime addresses;
+- loader interns symbols deterministically in section order;
+- symbol identity is stable within a world, but serialized symbol numeric ids are file-local and cannot be observed by user code.
 
-- common subexpression elimination of pure calls;
-- memoization hints;
-- parallelization of independent pure/dataflow nodes;
-- notebook invalidation pruning;
-- replay deterministic validation;
-- capability preflight;
-- warning about unused nondeterministic calls.
+#### 12.4.7. Range expressions
 
-Optimizer must not erase or reorder operations with non-empty effect rows unless it proves equivalence under the active profile.
+The main specification already uses matcher examples such as `when 1..10`. This patch makes the surface form compile-explicit.
 
-## 5. Amber/Observability & Replay Profile
+Grammar insertion:
 
-### 5.1. Observability goals
-
-Amber runtime has tasks, strands, channels, GC, loader, MOP, frozen-world, notebook watches, FFI, schemas and optional native/JIT. v20 requires observability to be semantic, not purely logging.
-
-Canonical event shape:
-
-```text
-AmberEvent(
-  name,
-  timestamp_or_virtual_time,
-  trace_id?, span_id?, parent_span_id?,
-  task_id?, strand_id?, worker_id?,
-  module_id?, method_id?, source_span?,
-  world_epoch?, watch_epoch?,
-  attributes,
-  severity?,
-  causality_edges[]
-)
+```ebnf
+CompareExpr         ::= RangeExpr { CompareOp RangeExpr }
+RangeExpr           ::= AddExpr [ ".." AddExpr ]
 ```
 
-### 5.2. Surface API
+Rules:
+
+- `a..b` is an inclusive `Range` expression;
+- `...` exclusive range is not part of v1 unless a later spec bump adds it;
+- operands evaluate left-to-right;
+- `a..b` lowers to `Range.new(a, b, inclusive_end: true)` or an equivalent intrinsic constructor;
+- as a `case` matcher expression, `range === value` is used by the ordinary matcher-expression rule;
+- `in` against a range calls `Range#contains?(value)` as already required by the `in` contract.
+
+This does not introduce a new semantic category; it formalizes syntax already implied by the accepted examples.
+
+#### 12.4.8. Collection literals
+
+Reference v1 treats collection literals as runtime constructor lowerings with stable evaluation order:
 
 ```amber
-trace.span "parse.orders", attrs: {path: path}:
-  rows = Csv.read(path)
-  trace.metric("orders.count", rows.count)
-  rows
+[expr1, expr2]       # Array
+(expr1, expr2)       # Tuple expression only when comma is present
+{key: value}         # Map with symbol/string key according to parsed key form
 ```
 
-Library spelling may remain ordinary calls; profile-enabled lowering may emit `HTraceSpan`/`HTraceEvent`.
+Rules:
 
-### 5.3. Required event families
+- list/map elements evaluate left-to-right;
+- duplicate literal keys in a map literal are allowed only if runtime `Map` semantics replaces earlier value by later value; compiler may warn;
+- empty `{}` is Map literal in expression context and map pattern in pattern context;
+- tuple expression requires comma. Parenthesized expression without comma is grouping.
 
-Minimum canonical names:
+### 12.5. Name resolution, slots, upvalues and initialization
+
+#### 12.5.1. Scope families
+
+Binder constructs a scope graph with these scope kinds:
 
 ```text
-task.started
-task.blocked
-task.resumed
-task.cancelled
-task.completed
-task.failed
-strand.enqueued
-strand.migrated
-channel.send
-channel.recv
-channel.close
-mutex.wait
-mutex.lock
-mutex.unlock
-atomic.cas
-gc.cycle.start
-gc.cycle.end
-gc.pause.start
-gc.pause.end
-loader.module.load
-loader.module.init
-world.freeze
-world.mutation
-watch.read
-watch.write
-watch.invalidate
-ffi.enter
-ffi.exit
-capability.check
-capability.denied
-effect.boundary
-schema.decode
-schema.encode
-workflow.step.start
-workflow.step.commit
-workflow.step.retry
-workflow.step.compensate
-```
-
-### 5.4. Trace context
-
-When host integrates with distributed tracing, Amber trace context must propagate through:
-
-- async task boundaries;
-- channel send/recv payload metadata, if host policy allows;
-- awaitables and async I/O;
-- HTTP/RPC stdlib clients;
-- workflow steps;
-- Wasm component calls.
-
-Trace context propagation must not make non-shareable values cross strands. It is metadata, not object sharing.
-
-### 5.5. Replay trace `.ambertrace`
-
-Replay profile records:
-
-```text
-package lock digests
-compiled artifact digests
-capability grants
-schema versions
-virtual clock values
-random seeds/outputs
-external input digests
-scheduler decisions
-channel operation order
-watch revisions and invalidations
-workflow step commits
-stdout/stderr ordering
-trace event stream
-```
-
-`.ambertrace` may be binary or canonical JSON in reference tools, but must have a stable content digest and version header.
-
-### 5.6. Deterministic scope
-
-```amber
-Kernel.deterministic(seed: 42):
-  report = run_pipeline()
-  report.digest()
-```
-
-Inside deterministic scope:
-
-- real clock is replaced by virtual clock;
-- random source is seeded/recorded;
-- scheduler choices are recorded or deterministic;
-- external I/O must go through recorded providers;
-- unordered map iteration must be canonicalized if observed.
-
-Forbidden nondeterminism gives `DeterminismError`.
-
-### 5.7. Replay
-
-```amber
-Kernel.replay("run-2026-04-26.ambertrace"):
-  run_pipeline()
-```
-
-If execution diverges from trace, runtime raises `ReplayDivergenceError` with source span and first divergent event id.
-
-## 6. Amber/DataFrame & Columnar BI Profile
-
-### 6.1. Цель
-
-Amber core collections are object/iterator oriented. BI workloads need relational, columnar, lazy and lineage-aware abstractions.
-
-### 6.2. Normative types
-
-```text
-Table
-Column[T]
-Series[T]
-Schema
-Row
-LazyTable
-QueryPlan
-GroupedTable
-JoinPlan
-Aggregation
-ColumnStats
-```
-
-`Table` is not a subtype of `Array[Row]` in the normative model. It may expose row iteration, but query operations are columnar/relational.
-
-### 6.3. Query API
-
-```amber
-orders
-  .where: _1.status == :paid
-  .select(:country, :amount, :user_id)
-  .group_by(:country)
-  .agg(
-    revenue: sum(:amount),
-    users: count_distinct(:user_id)
-  )
-  .sort_by(:revenue, desc: true)
-```
-
-Required operations:
-
-```text
-select
-rename
-drop
-where
-with_column
-group_by
-agg
-join
-union
-sort_by
-limit
-sample
-collect
-explain
-schema
-lineage
-```
-
-### 6.4. Lazy query plans
-
-`LazyTable` represents a plan, not immediate materialized data.
-
-```amber
-plan = orders.lazy.where: _1.amount > 100
-plan.explain()
-rows = plan.collect()
-```
-
-Normative requirements:
-
-- query plan is inspectable;
-- plan has stable fingerprint over inputs, operations and schema versions;
-- optimizer may reorder relationally safe operations;
-- side-effecting UDFs require effect annotations and constrain optimizer reordering.
-
-### 6.5. Columnar memory ABI
-
-Reference implementation may use an Arrow-compatible ABI for zero-copy interchange, but Amber spec only requires:
-
-```text
-contiguous or chunked column buffers
-null bitmap or equivalent validity representation
-schema metadata
-nested values support or explicit unsupported diagnostic
-pin-aware export to native/FFI/accelerator profiles
-```
-
-### 6.6. Notebook watch integration
-
-Columnar profile extends v19.2 watch keys:
-
-```text
-binding:orders@rev
-object:orders@rev
-column:orders.amount@rev
-table-plan:plan_fingerprint@rev
-lineage:source_digest@rev
-```
-
-A cell depending only on `orders.amount` is not invalidated by changes to `orders.status`, unless the query plan uses both.
-
-### 6.7. UDFs
-
-UDFs in table operations must declare effects in typed/effects profile:
-
-```amber
-orders.with_column(:bucket) |row| -> Symbol !{}:
-  if row.amount > 1000: :large else: :small
-```
-
-A UDF with `!{net}` or `!{time}` can be accepted only if host policy allows nondeterministic query plans.
-
-## 7. Amber/Schema & API Contracts Profile
-
-### 7.1. Schema syntax
-
-```amber
-schema User v2:
-  id as UUID
-  name as Str
-  email as Str?
-  created_at as Time
-  deprecated legacy_id as Int?
-
-schema Order v1:
-  id as UUID
-  user_id as UUID
-  amount as Decimal
-  status as Symbol = :new
-```
-
-`schema` is a profile-level declarative form. Parser that does not enable schema profile may reject it before ordinary expression parsing.
-
-### 7.2. Field metadata
-
-Supported field metadata:
-
-```text
-required / optional
-nullable
-default expression
-deprecated
-renamed_from
-sensitive labels
-wire_name
-codec hint
-version introduced/removed
-```
-
-Example:
-
-```amber
-schema Customer v3:
-  id as UUID
-  name as Str
-  email as Str? @pii
-  renamed_from(:full_name) display_name as Str
-  deprecated legacy_id as Int?
-```
-
-### 7.3. Codecs
-
-```amber
-codec = Json.codec(User)
-user = codec.decode(body)
-body = codec.encode(user)
-```
-
-Normative codec behavior:
-
-- unknown field policy is schema-configurable: reject, preserve, ignore;
-- missing required fields give `SchemaViolationError`;
-- deprecated fields decode but may warn;
-- encode respects wire names and redaction policy;
-- binary codecs must include schema/version fingerprint unless host profile waives it.
-
-### 7.4. Migrations
-
-```amber
-migration User v1 -> v2 |old|:
-  {
-    id: old.id,
-    name: old.name,
-    email: null,
-    created_at: old.created_at,
-    legacy_id: old.legacy_id,
-  }
-```
-
-Migrations must be deterministic unless annotated otherwise.
-
-### 7.5. API contracts
-
-HTTP/RPC boundary can be declared:
-
-```amber
-api Users:
-  get "/users/{id}" -> User !{db}
-  post "/users" CreateUser -> User !{db}
-```
-
-Tooling may generate OpenAPI-like description, client stubs, schema validators and contract tests.
-
-## 8. Amber/Wasm Component Profile
-
-### 8.1. Artifact
-
-`.amberwasm` is an optional deployable artifact for frozen, sandboxed component execution.
-
-Required properties:
-
-```text
-frozen-world only
-no runtime class/mixin reopen
-no define_method world mutation
-explicit imports/exports
-capability-bound host calls
-schema-defined boundary values
-no raw pointer FFI by default
-```
-
-### 8.2. Interface mapping
-
-Amber exports:
-
-```amber
-export normalize
-
-def normalize(row as Row) -> Row !{}:
-  row.cleaned()
-```
-
-map to component interface entries:
-
-```text
-normalize: func(row: Row) -> Row
-```
-
-Complex values crossing the component boundary must be schema-defined or mapped to a supported primitive/record/list type.
-
-### 8.3. Capabilities and WASI-style worlds
-
-Host provides capability world:
-
-```text
-world analytics-plugin {
-  import fs.read("/data")
-  import clock.virtual
-  export normalize
-}
-```
-
-Amber does not require source syntax for WIT; toolchain may generate or consume WIT-like interface files.
-
-### 8.4. Component lifecycle
-
-Component instance has lifecycle:
-
-```text
-compiled -> verified -> instantiated -> running -> stopped
-```
-
-Component cannot mutate host dispatch-world. Any dynamic feature that would require world mutation must be rejected at build/load time.
-
-## 9. Amber/Accelerator Profile
-
-### 9.1. Types
-
-```amber
-xs = Tensor.f32([1.0, 2.0, 3.0], device: :gpu)
-ys = gpu.map(xs) |x| -> F32 !{}:
-  x * 2.0
-```
-
-Normative runtime/library types:
-
-```text
-Tensor[T]
-DeviceBuffer[T]
-Device
-DeviceStream
-Kernel
-KernelModule
-```
-
-### 9.2. Kernel subset
-
-Allowed inside accelerator kernel:
-
-- primitive numeric operations;
-- boolean comparisons;
-- local variables;
-- structured control flow;
-- tensor/buffer indexing;
-- pure helper functions compiled into same kernel module;
-- constants and scalar parameters.
-
-Forbidden inside accelerator kernel:
-
-- arbitrary object allocation;
-- dynamic dispatch;
-- reflection;
-- `send` with dynamic selector;
-- ordinary heap object access;
-- exceptions crossing device boundary;
-- FFI;
-- filesystem/network/env/time/random;
-- notebook watch operations.
-
-### 9.3. Device memory
-
-Host/device movement is explicit:
-
-```amber
-buf = DeviceBuffer.copy_from(bytes, device: gpu0)
-view = buf.map_read() |slice|:
-  slice[0]
-buf.copy_to(host_buffer)
-buf.destroy!()
-```
-
-Device buffers participate in lifetime profile. Use-after-destroy/dealloc follows existing lifetime errors or `AcceleratorError` if the fault is device-specific.
-
-### 9.4. Effects
-
-Accelerator operations carry effects:
-
-```text
-!{gpu}
-!{gpu, mut}
-!{gpu, async}
-```
-
-A host can deny GPU usage via capability profile even if code typechecks.
-
-## 10. Amber/AI-Agent Tooling & Provenance Profile
-
-### 10.1. Goal
-
-AI agents will edit Amber projects. The language/toolchain must make machine edits checkable, attributable and reversible.
-
-### 10.2. Semantic index
-
-Required command:
-
-```text
-amber symbols --json
-```
-
-Minimum symbol graph fields:
-
-```text
-symbol_id
-name
-kind
 module
-visibility
-source_span
-defined_in
-references[]
-type_summary?
-effect_summary?
-schema_summary?
-doc_summary?
+class_body
+mixin_body
+method
+function
+block
+pattern_transaction
+type_term
 ```
 
-### 10.3. Explain API
+Each resolved name is classified as exactly one of:
 
 ```text
-amber explain path/to/file.amber --span 120:8 --json
+local_slot
+upvalue_cell
+module_cell
+export_cell
+import_alias
+class_binding
+mixin_binding
+prelude_binding
+current_self
+current_owner
+unresolved
 ```
 
-Output must include:
+`unresolved` is a compile-time diagnostic unless the syntax is explicitly reflective, such as `send(receiver, selector_expr, ...)`.
+
+#### 12.5.2. Top-level pre-scan
+
+For a module, binder performs a top-level pre-scan before expression resolution:
+
+1. collect optional `package`;
+2. collect imports and local import aliases;
+3. collect declared top-level names from `def`, `class`, `mixin` and top-level assignments whose left side is a simple name;
+4. collect export statements;
+5. verify export names against the collected top-level/import alias set.
+
+This allows mutually recursive top-level functions to compile while preserving source-order module init. The binding cell may exist before its value is initialized.
+
+#### 12.5.3. `UNINIT` sentinel
+
+Every local/module/export cell has an internal `UNINIT` state until assigned.
+
+Reading `UNINIT` raises `NameError` at runtime if the compiler cannot prove it impossible. Statically obvious cases should be compile-time diagnostics.
+
+Examples:
+
+```amber
+puts x
+x = 1
+# compile-time diagnostic if same-scope uninitialized read is obvious
+
+def f(flag):
+  if flag:
+    x = 1
+  x
+# runtime NameError possible unless later definite-assignment analysis rejects it
+```
+
+`UNINIT` is not user-observable as a value and cannot be stored in arrays, maps or fields.
+
+#### 12.5.4. Assignment and block capture
+
+Reference v1 assignment rules:
+
+- assignment to a simple name creates or updates the nearest lexical binding according to binder classification;
+- method/function scope owns its local slots;
+- block parameters and pattern bindings are block-local;
+- a block may capture outer locals as upvalue cells;
+- if a block assigns to an already existing outer local, it updates the captured cell;
+- if a block assigns to a name not found in an enclosing non-type scope, it creates a block-local slot;
+- `def` creates a fresh function/method scope; nested `def` captures only explicitly referenced lexical cells and is serialized as a closure-capable code object.
+
+This keeps Ruby-like closure mutation for blocks while keeping `def` boundaries compile-explicit.
+
+#### 12.5.5. Pattern transaction scopes
+
+Pattern matching never writes directly into ordinary local slots until the whole pattern succeeds.
+
+Lowering model:
 
 ```text
-AST node
-HIR node if available
-binding resolution
-type/effect info if enabled
-diagnostics touching span
-profile requirements
-possible refactor actions
+P_BEGIN_TXN
+  candidate bindings -> transaction slots
+  nested OR alternatives -> subtransactions
+P_COMMIT_TXN -> ordinary locals/upvalues/module cells
+P_ABORT_TXN  -> discard all candidate bindings
 ```
 
-### 10.4. Structured patch protocol
+This rule applies to:
 
-Patch file:
+- pattern assignment;
+- block parameter destructuring;
+- `case` / `case!`;
+- multi-clause `def`.
 
-```json
-{
-  "format": "amber.patch.v1",
-  "intent": "rename_symbol",
-  "operations": [
-    {"op": "rename", "symbol_id": "...", "new_name": "customer_id"}
-  ],
-  "provenance": {
-    "tool": "agent-name",
-    "request_digest": "...",
-    "capabilities": ["refactor", "format"]
-  }
-}
-```
+#### 12.5.6. Imported aliases
 
-Required commands:
+Imported aliases are read-only module cells. Any assignment target resolving to `import_alias` is a compile-time error. A `from ... import Name as Alias` creates a local import alias, not a copy of the exported value.
+
+Runtime representation:
 
 ```text
-amber patch check patch.json
-amber patch apply patch.json
-amber audit provenance
-```
-
-`patch check` must run parser/binder/profile validators before modifying files.
-
-### 10.5. Provenance log
-
-`.amberprov` records:
-
-```text
-patch id
-author/tool identity
-input request digest
-files changed
-symbols changed
-diagnostics before/after
-tests/checks run
-artifact digests
-human approval marker if required
-```
-
-Package publishing may require provenance digests in `.amberpkg` metadata.
-
-## 11. Amber/Contracts & Property Testing Profile
-
-### 11.1. Function contracts
-
-```amber
-def withdraw(account as Account, amount as Money) -> Account !{mut}:
-  require amount > 0
-  require account.balance >= amount
-
-  result = account.debit(amount)
-
-  ensure result.balance == old(account.balance) - amount
-  result
-```
-
-`require` checks preconditions. `ensure` checks postconditions. `old(expr)` captures value at function entry; for mutable objects, profile must specify shallow/deep/snapshot policy.
-
-### 11.2. Invariants
-
-```amber
-class Account:
-  invariant @balance >= 0
-```
-
-Invariant check points are profile-configurable but must include public method entry/exit in strict contract mode.
-
-### 11.3. Property tests
-
-```amber
-property "reverse twice gives original" |xs as Array[Int]|:
-  expect xs.reverse().reverse() == xs
-```
-
-Property engine must record:
-
-```text
-seed
-generator parameters
-shrinker path
-minimal counterexample if found
-profile set
-dependency fingerprints
-```
-
-### 11.4. Failure
-
-Failed `require`, `ensure`, invariant or property test raises `ContractViolationError` with source span and diagnostic payload.
-
-## 12. Amber/Privacy, Taint & Lineage Profile
-
-### 12.1. Data labels
-
-```amber
-type Email = Str @pii
-type ApiToken = Str @secret
-```
-
-Schema/table fields can carry labels:
-
-```amber
-schema User v1:
-  id as UUID
-  email as Str @pii
-  country as Str
-```
-
-### 12.2. Taint propagation
-
-Labels propagate through:
-
-- assignment;
-- object fields;
-- schema encode/decode;
-- table columns;
-- joins and aggregations;
-- string interpolation;
-- logs/traces, unless redacted;
-- API exports.
-
-Profile may allow conservative propagation where exact propagation is expensive.
-
-### 12.3. Export policy
-
-```amber
-policy PublicExport:
-  deny label :pii
-  deny label :secret
-  allow aggregate(:country, min_group: 10)
-```
-
-```amber
-def export_public(rows as Table) -> Csv !{fs.write}:
-  require_policy PublicExport, rows
-  Csv.write(rows)
-```
-
-Policy violation gives `PolicyViolationError`.
-
-### 12.4. Redaction
-
-Redaction must be explicit:
-
-```amber
-safe = users.redact(:email, with: :hash)
-```
-
-Implicit redaction by logging/tracing is allowed only as host safety net; source-level redaction must remain visible in lineage.
-
-### 12.5. Lineage graph
-
-Lineage node shape:
-
-```text
-LineageNode(
-  id,
-  kind: source | transform | join | aggregate | notebook_cell | export,
-  inputs[],
-  output,
-  schema_fingerprint,
-  labels,
-  source_span?,
-  watch_revisions?,
-  trace_span?
+ImportAliasCell(
+  source_module_id,
+  public_export_name,
+  cached_export_cell_ref?
 )
 ```
 
-Lineage must connect to notebook watch/dependency capture when both profiles are enabled.
+The alias observes live export cell updates according to loader semantics.
 
-## 13. Amber/Durable Workflow Profile
+### 12.6. Prelude, builtin registry and intrinsic recognition
 
-### 13.1. Goal
+#### 12.6.1. Prelude injection order
 
-Runtime tasks are ephemeral. Durable workflows survive process restart, deploy, retry and partial failure.
+Every module scope has an implicit prelude parent after explicit imports and local top-level bindings:
 
-### 13.2. Surface form
+```text
+local/top-level > imports > prelude
+```
+
+Therefore user code can shadow prelude names:
 
 ```amber
-workflow ImportOrders:
-  step fetch !{net} retry: {max: 3, backoff: :exponential}:
-    http.get(source)
-
-  step normalize !{}:
-    transform(fetch.result)
-
-  step commit !{db} idempotency_key: normalize.result.digest():
-    db.insert_many(normalize.result)
-
-  compensate commit !{db}:
-    db.delete_batch(commit.result.batch_id)
+send = my_send
+send(obj, :x)     # ordinary call, not builtin reflective send
 ```
 
-`workflow`, `step` and `compensate` are profile-level declarative forms.
+Intrinsic recognition is allowed only when binder resolves a name/path to the canonical prelude binding.
 
-### 13.3. History
+#### 12.6.2. Required prelude registry
 
-Workflow history records:
+Reference v1 requires a machine-readable registry:
 
 ```text
-workflow id
-workflow version
-step start/commit/failure/retry/compensation events
-input/output digests
-schema versions
-effect grants
-idempotency keys
-timeouts/deadlines
-trace ids
+spec/registries/prelude.yaml
 ```
 
-History is append-only. Replay reconstructs workflow state from history.
-
-### 13.4. Determinism
-
-A step must be deterministic relative to recorded inputs unless it declares effects and records external results.
-
-During replay:
-
-- already committed steps are not re-executed;
-- their recorded outputs are supplied to dependent steps;
-- divergent code/schema version requires migration policy or workflow version bump.
-
-### 13.5. Error handling
-
-Workflow violations give `WorkflowError`. Ordinary task exceptions inside a step are recorded as step failure and then processed by retry/compensation policy.
-
-## 14. Cross-profile interaction rules
-
-### 14.1. Capabilities + Effects
-
-Effects are semantic declarations. Capabilities are permissions.
-
-```amber
-def f() !{net}:
-  http.get("https://example.com")
-```
-
-This typechecks under effects profile, but still fails with `CapabilityError` if host did not grant `net.connect`.
-
-### 14.2. Effects + Replay
-
-Replay profile requires nondeterministic effects to be virtualized, recorded or denied.
+Minimum entries:
 
 ```text
-!{time}   -> virtual clock or recorded clock values
-!{random} -> seeded/recorded random source
-!{net}    -> recorded response provider or denied in deterministic mode
+Kernel
+memory
+send
+define_method
+Array
+Tuple
+Map
+Set
+Range
+LazySeq
+Str
+Int
+Float
+Bool
+Null
+Symbol
+Object
+Class
+Mixin
+TaskHandle
+Channel
+Mutex
+Atomic
+MatchError
+TypeError
+NameError
+ArgumentError
+NoMethodError
+ImportError
+ModuleInitError
+IsolationError
+DestroyedAccessError
+UseAfterFreeError
+LifetimeError
+IncludeCycleError
+WorldFrozenError
+SuperclassMismatchError
+TimeoutError
+CancelledError
+ChannelClosedError
+DeadlockError
+EmptyCollectionError
+BytecodeVerificationError
+UnsupportedProfileError
 ```
 
-### 14.3. Watch + DataFrame + Lineage
+Optional profile entries may appear behind feature flags, but a `.amberbc` file must record which profile flags were required when compiling it.
 
-Notebook invalidation chooses the most precise active dependency key:
+#### 12.6.3. Prelude version hash
+
+`.amberbc` must include a prelude ABI fingerprint:
 
 ```text
-binding-level
-object-level
-ivar-level
-column-level
-query-plan-level
-lineage-source-level
+prelude_abi_hash = hash(public builtin names + intrinsic ids + runtime error class ids + callable ABI version)
 ```
 
-Hosts may conservatively widen dependencies but must not miss invalidation.
+Loader rejects a module if its required prelude ABI is incompatible with the running VM.
 
-### 14.4. Schema + Privacy
+#### 12.6.4. Intrinsic table
 
-Schema labels feed taint propagation. Codec/export boundaries must preserve labels or explicitly redact/drop them.
-
-### 14.5. Wasm + Capabilities + Schema
-
-Wasm component boundary must be schema-described and capability-limited. If schema profile is disabled, component boundary is limited to primitive and simple aggregate types supported by component ABI.
-
-### 14.6. Accelerator + Effects + Memory
-
-Accelerator profile reuses `Buffer[T]`, `Slice[T]`, pinning and explicit lifetime model. Device kernels must have restricted effects and cannot access ordinary heap objects.
-
-### 14.7. AI-agent tooling + all profiles
-
-Semantic index and patch protocol must include active profile information so agent edits cannot accidentally erase capabilities, effects, privacy labels, contracts or schema versions.
-
-## 15. HIR and bytecode additions v20
-
-### 15.1. HIR nodes
-
-Optional HIR families:
+Minimum intrinsic ids:
 
 ```text
-HCapabilityCheck(capability, attributes)
-HCapabilityScope(grants, body)
-HEffectBoundary(effect_row, body)
-HTraceSpan(name, attrs, body)
-HTraceEvent(name, attrs)
-HDeterministicScope(options, body)
-HReplayBoundary(trace_ref, body)
-HSchemaDef(name, version, fields, metadata)
-HSchemaCodec(schema_ref, codec_kind)
-HTablePlan(op, inputs, args, effect_row?)
-HColumnDependency(table_ref, column_ref)
-HContractRequire(expr)
-HContractEnsure(expr, old_captures)
-HInvariant(expr)
-HPropertyTest(name, generators, body)
-HTaintLabel(expr, labels)
-HPolicyCheck(policy_ref, value)
-HLineageNode(kind, inputs, output, metadata)
-HWasmExport(name, signature)
-HWasmImport(name, signature, capability)
-HAcceleratorKernel(params, body_ir, device_requirements)
-HWorkflowDef(name, steps, compensation)
-HWorkflowStep(name, effect_row, policy, body)
-HAgentPatchMetadata(metadata)
+INTR_SEND_LITERAL
+INTR_SEND_DYN
+INTR_DEFINE_METHOD
+INTR_MEMORY_DEALLOC
+INTR_OBJECT_DESTROY
+INTR_KERNEL_WATCH_BINDING
+INTR_KERNEL_WATCH_IVAR
+INTR_KERNEL_WATCH_CVAR
+INTR_TASK_ASYNC
+INTR_TASK_SPAWN
+INTR_TASK_WAIT
+INTR_TASK_CANCEL
+INTR_TASK_RESUME
+INTR_CHANNEL_SEND
+INTR_CHANNEL_RECV
+INTR_CHANNEL_CLOSE
 ```
 
-### 15.2. Bytecode / `.amberbc` optional sections
+Intrinsics are not syntax by themselves. They are selected by binder/lowering only when the resolved binding is the canonical prelude object/method and the argument shape matches the intrinsic contract.
 
-Optional sections:
+### 12.7. Call ABI, keyword arguments, blocks and callable protocol
+
+#### 12.7.1. Unified call packet
+
+All calls and sends lower to a `CallPacket` before entering VM dispatch:
 
 ```text
-CAPS  capability requirements and grants metadata
-EFCT  effect summaries per callable/site
-OBSV  event schemas and trace site table
-RPLY  replay/determinism metadata
-SCMA  schema definitions and migration table
-TABL  table/query-plan metadata
-LINE  lineage metadata anchors
-PRIV  taint labels and policy ids
-CNTR  contracts/property-test metadata
-WASM  component import/export mapping
-ACCL  accelerator kernel descriptors
-WFLW  durable workflow descriptors
-PROV  provenance/agent patch metadata
+CallPacket(
+  kind,                 # call / send / send_dyn / super_reserved / native
+  callee_or_receiver,
+  selector_sym?,         # for send
+  selector_value?,       # for send_dyn
+  pos_regs[],
+  kw_names_sym[],
+  kw_value_regs[],
+  block_reg?,
+  callsite_id,
+  source_span_id
+)
 ```
 
-Verifier rules:
+Evaluation order remains source order:
 
-- unknown optional section with `required=false` may be ignored;
-- unknown optional section with `required=true` must reject artifact;
-- section digest participates in package artifact digest;
-- profile-specific sections must reference stable symbol/source ids.
+1. receiver/callee;
+2. positional args left-to-right;
+3. keyword value expressions left-to-right in source order;
+4. block closure creation if present;
+5. call dispatch.
 
-### 15.3. Runtime support table
+`kw_names_sym[]` may be canonicalized for cache keys after all keyword value expressions have been evaluated. Duplicate keyword names are detected before entering the target body and raise `ArgumentError` unless statically diagnosed earlier.
 
-Runtime advertises profile support:
+#### 12.7.2. Frame entry layout
+
+Every callable frame has:
 
 ```text
-amber runtime profiles --json
+Frame(
+  code_object,
+  caller_frame?,
+  current_task,
+  self_value?,
+  current_owner?,
+  local_slots[],
+  temp_registers[],
+  upvalue_cells[],
+  block_slot?,
+  last_result,
+  handler_stack,
+  return_ip,
+  source_span_id
+)
 ```
 
-Example:
+Rules:
+
+- ordinary functions have `self_value = null` unless bound as a method;
+- instance methods receive receiver as `self_value`;
+- class methods receive class object as `self_value`;
+- block closures inherit lexical `self_value` unless explicitly rebound by future syntax;
+- `current_owner` is needed for `@@`, class-side dispatch and debug information.
+
+#### 12.7.3. Callable object contract
+
+`HCall` / `CALL` accepts:
+
+1. closure objects;
+2. native builtin callables;
+3. callable reference objects created by `&target`;
+4. class objects, which call constructor path through `:new`;
+5. ordinary objects whose class lookup resolves selector `call`.
+
+If none applies, runtime raises `TypeError`.
+
+For ordinary objects with `call`, `obj(args...)` is observably equivalent to `obj.call(args...)`, including `method_missing`, keyword args and block forwarding. Class objects remain special: `Class(args...)` is constructor call and does not mean `Class.call(args...)`.
+
+#### 12.7.4. Blocks as hidden final argument
+
+A block suffix compiles to a closure object stored in `block_reg` of the `CallPacket`, not into the positional argument array.
+
+A method that consumes a block receives it through the frame's hidden `block_slot`. Standard library methods such as `map`, `select`, `reduce` invoke the block through `CALL_BLOCK` or ordinary `CALL` on the block object.
+
+Block parameter pattern matching happens at block frame entry. A mismatch raises `MatchError`.
+
+#### 12.7.5. Default thunks and type hooks
+
+Default parameter expressions compile to default-thunk code objects:
+
+```text
+DefaultThunk(
+  param_index,
+  code_object,
+  captured_signature_prefix_slots,
+  source_span_id
+)
+```
+
+A default thunk runs in the callee binding context after explicit args left of it are bound, before auto-assign commit.
+
+Type hooks compile to `TypeCheckProgram` ids and run after defaults, before clause dispatch/auto-assign.
+
+#### 12.7.6. Callsite cache key
+
+A callsite cache key must include at least:
+
+```text
+receiver_class_or_callable_shape
+selector_sym or callable_kind
+kw_shape_id
+block_presence
+world_epoch
+method_table_version
+```
+
+For callable references to unbound instance methods, cache key also includes owner class and selector.
+
+### 12.8. Operator lowering and primitive specialization
+
+#### 12.8.1. Selector mapping
+
+Operators lower to semantic operations with fallback selectors:
+
+| Surface | Semantic opcode | Fallback selector/protocol |
+|---|---|---|
+| `a + b` | `BINARY_OP add` | `:+` |
+| `a - b` | `BINARY_OP sub` | `:-` |
+| `a * b` | `BINARY_OP mul` | `:*` |
+| `a / b` | `BINARY_OP div` | `:/` |
+| `a % b` | `BINARY_OP mod` | `:%` |
+| `a == b` | `COMPARE_OP eq` | `:==` |
+| `a != b` | `COMPARE_OP ne` | `:==` then boolean invert |
+| `< <= > >=` | `COMPARE_OP` | corresponding symbolic selector |
+| `x in y` | `MEMBER_OP in` | `y.contains?(x)` |
+| `not x` | `BOOL_NOT` | truthiness primitive |
+| `a and b` | control-flow | no selector |
+| `a or b` | control-flow | no selector |
+
+`BINARY_OP` may specialize for `Int`, `Float` and `Str`, but fallback must preserve normal method dispatch and errors.
+
+#### 12.8.2. Truthiness lowering
+
+Control-flow truthiness uses the language rule:
+
+```text
+false and null are falsy; everything else truthy
+```
+
+No user-defined `truthy?` hook exists in v1. This is important for predictable optimization and branch lowering.
+
+#### 12.8.3. Equality vs identity
+
+Reference runtime distinguishes:
+
+```text
+object_id / identity       # VM identity
+==                         # user equality protocol
+value_equals for patterns  # same observable equality as ==, with literal-specific fast paths allowed
+```
+
+Pattern literal matching may fast-path immediates but must be observably equivalent to language equality.
+
+### 12.9. Module init, class/mixin bodies and atomic publish
+
+#### 12.9.1. Module init code
+
+Every `.amberbc` module may contain:
+
+```text
+module_init_code_id?
+```
+
+Top-level executable forms lower into `module_init_code`. `package`, `import` and `export` are not executable. `def`, `class` and `mixin` create or mutate module cells during init in source order, but their binding cells are allocated during link.
+
+Module init runs once per successful loader instance:
+
+```text
+linked -> initializing -> ready
+                 \-> failed
+```
+
+If init fails, the module remains `failed` and its export cells are not considered ready.
+
+#### 12.9.2. Export cells
+
+Export table entries point to export cells:
+
+```text
+ExportCell(
+  public_name,
+  local_binding_ref,
+  state,          # uninit / initializing / ready / failed
+  value
+)
+```
+
+`from` imports read export cells. Reading a cell in `initializing` state raises `ModuleInitError` unless the loader can prove the value was already initialized before the cycle edge.
+
+#### 12.9.3. Class and mixin body transaction
+
+A class/mixin body compiles to a transaction object:
+
+```text
+WorldTransaction(
+  target_kind,          # class / mixin
+  target_name,
+  superclass_ref?,
+  instance_methods[],
+  class_methods[],
+  direct_includes[],
+  direct_extends[],
+  nested_declarations[],
+  source_span_id
+)
+```
+
+Runtime executes the body in a staging area. If all body forms succeed, the transaction commits atomically:
+
+- method table entries are replaced as whole entries;
+- include/extend lists update in source order;
+- class/mixin version increments;
+- `world_epoch` increments if dispatch-relevant;
+- inline caches become invalid according to epoch/version guards.
+
+If body execution fails, no partial method/include publish is visible.
+
+#### 12.9.4. Reopen compatibility
+
+Reopen checks happen at transaction prepare time:
+
+- existing binding must be class/mixin of the requested kind;
+- superclass clause must match existing superclass if present;
+- post-freeze transaction prepare raises `WorldFrozenError`;
+- include cycle detection may happen before or during prepare, but must happen before commit.
+
+### 12.10. Value model and serialized constants
+
+#### 12.10.1. Runtime `Value` categories
+
+Reference VM may choose any internal tagging scheme, but the semantic categories are fixed:
+
+```text
+NullValue
+BoolValue
+IntValue
+FloatValue
+SymbolValue
+HeapObjectRef
+NativeHandle
+TombstoneRef
+```
+
+Only `false` and `null` are falsy. All other values, including `0`, `""`, empty collections and tombstones before access checks, are truthy at the truthiness primitive level. Accessing destroyed/deallocated objects fails before ordinary operations observe payload.
+
+#### 12.10.2. Constant pool values
+
+Constant pool may contain only immutable serialized constants:
+
+```text
+null
+bool
+int
+float
+string
+symbol
+tuple_of_constants
+frozen_array_of_constants
+frozen_map_of_constants
+type_term_blob
+signature_blob
+pattern_blob
+```
+
+It must not contain:
+
+- raw pointers;
+- mutable heap objects;
+- strand-confined objects;
+- native handles;
+- pre-initialized `Channel`, `Mutex`, `Atomic` or `TaskHandle`.
+
+Mutable literals are constructed at runtime from immutable constant payloads.
+
+#### 12.10.3. Identity and `object_id`
+
+`object_id` is runtime-world-local. It is never serialized into `.amberbc`. Debug output must not include raw addresses; if an identity is needed in deterministic tests, use stable synthetic ids assigned by the test harness.
+
+#### 12.10.4. Shareability metadata
+
+Every heap object header exposes runtime flags:
+
+```text
+frozen
+shareable
+sync
+pinned
+has_destructor
+dead
+watched
+```
+
+Compiler may embed shareability expectations in bytecode metadata, but runtime remains authoritative at cross-strand boundaries.
+
+### 12.11. Exception model and runtime error registry completion
+
+#### 12.11.1. Exception object ABI
+
+Every raised runtime error is an object with at least:
+
+```text
+ExceptionObject(
+  error_class,
+  message,
+  payload?,
+  backtrace_frames[],
+  cause?,
+  source_span_id?
+)
+```
+
+Backtrace frames contain symbolic method/module/code ids and source spans, not memory addresses.
+
+#### 12.11.2. Unwind model
+
+VM unwind walks frames until it finds a matching handler table entry. During unwind:
+
+1. mark current instruction as throwing;
+2. run pending ensure/finalizer handlers represented in bytecode handler table;
+3. release transient native pins whose scope is tied to the frame;
+4. notify structured task failure machinery if the root task frame unwinds;
+5. either enter handler or report unhandled exception.
+
+Even if source-level `rescue` syntax is not enabled in P0, the bytecode ABI must support handler tables because runtime, stdlib, scheduler and native bridges need deterministic unwind/finalization.
+
+#### 12.11.3. Required additions to runtime error registry
+
+The main spec already names many canonical errors, but a fully compilable implementation also needs the following registry entries. These should be mirrored into `spec/registries/runtime_errors.yaml` and into the next main-spec editorial sync.
+
+| Error | Raised when |
+|---|---|
+| `NameError` | unresolved dynamic name read or read of `UNINIT` local/module cell that was not rejected statically |
+| `ArgumentError` | arity mismatch, duplicate keyword, missing required argument, unknown keyword, invalid block argument shape |
+| `EmptyCollectionError` | `reduce` without init on empty collection and similar stdlib empty-required operations |
+| `IndexError` | builtin indexed access is out of bounds |
+| `KeyError` | builtin map/key access requires key presence and key is absent |
+| `ZeroDivisionError` | builtin numeric division/modulo by zero |
+| `EncodingError` | invalid runtime string/buffer encoding at a boundary that cannot be compile-time diagnosed |
+| `BytecodeVerificationError` | verifier rejects malformed `.amberbc` before execution |
+| `UnsupportedProfileError` | loader sees required feature/profile flag unsupported by the current runtime |
+| `InternalCompilerError` | compiler invariant failure; not catchable as user runtime exception |
+| `InternalVMError` | VM invariant failure; not catchable as ordinary user exception |
+
+`InternalCompilerError` and `InternalVMError` are tooling/runtime fatal classes. They should be visible in logs but not part of normal language-level control flow.
+
+#### 12.11.4. Compile diagnostics vs runtime exceptions
+
+Rule of preference:
+
+```text
+if violation is statically obvious:
+  emit compile diagnostic and do not produce executable bytecode
+else:
+  preserve runtime check and canonical runtime exception
+```
+
+A compiler must not remove runtime checks solely because a dynamic feature might be absent in a test corpus. In particular, reflective calls, module cycles, pattern protocol methods and FFI/native handles require runtime checks.
+
+### 12.12. `TypeTerm` runtime check program
+
+#### 12.12.1. Lowering
+
+Every `TypeTerm` lowers to a `TypeCheckProgram`:
+
+```text
+TypeCheckProgram(
+  ops[],
+  source_span_id,
+  mode              # parameter / return / cast / internal
+)
+```
+
+The bytecode emitter may inline simple checks or call a runtime type-check interpreter.
+
+#### 12.12.2. Check semantics
+
+Minimum operations:
+
+```text
+CHECK_CLASS const_ref         # calls T === value and requires Bool
+CHECK_NULL
+CHECK_UNION program_ids[]
+CHECK_TUPLE fixed_len, item_program_ids[]
+CHECK_RECORD fields[], rest_program?
+CHECK_GENERIC head_const_ref, arg_program_ids[]
+CHECK_OPTIONAL inner          # sugar for union(inner, Null)
+```
+
+Rules:
+
+- `T` checks use `T === value`;
+- `T?` is `T | Null`;
+- tuple type requires exact tuple arity;
+- record type requires named fields/keys and open-by-default extra keys unless exactness is represented by future syntax;
+- builtin `Array[T]`, `Map[K,V]`, `Set[T]` may perform deep finite checks in reference stdlib;
+- for user generics without a registered type-check hook, v1 preserves generic args in metadata and performs head check only.
+
+This matches the existing "minimal type envelope" without pretending full static generics already exist.
+
+#### 12.12.3. Return boundary
+
+A function/method with `-> TypeTerm` checks the value at every explicit or implicit return path:
+
+```text
+result = frame.last_result or RETURN operand
+CHECK_TYPE result, return_type_program
+RETURN result
+```
+
+If a task root fails a return boundary, the failure is stored in `TaskHandle` and rethrown by `wait()` like any other exception.
+
+### 12.13. Canonical `.amberbc` binary encoding
+
+#### 12.13.1. Header
+
+Reference binary layout:
+
+```text
+AmberBcHeader(
+  magic = "AMBC",
+  format_major: u16,
+  format_minor: u16,
+  language_major: u16,
+  language_minor: u16,
+  abi_major: u16,
+  abi_minor: u16,
+  endian = 1,             # 1 = little endian
+  pointer_size = 0,       # 0 because file stores no raw pointers
+  flags: u64,
+  section_count: u32,
+  header_size: u32,
+  section_table_offset: u64,
+  file_size: u64,
+  content_digest_kind: u16,
+  content_digest_offset: u64
+)
+```
+
+All multi-byte integers are little-endian. Variable-length indexes may use unsigned LEB128 inside sections, but section table fields are fixed-width for mmap-friendly loading.
+
+#### 12.13.2. Section table
+
+Each section record:
+
+```text
+SectionRecord(
+  id4: bytes[4],
+  version_major: u16,
+  version_minor: u16,
+  flags: u32,
+  offset: u64,
+  length: u64,
+  alignment: u32,
+  uncompressed_length: u64,
+  digest_offset: u64
+)
+```
+
+Required section ids:
+
+```text
+SYMS  symbol table
+STRS  string table
+CONS  constant pool
+TYPE  type-term/type-check blobs
+SIGS  signatures
+PATT  pattern programs
+CODE  bytecode code objects
+METH  method records
+MODU  module record and init entrypoint
+DEPS  dependency manifest
+EXPT  export table
+LINE  line/source map minimum
+```
+
+Optional section ids:
+
+```text
+DBUG  rich debug info
+DOCS  doc/comments metadata
+PROF  profile requirements
+CAPA  capability manifest
+MIR0  MIR/SSA future profile
+NATV  native code future profile
+SIGN  signature payload
+```
+
+Unknown required section flag -> `UnsupportedProfileError` at loader time. Unknown optional section may be ignored if digest and bounds are valid.
+
+#### 12.13.3. Deterministic section ordering
+
+Writer must emit sections in this order unless a future format bump changes it:
+
+```text
+SYMS, STRS, CONS, TYPE, SIGS, PATT, CODE, METH, MODU, DEPS, EXPT, LINE, DBUG, DOCS, PROF, CAPA, MIR0, NATV, SIGN
+```
+
+No timestamp, username, hostname, absolute build path or random UUID may appear in required deterministic sections.
+
+### 12.14. Verifier dataflow, root maps and safepoints
+
+#### 12.14.1. Control-flow graph verification
+
+Verifier builds a CFG per `BcCode` and checks:
+
+- every jump target lands on instruction boundary;
+- no instruction falls through outside code length;
+- handler ranges are non-empty, ordered and point to valid handler entries;
+- all referenced constants, symbols, signatures, patterns and methods exist;
+- opcodes are allowed under module feature/profile flags;
+- register indexes are within declared register count;
+- all registers read on a path are definitely initialized on that path.
+
+The initializedness lattice:
+
+```text
+UNINIT < INIT_VALUE
+```
+
+Verifier is not a static type checker. It tracks "is initialized" and "may contain GC reference" categories, not exact Amber classes.
+
+#### 12.14.2. Register categories for GC
+
+Verifier computes or validates a root category per live register at safepoints:
+
+```text
+NON_REF
+MAYBE_REF
+PIN_TOKEN
+NATIVE_HANDLE
+CALLABLE_REF
+```
+
+A register may be conservative `MAYBE_REF`; precise GC can still scan it as a tagged value.
+
+#### 12.14.3. Mandatory safepoints
+
+Bytecode must have safepoints at:
+
+- function/method call;
+- backward branch edge;
+- allocation;
+- `SPAWN_*`, `WAIT`, `SLEEP`, `YIELD`;
+- blocking `Channel` / `Mutex` ops;
+- native/FFI call enter and exit;
+- explicit `SAFEPOINT` instruction if none of the above appears on a long-running loop path.
+
+At each safepoint, `RootMap` lists live locals, temps, upvalues and transient pins.
+
+#### 12.14.4. RootMap format
+
+```text
+RootMapEntry(
+  code_id,
+  ip_offset,
+  local_bitmap,
+  temp_bitmap,
+  upvalue_bitmap,
+  pin_bitmap,
+  handler_depth,
+  flags
+)
+```
+
+Root maps are required even for non-moving collector because shared cycles, FFI handles and future native/JIT backends need precise liveness.
+
+#### 12.14.5. BytecodeVerificationError
+
+Verifier failure creates a structured diagnostic for tooling and a loader-visible `BytecodeVerificationError`. The VM must not attempt partial execution of a rejected code object.
+
+### 12.15. Pattern decision program canonical form
+
+#### 12.15.1. Pattern program structure
+
+Each compiled pattern is a small decision program:
+
+```text
+PatternProgram(
+  temp_count,
+  binding_count,
+  ops[],
+  success_label,
+  fail_label,
+  source_span_id
+)
+```
+
+Required op families:
+
+```text
+P_LOAD_SUBJECT
+P_TEST_LITERAL
+P_TEST_PIN
+P_TEST_CLASS
+P_TEST_TRIPLE_EQ
+P_COERCE_SEQ
+P_COERCE_MAP
+P_LEN_EQ
+P_LEN_GE
+P_HAS_KEY
+P_GET_INDEX
+P_GET_KEY
+P_SLICE_REST
+P_PROJECT_REST
+P_BIND
+P_BEGIN_ALT
+P_COMMIT_ALT
+P_ABORT_ALT
+P_DYNAMIC_MATCH
+P_CHECK_DYNAMIC_RESULT
+P_JUMP
+P_JUMP_IF_FAIL
+P_SUCCESS
+P_FAIL
+```
+
+#### 12.15.2. Binding transaction rule
+
+`P_BIND` writes only to pattern transaction slots. The caller context commits transaction slots only after `P_SUCCESS`.
+
+OR-pattern lowering:
+
+```text
+for each alternative:
+  P_BEGIN_ALT
+  run alternative program
+  if success:
+    P_COMMIT_ALT
+    jump success
+  else:
+    P_ABORT_ALT
+continue
+fail
+```
+
+All alternatives must have identical binding sets by compile-time precheck.
+
+#### 12.15.3. Guards
+
+Pattern guards are not part of `PatternProgram`; they are normal HIR/bytecode expressions executed after pattern success and before binding commit is made externally visible to the clause body.
+
+Guard environment sees candidate pattern bindings through temporary transaction slots.
+
+### 12.16. Diagnostics, source maps and stack trace schemas
+
+#### 12.16.1. Diagnostic JSON
+
+`amber.diag.v1` entries must include:
 
 ```json
 {
-  "capabilities": true,
-  "effects": "check+runtime",
-  "observability": true,
-  "replay": true,
-  "columnar_bi": false,
-  "schema": true,
-  "wasm_component": false,
-  "accelerator": {"gpu": false, "simd": true},
-  "agent_tooling": true,
-  "contracts": "runtime",
-  "privacy": false,
-  "workflow": false
+  "schema": "amber.diag.v1",
+  "code": "E0000",
+  "severity": "error|warning|lint",
+  "phase": "lex|parse|bind|lower|verify|load|runtime",
+  "message": "...",
+  "primary_span": {
+    "source_id": "...",
+    "module_id": "...",
+    "byte_start": 0,
+    "byte_end": 0,
+    "line_start": 1,
+    "column_start": 1,
+    "line_end": 1,
+    "column_end": 1
+  },
+  "notes": [],
+  "help": null,
+  "related": []
 }
 ```
 
-## 16. CLI additions v20
+Messages may be localized by tooling, but golden tests compare code, severity, phase and spans first.
 
-Required or recommended commands by profile:
+#### 12.16.2. Source map minimum
 
-```text
-amber profiles list
-amber capabilities check amber.toml
-amber effects check src/
-amber trace run --out run.ambertrace
-amber replay run.ambertrace
-amber schema check
-amber schema emit-openapi
-amber table explain query.amber
-amber wasm build
-amber accel check
-amber symbols --json
-amber explain path --span LINE:COL --json
-amber patch check patch.json
-amber patch apply patch.json
-amber audit provenance
-amber contract test
-amber privacy audit
-amber workflow run
-amber workflow replay
-```
-
-Toolchains may group these under subcommands, but machine-readable JSON output is required for agent/tool integrations where applicable.
-
-## 17. Conformance lanes v20
-
-v20 adds optional conformance lanes:
+`LINE` section must map bytecode instruction offsets to:
 
 ```text
-tests/profiles/capabilities/
-tests/profiles/effects/
-tests/profiles/observability/
-tests/profiles/replay/
-tests/profiles/table/
-tests/profiles/schema/
-tests/profiles/wasm/
-tests/profiles/accelerator/
-tests/profiles/agent_tooling/
-tests/profiles/contracts/
-tests/profiles/privacy/
-tests/profiles/workflow/
+SourceLoc(
+  source_id,
+  module_id,
+  byte_start,
+  byte_end,
+  line_start,
+  col_start,
+  line_end,
+  col_end,
+  generated_kind?      # direct / lowering / default_thunk / interpolation / block_suffix
+)
 ```
 
-Minimum positive tests:
+Generated code still points back to the surface expression that caused it.
 
-- capability grant allows permitted filesystem path and denies outside path;
-- pure function accepted where `!{}` required;
-- `trace.span` emits nested span events with task/strand metadata;
-- deterministic scope replays same random/clock values;
-- table query plan has stable fingerprint and column dependency keys;
-- schema codec accepts valid value and rejects missing required field;
-- Wasm component build rejects world mutation;
-- accelerator checker rejects dynamic dispatch inside kernel;
-- semantic patch rename preserves bindings;
-- property test records seed and counterexample;
-- taint label blocks public export without redaction;
-- workflow replay skips already committed step.
+#### 12.16.3. Stack trace frame
 
-Minimum negative tests:
-
-- no capability -> `CapabilityError`;
-- effect row mismatch -> compile diagnostic or `EffectViolationError`;
-- real clock in deterministic scope without provider -> `DeterminismError`;
-- replay event mismatch -> `ReplayDivergenceError`;
-- schema incompatible migration -> `SchemaViolationError`;
-- non-schema object crosses Wasm boundary in strict profile -> load diagnostic;
-- GPU kernel captures ordinary heap object -> `AcceleratorError` or compile diagnostic;
-- patch references stale symbol id -> patch rejection;
-- failed `ensure` -> `ContractViolationError`;
-- PII export without policy -> `PolicyViolationError`;
-- workflow step re-execution conflicts with committed idempotency key -> `WorkflowError`.
-
-## 18. Development matrix updates v20
-
-v20 extends the existing implementation matrix with P4/P5 tracks. These do not block P0/P1 dynamic runtime.
-
-### P4 — platform safety, observability and data profiles
-
-| Трек | Состояние | Ближайший шаг | Зависимости | Критерий выхода |
-|---|---|---|---|---|
-| G16. Capabilities & sandbox | Закрыто на уровне v20 profile | Реализовать manifest parser, capability resolver, runtime checks and `CapabilityError` | G6e, G11 | Package/plugin/notebook contexts deny host resources by default |
-| G17. Effects checker | Закрыто на уровне v20 profile | Добавить effect rows в typed checker, HIR summaries and call-site validation | G10, G16 | Pure/effectful boundaries диагностируются воспроизводимо |
-| G18. Observability & replay | Закрыто на уровне v20 profile | Реализовать event schema, trace spans, `.ambertrace`, deterministic scheduler mode | G7, G13, G16 | CI может записать run и воспроизвести его до первого divergence |
-| G19. Schema/API contracts | Закрыто на уровне v20 profile | Реализовать `schema`, codecs, migrations and API description generator | G10, G17 | Encode/decode/API boundaries валидируются schema-first |
-| G20. DataFrame/Columnar BI | Закрыто на уровне v20 profile | Реализовать `Table`, `Column`, `LazyTable`, query fingerprints and watch integration | G9, G18, G19 | Notebook invalidation работает на column/query-plan granularity |
-| G21. Privacy/Taint/Lineage | Закрыто на уровне v20 profile | Реализовать labels, policy checks, lineage graph and export audit | G18, G19, G20 | Sensitive data export блокируется или требует explicit redaction |
-
-### P5 — portability, accelerators, agent tooling and workflows
-
-| Трек | Состояние | Ближайший шаг | Зависимости | Критерий выхода |
-|---|---|---|---|---|
-| G22. Wasm Component | Закрыто на уровне v20 profile | Реализовать frozen subset checker, component interface mapping and capability host imports | G14, G16, G19 | `.amberwasm` plugin исполняется sandboxed без world mutation |
-| G23. Accelerator | Закрыто на уровне v20 profile | Реализовать kernel subset checker, tensor/device buffer runtime and CPU/SIMD fallback | G6d, G15, G17 | Kernel checker rejects dynamic Amber features and runs supported numeric kernels |
-| G24. AI-agent tooling/provenance | Закрыто на уровне v20 profile | Реализовать symbol graph, explain JSON, structured patch protocol and `.amberprov` | G1-G5, G10, G17 | Agent patches проверяются semantic-first before apply |
-| G25. Contracts/property testing | Закрыто на уровне v20 profile | Реализовать `require/ensure/invariant/property`, generators and shrinkers | G10, G18 | Failed contract/property yields replayable diagnostic |
-| G26. Durable workflow | Закрыто на уровне v20 profile | Реализовать workflow history, step replay, idempotency and compensation | G16-G19, G25 | Workflow survives restart and replays committed steps correctly |
-
-## 19. Ненормативные внешние ориентиры
-
-Этот список не является dependency Amber. Он фиксирует external design references, на которые v20 consciously ориентируется концептуально:
-
-- SLSA: supply-chain levels / provenance / artifact assurance — https://slsa.dev/
-- OpenTelemetry: traces, metrics, logs and context propagation — https://opentelemetry.io/
-- W3C Trace Context: standard HTTP headers for distributed trace context — https://www.w3.org/TR/trace-context/
-- Apache Arrow: language-independent columnar memory format — https://arrow.apache.org/
-- OpenAPI Specification: language-agnostic HTTP API description — https://swagger.io/specification/
-- WebAssembly Component Model — https://component-model.bytecodealliance.org/
-- WASI Preview 2 / WIT / component model direction — https://github.com/WebAssembly/WASI/blob/main/docs/Preview2.md
-- NIST AI Risk Management Framework — https://www.nist.gov/itl/ai-risk-management-framework
-- eBPF concept for low-level observability/security probes — https://ebpf.io/
-
-Amber v20 does not copy these specifications. It uses them as pressure tests for Amber's own profile boundaries.
-
-## 20. Итоговый статус v20
-
-После v20 Amber имеет три слоя зрелости:
+Deterministic stack frame rendering uses:
 
 ```text
-Core language and reference runtime contracts: closed for implementation.
-Second-wave compiler/runtime profiles v16-v19.2: closed for implementation.
-Modern platform profiles v20: closed as optional profile specifications, implementation order remains product/host-driven.
+StackFrame(
+  module_id,
+  function_or_method_name,
+  dispatch_owner?,
+  code_id,
+  source_loc,
+  inline_context[]
+)
 ```
 
-v20 делает Amber не только dynamic/typed/no-GIL/compiled language, но и platform-oriented language: безопасно запускаемый, объяснимый, воспроизводимый, пригодный для BI/data, переносимый в sandboxed components, готовый к AI-agent tooling and auditable enterprise workflows.
+No raw pointer values, thread ids or nondeterministic object ids appear in golden stack traces.
 
+### 12.17. Build graph, incremental compilation and reproducibility
 
-# Приложение A. Редакторская нормализация конфликтов между черновиками
+#### 12.17.1. Build graph node
 
-Ниже — важные конфликты, которые я сознательно свёл в одну редакцию.
+A build graph node:
 
-## A1. `_`, `$_` и underscore-формы
-
-В ранних черновиках last-result-переменная и wildcard менялись местами. Поздние закрывающие блоки `amber-lang-3` фиксируют такую развязку:
-
-- `_` = wildcard в pattern-контекстах;
-- `$_` = last result;
-- `_1`, `_2`, ... = placeholders в блоках без `|...|`;
-- `__` и другие double-underscore имена не имеют встроенной магии.
-
-Именно этот поздний вариант принят в текущей редакции.
-
-## A2. `case in when` vs `case when if`
-
-В `amber-lang-3` действительно присутствуют обе линии:
-
-- более ранняя ветка с `case ... in pattern when guard:`;
-- поздняя нормативная ветка с `case ... when pattern if guard:`.
-
-Так как в тех же поздних блоках `in` окончательно закрепляется как инфиксный оператор принадлежности, а `case when if` прямо помечается как унифицированный и финальный вариант, в этой редакции канонической формой принят:
-
-```amber
-case expr:
-  when PATTERN if GUARD:
-    ...
+```text
+BuildNode(
+  module_id,
+  source_path,
+  source_digest,
+  package_root_digest?,
+  compiler_version,
+  language_version,
+  feature_flags,
+  prelude_abi_hash,
+  deps[]
+)
 ```
 
-Изолированные более поздние объяснительные примеры, где снова всплывает `in`, трактуются как регрессия примеров, а не как повторное открытие решения.
+`module_id` comes from `package` if present; otherwise from entrypoint build configuration.
 
-## A3. `case` без `else`
+#### 12.17.2. Dependency fingerprint
 
-Внутри истории есть две несовместимые ветки:
+A dependency edge fingerprint includes:
 
-- строгая: `case` без совпадения и без `else` бросает `MatchError`;
-- поздняя safe-ветка: `case` без совпадения и без `else` возвращает `null`.
-
-Так как закрытая v1-спека pattern matching в `amber-lang-3` и её поздний уточняющий walkthrough уже используют второй вариант, текущая редакция сохраняет именно этот safe-default и одновременно включает строгую форму `case!`.
-
-Итог:
-
-- `if` без сработавшей ветки -> `null`
-- `case` без совпадения и без `else` -> `null`
-- `case!` без совпадения и без `else` -> `MatchError`
-- destructuring assignment / block params / multi-clause `def` при no-match -> `MatchError`
-
-## A4. Dynamic pattern objects
-
-В истории есть богатая линия про runtime-pattern-objects с `match(value)` и биндингами из конфигурации. Поздняя критика справедливо указывает, что риск несут прежде всего **скрытые локалы**, а не сама идея runtime-configured matcher object.
-
-Поэтому текущая редакция включает только explicit-binding profile:
-
-- разрешены `pattern(expr)` и `pattern(expr) with MAP_PATTERN`;
-- matcher object обязан возвращать `DynamicMatchResult(success: Bool, bindings: Map)`;
-- без `with ...` matcher не имеет права экспортировать bindings;
-- dynamic pattern objects разрешены только в `case`, `case!` и clause-style `def`;
-- dynamic pattern objects с неявной инъекцией локалов — вне v1.
-
-Bare matcher expressions через `===` по-прежнему остаются отдельной fallback-формой только для `case` / `case!`.
-
-# Приложение B. Короткий индекс примеров
-
-## One-liner chain with placeholders
-
-```amber
-numbers.map: _1 * 2 .select: _1 > 0 .reduce 0: _1 + _2
+```text
+dep_module_id
+dep_public_export_surface_hash
+dep_abi_hash
+dep_language_version
+dep_feature_flags
 ```
 
-## `class_method def`
+Changing private implementation without public ABI changes may allow incremental reuse of downstream HIR if the compiler supports it, but reference conformance only requires safe invalidation, not maximal caching.
 
-```amber
-class User:
-  class_method def find(id):
-    ...
+#### 12.17.3. Reproducible build rule
+
+Two builds are reproducible if:
+
+- same normalized source bytes;
+- same compiler and prelude ABI;
+- same feature/profile flags;
+- same dependency ABI fingerprints;
+- same target format version.
+
+Then emitted `.amberbc` bytes must be identical except optional `SIGN` section if signing mode includes external timestamped signatures. Deterministic signing mode must also be byte-identical.
+
+#### 12.17.4. Minimal build CLI
+
+Add to `amberc` CLI contract:
+
+```text
+amberc build path/to/root.amber -o build/out/
+amberc build --entry package.main -o build/out/
+amberc metadata path/to/file.amberbc --json
+amberc verify path/to/file.amberbc --json
 ```
 
-## Auto-assign и defaults
+`build` compiles the transitive source graph, writes `.amberbc` modules, and emits a build manifest:
 
-```amber
-class Connection:
-  def init(@host:, @port: 5432, timeout = @timeout):
-    pass
+```text
+amber.build.json
 ```
 
-## `case` с pattern matching
+### 12.18. Bootstrap and stdlib closure
 
-```amber
-case shape:
-  when Point(x, y):
-    x * y
-  when {w:, h:, **null}:
-    w * h
-  else:
-    0
+#### 12.18.1. Bootstrap layers
+
+Reference implementation uses four bootstrap layers:
+
+```text
+B0 runtime kernel
+  - Value representation
+  - Object/Class/Mixin metaobjects
+  - allocator/GC roots
+  - bytecode interpreter
+  - loader/verifier
+
+B1 native prelude
+  - core classes
+  - error classes
+  - intrinsic registry
+  - basic numeric/string/symbol operations
+
+B2 Amber stdlib bytecode
+  - collections
+  - ranges
+  - task/channel/mutex/atomic wrappers
+  - pattern helper objects
+  - diagnostics-facing helpers
+
+B3 tools
+  - amberc
+  - ambervm
+  - ambertest
+  - package/build tooling
 ```
 
-## Clause-style `def`
+B2 must be buildable with the same `.amberbc` pipeline used for user code. B0/B1 may be native implementation code.
 
-```amber
-def fmt(x, mode: :short):
-  when {mode: :short}:
-    "S: #{x}"
-  when {mode: :long}:
-    "LONG: #{x}"
-  else:
-    "??"
+#### 12.18.2. Required stdlib modules
+
+Minimum module ids:
+
+```text
+amber.core
+amber.collection
+amber.range
+amber.string
+amber.error
+amber.task
+amber.sync
+amber.memory
+amber.reflect
+amber.pattern
+amber.io      # may be stubbed in P0 if no host I/O profile is enabled
 ```
 
-## Simple many-def sugar
+`amber.core` and `amber.error` are preloaded before user module init. `amber.collection` must be ready before conformance runtime tests involving block suffix collection style.
 
-```amber
-def fact(0): 1
-def fact(n) if n > 0: n * fact(n - 1)
+#### 12.18.3. Stdlib ABI hash
+
+Each stdlib module exports an ABI hash. User `.amberbc` compiled against stdlib must record the stdlib ABI range it requires. Loader rejects incompatible stdlib with `ImportError` or `UnsupportedProfileError` depending on whether the module is missing or present-but-incompatible.
+
+### 12.19. Profile flags, capabilities and safe loading
+
+#### 12.19.1. Feature/profile flag model
+
+Every `.amberbc` records:
+
+```text
+required_features[]
+optional_features[]
+forbidden_features[]
 ```
 
-## Explicit destruction и immediate dealloc
+Examples:
 
-```amber
-class CachePage:
-  def init(rows):
-    @rows = rows
-    @index = rows.group_by: _1.id
-
-  def destroy!():
-    @index = null
-    @rows = null
-
-page = CachePage.new(load_rows())
-...
-memory.dealloc(page)
+```text
+core.v1
+notebook.watch.v1
+typed.v1
+capabilities.v1
+effects.v1
+ffi.v1
+native.mir.v1
 ```
 
-## Dead-object guard
+Loader behavior:
 
-```amber
-obj = CachePage.new(load_rows())
-memory.dealloc(obj)
-obj.rows()
-# => UseAfterFreeError
+- missing required feature -> `UnsupportedProfileError`;
+- unsupported optional feature -> ignore optional sections and continue;
+- feature explicitly forbidden by host policy -> `CapabilityError` or `UnsupportedProfileError` before init.
+
+#### 12.19.2. Capability manifest
+
+If capability profile is enabled, `CAPA` section declares host resources the module may request:
+
+```text
+CapabilityRequest(
+  kind,        # fs / net / env / process / clock / random / ffi / gpu / db / secrets
+  mode,        # read / write / execute / connect / allocate / observe
+  target?,
+  reason?
+)
 ```
 
+Compiler emits metadata; host grants capabilities at load/run time. Absence of capability must not be bypassed by native/FFI escape hatches.
 
-## Capability manifest v20
+#### 12.19.3. Bytecode safety boundary
 
-```toml
-[capabilities]
-fs.read = ["./data"]
-fs.write = ["./out"]
-net.connect = []
-time = true
-random = true
-ffi = false
+`.amberbc` is data, not trusted code. Loader must bounds-check every section before decoding. Verifier must reject:
+
+- unknown required opcodes;
+- invalid section offsets/lengths;
+- integer overflow in decoded sizes;
+- code that references disabled profile instructions;
+- malformed root maps/handler tables;
+- constant pool values disallowed by shareability rules.
+
+### 12.20. Native/AOT/JIT path closure requirements
+
+Native/AOT remains optional, but the project layer now fixes what it must preserve.
+
+A native backend must emit or preserve:
+
+```text
+NativeCodeObject(
+  source_bc_code_id,
+  machine_code_blob,
+  relocation_table,
+  call_stub_table,
+  deopt_or_slowpath_table?,
+  root_maps,
+  exception_maps,
+  safepoint_maps,
+  world_epoch_assumptions,
+  profile_flags
+)
 ```
 
-## Effects v20
+Rules:
 
-```amber
-def normalize(row as Row) -> Row !{}:
-  row.trimmed()
+- bytecode semantics remain reference truth;
+- reflective `send`, `method_missing`, dynamic pattern objects and `TypeTerm` hooks must either compile to slow stubs or remain bytecode-interpreted;
+- frozen-world native code records the `world_epoch` and method-table versions it assumed;
+- if deopt is not implemented, invalidation must discard native code and re-enter bytecode at safe call boundaries;
+- native code cannot omit GC/root maps;
+- native code cannot turn runtime language errors into process crashes.
 
-def fetch(url as Str) -> Response !{net, async}:
-  http.get(url).await()
+### 12.21. New implementation matrix additions: `W13`, `W14` and `W15`
+
+The existing `W0..W12` / modern-profile matrix remains valid. This patch adds three non-conflicting work packages that should be treated as blockers for "fully compilable release-grade Amber", even if a smaller prototype can run before they are complete.
+
+| Work package | Priority | Scope | Exit criterion |
+|---|---:|---|---|
+| `W13` Compiler-contract closure | P0/P1 | source/literals, name slots, prelude registry, call ABI, operator lowering, error registry, verifier dataflow, root/source maps | independent compiler+VM components agree through machine-readable registries and golden tests |
+| `W14` Build/bootstrap/conformance closure | P1/P2 | build graph, incremental cache, stdlib bootstrap, reproducible artifacts, profile flags, conformance bundles | multi-module Amber project builds reproducibly and passes compile/load/run corpus |
+| `W15` Native-readiness metadata | P3 | MIR/native root maps, exception maps, slow stubs, frozen assumptions | native/JIT work can start without changing bytecode/VM semantics |
+
+### 12.22. New issue catalogue `ISS-073..ISS-096`
+
+#### `ISS-073` source/literal/comment completion
+
+- finalize comment `#` rule and shebang handling;
+- implement numeric literal validation and constant-pool canonicalization;
+- implement string interpolation AST/HIR/source spans;
+- implement inclusive range expression `a..b`;
+- add parser and diagnostics corpus.
+
+#### `ISS-074` binder slot model and `UNINIT`
+
+- implement top-level pre-scan;
+- classify names into local/upvalue/module/import/prelude classes;
+- implement `UNINIT` sentinel and `NameError` path;
+- implement block capture/update rules;
+- add definite-assignment smoke diagnostics.
+
+#### `ISS-075` prelude and intrinsic registry
+
+- create `spec/registries/prelude.yaml`;
+- assign stable intrinsic ids;
+- implement prelude ABI hash in `.amberbc`;
+- verify shadowing disables intrinsic lowering;
+- add conformance tests for `send`, `define_method`, `Kernel.watch`, `memory.dealloc`.
+
+#### `ISS-076` unified call ABI
+
+- implement `CallPacket`;
+- implement keyword shape canonicalization after source-order evaluation;
+- implement hidden block slot;
+- implement callable object protocol including ordinary object `call`;
+- add cache key tests for selector/kw/block/world epoch.
+
+#### `ISS-077` operator lowering
+
+- implement semantic opcodes/fallback selectors for arithmetic/comparison;
+- lower `and/or` as control-flow returning operands;
+- lower `in` as `contains?`;
+- add fast-path plus fallback corpus.
+
+#### `ISS-078` module init and world transactions
+
+- compile top-level executable forms to module init;
+- allocate export cells at link;
+- implement class/mixin body staging and atomic commit;
+- add reopen/failure/no-partial-publish tests.
+
+#### `ISS-079` value model and constant pool rules
+
+- freeze constant pool allowed types;
+- reject mutable/shareability-invalid constants;
+- implement symbol/string deterministic interning;
+- add serialization round-trip tests.
+
+#### `ISS-080` runtime error registry completion
+
+- add missing error classes to registry and prelude;
+- define fatal internal compiler/VM error reporting;
+- implement stable exception object ABI and stack frames;
+- add runtime negative corpus for `NameError`, `ArgumentError`, `EmptyCollectionError`, `IndexError`, `KeyError`, `ZeroDivisionError`.
+
+#### `ISS-081` `TypeCheckProgram`
+
+- lower `TypeTerm` to check programs;
+- implement parameter/return/cast check sites;
+- implement builtin generic hooks for `Array`, `Map`, `Tuple`, `Set`;
+- add typed-boundary corpus without requiring full static checker.
+
+#### `ISS-082` canonical `.amberbc` binary encoding
+
+- implement fixed header and section table;
+- implement deterministic section ordering;
+- add digest validation;
+- add reader/writer round-trip corpus.
+
+#### `ISS-083` verifier dataflow and root maps
+
+- implement CFG verifier;
+- implement initializedness analysis;
+- validate handler ranges and root maps;
+- reject missing safepoints on back-edge paths;
+- add malformed bytecode fixtures.
+
+#### `ISS-084` pattern decision program canonicalization
+
+- implement `PatternProgram` transaction slots;
+- implement OR subtransactions;
+- implement dynamic matcher result verification;
+- add pattern disasm golden tests.
+
+#### `ISS-085` source maps and diagnostic schema
+
+- implement `LINE` minimum section;
+- implement generated-kind origin tags;
+- stabilize `amber.diag.v1` fields;
+- add stack trace golden tests without raw pointers.
+
+#### `ISS-086` build graph and reproducible build
+
+- implement `amberc build`;
+- implement `amber.build.json`;
+- hash source/prelude/dependency ABI inputs;
+- prove byte-identical `.amberbc` for identical builds.
+
+#### `ISS-087` stdlib bootstrap
+
+- split B0/B1/B2/B3 bootstrap layers;
+- compile B2 stdlib through ordinary bytecode pipeline;
+- define stdlib ABI hashes;
+- add loader tests for stdlib version mismatch.
+
+#### `ISS-088` profile and capability metadata
+
+- implement `PROF` section;
+- implement `CAPA` section parser;
+- reject unsupported required profiles;
+- add host-policy negative tests.
+
+#### `ISS-089` conformance compile-all bundle
+
+- create corpus bundle that compiles every positive fixture to `.amberbc`;
+- run `verify`, `disasm`, `load`, `run` where applicable;
+- fail on missing golden expectations for changed public formats.
+
+#### `ISS-090` native-readiness metadata
+
+- specify native root maps, exception maps and safepoint maps;
+- define runtime slow-stub ABI;
+- add bytecode/native equivalence requirements for future W13.
+
+#### `ISS-091` CLI metadata and verifier commands
+
+- add `amberc metadata --json`;
+- add `amberc verify --json`;
+- normalize errors for corrupted bytecode files;
+- add CLI golden tests.
+
+#### `ISS-092` keyword/callsite cache corpus
+
+- test duplicate keyword detection after value evaluation;
+- test kw shape cache stability;
+- test block presence in cache key;
+- test `world_epoch` invalidation.
+
+#### `ISS-093` export-cell cycle corpus
+
+- test cyclic imports with initialized vs initializing export reads;
+- test failed init remains failed;
+- test repeated load attempts;
+- test live alias updates.
+
+#### `ISS-094` GC root-map conformance
+
+- create stress fixtures for allocations at calls/back-edges/native boundaries;
+- validate that live values survive local and shared cycles;
+- test transient pin release during exception unwind.
+
+#### `ISS-095` string/range/interpolation corpus
+
+- test escape validation;
+- test interpolation evaluation order;
+- test `Range#===` and `in` behavior;
+- test source spans inside interpolation.
+
+#### `ISS-096` spec-sync registry issue
+
+- track items that must be mirrored into the main language spec:
+  - comment/shebang rules;
+  - inclusive range expression grammar;
+  - missing runtime error classes;
+  - prelude/builtin registry;
+  - callability of objects with `call`;
+  - `.amber`/`.am` source extension policy.
+
+### 12.23. New milestone `M11`: fully compilable reference gate
+
+`M11` is reached only after `M0..M5` plus `W13/W14` are green.
+
+Checklist:
+
+- `amberc build` compiles a multi-module project into `.amberbc` artifacts;
+- every artifact passes `amberc verify`;
+- `ambervm run` executes the built entrypoint without compiler process present;
+- stack traces are source-mapped and deterministic;
+- rebuild with same inputs is byte-identical;
+- all prelude/std/bytecode/error registries have versioned machine-readable files;
+- positive corpus passes parse/lower/check/compile/verify/disasm/load/run phases;
+- negative corpus confirms diagnostics/runtime errors with canonical codes/classes;
+- unsupported profile/capability requests are rejected before module init;
+- no test requires raw pointer values, absolute local paths or nondeterministic map ordering.
+
+### 12.24. Updated immediate implementation order
+
+For the next implementation cycle, the recommended order becomes:
+
+1. freeze machine-readable registries: tokens, diagnostics, prelude, runtime errors, opcodes, bytecode sections;
+2. implement source/literal/comment/range/interpolation parser coverage;
+3. implement binder slot classification and `UNINIT`/`NameError`;
+4. implement `CallPacket`, keyword shape and block slot ABI;
+5. implement operator lowering and callable object `call` protocol;
+6. implement `.amberbc` fixed header/section table and metadata command;
+7. implement verifier CFG/dataflow/root-map validation before expanding VM fast paths;
+8. implement module init/export-cell/class-body transaction path;
+9. bootstrap B2 stdlib through ordinary bytecode pipeline;
+10. add reproducible `amberc build` and full compile-all conformance bundle.
+
+### 12.25. Anti-drift rules added by compile-closure patch
+
+1. No new bytecode opcode without `spec/registries/opcodes.yaml`, verifier rule and disasm golden.
+2. No new prelude intrinsic without `prelude.yaml`, shadowing test and ABI hash update.
+3. No new runtime error class without `runtime_errors.yaml`, constructor ABI and at least one negative corpus case.
+4. No lowering that creates generated code without a source-map `generated_kind`.
+5. No call optimization that bypasses `CallPacket` observable semantics.
+6. No native/JIT optimization without root map and exception map.
+7. No loader acceptance of unknown required profile flags.
+8. No `.amberbc` writer change without reproducible-build fixture update.
+9. No pattern optimization that commits bindings before full success.
+10. No stdlib bootstrap shortcut that tests user code against APIs unavailable from compiled `.amberbc`.
+
+### 12.26. Final closure statement
+
+After this patch, the remaining work is implementation, not language architecture. Amber's reference path is now closed at these levels:
+
+```text
+source bytes
+  -> normalized tokens/comments/literals
+  -> syntax-faithful AST
+  -> resolved slots/imports/prelude/intrinsics
+  -> HIR with explicit calls/patterns/defaults/blocks
+  -> pattern/type-check programs
+  -> deterministic `.amberbc`
+  -> verifier CFG/dataflow/root maps
+  -> loader/linker/module init/export cells
+  -> register/slot VM with stable call/value/error ABI
+  -> stdlib/bootstrap/conformance
+  -> optional MIR/native/frozen profile preserving bytecode semantics
 ```
 
-## Trace/replay v20
-
-```amber
-Kernel.deterministic(seed: 42):
-  trace.span "report.refresh":
-    Report.refresh()
-```
-
-## Schema v20
-
-```amber
-schema User v2:
-  id as UUID
-  email as Str? @pii
-  created_at as Time
-```
-
-## Table/BI v20
-
-```amber
-orders.lazy
-  .where: _1.status == :paid
-  .group_by(:country)
-  .agg(revenue: sum(:amount))
-  .collect()
-```
-
-## Durable workflow v20
-
-```amber
-workflow ImportOrders:
-  step fetch !{net}:
-    http.get(source)
-
-  step commit !{db} idempotency_key: fetch.result.digest():
-    db.insert_many(fetch.result)
-```
+This is the engineering definition of "Amber as a fully compilable language" for the project layer.
 
