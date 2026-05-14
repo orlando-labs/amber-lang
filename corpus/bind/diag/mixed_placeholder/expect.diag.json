@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"E1005","severity":"error","phase":"parser","message":"mixing implicit placeholders with explicit block params","primary_span":{"file":"corpus/bind/diag/mixed_placeholder/source.am","start":{"line":2,"col":15,"offset":25},"end":{"line":2,"col":17,"offset":27}},"related":[],"notes":[]}
+  ]
+}

@@ -1,0 +1,15 @@
+package physics.core
+
+export Timestamped, Particle
+
+mixin Timestamped:
+  def touch!():
+    noop
+
+class Particle < Entity:
+  include Timestamped
+  extend Serializable
+  class_method def find(id):
+    id
+  def init(@масса, α = 1):
+    pass

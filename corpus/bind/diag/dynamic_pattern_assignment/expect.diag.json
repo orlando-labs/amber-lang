@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"E1009","severity":"error","phase":"pattern","message":"dynamic pattern object in block params or pattern assignment","primary_span":{"file":"corpus/bind/diag/dynamic_pattern_assignment/source.am","start":{"line":2,"col":3,"offset":23},"end":{"line":2,"col":26,"offset":46}},"related":[],"notes":[]}
+  ]
+}

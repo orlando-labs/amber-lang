@@ -1,0 +1,19 @@
+schema: amber.runtime_errors.registry.v1
+spec_anchor: amber_spec_consolidated_v19_1.md
+errors:
+  - MatchError
+  - TypeError
+  - NoMethodError
+  - ImportError
+  - ModuleInitError
+  - IsolationError
+  - DestroyedAccessError
+  - UseAfterFreeError
+  - LifetimeError
+  - IncludeCycleError
+  - WorldFrozenError
+  - SuperclassMismatchError
+  - TimeoutError
+  - CancelledError
+  - ChannelClosedError
+  - DeadlockError

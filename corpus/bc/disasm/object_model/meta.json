@@ -1,0 +1,5 @@
+{
+  "phase": "bc-disasm",
+  "source": "source.am",
+  "expect": "expect.dis.txt"
+}

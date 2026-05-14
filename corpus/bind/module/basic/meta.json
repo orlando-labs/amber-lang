@@ -1,0 +1,6 @@
+{
+  "format": "amber.corpus.meta.v1",
+  "phase": "bind",
+  "source": "source.am",
+  "expect": "expect.bind.json"
+}

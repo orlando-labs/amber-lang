@@ -1,0 +1,133 @@
+; amber.bc.v1 sha256=91bce2ed7b149a1f191d555dd19960e0feefbc0107229614ed8407569b005e13
+.header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
+.sections
+  STRS offset=344 size=72 align=1 flags=0
+  SYMS offset=416 size=109 align=1 flags=0
+  KONS offset=525 size=65 align=1 flags=0
+  CODE offset=590 size=417 align=1 flags=0
+  METH offset=1007 size=176 align=1 flags=0
+  CLAS offset=1183 size=88 align=1 flags=0
+  DEPS offset=1271 size=4 align=1 flags=0
+  EXPT offset=1275 size=46 align=1 flags=0
+  INIT offset=1321 size=9 align=1 flags=0
+  SPAN offset=1330 size=1426 align=1 flags=0
+  LINE offset=2756 size=220 align=1 flags=0
+  LOCS offset=2976 size=104 align=1 flags=0
+.strs
+  s0 "id"
+  s1 "param"
+  s2 "local"
+  s3 "масса"
+  s4 "α"
+  s5 "@масса"
+  s6 "class"
+.syms
+  y0 :Timestamped
+  y1 :touch!
+  y2 :Particle
+  y3 :Entity
+  y4 :Serializable
+  y5 :find
+  y6 :id
+  y7 :init
+  y8 :масса
+  y9 :α
+.kons
+  k0 key_set []
+  k1 path []
+  k2 path [3]
+  k3 path [0]
+  k4 path [4]
+  k5 path [6]
+  k6 path [8, 9]
+  k7 integer 1
+.code
+code c1 kind=module regs=1 flags=0
+  0000 CLOSE_UPVALUES 0
+  0001 GETLAST 0
+  0002 RETURN 0
+  span 0..1 corpus/bc/disasm/object_model/source.am:1:1-15:9
+  span 1..2 corpus/bc/disasm/object_model/source.am:1:1-15:9
+  span 2..3 corpus/bc/disasm/object_model/source.am:1:1-15:9
+code c2 kind=method regs=1 flags=0
+  0000 CLOSE_UPVALUES 0
+  0001 GETLAST 0
+  0002 RETURN 0
+  span 0..1 corpus/bc/disasm/object_model/source.am:6:3-7:9
+  span 1..2 corpus/bc/disasm/object_model/source.am:6:3-7:9
+  span 2..3 corpus/bc/disasm/object_model/source.am:6:3-7:9
+code c3 kind=method regs=2 flags=0
+  local l0 name=s0(id) role=s1(param) binding=s2(local)
+  0000 SETLAST 0
+  0001 CLOSE_UPVALUES 0
+  0002 GETLAST 1
+  0003 RETURN 1
+  span 0..1 corpus/bc/disasm/object_model/source.am:13:5-13:7
+  span 1..2 corpus/bc/disasm/object_model/source.am:12:3-13:7
+  span 2..3 corpus/bc/disasm/object_model/source.am:12:3-13:7
+  span 3..4 corpus/bc/disasm/object_model/source.am:12:3-13:7
+code c4 kind=method regs=3 flags=0
+  local l0 name=s3(масса) role=s1(param) binding=s2(local)
+  local l1 name=s4(α) role=s1(param) binding=s2(local)
+  0000 CLOSE_UPVALUES 0
+  0001 GETLAST 2
+  0002 RETURN 2
+  span 0..1 corpus/bc/disasm/object_model/source.am:14:3-15:9
+  span 1..2 corpus/bc/disasm/object_model/source.am:14:3-15:9
+  span 2..3 corpus/bc/disasm/object_model/source.am:14:3-15:9
+code c5 kind=default_thunk regs=4 flags=0
+  local l0 name=s3(масса) role=s1(param) binding=s2(local)
+  local l1 name=s4(α) role=s1(param) binding=s2(local)
+  0000 LOADK 2 7
+  0001 SETLAST 2
+  0002 CLOSE_UPVALUES 0
+  0003 GETLAST 3
+  0004 RETURN 3
+  span 0..1 corpus/bc/disasm/object_model/source.am:14:24-14:25
+  span 1..2 corpus/bc/disasm/object_model/source.am:14:24-14:25
+  span 2..3 corpus/bc/disasm/object_model/source.am:14:3-15:9
+  span 3..4 corpus/bc/disasm/object_model/source.am:14:3-15:9
+  span 4..5 corpus/bc/disasm/object_model/source.am:14:3-15:9
+.methods
+  m0 selector=y1(touch!) owner=0 signature=k1 entry=c2 flags=1
+  m1 selector=y5(find) owner=1 signature=k5 entry=c3 flags=2
+    param external=y6(id) local=s0(id) flags=0
+  m2 selector=y7(init) owner=1 signature=k6 entry=c4 flags=1
+    param external=y8(масса) local=s3(масса) flags=0
+    param external=y9(α) local=s4(α) flags=2
+    default_thunk c5
+    auto_assign local=s3(масса) target=s5(@масса) flags=0
+.classes
+  c0 name=y0(Timestamped) super=- ivar_schema=k0 methods=0+1 flags=1 kind=mixin
+  c1 name=y2(Particle) super=k2(Entity) ivar_schema=k0 methods=1+2 flags=0 includes=[k3(Timestamped)] extends=[k4(Serializable)]
+.deps
+.exports
+  export y0(Timestamped) kind=s6(class) target=0 visibility=1
+  export y2(Particle) kind=s6(class) target=1 visibility=1
+.init
+  entry c1 flags=0
+.line
+  c1 pc=0 line=1
+  c1 pc=1 line=1
+  c1 pc=2 line=1
+  c2 pc=0 line=6
+  c2 pc=1 line=6
+  c2 pc=2 line=6
+  c3 pc=0 line=13
+  c3 pc=1 line=12
+  c3 pc=2 line=12
+  c3 pc=3 line=12
+  c4 pc=0 line=14
+  c4 pc=1 line=14
+  c4 pc=2 line=14
+  c5 pc=0 line=14
+  c5 pc=1 line=14
+  c5 pc=2 line=14
+  c5 pc=3 line=14
+  c5 pc=4 line=14
+.locs
+  c3 l0 name=s0(id) 0..4
+  c4 l0 name=s3(масса) 0..3
+  c4 l1 name=s4(α) 0..3
+  c5 l0 name=s3(масса) 0..5
+  c5 l1 name=s4(α) 0..5

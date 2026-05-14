@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"E2007","severity":"error","phase":"binder","message":"assignment to imported alias","primary_span":{"file":"corpus/bind/diag/import_write/source.am","start":{"line":2,"col":1,"offset":32},"end":{"line":2,"col":7,"offset":38}},"related":[],"notes":[]}
+  ]
+}

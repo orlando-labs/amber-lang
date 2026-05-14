@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"E1003","severity":"error","phase":"pattern","message":"rest pattern outside tail position","primary_span":{"file":"corpus/bind/diag/map_rest_not_tail/source.am","start":{"line":2,"col":3,"offset":17},"end":{"line":3,"col":6,"offset":45}},"related":[],"notes":[]}
+  ]
+}

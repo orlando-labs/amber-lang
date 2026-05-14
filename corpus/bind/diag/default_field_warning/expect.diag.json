@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"W1001","severity":"warning","phase":"binder","message":"default expression reads field also targeted by delayed auto-assign","primary_span":{"file":"corpus/bind/diag/default_field_warning/source.am","start":{"line":2,"col":25,"offset":37},"end":{"line":2,"col":33,"offset":45}},"related":[],"notes":[]}
+  ]
+}

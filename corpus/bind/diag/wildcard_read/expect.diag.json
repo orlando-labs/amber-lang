@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"B0002","severity":"error","phase":"binder","message":"wildcard '_' cannot be used as an ordinary reference","primary_span":{"file":"corpus/bind/diag/wildcard_read/source.am","start":{"line":2,"col":3,"offset":11},"end":{"line":2,"col":4,"offset":12}},"related":[],"notes":[]}
+  ]
+}

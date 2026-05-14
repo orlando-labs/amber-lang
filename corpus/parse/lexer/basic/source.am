@@ -1,0 +1,13 @@
+def todo():
+  pass
+
+if feature_enabled?:
+  noop
+else:
+  log "disabled"
+
+numbers.map: _1.email.downcase() .uniq()
+obj.?.field
+case! value:
+  when _:
+    $_

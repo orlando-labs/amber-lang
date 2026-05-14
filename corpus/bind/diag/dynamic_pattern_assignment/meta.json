@@ -1,0 +1,5 @@
+{
+  "phase": "bind-diag",
+  "source": "source.am",
+  "expect": "expect.diag.json"
+}

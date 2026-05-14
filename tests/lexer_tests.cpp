@@ -1,0 +1,164 @@
+#include "frontend/lexer/lexer.h"
+
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
+using amber::lexer::Lexer;
+using amber::lexer::Token;
+using amber::lexer::TokenKind;
+
+std::vector<Token> lex_ok(const std::string &source) {
+  Lexer lexer(source, "<test>");
+  amber::lexer::LexResult result = lexer.lex();
+  if (!result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
+    std::exit(1);
+  }
+  return result.tokens;
+}
+
+void expect_kinds(const std::string &name, const std::string &source,
+                  const std::vector<TokenKind> &expected) {
+  const std::vector<Token> tokens = lex_ok(source);
+  std::vector<TokenKind> actual;
+  actual.reserve(tokens.size());
+  for (const Token &token : tokens) {
+    actual.push_back(token.kind);
+  }
+  if (actual != expected) {
+    std::cerr << "lexer test failed: " << name << "\nexpected:";
+    for (TokenKind kind : expected) {
+      std::cerr << " " << amber::lexer::token_kind_name(kind);
+    }
+    std::cerr << "\nactual:  ";
+    for (TokenKind kind : actual) {
+      std::cerr << " " << amber::lexer::token_kind_name(kind);
+    }
+    std::cerr << "\n";
+    std::exit(1);
+  }
+}
+
+void expect_identifier_lexemes(const std::string &name,
+                               const std::string &source,
+                               const std::vector<std::string> &expected) {
+  const std::vector<Token> tokens = lex_ok(source);
+  std::vector<std::string> actual;
+  for (const Token &token : tokens) {
+    if (token.kind == TokenKind::Identifier) {
+      actual.push_back(token.lexeme);
+    }
+  }
+  if (actual != expected) {
+    std::cerr << "lexer test failed: " << name << "\nexpected:";
+    for (const std::string &value : expected) {
+      std::cerr << " " << value;
+    }
+    std::cerr << "\nactual:  ";
+    for (const std::string &value : actual) {
+      std::cerr << " " << value;
+    }
+    std::cerr << "\n";
+    std::exit(1);
+  }
+}
+
+void test_block_tokens() {
+  expect_kinds(
+      "indent/dedent",
+      "def todo():\n"
+      "  pass\n"
+      "\n"
+      "if active?:\n"
+      "  noop\n"
+      "else:\n"
+      "  log \"disabled\"\n",
+      {TokenKind::KeywordDef,  TokenKind::Identifier,  TokenKind::LParen,
+       TokenKind::RParen,      TokenKind::Colon,       TokenKind::Newline,
+       TokenKind::Indent,      TokenKind::KeywordPass, TokenKind::Newline,
+       TokenKind::Dedent,      TokenKind::KeywordIf,   TokenKind::Identifier,
+       TokenKind::Colon,       TokenKind::Newline,     TokenKind::Indent,
+       TokenKind::KeywordNoop, TokenKind::Newline,     TokenKind::Dedent,
+       TokenKind::KeywordElse, TokenKind::Colon,       TokenKind::Newline,
+       TokenKind::Indent,      TokenKind::Identifier,  TokenKind::String,
+       TokenKind::Newline,     TokenKind::Dedent,      TokenKind::Eof});
+}
+
+void test_safe_and_chain_dot() {
+  expect_kinds(
+      "safe-dot and chain-dot",
+      "numbers.map: _1.email.downcase() .uniq()\n"
+      "obj.?.field\n",
+      {TokenKind::Identifier, TokenKind::Dot,         TokenKind::Identifier,
+       TokenKind::Colon,      TokenKind::Placeholder, TokenKind::Dot,
+       TokenKind::Identifier, TokenKind::Dot,         TokenKind::Identifier,
+       TokenKind::LParen,     TokenKind::RParen,      TokenKind::ChainDot,
+       TokenKind::Identifier, TokenKind::LParen,      TokenKind::RParen,
+       TokenKind::Newline,    TokenKind::Identifier,  TokenKind::SafeDot,
+       TokenKind::Identifier, TokenKind::Newline,     TokenKind::Eof});
+}
+
+void test_case_bang_and_last_value() {
+  expect_kinds("case bang and last value",
+               "case! value:\n"
+               "  when _:\n"
+               "    $_\n",
+               {TokenKind::KeywordCaseBang, TokenKind::Identifier,
+                TokenKind::Colon, TokenKind::Newline, TokenKind::Indent,
+                TokenKind::KeywordWhen, TokenKind::Identifier, TokenKind::Colon,
+                TokenKind::Newline, TokenKind::Indent, TokenKind::LastValue,
+                TokenKind::Newline, TokenKind::Dedent, TokenKind::Dedent,
+                TokenKind::Eof});
+}
+
+void test_identifier_forms() {
+  expect_kinds("identifier forms", "active? clear! _tmp __cache _1 $_\n",
+               {TokenKind::Identifier, TokenKind::Identifier,
+                TokenKind::Identifier, TokenKind::Identifier,
+                TokenKind::Placeholder, TokenKind::LastValue,
+                TokenKind::Newline, TokenKind::Eof});
+}
+
+void test_contextual_keywords_remain_identifiers() {
+  expect_kinds("contextual keywords", "as pattern with\n",
+               {TokenKind::Identifier, TokenKind::Identifier,
+                TokenKind::Identifier, TokenKind::Newline, TokenKind::Eof});
+}
+
+void test_pattern_punctuation() {
+  expect_kinds("pattern punctuation", "^x | y\n",
+               {TokenKind::Caret, TokenKind::Identifier, TokenKind::Pipe,
+                TokenKind::Identifier, TokenKind::Newline, TokenKind::Eof});
+}
+
+void test_unicode_identifier_forms() {
+  expect_kinds("unicode identifiers",
+               "масса = α + β2\n"
+               "объект.скорость!()\n",
+               {TokenKind::Identifier, TokenKind::Equal, TokenKind::Identifier,
+                TokenKind::Plus, TokenKind::Identifier, TokenKind::Newline,
+                TokenKind::Identifier, TokenKind::Dot, TokenKind::Identifier,
+                TokenKind::LParen, TokenKind::RParen, TokenKind::Newline,
+                TokenKind::Eof});
+  expect_identifier_lexemes("unicode identifier lexemes",
+                            "масса = α + β2\nобъект.скорость!()\n",
+                            {"масса", "α", "β2", "объект", "скорость!"});
+}
+
+} // namespace
+
+int main() {
+  test_block_tokens();
+  test_safe_and_chain_dot();
+  test_case_bang_and_last_value();
+  test_identifier_forms();
+  test_contextual_keywords_remain_identifiers();
+  test_pattern_punctuation();
+  test_unicode_identifier_forms();
+  std::cout << "lexer_tests: ok\n";
+  return 0;
+}

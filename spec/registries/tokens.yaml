@@ -1,0 +1,98 @@
+schema: amber.tokens.registry.v1
+spec_anchor: amber_spec_consolidated_v19_1.md
+tokens:
+  structural:
+    - EOF
+    - NEWLINE
+    - INDENT
+    - DEDENT
+  lexical:
+    - IDENTIFIER
+    - PLACEHOLDER
+    - LAST_VALUE
+    - INTEGER
+    - FLOAT
+    - STRING
+  punctuation:
+    - DOT
+    - CHAIN_DOT
+    - SAFE_DOT
+    - COLON
+    - COMMA
+    - LPAREN
+    - RPAREN
+    - LBRACKET
+    - RBRACKET
+    - LBRACE
+    - RBRACE
+    - PIPE
+    - CARET
+  operators:
+    - PLUS
+    - MINUS
+    - STAR
+    - SLASH
+    - PERCENT
+    - EQUAL
+    - EQUAL_EQUAL
+    - BANG_EQUAL
+    - LESS
+    - LESS_EQUAL
+    - GREATER
+    - GREATER_EQUAL
+    - AT
+    - AT_AT
+  keywords:
+    - KEYWORD_AND
+    - KEYWORD_BREAK
+    - KEYWORD_CASE
+    - KEYWORD_CASE_BANG
+    - KEYWORD_CLASS
+    - KEYWORD_CLASS_METHOD
+    - KEYWORD_DEF
+    - KEYWORD_DO
+    - KEYWORD_ELIF
+    - KEYWORD_ELSE
+    - KEYWORD_ELSIF
+    - KEYWORD_EXPORT
+    - KEYWORD_EXTEND
+    - KEYWORD_FALSE
+    - KEYWORD_FROM
+    - KEYWORD_IF
+    - KEYWORD_IMPORT
+    - KEYWORD_IN
+    - KEYWORD_INCLUDE
+    - KEYWORD_LOOP
+    - KEYWORD_MIXIN
+    - KEYWORD_NOOP
+    - KEYWORD_NOT
+    - KEYWORD_NULL
+    - KEYWORD_OR
+    - KEYWORD_PACKAGE
+    - KEYWORD_PASS
+    - KEYWORD_TRUE
+    - KEYWORD_UNLESS
+    - KEYWORD_UNTIL
+    - KEYWORD_WHEN
+    - KEYWORD_WHILE
+  contextual_keywords:
+    - as
+    - pattern
+    - with
+identifier_profile:
+  encoding: utf-8
+  start:
+    ascii: "A-Z a-z _"
+    unicode_ranges:
+      - "U+0370..U+03FF Greek and Coptic"
+      - "U+1F00..U+1FFF Greek Extended"
+      - "U+0400..U+052F Cyrillic"
+      - "U+1C80..U+1C8F Cyrillic Extended-C"
+      - "U+2DE0..U+2DFF Cyrillic Extended-A"
+      - "U+A640..U+A69F Cyrillic Extended-B"
+  part:
+    ascii: "A-Z a-z _ 0-9"
+    unicode: "same as start"
+  suffixes:
+    - "?"
+    - "!"

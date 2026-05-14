@@ -1,0 +1,5 @@
+{
+  "phase": "bind",
+  "source": "source.am",
+  "expect": "expect.bind.json"
+}

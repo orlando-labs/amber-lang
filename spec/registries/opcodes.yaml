@@ -1,0 +1,100 @@
+schema: amber.opcodes.registry.v1
+spec_anchor: amber_spec_consolidated_v20_1.md
+status: implemented_subset
+opcodes:
+  - name: LOADK
+    byte: 0x01
+  - name: LOADNULL
+    byte: 0x02
+  - name: LOADBOOL
+    byte: 0x03
+  - name: MOVE
+    byte: 0x04
+  - name: LOADSELF
+    byte: 0x05
+  - name: GETLAST
+    byte: 0x06
+  - name: SETLAST
+    byte: 0x07
+  - name: MAKELIST
+    byte: 0x08
+  - name: MAKETUPLE
+    byte: 0x09
+  - name: MAKEMAP
+    byte: 0x0A
+  - name: FREEZE
+    byte: 0x0B
+  - name: LOADUPVAL
+    byte: 0x10
+  - name: STOREUPVAL
+    byte: 0x11
+  - name: LOADIVAR
+    byte: 0x12
+  - name: STOREIVAR
+    byte: 0x13
+  - name: LOADCVAR
+    byte: 0x14
+  - name: STORECVAR
+    byte: 0x15
+  - name: LOOKUPCONST
+    byte: 0x16
+  - name: MAKECLOSURE
+    byte: 0x17
+  - name: OBJ_DESTROY
+    byte: 0x18
+  - name: OBJ_DEALLOC
+    byte: 0x19
+  - name: CLOSEUPVALUES
+    byte: 0x1A
+  - name: SEND
+    byte: 0x20
+  - name: SEND_DYN
+    byte: 0x21
+  - name: CALL
+    byte: 0x22
+  - name: IN_OP
+    byte: 0x23
+  - name: TRIPLE_EQ
+    byte: 0x24
+  - name: TYPE_CHECK
+    byte: 0x25
+  - name: JUMP
+    byte: 0x30
+  - name: JUMP_IF_TRUE
+    byte: 0x31
+  - name: JUMP_IF_FALSE
+    byte: 0x32
+  - name: JUMP_IF_NULL
+    byte: 0x33
+  - name: RETURN
+    byte: 0x34
+  - name: RAISE
+    byte: 0x35
+  - name: SAFEPOINT
+    byte: 0x36
+  - name: P_PREP_SEQ
+    byte: 0x40
+  - name: P_PREP_MAP
+    byte: 0x41
+  - name: P_CHECK_EQ
+    byte: 0x42
+  - name: P_CHECK_PIN
+    byte: 0x43
+  - name: P_CHECK_LEN_EQ
+    byte: 0x44
+  - name: P_CHECK_LEN_GTE
+    byte: 0x45
+  - name: P_GET_INDEX
+    byte: 0x46
+  - name: P_HAS_KEY
+    byte: 0x47
+  - name: P_GET_KEY
+    byte: 0x48
+  - name: P_TRIPLE_EQ
+    byte: 0x49
+  - name: P_BIND
+    byte: 0x4A
+  - name: P_COMMIT
+    byte: 0x4B
+  - name: P_FAIL
+    byte: 0x4C

@@ -1,0 +1,6 @@
+{
+  "format": "amber.corpus.meta.v1",
+  "phase": "parse-expr",
+  "source": "source.am",
+  "expect": "expect.ast.json"
+}

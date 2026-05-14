@@ -1,0 +1,6 @@
+{
+  "format": "amber.corpus.meta.v1",
+  "phase": "hir",
+  "source": "source.am",
+  "expect": "expect.hir.json"
+}

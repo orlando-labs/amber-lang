@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"E1011","severity":"error","phase":"pattern","message":"pattern(expr) references binding introduced by same enclosing pattern","primary_span":{"file":"corpus/bind/diag/dynamic_pattern_same_pattern_ref/source.am","start":{"line":3,"col":5,"offset":39},"end":{"line":4,"col":9,"offset":91}},"related":[],"notes":[]}
+  ]
+}

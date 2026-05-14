@@ -1,0 +1,8 @@
+{
+  "format": "amber.ast.v1",
+  "module": null,
+  "items": [
+    {"kind":"AstExprStmt","span":{"file":"corpus/parse/expr/unicode/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":1,"col":21,"offset":33}},"expr":{"kind":"AstAssign","span":{"file":"corpus/parse/expr/unicode/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":1,"col":21,"offset":33}},"op":"=","left":{"kind":"AstName","span":{"file":"corpus/parse/expr/unicode/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":1,"col":12,"offset":22}},"name":"коэффициент"},"right":{"kind":"AstBinary","span":{"file":"corpus/parse/expr/unicode/source.am","start":{"line":1,"col":15,"offset":25},"end":{"line":1,"col":21,"offset":33}},"op":"+","left":{"kind":"AstName","span":{"file":"corpus/parse/expr/unicode/source.am","start":{"line":1,"col":15,"offset":25},"end":{"line":1,"col":16,"offset":27}},"name":"α"},"right":{"kind":"AstName","span":{"file":"corpus/parse/expr/unicode/source.am","start":{"line":1,"col":19,"offset":30},"end":{"line":1,"col":21,"offset":33}},"name":"β2"}}}}
+  ],
+  "source_hash": "sha256:2a234bbb792cf64d59440aa81bdd7a7493028e80b4d7762f16ef14da10fdea8c"
+}

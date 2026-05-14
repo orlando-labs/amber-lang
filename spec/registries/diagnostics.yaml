@@ -1,0 +1,43 @@
+schema: amber.diagnostics.registry.v1
+spec_anchor: amber_spec_consolidated_v20_1.md
+diagnostics:
+  - { code: L0001, severity: error, phase: lexer, condition: lexer cannot produce a valid token stream }
+  - { code: P0001, severity: error, phase: parser, condition: parser cannot produce a valid syntax-faithful AST }
+  - { code: B0001, severity: error, phase: binder, condition: duplicate lexical binding in one scope }
+  - { code: B0002, severity: error, phase: binder, condition: wildcard underscore used as an ordinary binding or reference }
+  - { code: E1001, severity: error, phase: pattern, condition: duplicate binding names in one pattern }
+  - { code: E1002, severity: error, phase: pattern, condition: different binding sets across OR-pattern alternatives }
+  - { code: E1003, severity: error, phase: pattern, condition: rest pattern outside tail position }
+  - { code: E1004, severity: error, phase: binder, condition: ambiguous clause subject }
+  - { code: E1005, severity: error, phase: parser, condition: mixing placeholders with explicit block params }
+  - { code: E1006, severity: error, phase: parser, condition: sparse placeholder numbering }
+  - { code: E1007, severity: error, phase: binder, condition: default expression refers to a parameter to the right }
+  - { code: E1008, severity: error, phase: pattern, condition: bare matcher expression outside case or case! }
+  - { code: E1009, severity: error, phase: pattern, condition: dynamic pattern object in block params or pattern assignment }
+  - { code: E1010, severity: error, phase: pattern, condition: pattern(expr) exports bindings without with map pattern }
+  - { code: E1011, severity: error, phase: pattern, condition: pattern(expr) references binding introduced by same enclosing pattern }
+  - { code: E2001, severity: error, phase: parser, condition: duplicate package declaration }
+  - { code: E2002, severity: error, phase: parser, condition: import outside contiguous import-zone }
+  - { code: E2003, severity: error, phase: parser, condition: from import star is forbidden }
+  - { code: E2004, severity: error, phase: parser, condition: relative imports are forbidden in v1 }
+  - { code: E2005, severity: error, phase: binder, condition: export of unknown local name }
+  - { code: E2006, severity: error, phase: binder, condition: duplicate public export }
+  - { code: E2007, severity: error, phase: binder, condition: assignment to imported alias }
+  - { code: E2008, severity: error, phase: binder, condition: duplicate keyword argument at call site }
+  - { code: E2009, severity: error, phase: binder, condition: unknown keyword argument at call site }
+  - { code: E2010, severity: error, phase: binder, condition: too many positional arguments for callable signature }
+  - { code: E2011, severity: error, phase: binder, condition: missing required parameter after explicit bind }
+  - { code: E3001, severity: error, phase: parser, condition: include outside declarative class or mixin body }
+  - { code: E3002, severity: error, phase: binder, condition: statically provable non-mixin include target }
+  - { code: E3003, severity: error, phase: binder, condition: statically provable include cycle }
+  - { code: E3004, severity: error, phase: parser, condition: class_method def inside mixin body }
+  - { code: E3005, severity: error, phase: binder, condition: reopen with incompatible superclass }
+  - { code: E3006, severity: error, phase: binder, condition: reopen mixin/class name collides with different binding kind }
+  - { code: E3007, severity: error, phase: parser, condition: extend outside declarative class body }
+  - { code: E3008, severity: error, phase: binder, condition: statically provable non-mixin extend target }
+  - { code: BC2001, severity: error, phase: bytecode, condition: malformed or unsupported HIR shape reached bytecode emitter }
+  - { code: BC2002, severity: error, phase: bytecode, condition: unsupported top-level, class-body, export, or root item for current bytecode emitter slice }
+  - { code: BC2003, severity: error, phase: bytecode, condition: missing procedure or code mapping required by bytecode emitter }
+  - { code: BC2006, severity: error, phase: bytecode, condition: unsupported object-model descriptor reached current bytecode emitter }
+  - { code: BC2007, severity: error, phase: bytecode, condition: unsupported match-program node reached current bytecode emitter }
+  - { code: W1001, severity: warning, phase: binder, condition: default expression reads field also targeted by delayed auto-assign }

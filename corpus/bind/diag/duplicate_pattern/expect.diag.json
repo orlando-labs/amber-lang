@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"E1001","severity":"error","phase":"pattern","message":"duplicate binding names in one pattern","primary_span":{"file":"corpus/bind/diag/duplicate_pattern/source.am","start":{"line":2,"col":3,"offset":19},"end":{"line":3,"col":6,"offset":42}},"related":[],"notes":[]}
+  ]
+}

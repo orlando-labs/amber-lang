@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"B0001","severity":"error","phase":"binder","message":"duplicate lexical binding in one scope","primary_span":{"file":"corpus/bind/diag/duplicate_param/source.am","start":{"line":1,"col":10,"offset":9},"end":{"line":1,"col":11,"offset":10}},"related":[],"notes":[]}
+  ]
+}

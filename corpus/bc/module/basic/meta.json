@@ -1,0 +1,5 @@
+{
+  "phase": "bc",
+  "source": "source.am",
+  "expect": "expect.bc.json"
+}

@@ -1,0 +1,6 @@
+{
+  "format": "amber.corpus.meta.v1",
+  "phase": "bind-diag",
+  "source": "source.am",
+  "expect": "expect.diag.json"
+}

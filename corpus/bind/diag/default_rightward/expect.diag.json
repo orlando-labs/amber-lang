@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"E1007","severity":"error","phase":"binder","message":"default expression refers to a parameter that is not available yet","primary_span":{"file":"corpus/bind/diag/default_rightward/source.am","start":{"line":1,"col":11,"offset":10},"end":{"line":1,"col":12,"offset":11}},"related":[],"notes":[]}
+  ]
+}

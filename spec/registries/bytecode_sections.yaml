@@ -1,0 +1,49 @@
+schema: amber.bytecode_sections.registry.v1
+spec_anchor: amber_spec_consolidated_v20_1.md
+status: implemented
+sections:
+  - tag: STRS
+    required: true
+    meaning: utf8 string pool
+  - tag: SYMS
+    required: true
+    meaning: interned selectors and symbol atoms
+  - tag: KONS
+    required: true
+    meaning: serializable constant pool
+  - tag: CODE
+    required: true
+    meaning: bc code records and instruction streams
+  - tag: METH
+    required: true
+    meaning: method descriptors
+  - tag: CLAS
+    required: true
+    meaning: class/runtime descriptors
+  - tag: DEPS
+    required: true
+    meaning: dependency manifest
+  - tag: EXPT
+    required: true
+    meaning: export table
+  - tag: INIT
+    required: true
+    meaning: module init entry metadata
+  - tag: PATS
+    required: false
+    meaning: precompiled pattern program descriptors
+  - tag: SPAN
+    required: false
+    meaning: source span table keyed by code_id
+  - tag: LINE
+    required: false
+    meaning: line table for stack traces
+  - tag: LOCS
+    required: false
+    meaning: local name/debug ranges
+  - tag: ATTR
+    required: false
+    meaning: compiler/build attributes
+  - tag: HASH
+    required: false
+    meaning: section digests

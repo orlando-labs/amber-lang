@@ -1,0 +1,41 @@
+{
+  "schema": "amber.bc.v1",
+  "source_hash": "5bb87e34bf2b5dc8340bc0460c4aa2a6a801f64a55afb0758acc7e5de1e389e7",
+  "format_version": {"major": 1, "minor": 0},
+  "language_version": {"major": 1, "minor": 0},
+  "profile_flags": 0,
+  "file_flags": 0,
+  "abi_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sections": [
+    {"kind":"STRS","offset":344,"size":57,"align":1,"flags":0},
+    {"kind":"SYMS","offset":401,"size":32,"align":1,"flags":0},
+    {"kind":"KONS","offset":433,"size":19,"align":1,"flags":0},
+    {"kind":"CODE","offset":452,"size":334,"align":1,"flags":0},
+    {"kind":"METH","offset":786,"size":72,"align":1,"flags":0},
+    {"kind":"CLAS","offset":858,"size":4,"align":1,"flags":0},
+    {"kind":"DEPS","offset":862,"size":4,"align":1,"flags":0},
+    {"kind":"EXPT","offset":866,"size":4,"align":1,"flags":0},
+    {"kind":"INIT","offset":870,"size":9,"align":1,"flags":0},
+    {"kind":"SPAN","offset":879,"size":979,"align":1,"flags":0},
+    {"kind":"LINE","offset":1858,"size":160,"align":1,"flags":0},
+    {"kind":"LOCS","offset":2018,"size":104,"align":1,"flags":0}
+  ],
+  "strings": ["configure","function","local","x","param","y"],
+  "symbols": ["configure","x","y","+"],
+  "constants": [{"kind":"path","items":[1,2]},{"kind":"integer","int_value":1}],
+  "code": [
+    {"code_id":1,"kind":"module","reg_count":2,"flags":0,"locals":[{"slot":0,"name_str_id":0,"role_str_id":1,"binding_kind_str_id":2}],"captures":[],"instructions":[{"opcode":"CLOSE_UPVALUES","operands":[{"value":0,"signed":false}]},{"opcode":"GETLAST","operands":[{"value":1,"signed":false}]},{"opcode":"RETURN","operands":[{"value":1,"signed":false}]}],"handlers":[],"call_sites":[],"ivar_sites":[],"safepoints":[],"source_spans":[{"pc_from":0,"pc_to":1,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}},{"pc_from":1,"pc_to":2,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}},{"pc_from":2,"pc_to":3,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}}]},
+    {"code_id":2,"kind":"method","reg_count":3,"flags":0,"locals":[{"slot":0,"name_str_id":3,"role_str_id":4,"binding_kind_str_id":2},{"slot":1,"name_str_id":5,"role_str_id":4,"binding_kind_str_id":2}],"captures":[],"instructions":[{"opcode":"SETLAST","operands":[{"value":1,"signed":false}]},{"opcode":"CLOSE_UPVALUES","operands":[{"value":0,"signed":false}]},{"opcode":"GETLAST","operands":[{"value":2,"signed":false}]},{"opcode":"RETURN","operands":[{"value":2,"signed":false}]}],"handlers":[],"call_sites":[],"ivar_sites":[],"safepoints":[],"source_spans":[{"pc_from":0,"pc_to":1,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":2,"col":3,"offset":31},"end":{"line":2,"col":4,"offset":32}}},{"pc_from":1,"pc_to":2,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}},{"pc_from":2,"pc_to":3,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}},{"pc_from":3,"pc_to":4,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}}]},
+    {"code_id":3,"kind":"default_thunk","reg_count":5,"flags":0,"locals":[{"slot":0,"name_str_id":3,"role_str_id":4,"binding_kind_str_id":2},{"slot":1,"name_str_id":5,"role_str_id":4,"binding_kind_str_id":2}],"captures":[],"instructions":[{"opcode":"LOADK","operands":[{"value":3,"signed":false},{"value":1,"signed":false}]},{"opcode":"SEND","operands":[{"value":2,"signed":false},{"value":0,"signed":false},{"value":3,"signed":false},{"value":1,"signed":false},{"value":3,"signed":false},{"value":0,"signed":false},{"value":4294967295,"signed":true},{"value":0,"signed":false}]},{"opcode":"SETLAST","operands":[{"value":2,"signed":false}]},{"opcode":"CLOSE_UPVALUES","operands":[{"value":0,"signed":false}]},{"opcode":"GETLAST","operands":[{"value":4,"signed":false}]},{"opcode":"RETURN","operands":[{"value":4,"signed":false}]}],"handlers":[],"call_sites":[{"pc":1,"slot":0,"symbol_id":3,"flags":0}],"ivar_sites":[],"safepoints":[],"source_spans":[{"pc_from":0,"pc_to":1,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":26,"offset":25},"end":{"line":1,"col":27,"offset":26}}},{"pc_from":1,"pc_to":2,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":22,"offset":21},"end":{"line":1,"col":27,"offset":26}}},{"pc_from":2,"pc_to":3,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":22,"offset":21},"end":{"line":1,"col":27,"offset":26}}},{"pc_from":3,"pc_to":4,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}},{"pc_from":4,"pc_to":5,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}},{"pc_from":5,"pc_to":6,"span":{"file":"corpus/bc/module/defaults/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":4,"offset":32}}}]}
+  ],
+  "methods": [{"selector_sym_id":0,"owner_dispatch_ref":0,"signature_blob_id":0,"params":[{"external_name_sym_id":1,"local_name_str_id":3,"flags":0},{"external_name_sym_id":2,"local_name_str_id":5,"flags":2}],"default_thunk_ids":[3],"type_hook_ids":[],"clauses":[],"auto_assign":[],"entry_code_id":2,"flags":0}],
+  "classes": [],
+  "dependencies": [],
+  "exports": [],
+  "init": {"has_entry_code_id":true,"entry_code_id":1,"flags":0},
+  "pattern_programs": [],
+  "line_table": [{"code_id":1,"pc":0,"line":1},{"code_id":1,"pc":1,"line":1},{"code_id":1,"pc":2,"line":1},{"code_id":2,"pc":0,"line":2},{"code_id":2,"pc":1,"line":1},{"code_id":2,"pc":2,"line":1},{"code_id":2,"pc":3,"line":1},{"code_id":3,"pc":0,"line":1},{"code_id":3,"pc":1,"line":1},{"code_id":3,"pc":2,"line":1},{"code_id":3,"pc":3,"line":1},{"code_id":3,"pc":4,"line":1},{"code_id":3,"pc":5,"line":1}],
+  "local_debug": [{"code_id":1,"slot":0,"name_str_id":0,"start_pc":0,"end_pc":3},{"code_id":2,"slot":0,"name_str_id":3,"start_pc":0,"end_pc":4},{"code_id":2,"slot":1,"name_str_id":5,"start_pc":0,"end_pc":4},{"code_id":3,"slot":0,"name_str_id":3,"start_pc":0,"end_pc":6},{"code_id":3,"slot":1,"name_str_id":5,"start_pc":0,"end_pc":6}],
+  "attrs": [],
+  "hashes": []
+}

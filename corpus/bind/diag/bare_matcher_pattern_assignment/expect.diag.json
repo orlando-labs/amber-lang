@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"E1008","severity":"error","phase":"pattern","message":"bare matcher expression outside case or case!","primary_span":{"file":"corpus/bind/diag/bare_matcher_pattern_assignment/source.am","start":{"line":2,"col":3,"offset":22},"end":{"line":2,"col":17,"offset":36}},"related":[],"notes":[]}
+  ]
+}
