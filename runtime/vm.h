@@ -31,6 +31,10 @@ enum class ObjectGeneration { Young, Mature, Shared };
 
 enum class RuntimeGcCycle { Young, Full, Shared };
 
+enum class RuntimePinViewKind { Opaque, ValueBuffer };
+
+enum class RuntimePinPermission { ReadOnly, ReadWrite };
+
 struct OwnerToken {
   OwnerTokenKind kind = OwnerTokenKind::Confined;
   std::uint64_t strand_id = 0;
@@ -41,6 +45,7 @@ inline constexpr std::uint32_t kObjectFlagShareable = 0x2U;
 inline constexpr std::uint32_t kObjectFlagDead = 0x4U;
 inline constexpr std::uint32_t kObjectFlagDestroyed = 0x8U;
 inline constexpr std::uint32_t kObjectFlagDestroying = 0x10U;
+inline constexpr std::uint32_t kObjectFlagPinned = 0x20U;
 
 struct ShapeDescriptor {
   std::uint64_t shape_id = 0;
@@ -64,6 +69,8 @@ struct ObjHeader {
   ObjectGeneration generation = ObjectGeneration::Young;
   std::uint32_t gc_age = 0;
   std::uint64_t gc_mark_epoch = 0;
+  std::uint32_t pin_count = 0;
+  std::uint64_t pin_epoch = 0;
 };
 
 struct SymbolValue {
@@ -197,6 +204,16 @@ struct RuntimeHeapStats {
   std::uint64_t write_barrier_rejected_isolation = 0;
   std::uint64_t remembered_set_objects = 0;
   std::uint64_t remembered_set_entries = 0;
+  std::uint64_t active_pins = 0;
+  std::uint64_t pinned_objects = 0;
+  std::uint64_t pin_tokens_created = 0;
+  std::uint64_t pin_unpins = 0;
+  std::uint64_t pin_stale_unpins = 0;
+  std::uint64_t opaque_handles_created = 0;
+  std::uint64_t active_opaque_handles = 0;
+  std::uint64_t buffer_views_created = 0;
+  std::uint64_t native_waits_created = 0;
+  std::uint64_t native_wait_cancellations = 0;
   std::vector<RuntimeArenaStats> arenas;
 };
 
@@ -213,6 +230,82 @@ struct RuntimeGcResult {
 struct RuntimeWriteBarrierResult {
   bool ok = true;
   bool remembered = false;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimePinToken {
+  std::uint64_t pin_id = 0;
+  std::uint64_t pin_epoch = 0;
+  std::uint64_t allocation_id = 0;
+  RuntimePinViewKind view_kind = RuntimePinViewKind::Opaque;
+  RuntimePinPermission permissions = RuntimePinPermission::ReadOnly;
+  OwnerToken owner;
+  ObjectGeneration generation = ObjectGeneration::Young;
+  bool active = false;
+};
+
+struct RuntimePinResult {
+  bool ok = true;
+  RuntimePinToken token;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeUnpinResult {
+  bool ok = true;
+  bool unpinned = false;
+  bool stale = false;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeOpaqueHandle {
+  std::uint64_t handle_id = 0;
+  std::uint64_t pin_id = 0;
+  std::uint64_t pin_epoch = 0;
+  std::uint64_t allocation_id = 0;
+  HeapObjectKind kind = HeapObjectKind::Instance;
+  bool active = false;
+};
+
+struct RuntimeOpaqueHandleResult {
+  bool ok = true;
+  bool released = false;
+  RuntimeOpaqueHandle handle;
+  Value value = Value::null();
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeValueBufferView {
+  std::uint64_t pin_id = 0;
+  const Value *data = nullptr;
+  std::size_t size = 0;
+  bool read_only = true;
+  bool active = false;
+};
+
+struct RuntimeValueBufferViewResult {
+  bool ok = true;
+  RuntimeValueBufferView view;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeNativeWaitHandle {
+  std::uint64_t wait_id = 0;
+  std::uint64_t pin_id = 0;
+  std::uint64_t pin_epoch = 0;
+  bool active = false;
+  bool cancellation_requested = false;
+};
+
+struct RuntimeNativeWaitResult {
+  bool ok = true;
+  bool cancelled = false;
+  bool finished = false;
+  RuntimeNativeWaitHandle handle;
   std::string error_name;
   std::string message;
 };
@@ -252,11 +345,50 @@ public:
                                   bool from_safepoint = false);
   void request_garbage_collection(RuntimeGcCycle cycle = RuntimeGcCycle::Full);
   std::optional<RuntimeGcCycle> pending_gc_request() const;
+  RuntimePinResult
+  pin(const Value &value,
+      RuntimePinViewKind view_kind = RuntimePinViewKind::Opaque,
+      RuntimePinPermission permissions = RuntimePinPermission::ReadOnly);
+  RuntimeUnpinResult unpin(RuntimePinToken *token);
+  std::uint64_t pin_count(const Value &value) const;
+  bool is_pinned(const Value &value) const;
+  RuntimeOpaqueHandleResult opaque_handle_for(const RuntimePinToken &token);
+  RuntimeOpaqueHandleResult release_opaque_handle(RuntimeOpaqueHandle *handle);
+  RuntimeOpaqueHandleResult
+  resolve_opaque_handle(const RuntimeOpaqueHandle &handle) const;
+  RuntimeValueBufferViewResult value_buffer_view(const RuntimePinToken &token);
+  RuntimeNativeWaitResult register_native_wait(const RuntimePinToken &token);
+  RuntimeNativeWaitResult cancel_native_wait(RuntimeNativeWaitHandle *handle);
+  RuntimeNativeWaitResult
+  poll_native_wait(const RuntimeNativeWaitHandle &handle) const;
+  RuntimeNativeWaitResult finish_native_wait(RuntimeNativeWaitHandle *handle);
   RuntimeHeapStats stats() const;
 
 private:
   class Impl;
   std::shared_ptr<Impl> impl_;
+};
+
+class RuntimePinScope {
+public:
+  RuntimePinScope(
+      RuntimeHeap &heap, const Value &value,
+      RuntimePinViewKind view_kind = RuntimePinViewKind::Opaque,
+      RuntimePinPermission permissions = RuntimePinPermission::ReadOnly);
+  RuntimePinScope(const RuntimePinScope &) = delete;
+  RuntimePinScope &operator=(const RuntimePinScope &) = delete;
+  RuntimePinScope(RuntimePinScope &&other) noexcept;
+  RuntimePinScope &operator=(RuntimePinScope &&other) noexcept;
+  ~RuntimePinScope();
+
+  bool active() const;
+  const RuntimePinResult &result() const;
+  const RuntimePinToken &token() const;
+  RuntimeUnpinResult unpin();
+
+private:
+  RuntimeHeap *heap_ = nullptr;
+  RuntimePinResult result_;
 };
 
 RuntimeHeap &default_runtime_heap();
@@ -326,6 +458,23 @@ public:
   RuntimeGcResult collect_garbage(const std::vector<Value> &roots = {},
                                   RuntimeGcCycle cycle = RuntimeGcCycle::Full);
   void request_garbage_collection(RuntimeGcCycle cycle = RuntimeGcCycle::Full);
+  RuntimePinResult
+  pin(const Value &value,
+      RuntimePinViewKind view_kind = RuntimePinViewKind::Opaque,
+      RuntimePinPermission permissions = RuntimePinPermission::ReadOnly);
+  RuntimeUnpinResult unpin(RuntimePinToken *token);
+  std::uint64_t pin_count(const Value &value) const;
+  bool is_pinned(const Value &value) const;
+  RuntimeOpaqueHandleResult opaque_handle_for(const RuntimePinToken &token);
+  RuntimeOpaqueHandleResult release_opaque_handle(RuntimeOpaqueHandle *handle);
+  RuntimeOpaqueHandleResult
+  resolve_opaque_handle(const RuntimeOpaqueHandle &handle) const;
+  RuntimeValueBufferViewResult value_buffer_view(const RuntimePinToken &token);
+  RuntimeNativeWaitResult register_native_wait(const RuntimePinToken &token);
+  RuntimeNativeWaitResult cancel_native_wait(RuntimeNativeWaitHandle *handle);
+  RuntimeNativeWaitResult
+  poll_native_wait(const RuntimeNativeWaitHandle &handle) const;
+  RuntimeNativeWaitResult finish_native_wait(RuntimeNativeWaitHandle *handle);
 
 private:
   struct Impl;

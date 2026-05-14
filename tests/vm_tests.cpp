@@ -1675,6 +1675,273 @@ void test_runtime_gc_parallel_smoke() {
          "final full GC should reclaim worker allocations after roots clear");
 }
 
+void test_runtime_pin_roots_gc_and_rejects_stale_unpin() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value value =
+      heap.make_list_value({amber::runtime::Value::integer(1)});
+  std::shared_ptr<amber::runtime::ListValue> list = value.as_list();
+
+  amber::runtime::RuntimePinResult pin = heap.pin(value);
+  expect(pin.ok && pin.token.active, "pin should create active token");
+  expect(heap.pin_count(value) == 1, "pin count should include active token");
+  expect((list->header.flags & amber::runtime::kObjectFlagPinned) != 0U,
+         "pin should set object pinned flag");
+
+  value = amber::runtime::Value::null();
+  const amber::runtime::RuntimeGcResult pinned_gc =
+      heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Full);
+  expect(pinned_gc.reclaimed == 0, "active pin should root object for GC");
+  expect(list->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "pinned object should remain live after GC");
+
+  amber::runtime::RuntimeUnpinResult first = heap.unpin(&pin.token);
+  expect(first.ok && first.unpinned && !pin.token.active,
+         "first unpin should deactivate token");
+  amber::runtime::RuntimeUnpinResult second = heap.unpin(&pin.token);
+  expect(second.ok && !second.unpinned && second.stale,
+         "stale/double unpin should be guarded and return false");
+
+  const amber::runtime::RuntimeGcResult after_unpin =
+      heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Full);
+  expect(after_unpin.reclaimed == 1,
+         "unpinned object should be collectable without roots");
+  expect(list->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Deallocated,
+         "GC should tombstone object after pin release");
+}
+
+void test_runtime_pin_scope_nesting_counts_and_releases() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value value = heap.make_list_value({});
+  const std::shared_ptr<amber::runtime::ListValue> list = value.as_list();
+
+  {
+    amber::runtime::RuntimePinScope outer(heap, value);
+    expect(outer.active(), "outer pin scope should be active");
+    expect(heap.pin_count(value) == 1, "outer scope should pin once");
+    {
+      amber::runtime::RuntimePinScope inner(heap, value);
+      expect(inner.active(), "inner pin scope should be active");
+      expect(heap.pin_count(value) == 2,
+             "nested scope should increment pin count");
+      const amber::runtime::RuntimeGcResult gc =
+          heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Full);
+      expect(gc.reclaimed == 0, "nested active pins should prevent GC reclaim");
+    }
+    expect(heap.pin_count(value) == 1,
+           "inner scope destructor should release one pin");
+  }
+
+  expect(heap.pin_count(value) == 0, "outer scope should release final pin");
+  expect((list->header.flags & amber::runtime::kObjectFlagPinned) == 0U,
+         "final unpin should clear object pinned flag");
+}
+
+void test_runtime_pin_opaque_handle_boundary() {
+  amber::runtime::RuntimeHeap heap;
+  std::shared_ptr<amber::runtime::InstanceValue> instance =
+      heap.make_instance_value(2);
+  amber::runtime::Value value = amber::runtime::Value::instance(instance);
+
+  amber::runtime::RuntimePinResult pin = heap.pin(value);
+  expect(pin.ok, "opaque pin should succeed for ordinary object");
+  amber::runtime::RuntimeOpaqueHandleResult handle_result =
+      heap.opaque_handle_for(pin.token);
+  expect(handle_result.ok && handle_result.handle.active &&
+             handle_result.handle.handle_id != 0,
+         "opaque handle should be active and identifier based");
+  expect(handle_result.handle.allocation_id == instance->header.allocation_id,
+         "opaque handle should refer to allocation id, not raw layout");
+
+  amber::runtime::RuntimeOpaqueHandleResult resolved =
+      heap.resolve_opaque_handle(handle_result.handle);
+  expect(resolved.ok && resolved.value.is_instance_object() &&
+             resolved.value.as_instance_object() == instance,
+         "opaque handle should resolve through runtime registry");
+
+  amber::runtime::RuntimeOpaqueHandle handle = handle_result.handle;
+  amber::runtime::RuntimeOpaqueHandleResult released =
+      heap.release_opaque_handle(&handle);
+  expect(released.ok && released.released && !handle.active,
+         "opaque handle release should deactivate handle");
+  amber::runtime::RuntimeOpaqueHandleResult stale =
+      heap.resolve_opaque_handle(handle);
+  expect(!stale.ok && stale.error_name == "LifetimeError",
+         "released opaque handle should not resolve");
+
+  amber::runtime::RuntimeUnpinResult unpin = heap.unpin(&pin.token);
+  expect(unpin.unpinned, "opaque pin should unpin cleanly");
+}
+
+void test_runtime_pin_buffer_view_mode() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value value = heap.make_list_value(
+      {amber::runtime::Value::integer(3), amber::runtime::Value::integer(4)});
+
+  amber::runtime::RuntimePinResult opaque = heap.pin(value);
+  expect(opaque.ok, "opaque pin should succeed");
+  amber::runtime::RuntimeValueBufferViewResult wrong_mode =
+      heap.value_buffer_view(opaque.token);
+  expect(!wrong_mode.ok && wrong_mode.error_name == "TypeError",
+         "buffer view should reject opaque pin token");
+  heap.unpin(&opaque.token);
+
+  amber::runtime::RuntimePinResult buffer =
+      heap.pin(value, amber::runtime::RuntimePinViewKind::ValueBuffer,
+               amber::runtime::RuntimePinPermission::ReadOnly);
+  expect(buffer.ok, "buffer pin should succeed for list storage");
+  amber::runtime::RuntimeValueBufferViewResult view =
+      heap.value_buffer_view(buffer.token);
+  expect(view.ok && view.view.active && view.view.size == 2 &&
+             view.view.data != nullptr,
+         "buffer pin should expose stable value span");
+  expect(view.view.data[0].is_integer() && view.view.data[0].as_integer() == 3,
+         "buffer view should point at list item storage");
+  heap.unpin(&buffer.token);
+
+  amber::runtime::RuntimeValueBufferViewResult after_unpin =
+      heap.value_buffer_view(buffer.token);
+  expect(!after_unpin.ok && after_unpin.error_name == "LifetimeError",
+         "buffer view should reject stale token after unpin");
+}
+
+void test_runtime_pin_dealloc_after_pin_violation() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  Constant one;
+  one.kind = ConstantKind::Integer;
+  one.int_value = 1;
+  module.const_pool.push_back(one);
+
+  BcCode make_list;
+  make_list.code_id = 1;
+  make_list.kind = CodeKind::Method;
+  make_list.reg_count = 2;
+  make_list.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  make_list.instructions.push_back(
+      {Opcode::MakeList, {{1, false}, {0, false}, {1, false}}});
+  make_list.instructions.push_back({Opcode::Return, {{1, false}}});
+
+  BcCode dealloc;
+  dealloc.code_id = 2;
+  dealloc.kind = CodeKind::Method;
+  dealloc.reg_count = 2;
+  dealloc.instructions.push_back(
+      {Opcode::ObjDealloc, {{1, false}, {0, false}}});
+  dealloc.instructions.push_back({Opcode::Return, {{1, false}}});
+  module.code_objects = {make_list, dealloc};
+
+  amber::runtime::RuntimeWorld world(module);
+  amber::runtime::ExecutionResult made = world.execute(1);
+  expect(made.ok() && made.value.is_list(),
+         "pin dealloc probe should make list");
+  const std::shared_ptr<amber::runtime::ListValue> list = made.value.as_list();
+
+  amber::runtime::RuntimePinResult pin = world.pin(made.value);
+  expect(pin.ok, "world pin should succeed");
+  amber::runtime::ExecutionResult blocked = world.execute(2, {made.value});
+  expect(!blocked.ok() && blocked.fault.has_value() &&
+             blocked.fault->error_name == "PinnedObjectError",
+         "OBJ_DEALLOC should reject active pin");
+  expect(list->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "failed dealloc should not change lifetime state");
+
+  amber::runtime::RuntimeUnpinResult unpin = world.unpin(&pin.token);
+  expect(unpin.unpinned, "world unpin should succeed");
+  amber::runtime::ExecutionResult released = world.execute(2, {made.value});
+  expect(released.ok() && released.value.is_bool() && released.value.as_bool(),
+         "OBJ_DEALLOC should succeed after pin release");
+  expect(list->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Deallocated,
+         "dealloc after unpin should tombstone list");
+  amber::runtime::RuntimePinResult dead_pin = world.pin(made.value);
+  expect(!dead_pin.ok && dead_pin.error_name == "UseAfterFreeError",
+         "pin should reject deallocated objects");
+}
+
+void test_runtime_pin_parallel_race_smoke() {
+  amber::runtime::RuntimeHeap heap;
+  std::vector<amber::runtime::Value> values;
+  for (std::int64_t i = 0; i < 32; ++i) {
+    values.push_back(heap.make_list_value({amber::runtime::Value::integer(i)}));
+  }
+
+  std::atomic<int> failures{0};
+  std::vector<std::thread> threads;
+  for (std::uint64_t worker = 0; worker < 4; ++worker) {
+    threads.emplace_back([&heap, &values, &failures, worker]() {
+      amber::runtime::RuntimeWorkerScope scope(80 + worker);
+      for (std::size_t i = worker; i < values.size(); i += 4) {
+        for (int round = 0; round < 8; ++round) {
+          amber::runtime::RuntimePinResult pin = heap.pin(values[i]);
+          if (!pin.ok) {
+            ++failures;
+            continue;
+          }
+          const amber::runtime::RuntimeGcResult gc = heap.collect_garbage(
+              values, amber::runtime::RuntimeGcCycle::Full);
+          if (gc.reclaimed != 0) {
+            ++failures;
+          }
+          amber::runtime::RuntimeUnpinResult unpin = heap.unpin(&pin.token);
+          if (!unpin.unpinned) {
+            ++failures;
+          }
+        }
+      }
+    });
+  }
+  for (std::thread &thread : threads) {
+    thread.join();
+  }
+
+  expect(failures.load() == 0, "parallel pin/unpin smoke should not fail");
+  const amber::runtime::RuntimeHeapStats stats = heap.stats();
+  expect(stats.pin_tokens_created == 256,
+         "parallel smoke should create one token per pin attempt");
+  expect(stats.active_pins == 0 && stats.pinned_objects == 0,
+         "parallel smoke should release all pins");
+}
+
+void test_runtime_native_wait_cancel_poll_uses_active_pin() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value value = heap.make_list_value({});
+  amber::runtime::RuntimePinResult pin = heap.pin(value);
+  expect(pin.ok, "native wait needs active pin");
+
+  amber::runtime::RuntimeNativeWaitResult wait =
+      heap.register_native_wait(pin.token);
+  expect(wait.ok && wait.handle.active,
+         "native wait registration should return active handle");
+  amber::runtime::RuntimeNativeWaitHandle handle = wait.handle;
+  amber::runtime::RuntimeNativeWaitResult initial_poll =
+      heap.poll_native_wait(handle);
+  expect(initial_poll.ok && !initial_poll.cancelled,
+         "native wait should start without cancellation");
+
+  amber::runtime::RuntimeNativeWaitResult cancel =
+      heap.cancel_native_wait(&handle);
+  expect(cancel.ok && cancel.cancelled && handle.cancellation_requested,
+         "native wait cancel hook should record pending cancellation");
+  amber::runtime::RuntimeNativeWaitResult cancelled_poll =
+      heap.poll_native_wait(handle);
+  expect(cancelled_poll.ok && cancelled_poll.cancelled,
+         "native wait poll should observe cancellation");
+
+  amber::runtime::RuntimeNativeWaitResult finish =
+      heap.finish_native_wait(&handle);
+  expect(finish.ok && finish.finished && !handle.active,
+         "native wait finish should deactivate wait handle");
+  amber::runtime::RuntimeNativeWaitResult stale_poll =
+      heap.poll_native_wait(handle);
+  expect(!stale_poll.ok && stale_poll.error_name == "LifetimeError",
+         "finished native wait should reject further polls");
+  heap.unpin(&pin.token);
+}
+
 void test_runtime_world_heap_tracks_vm_allocations() {
   using namespace amber::bytecode;
 
@@ -2578,6 +2845,13 @@ int main() {
   test_runtime_gc_write_barrier_rejects_invalid_edges();
   test_runtime_gc_safepoint_scans_vm_frame_roots();
   test_runtime_gc_parallel_smoke();
+  test_runtime_pin_roots_gc_and_rejects_stale_unpin();
+  test_runtime_pin_scope_nesting_counts_and_releases();
+  test_runtime_pin_opaque_handle_boundary();
+  test_runtime_pin_buffer_view_mode();
+  test_runtime_pin_dealloc_after_pin_violation();
+  test_runtime_pin_parallel_race_smoke();
+  test_runtime_native_wait_cancel_poll_uses_active_pin();
   test_runtime_world_heap_tracks_vm_allocations();
   test_runtime_lifecycle_destroy_opcode_is_idempotent();
   test_runtime_lifecycle_dealloc_opcode_tombstones_instance_payload();

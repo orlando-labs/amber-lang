@@ -82,6 +82,35 @@ public:
     bool logical_live = true;
   };
 
+  struct PinRecord {
+    std::uint64_t pin_id = 0;
+    std::uint64_t pin_epoch = 0;
+    std::uint64_t allocation_id = 0;
+    RuntimePinViewKind view_kind = RuntimePinViewKind::Opaque;
+    RuntimePinPermission permissions = RuntimePinPermission::ReadOnly;
+    OwnerToken owner;
+    ObjectGeneration generation = ObjectGeneration::Young;
+    Value value = Value::null();
+    bool active = false;
+  };
+
+  struct OpaqueHandleRecord {
+    std::uint64_t handle_id = 0;
+    std::uint64_t pin_id = 0;
+    std::uint64_t pin_epoch = 0;
+    std::uint64_t allocation_id = 0;
+    HeapObjectKind kind = HeapObjectKind::Instance;
+    bool active = false;
+  };
+
+  struct NativeWaitRecord {
+    std::uint64_t wait_id = 0;
+    std::uint64_t pin_id = 0;
+    std::uint64_t pin_epoch = 0;
+    bool active = false;
+    bool cancellation_requested = false;
+  };
+
   ~Impl() { drain_all_remote_frees(); }
 
   template <typename T, typename Init>
@@ -257,6 +286,14 @@ public:
       enqueue_value(root);
     }
 
+    for (const auto &[pin_id, pin] : pins_) {
+      (void)pin_id;
+      if (pin.active) {
+        ++result.roots;
+        enqueue_value(pin.value);
+      }
+    }
+
     if (cycle == RuntimeGcCycle::Young) {
       for (const auto &[owner_id, children] : remembered_set_) {
         (void)owner_id;
@@ -301,6 +338,9 @@ public:
         continue;
       }
       if (!cycle_collects_header(cycle, *header)) {
+        continue;
+      }
+      if (active_pin_counts_.find(allocation_id) != active_pin_counts_.end()) {
         continue;
       }
       if (visited.find(allocation_id) == visited.end()) {
@@ -354,6 +394,392 @@ public:
     return pending_gc_cycle_;
   }
 
+  RuntimePinResult pin(const Value &value, RuntimePinViewKind view_kind,
+                       RuntimePinPermission permissions) {
+    RuntimePinResult out;
+    ObjHeader *header = mutable_heap_header_from_value(value);
+    if (!value_has_heap_payload_tag(value) || header == nullptr) {
+      out.ok = false;
+      out.error_name = "TypeError";
+      out.message = "pin expects a heap object";
+      return out;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::optional<std::string> lifecycle_error =
+        lifecycle_access_error_name(*header);
+    if (lifecycle_error.has_value()) {
+      out.ok = false;
+      out.error_name = *lifecycle_error;
+      out.message = lifecycle_access_error_message(*lifecycle_error);
+      return out;
+    }
+    const auto object = objects_.find(header->allocation_id);
+    if (header->allocation_id == 0 || object == objects_.end() ||
+        !object->second.logical_live) {
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "pin expects a live heap-owned object";
+      return out;
+    }
+    if (view_kind == RuntimePinViewKind::ValueBuffer && !value.is_list() &&
+        !value.is_tuple()) {
+      out.ok = false;
+      out.error_name = "TypeError";
+      out.message = "buffer pin expects list or tuple storage";
+      return out;
+    }
+
+    const std::uint64_t pin_id = next_pin_id_++;
+    const std::uint64_t pin_epoch = next_pin_epoch_++;
+    RuntimePinToken token;
+    token.pin_id = pin_id;
+    token.pin_epoch = pin_epoch;
+    token.allocation_id = header->allocation_id;
+    token.view_kind = view_kind;
+    token.permissions = permissions;
+    token.owner = header->owner;
+    token.generation = header->generation;
+    token.active = true;
+
+    pins_[pin_id] =
+        PinRecord{pin_id,      pin_epoch,     header->allocation_id, view_kind,
+                  permissions, header->owner, header->generation,    value,
+                  true};
+    active_pins_by_object_[header->allocation_id].insert(pin_id);
+    active_pin_counts_[header->allocation_id] += 1;
+    header->pin_count += 1;
+    header->pin_epoch = pin_epoch;
+    header->flags |= kObjectFlagPinned;
+    ++stats_.active_pins;
+    ++stats_.pin_tokens_created;
+    out.token = token;
+    return out;
+  }
+
+  RuntimeUnpinResult unpin(RuntimePinToken *token) {
+    RuntimeUnpinResult out;
+    if (token == nullptr || token->pin_id == 0 || !token->active) {
+      out.stale = true;
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++stats_.pin_stale_unpins;
+      return out;
+    }
+
+    Value deferred_release = Value::null();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto found = pins_.find(token->pin_id);
+      if (found == pins_.end() || !found->second.active ||
+          found->second.pin_epoch != token->pin_epoch ||
+          found->second.allocation_id != token->allocation_id) {
+        out.stale = true;
+        ++stats_.pin_stale_unpins;
+        token->active = false;
+        return out;
+      }
+
+      PinRecord &pin = found->second;
+      ObjHeader *header = mutable_heap_header_from_value(pin.value);
+      if (header != nullptr && header->allocation_id == pin.allocation_id) {
+        if (header->pin_count > 0) {
+          header->pin_count -= 1;
+        }
+        if (header->pin_count == 0) {
+          header->flags &= ~kObjectFlagPinned;
+        }
+      }
+
+      auto active_count = active_pin_counts_.find(pin.allocation_id);
+      if (active_count != active_pin_counts_.end()) {
+        if (active_count->second <= 1) {
+          active_pin_counts_.erase(active_count);
+        } else {
+          active_count->second -= 1;
+        }
+      }
+      auto active_set = active_pins_by_object_.find(pin.allocation_id);
+      if (active_set != active_pins_by_object_.end()) {
+        active_set->second.erase(pin.pin_id);
+        if (active_set->second.empty()) {
+          active_pins_by_object_.erase(active_set);
+        }
+      }
+      pin.active = false;
+      deferred_release = std::move(pin.value);
+      pin.value = Value::null();
+      if (stats_.active_pins > 0) {
+        --stats_.active_pins;
+      }
+      ++stats_.pin_unpins;
+      token->active = false;
+      out.unpinned = true;
+    }
+    (void)deferred_release;
+    return out;
+  }
+
+  std::uint64_t pin_count(const Value &value) const {
+    const ObjHeader *header = heap_header_from_value(value);
+    if (header == nullptr || header->allocation_id == 0) {
+      return 0;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = active_pin_counts_.find(header->allocation_id);
+    return found == active_pin_counts_.end() ? 0 : found->second;
+  }
+
+  bool is_pinned(const Value &value) const { return pin_count(value) > 0; }
+
+  RuntimeOpaqueHandleResult opaque_handle_for(const RuntimePinToken &token) {
+    RuntimeOpaqueHandleResult out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    PinRecord *pin =
+        active_pin_for_token_locked(token, &out.error_name, &out.message);
+    if (pin == nullptr) {
+      out.ok = false;
+      return out;
+    }
+    if (pin->view_kind != RuntimePinViewKind::Opaque) {
+      out.ok = false;
+      out.error_name = "TypeError";
+      out.message = "opaque handle requires an opaque pin";
+      return out;
+    }
+    const ObjHeader *header = heap_header_from_value(pin->value);
+    if (header == nullptr) {
+      out.ok = false;
+      out.error_name = "UseAfterFreeError";
+      out.message = "pinned object is not available";
+      return out;
+    }
+    const std::uint64_t handle_id = next_opaque_handle_id_++;
+    RuntimeOpaqueHandle handle;
+    handle.handle_id = handle_id;
+    handle.pin_id = token.pin_id;
+    handle.pin_epoch = token.pin_epoch;
+    handle.allocation_id = token.allocation_id;
+    handle.kind = header->kind;
+    handle.active = true;
+    opaque_handles_[handle_id] =
+        OpaqueHandleRecord{handle_id,           token.pin_id, token.pin_epoch,
+                           token.allocation_id, header->kind, true};
+    ++stats_.opaque_handles_created;
+    ++stats_.active_opaque_handles;
+    out.handle = handle;
+    return out;
+  }
+
+  RuntimeOpaqueHandleResult release_opaque_handle(RuntimeOpaqueHandle *handle) {
+    RuntimeOpaqueHandleResult out;
+    if (handle == nullptr || handle->handle_id == 0 || !handle->active) {
+      out.ok = true;
+      out.released = false;
+      out.error_name = "LifetimeError";
+      out.message = "opaque handle is stale";
+      return out;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = opaque_handles_.find(handle->handle_id);
+    if (found == opaque_handles_.end() || !found->second.active ||
+        found->second.pin_epoch != handle->pin_epoch) {
+      handle->active = false;
+      out.ok = true;
+      out.released = false;
+      out.error_name = "LifetimeError";
+      out.message = "opaque handle is stale";
+      return out;
+    }
+    found->second.active = false;
+    handle->active = false;
+    if (stats_.active_opaque_handles > 0) {
+      --stats_.active_opaque_handles;
+    }
+    out.released = true;
+    return out;
+  }
+
+  RuntimeOpaqueHandleResult
+  resolve_opaque_handle(const RuntimeOpaqueHandle &handle) const {
+    RuntimeOpaqueHandleResult out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto handle_record = opaque_handles_.find(handle.handle_id);
+    if (handle.handle_id == 0 || !handle.active ||
+        handle_record == opaque_handles_.end() ||
+        !handle_record->second.active ||
+        handle_record->second.pin_epoch != handle.pin_epoch) {
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "opaque handle is stale";
+      return out;
+    }
+    const auto pin = pins_.find(handle.pin_id);
+    if (pin == pins_.end() || !pin->second.active ||
+        pin->second.pin_epoch != handle.pin_epoch ||
+        pin->second.allocation_id != handle.allocation_id) {
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "opaque handle pin is not active";
+      return out;
+    }
+    out.value = pin->second.value;
+    out.handle = handle;
+    return out;
+  }
+
+  RuntimeValueBufferViewResult value_buffer_view(const RuntimePinToken &token) {
+    RuntimeValueBufferViewResult out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    PinRecord *pin =
+        active_pin_for_token_locked(token, &out.error_name, &out.message);
+    if (pin == nullptr) {
+      out.ok = false;
+      return out;
+    }
+    if (pin->view_kind != RuntimePinViewKind::ValueBuffer) {
+      out.ok = false;
+      out.error_name = "TypeError";
+      out.message = "value buffer view requires a buffer pin";
+      return out;
+    }
+
+    RuntimeValueBufferView view;
+    view.pin_id = token.pin_id;
+    view.read_only = token.permissions == RuntimePinPermission::ReadOnly;
+    view.active = true;
+    if (pin->value.is_list()) {
+      const std::shared_ptr<ListValue> list = pin->value.as_list();
+      if (list == nullptr ||
+          lifecycle_access_error_name(list->header).has_value()) {
+        out.ok = false;
+        out.error_name = "UseAfterFreeError";
+        out.message = "pinned list buffer is not live";
+        return out;
+      }
+      view.data = list->items.empty() ? nullptr : list->items.data();
+      view.size = list->items.size();
+    } else if (pin->value.is_tuple()) {
+      const std::shared_ptr<TupleValue> tuple = pin->value.as_tuple();
+      if (tuple == nullptr ||
+          lifecycle_access_error_name(tuple->header).has_value()) {
+        out.ok = false;
+        out.error_name = "UseAfterFreeError";
+        out.message = "pinned tuple buffer is not live";
+        return out;
+      }
+      view.data = tuple->items.empty() ? nullptr : tuple->items.data();
+      view.size = tuple->items.size();
+    } else {
+      out.ok = false;
+      out.error_name = "TypeError";
+      out.message = "buffer pin target has no contiguous value storage";
+      return out;
+    }
+    ++stats_.buffer_views_created;
+    out.view = view;
+    return out;
+  }
+
+  RuntimeNativeWaitResult register_native_wait(const RuntimePinToken &token) {
+    RuntimeNativeWaitResult out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    PinRecord *pin =
+        active_pin_for_token_locked(token, &out.error_name, &out.message);
+    if (pin == nullptr) {
+      out.ok = false;
+      return out;
+    }
+    (void)pin;
+    const std::uint64_t wait_id = next_native_wait_id_++;
+    RuntimeNativeWaitHandle handle;
+    handle.wait_id = wait_id;
+    handle.pin_id = token.pin_id;
+    handle.pin_epoch = token.pin_epoch;
+    handle.active = true;
+    native_waits_[wait_id] =
+        NativeWaitRecord{wait_id, token.pin_id, token.pin_epoch, true, false};
+    ++stats_.native_waits_created;
+    out.handle = handle;
+    return out;
+  }
+
+  RuntimeNativeWaitResult cancel_native_wait(RuntimeNativeWaitHandle *handle) {
+    RuntimeNativeWaitResult out;
+    if (handle == nullptr || handle->wait_id == 0 || !handle->active) {
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "native wait handle is stale";
+      return out;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = native_waits_.find(handle->wait_id);
+    if (found == native_waits_.end() || !found->second.active ||
+        found->second.pin_epoch != handle->pin_epoch) {
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "native wait handle is stale";
+      return out;
+    }
+    found->second.cancellation_requested = true;
+    handle->cancellation_requested = true;
+    ++stats_.native_wait_cancellations;
+    out.cancelled = true;
+    out.handle = *handle;
+    return out;
+  }
+
+  RuntimeNativeWaitResult
+  poll_native_wait(const RuntimeNativeWaitHandle &handle) const {
+    RuntimeNativeWaitResult out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto wait = native_waits_.find(handle.wait_id);
+    if (handle.wait_id == 0 || !handle.active || wait == native_waits_.end() ||
+        !wait->second.active || wait->second.pin_epoch != handle.pin_epoch) {
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "native wait handle is stale";
+      return out;
+    }
+    const auto pin = pins_.find(handle.pin_id);
+    if (pin == pins_.end() || !pin->second.active ||
+        pin->second.pin_epoch != handle.pin_epoch) {
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "native wait pin is not active";
+      return out;
+    }
+    out.cancelled = wait->second.cancellation_requested;
+    out.handle = handle;
+    out.handle.cancellation_requested = out.cancelled;
+    return out;
+  }
+
+  RuntimeNativeWaitResult finish_native_wait(RuntimeNativeWaitHandle *handle) {
+    RuntimeNativeWaitResult out;
+    if (handle == nullptr || handle->wait_id == 0 || !handle->active) {
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "native wait handle is stale";
+      return out;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = native_waits_.find(handle->wait_id);
+    if (found == native_waits_.end() || !found->second.active ||
+        found->second.pin_epoch != handle->pin_epoch) {
+      handle->active = false;
+      out.ok = false;
+      out.error_name = "LifetimeError";
+      out.message = "native wait handle is stale";
+      return out;
+    }
+    found->second.active = false;
+    handle->active = false;
+    out.finished = true;
+    out.cancelled = found->second.cancellation_requested;
+    out.handle = *handle;
+    return out;
+  }
+
   RuntimeHeapStats stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     RuntimeHeapStats out = stats_;
@@ -386,6 +812,7 @@ public:
     out.remembered_set_objects =
         static_cast<std::uint64_t>(remembered_set_.size());
     out.remembered_set_entries = remembered_entry_count_locked();
+    out.pinned_objects = static_cast<std::uint64_t>(active_pin_counts_.size());
     for (const auto &[worker_id, arena] : arenas_) {
       out.arenas.push_back(RuntimeArenaStats{
           worker_id, arena.allocations, arena.live_objects,
@@ -395,6 +822,25 @@ public:
   }
 
 private:
+  PinRecord *active_pin_for_token_locked(const RuntimePinToken &token,
+                                         std::string *error_name,
+                                         std::string *message) {
+    if (token.pin_id == 0 || !token.active) {
+      *error_name = "LifetimeError";
+      *message = "pin token is stale";
+      return nullptr;
+    }
+    auto found = pins_.find(token.pin_id);
+    if (found == pins_.end() || !found->second.active ||
+        found->second.pin_epoch != token.pin_epoch ||
+        found->second.allocation_id != token.allocation_id) {
+      *error_name = "LifetimeError";
+      *message = "pin token is stale";
+      return nullptr;
+    }
+    return &found->second;
+  }
+
   template <typename T> static void destroy(void *ptr) {
     delete static_cast<T *>(ptr);
   }
@@ -718,11 +1164,21 @@ private:
   mutable std::mutex mutex_;
   std::uint64_t next_allocation_id_ = 1;
   std::uint64_t gc_epoch_ = 0;
+  std::uint64_t next_pin_id_ = 1;
+  std::uint64_t next_pin_epoch_ = 1;
+  std::uint64_t next_opaque_handle_id_ = 1;
+  std::uint64_t next_native_wait_id_ = 1;
   RuntimeHeapStats stats_;
   std::map<std::uint64_t, ArenaState> arenas_;
   std::unordered_map<std::uint64_t, ObjectRecord> objects_;
   std::unordered_map<std::uint64_t, std::unordered_set<std::uint64_t>>
       remembered_set_;
+  std::unordered_map<std::uint64_t, PinRecord> pins_;
+  std::unordered_map<std::uint64_t, std::uint64_t> active_pin_counts_;
+  std::unordered_map<std::uint64_t, std::unordered_set<std::uint64_t>>
+      active_pins_by_object_;
+  std::unordered_map<std::uint64_t, OpaqueHandleRecord> opaque_handles_;
+  std::unordered_map<std::uint64_t, NativeWaitRecord> native_waits_;
   std::shared_ptr<ShapeDescriptor> dead_shape_;
   std::optional<RuntimeGcCycle> pending_gc_cycle_;
 };
@@ -813,7 +1269,111 @@ std::optional<RuntimeGcCycle> RuntimeHeap::pending_gc_request() const {
   return impl_->pending_gc_request();
 }
 
+RuntimePinResult RuntimeHeap::pin(const Value &value,
+                                  RuntimePinViewKind view_kind,
+                                  RuntimePinPermission permissions) {
+  return impl_->pin(value, view_kind, permissions);
+}
+
+RuntimeUnpinResult RuntimeHeap::unpin(RuntimePinToken *token) {
+  return impl_->unpin(token);
+}
+
+std::uint64_t RuntimeHeap::pin_count(const Value &value) const {
+  return impl_->pin_count(value);
+}
+
+bool RuntimeHeap::is_pinned(const Value &value) const {
+  return impl_->is_pinned(value);
+}
+
+RuntimeOpaqueHandleResult
+RuntimeHeap::opaque_handle_for(const RuntimePinToken &token) {
+  return impl_->opaque_handle_for(token);
+}
+
+RuntimeOpaqueHandleResult
+RuntimeHeap::release_opaque_handle(RuntimeOpaqueHandle *handle) {
+  return impl_->release_opaque_handle(handle);
+}
+
+RuntimeOpaqueHandleResult
+RuntimeHeap::resolve_opaque_handle(const RuntimeOpaqueHandle &handle) const {
+  return impl_->resolve_opaque_handle(handle);
+}
+
+RuntimeValueBufferViewResult
+RuntimeHeap::value_buffer_view(const RuntimePinToken &token) {
+  return impl_->value_buffer_view(token);
+}
+
+RuntimeNativeWaitResult
+RuntimeHeap::register_native_wait(const RuntimePinToken &token) {
+  return impl_->register_native_wait(token);
+}
+
+RuntimeNativeWaitResult
+RuntimeHeap::cancel_native_wait(RuntimeNativeWaitHandle *handle) {
+  return impl_->cancel_native_wait(handle);
+}
+
+RuntimeNativeWaitResult
+RuntimeHeap::poll_native_wait(const RuntimeNativeWaitHandle &handle) const {
+  return impl_->poll_native_wait(handle);
+}
+
+RuntimeNativeWaitResult
+RuntimeHeap::finish_native_wait(RuntimeNativeWaitHandle *handle) {
+  return impl_->finish_native_wait(handle);
+}
+
 RuntimeHeapStats RuntimeHeap::stats() const { return impl_->stats(); }
+
+RuntimePinScope::RuntimePinScope(RuntimeHeap &heap, const Value &value,
+                                 RuntimePinViewKind view_kind,
+                                 RuntimePinPermission permissions)
+    : heap_(&heap), result_(heap.pin(value, view_kind, permissions)) {}
+
+RuntimePinScope::RuntimePinScope(RuntimePinScope &&other) noexcept
+    : heap_(other.heap_), result_(other.result_) {
+  other.heap_ = nullptr;
+  other.result_.token.active = false;
+}
+
+RuntimePinScope &RuntimePinScope::operator=(RuntimePinScope &&other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  (void)unpin();
+  heap_ = other.heap_;
+  result_ = other.result_;
+  other.heap_ = nullptr;
+  other.result_.token.active = false;
+  return *this;
+}
+
+RuntimePinScope::~RuntimePinScope() { (void)unpin(); }
+
+bool RuntimePinScope::active() const {
+  return heap_ != nullptr && result_.ok && result_.token.active;
+}
+
+const RuntimePinResult &RuntimePinScope::result() const { return result_; }
+
+const RuntimePinToken &RuntimePinScope::token() const { return result_.token; }
+
+RuntimeUnpinResult RuntimePinScope::unpin() {
+  if (heap_ == nullptr || !result_.token.active) {
+    RuntimeUnpinResult out;
+    out.stale = true;
+    return out;
+  }
+  RuntimeUnpinResult out = heap_->unpin(&result_.token);
+  if (out.unpinned || out.stale) {
+    heap_ = nullptr;
+  }
+  return out;
+}
 
 RuntimeHeap &default_runtime_heap() {
   static RuntimeHeap heap;
@@ -1443,6 +2003,15 @@ private:
     return true;
   }
 
+  bool check_not_pinned_for_lifecycle(const Frame &frame, const Value &value) {
+    if (state_->heap.is_pinned(value)) {
+      set_fault(frame, "PinnedObjectError",
+                "cannot destroy or deallocate pinned object");
+      return false;
+    }
+    return true;
+  }
+
   bool run_destroy_methods(Frame &frame, const Value &value) {
     if (!value.is_instance_object()) {
       return true;
@@ -1525,6 +2094,9 @@ private:
     if (!check_lifecycle_preconditions(frame, *header)) {
       return false;
     }
+    if (!check_not_pinned_for_lifecycle(frame, value)) {
+      return false;
+    }
     return perform_destroy(frame, value, *header, changed);
   }
 
@@ -1605,6 +2177,9 @@ private:
       return false;
     }
     if (!check_lifecycle_preconditions(frame, *header)) {
+      return false;
+    }
+    if (!check_not_pinned_for_lifecycle(frame, value)) {
       return false;
     }
     if (!header_is_destroyed(*header)) {
@@ -5237,6 +5812,137 @@ void RuntimeWorld::request_garbage_collection(RuntimeGcCycle cycle) {
     return;
   }
   impl_->state->heap.request_garbage_collection(cycle);
+}
+
+RuntimePinResult RuntimeWorld::pin(const Value &value,
+                                   RuntimePinViewKind view_kind,
+                                   RuntimePinPermission permissions) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimePinResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.pin(value, view_kind, permissions);
+}
+
+RuntimeUnpinResult RuntimeWorld::unpin(RuntimePinToken *token) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeUnpinResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.unpin(token);
+}
+
+std::uint64_t RuntimeWorld::pin_count(const Value &value) const {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return 0;
+  }
+  return impl_->state->heap.pin_count(value);
+}
+
+bool RuntimeWorld::is_pinned(const Value &value) const {
+  return pin_count(value) > 0;
+}
+
+RuntimeOpaqueHandleResult
+RuntimeWorld::opaque_handle_for(const RuntimePinToken &token) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeOpaqueHandleResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.opaque_handle_for(token);
+}
+
+RuntimeOpaqueHandleResult
+RuntimeWorld::release_opaque_handle(RuntimeOpaqueHandle *handle) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeOpaqueHandleResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.release_opaque_handle(handle);
+}
+
+RuntimeOpaqueHandleResult
+RuntimeWorld::resolve_opaque_handle(const RuntimeOpaqueHandle &handle) const {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeOpaqueHandleResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.resolve_opaque_handle(handle);
+}
+
+RuntimeValueBufferViewResult
+RuntimeWorld::value_buffer_view(const RuntimePinToken &token) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeValueBufferViewResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.value_buffer_view(token);
+}
+
+RuntimeNativeWaitResult
+RuntimeWorld::register_native_wait(const RuntimePinToken &token) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeNativeWaitResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.register_native_wait(token);
+}
+
+RuntimeNativeWaitResult
+RuntimeWorld::cancel_native_wait(RuntimeNativeWaitHandle *handle) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeNativeWaitResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.cancel_native_wait(handle);
+}
+
+RuntimeNativeWaitResult
+RuntimeWorld::poll_native_wait(const RuntimeNativeWaitHandle &handle) const {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeNativeWaitResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.poll_native_wait(handle);
+}
+
+RuntimeNativeWaitResult
+RuntimeWorld::finish_native_wait(RuntimeNativeWaitHandle *handle) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    RuntimeNativeWaitResult result;
+    result.ok = false;
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  return impl_->state->heap.finish_native_wait(handle);
 }
 
 std::string value_to_debug_string(const Value &value,

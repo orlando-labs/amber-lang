@@ -9,6 +9,7 @@ errors:
   - IsolationError
   - DestroyedAccessError
   - UseAfterFreeError
+  - PinnedObjectError
   - LifetimeError
   - IncludeCycleError
   - WorldFrozenError
