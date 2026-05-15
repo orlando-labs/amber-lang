@@ -9,6 +9,7 @@
 #include "frontend/parser/parser.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -24,6 +25,19 @@ void expect(bool condition, const std::string &message) {
     std::cerr << "vm test failed: " << message << "\n";
     std::exit(1);
   }
+}
+
+template <typename Predicate>
+bool wait_for_condition(Predicate predicate,
+                        std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return predicate();
 }
 
 amber::bytecode::EmitResult emit_ok(const std::string &source) {
@@ -1942,6 +1956,481 @@ void test_runtime_native_wait_cancel_poll_uses_active_pin() {
   heap.unpin(&pin.token);
 }
 
+void test_runtime_scheduler_runs_strands_in_parallel() {
+  amber::runtime::RuntimeScheduler scheduler(4);
+  std::atomic<int> entered{0};
+  std::atomic<int> active{0};
+  std::atomic<int> max_active{0};
+  std::atomic<bool> release{false};
+
+  for (int index = 0; index < 8; ++index) {
+    scheduler.spawn_strand([&entered, &active, &max_active, &release]() {
+      expect(amber::runtime::current_runtime_worker_id() != 0,
+             "scheduler strand should run inside a worker scope");
+      expect(amber::runtime::current_runtime_strand_id() != 0,
+             "scheduler strand should expose current strand id");
+
+      const int now = active.fetch_add(1) + 1;
+      int observed = max_active.load();
+      while (now > observed &&
+             !max_active.compare_exchange_weak(observed, now)) {
+      }
+      entered.fetch_add(1);
+      while (!release.load()) {
+        std::this_thread::yield();
+      }
+      active.fetch_sub(1);
+    });
+  }
+
+  expect(wait_for_condition([&entered]() { return entered.load() >= 4; },
+                            std::chrono::milliseconds(1000)),
+         "worker pool should start multiple strands");
+  expect(max_active.load() >= 2,
+         "worker pool should execute strands in parallel");
+  release = true;
+  expect(scheduler.wait_until_idle(std::chrono::milliseconds(1000)),
+         "scheduler should drain runnable strands");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.worker_count == 4, "scheduler should report worker count");
+  expect(stats.strands_created == 8 && stats.strands_completed == 8,
+         "scheduler stats should count completed strands");
+  expect(stats.max_parallel_running >= 2,
+         "scheduler stats should observe parallel running strands");
+}
+
+void test_runtime_scheduler_timer_queue_wakes_sleeping_strand() {
+  amber::runtime::RuntimeScheduler scheduler(2);
+  std::atomic<int> ran{0};
+  const std::uint64_t strand_id = scheduler.spawn_sleeping_strand(
+      std::chrono::milliseconds(25), [&ran]() { ran.fetch_add(1); });
+
+  const std::optional<amber::runtime::RuntimeStrandSnapshot> sleeping =
+      scheduler.strand_snapshot(strand_id);
+  expect(sleeping.has_value() &&
+             sleeping->state == amber::runtime::RuntimeStrandState::Sleeping,
+         "delayed strand should begin in sleeping state");
+  expect(!scheduler.wait_until_idle(std::chrono::milliseconds(5)),
+         "sleeping strand should keep scheduler non-idle before timer fires");
+  expect(ran.load() == 0, "sleeping strand should not run before timer wake");
+
+  expect(scheduler.wait_until_idle(std::chrono::milliseconds(1000)),
+         "timer queue should wake delayed strand");
+  expect(ran.load() == 1, "timer wake should run sleeping strand once");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.timer_wakes == 1, "scheduler should count timer wake");
+  expect(stats.local_queue_enqueues == 1,
+         "timer wake should enter a worker-local run queue");
+}
+
+void test_runtime_scheduler_explicit_wake_coalesces_sleeping_strand() {
+  amber::runtime::RuntimeScheduler scheduler(2);
+  std::atomic<int> ran{0};
+  std::atomic<std::uint64_t> observed_strand{0};
+  std::atomic<bool> release{false};
+
+  const std::uint64_t strand_id = scheduler.spawn_sleeping_strand(
+      std::chrono::hours(1), [&ran, &observed_strand, &release]() {
+        observed_strand = amber::runtime::current_runtime_strand_id();
+        ran.fetch_add(1);
+        while (!release.load()) {
+          std::this_thread::yield();
+        }
+      });
+
+  expect(scheduler.wake_strand(strand_id),
+         "first explicit wake should make sleeping strand runnable");
+  expect(!scheduler.wake_strand(strand_id),
+         "duplicate wake should be coalesced while strand is queued/running");
+  release = true;
+  expect(scheduler.wait_until_idle(std::chrono::milliseconds(1000)),
+         "explicit wake should drain sleeping strand without waiting timer");
+  expect(ran.load() == 1, "coalesced wakes should run strand once");
+  expect(observed_strand.load() == strand_id,
+         "woken strand should preserve current strand id");
+
+  const std::optional<amber::runtime::RuntimeStrandSnapshot> finished =
+      scheduler.strand_snapshot(strand_id);
+  expect(finished.has_value() &&
+             finished->state == amber::runtime::RuntimeStrandState::Finished,
+         "woken strand should finish");
+  expect(finished->explicit_wakes == 1,
+         "strand snapshot should count one accepted explicit wake");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.explicit_wakes == 1 && stats.coalesced_wakes == 1,
+         "scheduler should count accepted and coalesced wakes");
+  expect(stats.strands_completed == 1,
+         "explicit wake strand should complete exactly once");
+  expect(stats.timer_queue_depth == 0 && stats.sleeping_strands == 0,
+         "stale timer entry should not keep a woken strand logically sleeping");
+}
+
+void test_runtime_task_join_rethrows_failure() {
+  amber::runtime::RuntimeScheduler scheduler(2);
+  const std::uint64_t task_id = scheduler.spawn_task([]() {
+    throw amber::runtime::RuntimeTaskFailure("BoomError", "child failed");
+  });
+
+  const amber::runtime::RuntimeTaskJoinResult join =
+      scheduler.join_task(task_id, std::chrono::milliseconds(1000));
+  expect(!join.ok && join.joined &&
+             join.state == amber::runtime::RuntimeStrandState::Failed,
+         "join should observe failed task state");
+  expect(join.error_name == "BoomError" && join.message == "child failed",
+         "join should rethrow task failure metadata");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.tasks_created == 1 && stats.tasks_failed == 1,
+         "task stats should count failed task");
+}
+
+void test_runtime_task_join_timeout_does_not_cancel_task() {
+  amber::runtime::RuntimeScheduler scheduler(2);
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+
+  const std::uint64_t task_id = scheduler.spawn_task([&entered, &release]() {
+    entered = true;
+    while (!release.load()) {
+      std::this_thread::yield();
+    }
+  });
+
+  expect(wait_for_condition([&entered]() { return entered.load(); },
+                            std::chrono::milliseconds(1000)),
+         "timeout probe task should start");
+  const amber::runtime::RuntimeTaskJoinResult timed_out =
+      scheduler.join_task(task_id, std::chrono::milliseconds(10));
+  expect(!timed_out.ok && timed_out.timed_out &&
+             timed_out.error_name == "TimeoutError",
+         "timed join should return TimeoutError");
+
+  const std::optional<amber::runtime::RuntimeTaskSnapshot> snapshot =
+      scheduler.task_snapshot(task_id);
+  expect(snapshot.has_value() && !snapshot->cancellation_requested,
+         "join timeout should not request task cancellation");
+
+  release = true;
+  const amber::runtime::RuntimeTaskJoinResult joined =
+      scheduler.join_task(task_id, std::chrono::milliseconds(1000));
+  expect(joined.ok && joined.state == amber::runtime::RuntimeStrandState::Done,
+         "task should still finish after join timeout");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.task_join_timeouts == 1 && stats.tasks_completed == 1,
+         "task stats should count timeout and later completion");
+}
+
+void test_runtime_task_cancel_is_cooperative_safepoint() {
+  amber::runtime::RuntimeScheduler scheduler(2);
+  std::atomic<bool> entered{false};
+  std::atomic<bool> observed_cancel{false};
+
+  const std::uint64_t task_id =
+      scheduler.spawn_task([&entered, &observed_cancel]() {
+        entered = true;
+        while (!amber::runtime::current_runtime_task_cancel_requested()) {
+          std::this_thread::yield();
+        }
+        observed_cancel = true;
+        amber::runtime::throw_if_runtime_task_cancelled();
+      });
+
+  expect(wait_for_condition([&entered]() { return entered.load(); },
+                            std::chrono::milliseconds(1000)),
+         "cancellable task should start");
+  expect(scheduler.cancel_task(task_id),
+         "cancel_task should request cancellation");
+
+  const amber::runtime::RuntimeTaskJoinResult join =
+      scheduler.join_task(task_id, std::chrono::milliseconds(1000));
+  expect(!join.ok && join.cancelled && join.error_name == "CancelledError",
+         "cancelled task should join with CancelledError");
+  expect(observed_cancel.load(), "task should observe cancellation flag");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.task_cancellation_requests == 1 && stats.tasks_cancelled == 1,
+         "task stats should count cooperative cancellation");
+}
+
+void test_runtime_structured_task_scope_propagates_first_failure() {
+  amber::runtime::RuntimeScheduler scheduler(3);
+  std::atomic<bool> sibling_started{false};
+  std::atomic<bool> sibling_cancelled{false};
+  std::atomic<bool> allow_failure{false};
+
+  const std::uint64_t parent_id = scheduler.spawn_task(
+      [&scheduler, &sibling_started, &sibling_cancelled, &allow_failure]() {
+        scheduler.spawn_task([&sibling_started, &sibling_cancelled]() {
+          sibling_started = true;
+          while (!amber::runtime::current_runtime_task_cancel_requested()) {
+            std::this_thread::yield();
+          }
+          sibling_cancelled = true;
+          amber::runtime::throw_if_runtime_task_cancelled();
+        });
+        scheduler.spawn_task([&allow_failure]() {
+          while (!allow_failure.load()) {
+            std::this_thread::yield();
+          }
+          throw amber::runtime::RuntimeTaskFailure("ChildBoom",
+                                                   "first child failed");
+        });
+      });
+
+  expect(
+      wait_for_condition(
+          [&scheduler, parent_id, &sibling_started]() {
+            const std::optional<amber::runtime::RuntimeTaskSnapshot> snapshot =
+                scheduler.task_snapshot(parent_id);
+            return snapshot.has_value() &&
+                   snapshot->state ==
+                       amber::runtime::RuntimeStrandState::Waiting &&
+                   snapshot->active_children == 2 && sibling_started.load();
+          },
+          std::chrono::milliseconds(1000)),
+      "parent should wait for structured children at scope exit");
+  expect(sibling_started.load(), "sibling should be running before failure");
+
+  allow_failure = true;
+  const amber::runtime::RuntimeTaskJoinResult join =
+      scheduler.join_task(parent_id, std::chrono::milliseconds(1000));
+  expect(!join.ok && join.joined &&
+             join.state == amber::runtime::RuntimeStrandState::Failed,
+         "parent join should fail after first child failure");
+  expect(join.error_name == "ChildBoom" && join.message == "first child failed",
+         "parent join should report first child failure");
+  expect(sibling_cancelled.load(),
+         "first child failure should cancel running sibling");
+
+  const std::optional<amber::runtime::RuntimeTaskSnapshot> snapshot =
+      scheduler.task_snapshot(parent_id);
+  expect(snapshot.has_value() &&
+             snapshot->state == amber::runtime::RuntimeStrandState::Failed &&
+             snapshot->total_children == 2 && snapshot->active_children == 0,
+         "failed parent should retain structured child snapshot");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.structured_child_tasks == 2 &&
+             stats.first_failure_cancellations == 1,
+         "structured stats should count child links and first-failure cancel");
+  expect(stats.tasks_failed == 2 && stats.tasks_cancelled == 1,
+         "structured failure should fail child and parent, and cancel sibling");
+}
+
+void test_runtime_channel_rendezvous_fifo_close() {
+  amber::runtime::RuntimeChannel channel(0);
+  amber::runtime::RuntimeScheduler scheduler(4);
+  std::atomic<int> senders_released{0};
+  std::mutex received_mutex;
+  std::vector<std::int64_t> received;
+
+  for (int index = 1; index <= 3; ++index) {
+    scheduler.spawn_task([&channel, &senders_released, index]() {
+      const amber::runtime::RuntimeChannelResult send =
+          channel.send(amber::runtime::Value::integer(index),
+                       std::chrono::milliseconds(1000));
+      expect(send.ok && send.sent, "rendezvous channel send should complete");
+      senders_released.fetch_add(1);
+    });
+    expect(wait_for_condition(
+               [&channel, index]() {
+                 return channel.stats().pending_senders ==
+                        static_cast<std::uint64_t>(index);
+               },
+               std::chrono::milliseconds(1000)),
+           "rendezvous sender should enter FIFO wait queue");
+  }
+
+  expect(senders_released.load() == 0,
+         "rendezvous sends should not complete before recv");
+
+  scheduler.spawn_task([&channel, &received, &received_mutex]() {
+    for (int expected = 1; expected <= 3; ++expected) {
+      const amber::runtime::RuntimeChannelResult recv =
+          channel.recv(std::chrono::milliseconds(1000));
+      expect(recv.ok && recv.received && recv.value.is_integer(),
+             "rendezvous channel recv should return sent value");
+      std::lock_guard<std::mutex> lock(received_mutex);
+      received.push_back(recv.value.as_integer());
+      expect(recv.value.as_integer() == expected,
+             "rendezvous channel should preserve FIFO send order");
+    }
+    expect(channel.close(), "channel close should succeed once");
+    const amber::runtime::RuntimeChannelResult closed =
+        channel.recv(std::chrono::milliseconds(10));
+    expect(!closed.ok && closed.closed &&
+               closed.error_name == "ChannelClosedError",
+           "closed empty channel recv should report ChannelClosedError");
+  });
+
+  expect(scheduler.wait_until_idle(std::chrono::milliseconds(1000)),
+         "rendezvous channel tasks should drain");
+  expect(senders_released.load() == 3,
+         "all rendezvous senders should complete after receives");
+  {
+    std::lock_guard<std::mutex> lock(received_mutex);
+    expect(received.size() == 3 && received[0] == 1 && received[1] == 2 &&
+               received[2] == 3,
+           "rendezvous channel should receive all values in order");
+  }
+
+  const amber::runtime::RuntimeChannelStats stats = channel.stats();
+  expect(stats.sends == 3 && stats.receives == 3 && stats.closes == 1,
+         "rendezvous channel stats should count sends, receives, and close");
+}
+
+void test_runtime_channel_buffered_close_and_shareability_gate() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::RuntimeChannel channel(2);
+
+  const amber::runtime::RuntimeChannelResult first =
+      channel.send(amber::runtime::Value::integer(10));
+  const amber::runtime::RuntimeChannelResult second =
+      channel.send(amber::runtime::Value::integer(11));
+  expect(first.ok && second.ok, "buffered channel should accept capacity");
+
+  const amber::runtime::Value confined = heap.make_list_value({});
+  expect(!amber::runtime::runtime_value_is_shareable(confined),
+         "mutable list should not be shareable");
+  const amber::runtime::RuntimeChannelResult rejected =
+      channel.send(confined, std::chrono::milliseconds(0));
+  expect(!rejected.ok && rejected.error_name == "IsolationError",
+         "channel send should reject confined payloads");
+
+  const amber::runtime::Value transitively_confined =
+      heap.make_list_value({confined}, true);
+  expect(!amber::runtime::runtime_value_is_shareable(transitively_confined),
+         "frozen collection with confined payload should not be shareable");
+  const amber::runtime::RuntimeChannelResult nested_rejected =
+      channel.send(transitively_confined, std::chrono::milliseconds(0));
+  expect(!nested_rejected.ok && nested_rejected.error_name == "IsolationError",
+         "channel send should reject transitively confined payloads");
+
+  const amber::runtime::RuntimeChannelResult recv_first = channel.recv();
+  const amber::runtime::RuntimeChannelResult recv_second = channel.recv();
+  expect(recv_first.ok && recv_first.value.as_integer() == 10,
+         "buffered channel should receive first queued value");
+  expect(recv_second.ok && recv_second.value.as_integer() == 11,
+         "buffered channel should receive second queued value");
+
+  const amber::runtime::RuntimeChannelResult timed_out =
+      channel.recv(std::chrono::milliseconds(5));
+  expect(!timed_out.ok && timed_out.timed_out &&
+             timed_out.error_name == "TimeoutError",
+         "empty open channel recv should support timeout");
+
+  const amber::runtime::RuntimeChannelResult queued_after_timeout =
+      channel.send(amber::runtime::Value::integer(12));
+  expect(queued_after_timeout.ok, "buffered channel should accept later send");
+  expect(channel.close(), "buffered channel close should succeed");
+  const amber::runtime::RuntimeChannelResult send_after_close =
+      channel.send(amber::runtime::Value::integer(13));
+  expect(!send_after_close.ok && send_after_close.closed &&
+             send_after_close.error_name == "ChannelClosedError",
+         "send into closed channel should fail");
+  const amber::runtime::RuntimeChannelResult recv_buffered_after_close =
+      channel.recv();
+  expect(recv_buffered_after_close.ok &&
+             recv_buffered_after_close.value.as_integer() == 12,
+         "closed buffered channel should drain queued values first");
+  const amber::runtime::RuntimeChannelResult closed_empty = channel.recv();
+  expect(!closed_empty.ok && closed_empty.closed &&
+             closed_empty.error_name == "ChannelClosedError",
+         "closed empty buffered channel should fail recv");
+
+  const amber::runtime::RuntimeChannelStats stats = channel.stats();
+  expect(stats.sends == 3 && stats.receives == 3 &&
+             stats.receive_timeouts == 1 && stats.isolation_rejections == 2,
+         "buffered channel stats should count success, timeout, and isolation");
+}
+
+void test_runtime_mutex_non_reentrant_and_contention() {
+  amber::runtime::RuntimeMutex reentrant_probe;
+  const amber::runtime::RuntimeMutexResult first_lock =
+      reentrant_probe.lock(std::chrono::milliseconds(10));
+  expect(first_lock.ok && first_lock.locked, "mutex first lock should succeed");
+  const amber::runtime::RuntimeMutexResult second_lock =
+      reentrant_probe.lock(std::chrono::milliseconds(10));
+  expect(!second_lock.ok && second_lock.error_name == "DeadlockError",
+         "mutex should reject reentrant lock by same owner");
+  const amber::runtime::RuntimeMutexResult first_unlock =
+      reentrant_probe.unlock();
+  expect(first_unlock.ok && first_unlock.unlocked,
+         "mutex unlock should release owner");
+
+  amber::runtime::RuntimeScheduler scheduler(4);
+  amber::runtime::RuntimeMutex mutex;
+  int counter = 0;
+  constexpr int kTasks = 8;
+  constexpr int kIterations = 200;
+
+  for (int task = 0; task < kTasks; ++task) {
+    scheduler.spawn_task([&mutex, &counter]() {
+      for (int iteration = 0; iteration < kIterations; ++iteration) {
+        const amber::runtime::RuntimeMutexResult lock =
+            mutex.lock(std::chrono::milliseconds(1000));
+        expect(lock.ok && lock.locked,
+               "contended mutex lock should eventually succeed");
+        const int next = counter + 1;
+        if (iteration % 5 == 0) {
+          std::this_thread::yield();
+        }
+        counter = next;
+        const amber::runtime::RuntimeMutexResult unlock = mutex.unlock();
+        expect(unlock.ok && unlock.unlocked,
+               "contended mutex unlock should succeed");
+      }
+    });
+  }
+
+  expect(scheduler.wait_until_idle(std::chrono::milliseconds(3000)),
+         "mutex contention tasks should drain");
+  expect(counter == kTasks * kIterations,
+         "mutex should protect contended counter updates");
+  const amber::runtime::RuntimeMutexStats stats = mutex.stats();
+  expect(stats.locks == kTasks * kIterations &&
+             stats.unlocks == kTasks * kIterations && !stats.locked,
+         "mutex stats should count balanced lock/unlock operations");
+}
+
+void test_runtime_atomic_seq_cst_compare_and_set_visibility() {
+  amber::runtime::RuntimeAtomic probe(0);
+  expect(probe.get() == 0, "atomic get should read initial value");
+  expect(probe.compare_and_set(0, 1),
+         "atomic compare_and_set should update matching value");
+  expect(!probe.compare_and_set(0, 2),
+         "atomic compare_and_set should reject stale expected value");
+  probe.set(3);
+  expect(probe.get() == 3, "atomic set should publish new value");
+
+  amber::runtime::RuntimeScheduler scheduler(4);
+  amber::runtime::RuntimeAtomic counter(0);
+  constexpr int kTasks = 8;
+  constexpr int kIterations = 500;
+  for (int task = 0; task < kTasks; ++task) {
+    scheduler.spawn_task([&counter]() {
+      for (int iteration = 0; iteration < kIterations; ++iteration) {
+        while (true) {
+          const std::int64_t current = counter.get();
+          if (counter.compare_and_set(current, current + 1)) {
+            break;
+          }
+          std::this_thread::yield();
+        }
+      }
+    });
+  }
+
+  expect(scheduler.wait_until_idle(std::chrono::milliseconds(3000)),
+         "atomic CAS increment tasks should drain");
+  expect(counter.get() == kTasks * kIterations,
+         "atomic compare_and_set should preserve all contended increments");
+}
+
 void test_runtime_world_heap_tracks_vm_allocations() {
   using namespace amber::bytecode;
 
@@ -2852,6 +3341,17 @@ int main() {
   test_runtime_pin_dealloc_after_pin_violation();
   test_runtime_pin_parallel_race_smoke();
   test_runtime_native_wait_cancel_poll_uses_active_pin();
+  test_runtime_scheduler_runs_strands_in_parallel();
+  test_runtime_scheduler_timer_queue_wakes_sleeping_strand();
+  test_runtime_scheduler_explicit_wake_coalesces_sleeping_strand();
+  test_runtime_task_join_rethrows_failure();
+  test_runtime_task_join_timeout_does_not_cancel_task();
+  test_runtime_task_cancel_is_cooperative_safepoint();
+  test_runtime_structured_task_scope_propagates_first_failure();
+  test_runtime_channel_rendezvous_fifo_close();
+  test_runtime_channel_buffered_close_and_shareability_gate();
+  test_runtime_mutex_non_reentrant_and_contention();
+  test_runtime_atomic_seq_cst_compare_and_set_visibility();
   test_runtime_world_heap_tracks_vm_allocations();
   test_runtime_lifecycle_destroy_opcode_is_idempotent();
   test_runtime_lifecycle_dealloc_opcode_tombstones_instance_payload();

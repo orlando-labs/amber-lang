@@ -1,6 +1,6 @@
 # amber.runtime.v1
 
-Status: `W5.1` through `W6.4` acceptance is satisfied.
+Status: `W5.1` through `W8.1` runtime acceptance is satisfied.
 
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
 
@@ -88,6 +88,24 @@ Current implemented slice:
   active-pin registry roots for GC, `RuntimePinScope` nesting, stale/double
   unpin guards, `PinnedObjectError` lifecycle rejection, opaque managed handles,
   pinned list/tuple value-buffer views, and native wait cancellation poll hooks;
+- `W7.1` worker-pool scheduler with public `RuntimeScheduler`,
+  `RuntimeWorkerScope` / `RuntimeStrandScope` TLS, global and worker-local
+  runnable queues, timer-backed sleeping strands, explicit wake coalescing,
+  deterministic idle waits, and parallel smoke coverage;
+- `W7.2` task lifecycle with task TLS, join/rethrow results, timed joins
+  without auto-cancel, cooperative cancellation polling, structured child sets,
+  waiting parent scope exit, first-failure propagation, and sibling
+  cancellation;
+- `W7.3` concurrency primitives with `RuntimeChannel` rendezvous and buffered
+  modes, FIFO blocking send/recv queues, explicit `close()`,
+  `ChannelClosedError`, timeout/cancellation-aware blocking results,
+  recursive shareability checks for channel payloads, non-reentrant
+  `RuntimeMutex`, and seq-cst `RuntimeAtomic`;
+- `W8.1` loader baseline in `runtime/module_loader.{h,cpp}` with serialized
+  `.amberbc` decode/verify on every load path, dependency graph linking,
+  deterministic dependency-before-dependent module init, single-run init
+  snapshots, missing-dependency `ImportError`, cycle-aware `ModuleInitError`,
+  and VM fault propagation for failed module init;
 - direct `P_PREP_SEQ` / `P_PREP_MAP` coercion through object-level
   `deconstruct` / `deconstruct_keys(keys)` when native list/tuple/map
   matching is not available, with `null` as no-match and wrong protocol return
@@ -107,10 +125,20 @@ Current implemented slice:
   tombstone, and dead-access coverage, W6.3 non-moving GC, barrier,
   remembered-set, safepoint-root, and parallel smoke coverage, and W6.4 pin
   roots, stale-unpin, nested-scope, opaque-handle, buffer-view,
-  dealloc-after-pin, native-wait-cancel, and parallel pin/unpin coverage.
+  dealloc-after-pin, native-wait-cancel, and parallel pin/unpin coverage, plus
+  W7.1 worker-pool scheduler, strand TLS scope, timer wake, explicit wake
+  coalescing, and parallel strand smoke coverage, and W7.2 task lifecycle,
+  join/rethrow, timed join, cooperative cancellation, waiting scope-exit parent,
+  structured child, and first-failure sibling-cancellation coverage, plus W7.3
+  rendezvous/buffered channel close/FIFO/isolation coverage, mutex
+  reentrancy/contention coverage, and atomic compare-and-set contention
+  coverage, plus W8.1 verifier-gated module load, missing dependency,
+  dependency init order, single-run init, cycle detection, and failed-init
+  coverage.
 
 Still intentionally missing in later layers:
 
-- `W8.1`: dependency linker and module-init state machine over serialized
-  `.amberbc`;
-- `W7+`: scheduler, concurrency, and deeper memory/runtime integration.
+- `W8.2`: export/import table materialization, debug sections, and
+  human/machine-readable loader diagnostics;
+- stdlib/language surfacing for the concurrency primitives, `select`-style
+  multi-wait paths, and deeper memory/runtime integration.

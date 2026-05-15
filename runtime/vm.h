@@ -2,8 +2,11 @@
 
 #include "bytecode/format.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -311,6 +314,30 @@ struct RuntimeNativeWaitResult {
 };
 
 std::uint64_t current_runtime_worker_id();
+std::uint64_t current_runtime_strand_id();
+std::uint64_t current_runtime_task_id();
+bool current_runtime_task_cancel_requested();
+
+class RuntimeTaskFailure : public std::exception {
+public:
+  RuntimeTaskFailure(std::string error_name, std::string message);
+  const char *what() const noexcept override;
+  const std::string &error_name() const;
+  const std::string &message() const;
+
+private:
+  std::string error_name_;
+  std::string message_;
+  std::string what_;
+};
+
+class RuntimeTaskCancelled : public std::exception {
+public:
+  RuntimeTaskCancelled();
+  const char *what() const noexcept override;
+};
+
+void throw_if_runtime_task_cancelled();
 
 class RuntimeWorkerScope {
 public:
@@ -321,6 +348,247 @@ public:
 
 private:
   std::uint64_t previous_worker_id_ = 0;
+};
+
+class RuntimeStrandScope {
+public:
+  explicit RuntimeStrandScope(std::uint64_t strand_id);
+  RuntimeStrandScope(const RuntimeStrandScope &) = delete;
+  RuntimeStrandScope &operator=(const RuntimeStrandScope &) = delete;
+  ~RuntimeStrandScope();
+
+private:
+  std::uint64_t previous_strand_id_ = 0;
+};
+
+enum class RuntimeStrandState {
+  New,
+  Runnable,
+  Running,
+  Sleeping,
+  Waiting,
+  Done,
+  Finished = Done,
+  Failed,
+  Cancelled
+};
+
+struct RuntimeSchedulerConfig {
+  std::size_t worker_count = 0;
+  std::uint64_t first_worker_id = 1;
+};
+
+struct RuntimeSchedulerStats {
+  std::uint64_t worker_count = 0;
+  std::uint64_t strands_created = 0;
+  std::uint64_t strands_completed = 0;
+  std::uint64_t strands_failed = 0;
+  std::uint64_t global_queue_enqueues = 0;
+  std::uint64_t local_queue_enqueues = 0;
+  std::uint64_t worker_dequeues = 0;
+  std::uint64_t explicit_wakes = 0;
+  std::uint64_t timer_wakes = 0;
+  std::uint64_t coalesced_wakes = 0;
+  std::uint64_t stale_timer_wakes = 0;
+  std::uint64_t max_parallel_running = 0;
+  std::uint64_t runnable_queue_depth = 0;
+  std::uint64_t timer_queue_depth = 0;
+  std::uint64_t sleeping_strands = 0;
+  std::uint64_t tasks_created = 0;
+  std::uint64_t tasks_completed = 0;
+  std::uint64_t tasks_failed = 0;
+  std::uint64_t tasks_cancelled = 0;
+  std::uint64_t task_joins = 0;
+  std::uint64_t task_join_timeouts = 0;
+  std::uint64_t task_cancellation_requests = 0;
+  std::uint64_t task_wait_state_entries = 0;
+  std::uint64_t structured_child_tasks = 0;
+  std::uint64_t first_failure_cancellations = 0;
+};
+
+struct RuntimeStrandSnapshot {
+  std::uint64_t strand_id = 0;
+  RuntimeStrandState state = RuntimeStrandState::New;
+  std::uint64_t worker_id = 0;
+  std::uint64_t wake_generation = 0;
+  bool wake_pending = false;
+  std::uint64_t explicit_wakes = 0;
+  std::uint64_t timer_wakes = 0;
+};
+
+struct RuntimeTaskSnapshot {
+  std::uint64_t task_id = 0;
+  std::uint64_t parent_task_id = 0;
+  RuntimeStrandState state = RuntimeStrandState::New;
+  std::uint64_t worker_id = 0;
+  bool cancellation_requested = false;
+  std::uint64_t total_children = 0;
+  std::uint64_t active_children = 0;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeTaskJoinResult {
+  bool ok = false;
+  bool joined = false;
+  bool timed_out = false;
+  bool cancelled = false;
+  std::uint64_t task_id = 0;
+  RuntimeStrandState state = RuntimeStrandState::New;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeChannelResult {
+  bool ok = false;
+  bool sent = false;
+  bool received = false;
+  bool closed = false;
+  bool timed_out = false;
+  bool cancelled = false;
+  Value value = Value::null();
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeChannelStats {
+  std::uint64_t capacity = 0;
+  std::uint64_t buffered_values = 0;
+  std::uint64_t pending_senders = 0;
+  std::uint64_t pending_receivers = 0;
+  std::uint64_t sends = 0;
+  std::uint64_t receives = 0;
+  std::uint64_t closes = 0;
+  std::uint64_t send_timeouts = 0;
+  std::uint64_t receive_timeouts = 0;
+  std::uint64_t send_cancellations = 0;
+  std::uint64_t receive_cancellations = 0;
+  std::uint64_t isolation_rejections = 0;
+  bool closed = false;
+};
+
+class RuntimeChannel {
+public:
+  explicit RuntimeChannel(std::size_t capacity = 0);
+  RuntimeChannel(const RuntimeChannel &) = delete;
+  RuntimeChannel &operator=(const RuntimeChannel &) = delete;
+  RuntimeChannel(RuntimeChannel &&) noexcept;
+  RuntimeChannel &operator=(RuntimeChannel &&) noexcept;
+  ~RuntimeChannel();
+
+  RuntimeChannelResult
+  send(const Value &value,
+       std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+  RuntimeChannelResult
+  recv(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+  bool close();
+  bool closed() const;
+  RuntimeChannelStats stats() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+struct RuntimeMutexResult {
+  bool ok = false;
+  bool locked = false;
+  bool unlocked = false;
+  bool timed_out = false;
+  bool cancelled = false;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeMutexStats {
+  std::uint64_t lock_attempts = 0;
+  std::uint64_t locks = 0;
+  std::uint64_t unlocks = 0;
+  std::uint64_t contentions = 0;
+  std::uint64_t reentrant_failures = 0;
+  std::uint64_t lock_timeouts = 0;
+  std::uint64_t lock_cancellations = 0;
+  std::uint64_t waiting_lockers = 0;
+  std::uint64_t owner_id = 0;
+  bool locked = false;
+};
+
+class RuntimeMutex {
+public:
+  RuntimeMutex();
+  RuntimeMutex(const RuntimeMutex &) = delete;
+  RuntimeMutex &operator=(const RuntimeMutex &) = delete;
+  RuntimeMutex(RuntimeMutex &&) noexcept;
+  RuntimeMutex &operator=(RuntimeMutex &&) noexcept;
+  ~RuntimeMutex();
+
+  RuntimeMutexResult
+  lock(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+  RuntimeMutexResult unlock();
+  bool locked() const;
+  RuntimeMutexStats stats() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+class RuntimeAtomic {
+public:
+  explicit RuntimeAtomic(std::int64_t value = 0);
+  RuntimeAtomic(const RuntimeAtomic &) = delete;
+  RuntimeAtomic &operator=(const RuntimeAtomic &) = delete;
+  RuntimeAtomic(RuntimeAtomic &&) noexcept;
+  RuntimeAtomic &operator=(RuntimeAtomic &&) noexcept;
+  ~RuntimeAtomic();
+
+  std::int64_t get() const;
+  void set(std::int64_t value);
+  bool compare_and_set(std::int64_t expected, std::int64_t desired);
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+bool runtime_value_is_shareable(const Value &value);
+
+class RuntimeScheduler {
+public:
+  using StrandFunction = std::function<void()>;
+
+  explicit RuntimeScheduler(std::size_t worker_count = 0);
+  explicit RuntimeScheduler(RuntimeSchedulerConfig config);
+  RuntimeScheduler(const RuntimeScheduler &) = delete;
+  RuntimeScheduler &operator=(const RuntimeScheduler &) = delete;
+  RuntimeScheduler(RuntimeScheduler &&) noexcept;
+  RuntimeScheduler &operator=(RuntimeScheduler &&) noexcept;
+  ~RuntimeScheduler();
+
+  void start();
+  void shutdown();
+  std::uint64_t spawn_strand(StrandFunction function);
+  std::uint64_t spawn_sleeping_strand(std::chrono::milliseconds delay,
+                                      StrandFunction function);
+  std::uint64_t spawn_task(StrandFunction function);
+  std::uint64_t spawn_sleeping_task(std::chrono::milliseconds delay,
+                                    StrandFunction function);
+  bool wake_strand(std::uint64_t strand_id);
+  bool cancel_task(std::uint64_t task_id);
+  bool task_cancel_requested(std::uint64_t task_id) const;
+  RuntimeTaskJoinResult join_task(
+      std::uint64_t task_id,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+  bool wait_until_idle(
+      std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+  RuntimeSchedulerStats stats() const;
+  std::optional<RuntimeStrandSnapshot>
+  strand_snapshot(std::uint64_t strand_id) const;
+  std::optional<RuntimeTaskSnapshot> task_snapshot(std::uint64_t task_id) const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
 };
 
 class RuntimeHeap {

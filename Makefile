@@ -17,7 +17,7 @@ PATTERN_SRCS := frontend/pattern/pattern.cpp
 BINDER_SRCS := frontend/binder/binder.cpp
 HIR_SRCS := frontend/hir/hir.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
-RUNTIME_SRCS := runtime/vm.cpp
+RUNTIME_SRCS := runtime/vm.cpp runtime/module_loader.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(HIR_SRCS)
 CORE_SRCS := $(FRONTEND_SRCS) $(BYTECODE_SRCS)
 AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS)
@@ -29,6 +29,7 @@ HIR_TEST_SRCS := tests/hir_tests.cpp $(FRONTEND_SRCS)
 BYTECODE_TEST_SRCS := tests/bytecode_tests.cpp $(BYTECODE_SRCS) $(LEXER_SRCS) $(AST_SRCS)
 EMITTER_TEST_SRCS := tests/emitter_tests.cpp $(CORE_SRCS)
 VM_TEST_SRCS := tests/vm_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
+MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(BYTECODE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
 
 FORMAT_FILES := \
 	frontend/lexer/lexer.cpp \
@@ -49,6 +50,8 @@ FORMAT_FILES := \
 	bytecode/format.h \
 	bytecode/emitter.cpp \
 	bytecode/emitter.h \
+	runtime/module_loader.cpp \
+	runtime/module_loader.h \
 	runtime/vm.cpp \
 	runtime/vm.h \
 	tools/amberc/main.cpp \
@@ -59,13 +62,14 @@ FORMAT_FILES := \
 	tests/hir_tests.cpp \
 	tests/bytecode_tests.cpp \
 	tests/emitter_tests.cpp \
+	tests/module_loader_tests.cpp \
 	tests/vm_tests.cpp
 
 .PHONY: all build test fmt clean
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -98,6 +102,9 @@ $(BUILD_DIR)/emitter_tests: $(EMITTER_TEST_SRCS) | $(BUILD_DIR)/.dir
 $(BUILD_DIR)/vm_tests: $(VM_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(VM_TEST_SRCS) $(LDFLAGS) -o $@
 
+$(BUILD_DIR)/module_loader_tests: $(MODULE_LOADER_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODULE_LOADER_TEST_SRCS) $(LDFLAGS) -o $@
+
 test: build
 	$(BUILD_DIR)/lexer_tests
 	$(BUILD_DIR)/parser_tests
@@ -106,6 +113,7 @@ test: build
 	$(BUILD_DIR)/bytecode_tests
 	$(BUILD_DIR)/emitter_tests
 	$(BUILD_DIR)/vm_tests
+	$(BUILD_DIR)/module_loader_tests
 	$(BUILD_DIR)/amberc lex corpus/parse/lexer/basic/source.am > $(BUILD_DIR)/lexer-basic.tokens.json
 	$(BUILD_DIR)/ambertest run corpus
 
