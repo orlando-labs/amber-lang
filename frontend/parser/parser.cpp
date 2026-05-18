@@ -85,6 +85,10 @@ bool param_nodes_match(const ast::Expr &left, const ast::Expr &right) {
 }
 
 bool signatures_match(const ast::Expr &left, const ast::Expr &right) {
+  if (string_value(left, "return_type_expr") !=
+      string_value(right, "return_type_expr")) {
+    return false;
+  }
   const ast::ListField *left_params = find_list_field(left, "params");
   const ast::ListField *right_params = find_list_field(right, "params");
   const std::size_t left_count =
@@ -160,7 +164,9 @@ bool no_space_before_pattern_token(lexer::TokenKind kind) {
   return kind == lexer::TokenKind::Comma || kind == lexer::TokenKind::Colon ||
          kind == lexer::TokenKind::Dot || kind == lexer::TokenKind::LParen ||
          kind == lexer::TokenKind::LBracket ||
-         kind == lexer::TokenKind::LBrace || kind == lexer::TokenKind::RParen ||
+         kind == lexer::TokenKind::LBrace ||
+         kind == lexer::TokenKind::Question ||
+         kind == lexer::TokenKind::RParen ||
          kind == lexer::TokenKind::RBracket || kind == lexer::TokenKind::RBrace;
 }
 
@@ -559,6 +565,16 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
   }
 
   signature = parse_signature();
+  if (match(lexer::TokenKind::Arrow)) {
+    const lexer::Token arrow = previous();
+    std::string return_type = parse_type_term_text_until_return_boundary();
+    if (return_type.empty()) {
+      error(arrow, "expected return type after '->'");
+    } else {
+      signature->string_field("return_type_expr", return_type);
+      signature->span = ast::join_spans(signature->span, previous().span);
+    }
+  }
   consume(lexer::TokenKind::Colon, "expected ':' after function signature");
   if (!class_method && starts_clause_body()) {
     ClauseBody clause_body = parse_clause_body();
@@ -698,16 +714,7 @@ std::unique_ptr<ast::Expr> Parser::parse_param() {
   std::unique_ptr<ast::Expr> default_expr;
 
   if (match_contextual("as")) {
-    std::string type_text;
-    while (!at_end() && !check(lexer::TokenKind::Comma) &&
-           !check(lexer::TokenKind::RParen) &&
-           !check(lexer::TokenKind::Equal) && !check(lexer::TokenKind::Colon)) {
-      if (!type_text.empty()) {
-        type_text += " ";
-      }
-      type_text += advance().lexeme;
-    }
-    type_expr = type_text;
+    type_expr = parse_type_term_text_until_param_boundary();
   }
 
   if (match(lexer::TokenKind::Colon)) {
@@ -730,6 +737,77 @@ std::unique_ptr<ast::Expr> Parser::parse_param() {
     param->node_field("default_expr", std::move(default_expr));
   }
   return param;
+}
+
+std::string Parser::parse_type_term_text_until_param_boundary() {
+  std::string text;
+  const lexer::Token *previous_type_token = nullptr;
+  int depth = 0;
+  while (!at_end()) {
+    const lexer::TokenKind kind = current().kind;
+    if (depth == 0 &&
+        (kind == lexer::TokenKind::Comma || kind == lexer::TokenKind::RParen ||
+         kind == lexer::TokenKind::Equal || kind == lexer::TokenKind::Colon ||
+         kind == lexer::TokenKind::Newline || kind == lexer::TokenKind::Eof)) {
+      break;
+    }
+    if (kind == lexer::TokenKind::LParen ||
+        kind == lexer::TokenKind::LBracket ||
+        kind == lexer::TokenKind::LBrace) {
+      ++depth;
+    }
+    if ((kind == lexer::TokenKind::RParen ||
+         kind == lexer::TokenKind::RBracket ||
+         kind == lexer::TokenKind::RBrace) &&
+        depth == 0) {
+      break;
+    }
+    append_pattern_token(&text, current(), previous_type_token);
+    previous_type_token = &current();
+    advance();
+    if ((kind == lexer::TokenKind::RParen ||
+         kind == lexer::TokenKind::RBracket ||
+         kind == lexer::TokenKind::RBrace) &&
+        depth > 0) {
+      --depth;
+    }
+  }
+  return text;
+}
+
+std::string Parser::parse_type_term_text_until_return_boundary() {
+  std::string text;
+  const lexer::Token *previous_type_token = nullptr;
+  int depth = 0;
+  while (!at_end()) {
+    const lexer::TokenKind kind = current().kind;
+    if (depth == 0 &&
+        (kind == lexer::TokenKind::Colon || kind == lexer::TokenKind::Newline ||
+         kind == lexer::TokenKind::Eof)) {
+      break;
+    }
+    if (kind == lexer::TokenKind::LParen ||
+        kind == lexer::TokenKind::LBracket ||
+        kind == lexer::TokenKind::LBrace) {
+      ++depth;
+    }
+    if ((kind == lexer::TokenKind::RParen ||
+         kind == lexer::TokenKind::RBracket ||
+         kind == lexer::TokenKind::RBrace) &&
+        depth == 0) {
+      break;
+    }
+    append_pattern_token(&text, current(), previous_type_token);
+    previous_type_token = &current();
+    advance();
+    if ((kind == lexer::TokenKind::RParen ||
+         kind == lexer::TokenKind::RBracket ||
+         kind == lexer::TokenKind::RBrace) &&
+        depth > 0) {
+      --depth;
+    }
+  }
+  return text;
 }
 
 Parser::ClauseBody Parser::parse_clause_body() {

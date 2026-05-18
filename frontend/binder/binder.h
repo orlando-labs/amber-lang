@@ -63,6 +63,7 @@ struct Signature {
   std::string id;
   int scope_index = -1;
   std::string owner;
+  std::string return_type_expr;
   lexer::Span span;
   std::vector<ParamDescriptor> params;
 };

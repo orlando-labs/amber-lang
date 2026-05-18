@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"T0005","severity":"error","phase":"typed","message":"inferred return type does not satisfy return boundary","primary_span":{"file":"corpus/typed/diag/return_mismatch/source.am","start":{"line":2,"col":1,"offset":9},"end":{"line":3,"col":8,"offset":32}},"related":[],"notes":[]}
+  ]
+}

@@ -2,6 +2,7 @@
 #include "bytecode/format.h"
 #include "frontend/ast/expr.h"
 #include "frontend/binder/binder.h"
+#include "frontend/checker/checker.h"
 #include "frontend/hir/hir.h"
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
@@ -221,12 +222,18 @@ int phase_bundle_level(const std::string &phase) {
   if (canonical == "load") {
     return 5;
   }
+  if (canonical == "typed" || canonical == "typed-diag") {
+    return 6;
+  }
   return 99;
 }
 
 int bundle_level(const std::string &bundle) {
   if (bundle.empty() || bundle == "all" || bundle == "full" || bundle == "M5") {
     return 5;
+  }
+  if (bundle == "M6") {
+    return 6;
   }
   if (bundle == "M1") {
     return 1;
@@ -591,6 +598,117 @@ bool run_check_case(const TestCase &test_case) {
   return true;
 }
 
+bool run_typed_case(const TestCase &test_case) {
+  const std::string source_path =
+      join_path(test_case.directory, test_case.source);
+  const std::string expect_path =
+      join_path(test_case.directory, test_case.expect);
+  const std::string source = read_file(source_path);
+
+  amber::lexer::Lexer lexer(source, source_path);
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << test_case.directory << ": lexer diagnostics:\n"
+              << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    return false;
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    std::cerr << test_case.directory << ": parser diagnostics:\n"
+              << amber::lexer::diagnostics_to_json(parse_result.diagnostics);
+    return false;
+  }
+
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    std::cerr << test_case.directory << ": binder diagnostics:\n"
+              << amber::lexer::diagnostics_to_json(bind_result.diagnostics);
+    return false;
+  }
+
+  amber::checker::CheckResult check_result = amber::checker::check_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  if (!check_result.ok()) {
+    std::cerr << test_case.directory << ": typed diagnostics:\n"
+              << amber::lexer::diagnostics_to_json(check_result.diagnostics);
+    return false;
+  }
+
+  const std::string actual = amber::checker::check_result_to_json(
+      check_result, parse_result.module_name);
+  const std::string expected = read_file(expect_path);
+  if (actual != expected) {
+    print_mismatch(test_case, "typed result", expected, actual);
+    return false;
+  }
+  return true;
+}
+
+bool run_typed_diag_case(const TestCase &test_case) {
+  const std::string source_path =
+      join_path(test_case.directory, test_case.source);
+  const std::string expect_path =
+      join_path(test_case.directory, test_case.expect);
+  const std::string source = read_file(source_path);
+
+  amber::lexer::Lexer lexer(source, source_path);
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    const std::string actual =
+        amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    const std::string expected = read_file(expect_path);
+    if (actual != expected) {
+      print_mismatch(test_case, "lexer diagnostic", expected, actual);
+      return false;
+    }
+    return true;
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    const std::string actual =
+        amber::lexer::diagnostics_to_json(parse_result.diagnostics);
+    const std::string expected = read_file(expect_path);
+    if (actual != expected) {
+      print_mismatch(test_case, "parser diagnostic", expected, actual);
+      return false;
+    }
+    return true;
+  }
+
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    const std::string actual =
+        amber::lexer::diagnostics_to_json(bind_result.diagnostics);
+    const std::string expected = read_file(expect_path);
+    if (actual != expected) {
+      print_mismatch(test_case, "binder diagnostic", expected, actual);
+      return false;
+    }
+    return true;
+  }
+
+  amber::checker::CheckResult check_result = amber::checker::check_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  if (check_result.diagnostics.empty()) {
+    std::cerr << test_case.directory << ": expected diagnostics, got success\n";
+    return false;
+  }
+  const std::string actual =
+      amber::lexer::diagnostics_to_json(check_result.diagnostics);
+  const std::string expected = read_file(expect_path);
+  if (actual != expected) {
+    print_mismatch(test_case, "typed diagnostic", expected, actual);
+    return false;
+  }
+  return true;
+}
+
 bool run_hir_case(const TestCase &test_case) {
   const std::string source_path =
       join_path(test_case.directory, test_case.source);
@@ -863,7 +981,7 @@ bool run_bind_diag_case(const TestCase &test_case) {
 }
 
 void usage(std::ostream &out) {
-  out << "usage: ambertest run <path> [--bundle M1|M2|M3|M4|M5]\n";
+  out << "usage: ambertest run <path> [--bundle M1|M2|M3|M4|M5|M6]\n";
 }
 
 } // namespace
@@ -935,6 +1053,18 @@ int main(int argc, char **argv) {
         }
       } else if (phase == "check") {
         if (run_check_case(test_case)) {
+          ++passed;
+        } else {
+          ++failed;
+        }
+      } else if (phase == "typed") {
+        if (run_typed_case(test_case)) {
+          ++passed;
+        } else {
+          ++failed;
+        }
+      } else if (phase == "typed-diag") {
+        if (run_typed_diag_case(test_case)) {
           ++passed;
         } else {
           ++failed;

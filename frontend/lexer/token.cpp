@@ -113,10 +113,14 @@ const char *token_kind_name(TokenKind kind) {
     return "PIPE";
   case TokenKind::Caret:
     return "CARET";
+  case TokenKind::Question:
+    return "QUESTION";
   case TokenKind::Plus:
     return "PLUS";
   case TokenKind::Minus:
     return "MINUS";
+  case TokenKind::Arrow:
+    return "ARROW";
   case TokenKind::Star:
     return "STAR";
   case TokenKind::Slash:

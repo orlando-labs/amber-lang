@@ -2,6 +2,7 @@
 #include "bytecode/format.h"
 #include "frontend/ast/expr.h"
 #include "frontend/binder/binder.h"
+#include "frontend/checker/checker.h"
 #include "frontend/hir/hir.h"
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
@@ -30,6 +31,7 @@ void usage(std::ostream &out) {
   out << "  amberc parse <file>\n";
   out << "  amberc parse-expr <file>\n";
   out << "  amberc bind <file>\n";
+  out << "  amberc typed <file>\n";
   out << "  amberc hir <file>\n";
   out << "  amberc bc <file>\n";
   out << "  amberc bc-disasm <file>\n";
@@ -55,8 +57,9 @@ int main(int argc, char **argv) {
     }
     if (argc != 3 ||
         (std::string(argv[1]) != "lex" && std::string(argv[1]) != "parse" &&
-         std::string(argv[1]) != "bind" && std::string(argv[1]) != "hir" &&
-         std::string(argv[1]) != "bc" && std::string(argv[1]) != "bc-disasm" &&
+         std::string(argv[1]) != "bind" && std::string(argv[1]) != "typed" &&
+         std::string(argv[1]) != "hir" && std::string(argv[1]) != "bc" &&
+         std::string(argv[1]) != "bc-disasm" &&
          std::string(argv[1]) != "parse-expr" &&
          std::string(argv[1]) != "amberbc-dump" &&
          std::string(argv[1]) != "amberbc-verify" &&
@@ -107,8 +110,8 @@ int main(int argc, char **argv) {
     }
 
     amber::parser::Parser parser(lex_result.tokens);
-    if (command == "parse" || command == "bind" || command == "hir" ||
-        command == "bc" || command == "bc-disasm") {
+    if (command == "parse" || command == "bind" || command == "typed" ||
+        command == "hir" || command == "bc" || command == "bc-disasm") {
       amber::parser::ParseModuleResult parse_result =
           parser.parse_module_unit();
       if (!parse_result.ok()) {
@@ -116,8 +119,8 @@ int main(int argc, char **argv) {
             parse_result.diagnostics);
         return 1;
       }
-      if (command == "bind" || command == "hir" || command == "bc" ||
-          command == "bc-disasm") {
+      if (command == "bind" || command == "typed" || command == "hir" ||
+          command == "bc" || command == "bc-disasm") {
         amber::binder::BindResult bind_result = amber::binder::bind_module(
             parse_result.items, parse_result.module_name);
         if (!bind_result.diagnostics.empty()) {
@@ -131,6 +134,20 @@ int main(int argc, char **argv) {
           std::cout << amber::binder::bind_graph_to_json(
               bind_result.graph, parse_result.module_name,
               amber::lexer::sha256_hex(source));
+          return 0;
+        }
+        if (command == "typed") {
+          amber::checker::CheckResult check_result =
+              amber::checker::check_module(parse_result.items,
+                                           parse_result.module_name,
+                                           bind_result.graph);
+          if (!check_result.ok()) {
+            std::cerr << amber::lexer::diagnostics_to_json(
+                check_result.diagnostics);
+            return 1;
+          }
+          std::cout << amber::checker::check_result_to_json(
+              check_result, parse_result.module_name);
           return 0;
         }
         amber::hir::Program program = amber::hir::lower_module(

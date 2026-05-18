@@ -1,0 +1,886 @@
+#include "frontend/checker/checker.h"
+
+#include <algorithm>
+#include <cctype>
+#include <iomanip>
+#include <map>
+#include <set>
+#include <sstream>
+
+namespace amber::checker {
+namespace {
+
+std::string json_escape(const std::string &value) {
+  std::ostringstream out;
+  for (unsigned char c : value) {
+    switch (c) {
+    case '"':
+      out << "\\\"";
+      break;
+    case '\\':
+      out << "\\\\";
+      break;
+    case '\b':
+      out << "\\b";
+      break;
+    case '\f':
+      out << "\\f";
+      break;
+    case '\n':
+      out << "\\n";
+      break;
+    case '\r':
+      out << "\\r";
+      break;
+    case '\t':
+      out << "\\t";
+      break;
+    default:
+      if (c < 0x20) {
+        out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+            << static_cast<int>(c) << std::dec << std::setfill(' ');
+      } else {
+        out << static_cast<char>(c);
+      }
+    }
+  }
+  return out.str();
+}
+
+const std::string *string_field_ptr(const ast::Expr &expr,
+                                    const std::string &name) {
+  for (const ast::StringField &field : expr.string_fields) {
+    if (field.name == name) {
+      return &field.value;
+    }
+  }
+  return nullptr;
+}
+
+std::string string_field(const ast::Expr &expr, const std::string &name) {
+  const std::string *value = string_field_ptr(expr, name);
+  return value == nullptr ? "" : *value;
+}
+
+bool bool_field(const ast::Expr &expr, const std::string &name) {
+  for (const ast::BoolField &field : expr.bool_fields) {
+    if (field.name == name) {
+      return field.value;
+    }
+  }
+  return false;
+}
+
+const ast::Expr *node_field(const ast::Expr &expr, const std::string &name) {
+  for (const ast::NodeField &field : expr.node_fields) {
+    if (field.name == name) {
+      return field.value.get();
+    }
+  }
+  return nullptr;
+}
+
+const ast::ListField *list_field(const ast::Expr &expr,
+                                 const std::string &name) {
+  for (const ast::ListField &field : expr.list_fields) {
+    if (field.name == name) {
+      return &field;
+    }
+  }
+  return nullptr;
+}
+
+lexer::Diagnostic diagnostic(const std::string &code,
+                             const std::string &message,
+                             const lexer::Span &span) {
+  return lexer::Diagnostic{code, "error", "typed", message, span};
+}
+
+TypeTerm named_type(const std::string &name) {
+  TypeTerm term;
+  term.kind = "Named";
+  term.name = name;
+  return term;
+}
+
+TypeTerm optional_type(TypeTerm inner) {
+  TypeTerm term;
+  term.kind = "Optional";
+  term.args.push_back(std::move(inner));
+  return term;
+}
+
+TypeTerm union_type(std::vector<TypeTerm> terms) {
+  std::vector<TypeTerm> flattened;
+  for (TypeTerm &term : terms) {
+    if (term.kind == "Union") {
+      for (TypeTerm &inner : term.args) {
+        flattened.push_back(std::move(inner));
+      }
+    } else {
+      flattened.push_back(std::move(term));
+    }
+  }
+  std::vector<TypeTerm> deduped;
+  std::set<std::string> seen;
+  for (TypeTerm &term : flattened) {
+    const std::string text = type_term_to_string(term);
+    if (seen.insert(text).second) {
+      deduped.push_back(std::move(term));
+    }
+  }
+  if (deduped.empty()) {
+    return named_type("Never");
+  }
+  if (deduped.size() == 1U) {
+    return deduped.front();
+  }
+  TypeTerm result;
+  result.kind = "Union";
+  result.args = std::move(deduped);
+  return result;
+}
+
+bool is_named(const TypeTerm &term, const std::string &name) {
+  return term.kind == "Named" && term.name == name;
+}
+
+bool is_any(const TypeTerm &term) { return is_named(term, "Any"); }
+
+bool is_null(const TypeTerm &term) { return is_named(term, "Null"); }
+
+bool is_falsey_singleton(const TypeTerm &term) {
+  return is_named(term, "False") || is_null(term);
+}
+
+bool type_equivalent(const TypeTerm &left, const TypeTerm &right) {
+  return type_term_to_string(left) == type_term_to_string(right);
+}
+
+bool compatible(const TypeTerm &actual, const TypeTerm &expected) {
+  if (is_any(expected) || is_any(actual)) {
+    return true;
+  }
+  if (is_named(expected, "Bool") &&
+      (is_named(actual, "Bool") || is_named(actual, "True") ||
+       is_named(actual, "False"))) {
+    return true;
+  }
+  if (expected.kind == "Optional") {
+    return is_null(actual) || compatible(actual, expected.args.front());
+  }
+  if (expected.kind == "Union") {
+    for (const TypeTerm &option : expected.args) {
+      if (compatible(actual, option)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (actual.kind == "Union") {
+    for (const TypeTerm &option : actual.args) {
+      if (!compatible(option, expected)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (expected.kind == "Generic" || actual.kind == "Generic") {
+    return type_equivalent(actual, expected);
+  }
+  if (expected.kind == "Tuple" || actual.kind == "Tuple" ||
+      expected.kind == "Record" || actual.kind == "Record") {
+    return type_equivalent(actual, expected);
+  }
+  return type_equivalent(actual, expected);
+}
+
+TypeTerm truthy_part(const TypeTerm &term) {
+  if (is_falsey_singleton(term)) {
+    return named_type("Never");
+  }
+  if (term.kind == "Union") {
+    std::vector<TypeTerm> parts;
+    for (const TypeTerm &option : term.args) {
+      TypeTerm part = truthy_part(option);
+      if (!is_named(part, "Never")) {
+        parts.push_back(part);
+      }
+    }
+    return union_type(std::move(parts));
+  }
+  if (is_named(term, "Bool")) {
+    return named_type("True");
+  }
+  return term;
+}
+
+TypeTerm falsy_part(const TypeTerm &term) {
+  if (is_falsey_singleton(term)) {
+    return term;
+  }
+  if (term.kind == "Union") {
+    std::vector<TypeTerm> parts;
+    for (const TypeTerm &option : term.args) {
+      TypeTerm part = falsy_part(option);
+      if (!is_named(part, "Never")) {
+        parts.push_back(part);
+      }
+    }
+    return union_type(std::move(parts));
+  }
+  if (is_named(term, "Bool")) {
+    return named_type("False");
+  }
+  return named_type("Never");
+}
+
+class TypeParser {
+public:
+  TypeParser(std::string source, lexer::Span span)
+      : source_(std::move(source)), span_(std::move(span)) {}
+
+  TypeParseResult parse() {
+    skip_space();
+    if (at_end()) {
+      error("empty TypeTerm");
+      return result_;
+    }
+    result_.term = parse_union();
+    skip_space();
+    if (!at_end()) {
+      error("unexpected trailing token in TypeTerm");
+    }
+    return result_;
+  }
+
+private:
+  bool at_end() const { return cursor_ >= source_.size(); }
+
+  char current() const { return at_end() ? '\0' : source_[cursor_]; }
+
+  void skip_space() {
+    while (!at_end() && std::isspace(static_cast<unsigned char>(current()))) {
+      ++cursor_;
+    }
+  }
+
+  bool match(char c) {
+    skip_space();
+    if (current() != c) {
+      return false;
+    }
+    ++cursor_;
+    return true;
+  }
+
+  void consume(char c, const std::string &message) {
+    if (!match(c)) {
+      error(message);
+    }
+  }
+
+  void error(const std::string &message) {
+    result_.diagnostics.push_back(diagnostic("T0003", message, span_));
+  }
+
+  bool identifier_char(unsigned char c) const {
+    return std::isalnum(c) || c == '_' || c == '.' || c >= 0x80;
+  }
+
+  std::string parse_identifier() {
+    skip_space();
+    std::string name;
+    while (!at_end() &&
+           identifier_char(static_cast<unsigned char>(current()))) {
+      name.push_back(current());
+      ++cursor_;
+    }
+    if (name.empty()) {
+      error("expected type name in TypeTerm");
+      return "Any";
+    }
+    return name;
+  }
+
+  TypeTerm parse_union() {
+    std::vector<TypeTerm> terms;
+    terms.push_back(parse_postfix());
+    while (match('|')) {
+      terms.push_back(parse_postfix());
+    }
+    return union_type(std::move(terms));
+  }
+
+  TypeTerm parse_postfix() {
+    TypeTerm term = parse_primary();
+    while (true) {
+      if (match('?')) {
+        term = optional_type(std::move(term));
+        continue;
+      }
+      if (term.kind == "Named" && match('[')) {
+        TypeTerm generic;
+        generic.kind = "Generic";
+        generic.name = term.name;
+        if (!match(']')) {
+          do {
+            generic.args.push_back(parse_union());
+          } while (match(','));
+          consume(']', "expected ']' after generic arguments");
+        }
+        term = std::move(generic);
+        continue;
+      }
+      break;
+    }
+    return term;
+  }
+
+  TypeTerm parse_primary() {
+    skip_space();
+    if (match('(')) {
+      TypeTerm inner = parse_union();
+      consume(')', "expected ')' after TypeTerm");
+      return inner;
+    }
+    if (match('[')) {
+      TypeTerm tuple;
+      tuple.kind = "Tuple";
+      if (!match(']')) {
+        do {
+          tuple.args.push_back(parse_union());
+        } while (match(','));
+        consume(']', "expected ']' after tuple TypeTerm");
+      }
+      return tuple;
+    }
+    if (match('{')) {
+      return parse_record();
+    }
+    return named_type(parse_identifier());
+  }
+
+  TypeTerm parse_record() {
+    TypeTerm record;
+    record.kind = "Record";
+    if (match('}')) {
+      return record;
+    }
+    while (!at_end()) {
+      skip_space();
+      if (match('*')) {
+        consume('*', "expected second '*' in exact record marker");
+        const std::string marker = parse_identifier();
+        if (marker != "Never") {
+          error("record exactness marker must be **Never");
+        }
+        record.exact_record = true;
+      } else {
+        const std::string name = parse_identifier();
+        consume(':', "expected ':' after record field name");
+        record.fields.push_back({name, parse_union()});
+      }
+      if (match('}')) {
+        break;
+      }
+      if (!match(',')) {
+        error("expected ',' between record fields");
+        break;
+      }
+      if (match('}')) {
+        break;
+      }
+    }
+    return record;
+  }
+
+  std::string source_;
+  lexer::Span span_;
+  std::size_t cursor_ = 0;
+  TypeParseResult result_;
+};
+
+class Checker {
+public:
+  Checker(const std::vector<std::unique_ptr<ast::Expr>> &items,
+          std::string module_name, const binder::BindGraph &graph)
+      : items_(items), module_name_(std::move(module_name)), graph_(graph) {
+    for (const binder::Binding &binding : graph_.bindings) {
+      bindings_by_id_.emplace(binding.id, &binding);
+    }
+    for (const binder::Signature &signature : graph_.signatures) {
+      signatures_by_owner_.emplace(signature.owner, &signature);
+    }
+    for (const binder::Export &export_record : graph_.exports) {
+      if (!export_record.resolved) {
+        continue;
+      }
+      const auto found = bindings_by_id_.find(export_record.binding_id);
+      if (found != bindings_by_id_.end()) {
+        exported_names_.insert(found->second->name);
+      }
+    }
+  }
+
+  CheckResult check() {
+    visit_items(items_);
+    return std::move(result_);
+  }
+
+private:
+  using TypeEnv = std::map<std::string, TypeTerm>;
+
+  void visit_items(const std::vector<std::unique_ptr<ast::Expr>> &items) {
+    for (const std::unique_ptr<ast::Expr> &item : items) {
+      if (item != nullptr) {
+        visit_item(*item);
+      }
+    }
+  }
+
+  void visit_item(const ast::Expr &item) {
+    if (item.kind == "AstDefStmt" || item.kind == "AstClassMethodDef") {
+      check_callable(
+          item, item.kind == "AstClassMethodDef" ? "class_method" : "function",
+          node_field(item, "signature"), list_field(item, "body"));
+      return;
+    }
+    if (item.kind == "AstClauseDef") {
+      check_callable(item, "function", node_field(item, "base_signature"),
+                     list_field(item, "else_body"));
+      return;
+    }
+    if (item.kind == "AstClassDef" || item.kind == "AstMixinDef") {
+      if (const ast::ListField *body = list_field(item, "body")) {
+        visit_items(body->values);
+      }
+    }
+  }
+
+  void check_callable(const ast::Expr &item, const std::string &kind,
+                      const ast::Expr *signature_node,
+                      const ast::ListField *body) {
+    const std::string owner = string_field(item, "name");
+    const binder::Signature *signature = signature_for_owner(owner);
+    const bool exported = exported_names_.count(owner) != 0U;
+    CallableBoundary boundary;
+    boundary.owner = owner;
+    boundary.kind = kind;
+    boundary.exported = exported;
+
+    TypeEnv env;
+    if (signature != nullptr) {
+      for (const binder::ParamDescriptor &param : signature->params) {
+        ParamBoundary param_boundary;
+        param_boundary.name = param.local_name;
+        param_boundary.kind = param.kind;
+        param_boundary.has_default = param.has_default;
+        if (param.type_expr.empty()) {
+          if (exported) {
+            result_.diagnostics.push_back(diagnostic(
+                "T0001", "exported callable parameter requires type annotation",
+                param.span));
+          }
+          env.emplace(param.local_name, named_type("Any"));
+        } else {
+          TypeParseResult parsed = parse_type_term(param.type_expr, param.span);
+          append_diagnostics(parsed.diagnostics);
+          const std::string normalized = type_term_to_string(parsed.term);
+          param_boundary.type = normalized;
+          env.emplace(param.local_name, parsed.term);
+          boundary.type_hooks.push_back("parameter:" + param.local_name + ":" +
+                                        normalized);
+          check_default_boundary(param, parsed.term, signature_node);
+        }
+        boundary.params.push_back(std::move(param_boundary));
+      }
+      if (!signature->return_type_expr.empty()) {
+        TypeParseResult parsed =
+            parse_type_term(signature->return_type_expr, signature->span);
+        append_diagnostics(parsed.diagnostics);
+        boundary.return_type = type_term_to_string(parsed.term);
+        boundary.type_hooks.push_back("return:" + owner + ":" +
+                                      boundary.return_type);
+        const TypeTerm observed = infer_body(body, env);
+        boundary.observed_return_type = type_term_to_string(observed);
+        if (!compatible(observed, parsed.term)) {
+          result_.diagnostics.push_back(diagnostic(
+              "T0005", "inferred return type does not satisfy return boundary",
+              item.span));
+        }
+      } else if (exported) {
+        result_.diagnostics.push_back(diagnostic(
+            "T0002", "exported callable requires return type annotation",
+            item.span));
+      }
+    }
+
+    const bool has_boundary = exported || !boundary.return_type.empty() ||
+                              !boundary.type_hooks.empty();
+    if (has_boundary) {
+      result_.boundaries.push_back(std::move(boundary));
+    }
+  }
+
+  void check_default_boundary(const binder::ParamDescriptor &param,
+                              const TypeTerm &expected,
+                              const ast::Expr *signature_node) {
+    if (!param.has_default || signature_node == nullptr) {
+      return;
+    }
+    const ast::ListField *params = list_field(*signature_node, "params");
+    if (params == nullptr) {
+      return;
+    }
+    for (const std::unique_ptr<ast::Expr> &param_node : params->values) {
+      if (param_node == nullptr ||
+          string_field(*param_node, "local_name") != param.local_name) {
+        continue;
+      }
+      const ast::Expr *default_expr = node_field(*param_node, "default_expr");
+      if (default_expr == nullptr) {
+        return;
+      }
+      TypeEnv env;
+      const TypeTerm actual = infer_expr(*default_expr, env);
+      if (!compatible(actual, expected)) {
+        result_.diagnostics.push_back(diagnostic(
+            "T0004", "default value does not satisfy parameter type boundary",
+            default_expr->span));
+      }
+      return;
+    }
+  }
+
+  TypeTerm infer_body(const ast::ListField *body, TypeEnv env) {
+    if (body == nullptr || body->values.empty()) {
+      return named_type("Null");
+    }
+    TypeTerm last = named_type("Null");
+    for (const std::unique_ptr<ast::Expr> &stmt : body->values) {
+      if (stmt != nullptr) {
+        last = infer_stmt(*stmt, env);
+      }
+    }
+    return last;
+  }
+
+  TypeTerm infer_stmt(const ast::Expr &stmt, TypeEnv &env) {
+    if (stmt.kind == "AstExprStmt") {
+      if (const ast::Expr *expr = node_field(stmt, "expr")) {
+        return infer_expr(*expr, env);
+      }
+    }
+    if (stmt.kind == "AstPassStmt" || stmt.kind == "AstNoopStmt") {
+      return named_type("Null");
+    }
+    return infer_expr(stmt, env);
+  }
+
+  TypeTerm infer_expr(const ast::Expr &expr, TypeEnv &env) {
+    if (expr.kind == "AstLiteral") {
+      const std::string token = string_field(expr, "token");
+      if (token == "INTEGER") {
+        return named_type("Int");
+      }
+      if (token == "FLOAT") {
+        return named_type("Float");
+      }
+      if (token == "STRING") {
+        return named_type("Str");
+      }
+      if (token == "KEYWORD_TRUE") {
+        return named_type("True");
+      }
+      if (token == "KEYWORD_FALSE") {
+        return named_type("False");
+      }
+      if (token == "KEYWORD_NULL") {
+        return named_type("Null");
+      }
+    }
+    if (expr.kind == "AstName") {
+      const auto found = env.find(string_field(expr, "name"));
+      return found == env.end() ? named_type("Any") : found->second;
+    }
+    if (expr.kind == "AstGroup") {
+      const ast::Expr *inner = node_field(expr, "expr");
+      return inner == nullptr ? named_type("Any") : infer_expr(*inner, env);
+    }
+    if (expr.kind == "AstUnary") {
+      const std::string op = string_field(expr, "op");
+      if (op == "not") {
+        return named_type("Bool");
+      }
+      const ast::Expr *operand = node_field(expr, "operand");
+      return operand == nullptr ? named_type("Any") : infer_expr(*operand, env);
+    }
+    if (expr.kind == "AstBinary" || expr.kind == "AstAssign") {
+      return infer_binary(expr, env);
+    }
+    if (expr.kind == "AstIf" || expr.kind == "AstUnless") {
+      return infer_if(expr, env);
+    }
+    if (expr.kind == "AstCase") {
+      return infer_case(expr, env);
+    }
+    if (expr.kind == "AstListLiteral") {
+      TypeTerm term;
+      term.kind = "Generic";
+      term.name = "Array";
+      term.args.push_back(named_type("Any"));
+      return term;
+    }
+    return named_type("Any");
+  }
+
+  TypeTerm infer_binary(const ast::Expr &expr, TypeEnv &env) {
+    const std::string op = string_field(expr, "op");
+    const ast::Expr *left_expr = node_field(expr, "left");
+    const ast::Expr *right_expr = node_field(expr, "right");
+    const TypeTerm left =
+        left_expr == nullptr ? named_type("Any") : infer_expr(*left_expr, env);
+    if (op == "=") {
+      const TypeTerm right = right_expr == nullptr
+                                 ? named_type("Any")
+                                 : infer_expr(*right_expr, env);
+      if (left_expr != nullptr && left_expr->kind == "AstName") {
+        env[string_field(*left_expr, "name")] = right;
+      }
+      return right;
+    }
+    if (op == "and") {
+      TypeEnv narrowed = env;
+      const TypeTerm right = right_expr == nullptr
+                                 ? named_type("Any")
+                                 : infer_expr(*right_expr, narrowed);
+      return union_type({falsy_part(left), right});
+    }
+    if (op == "or") {
+      TypeEnv narrowed = env;
+      const TypeTerm right = right_expr == nullptr
+                                 ? named_type("Any")
+                                 : infer_expr(*right_expr, narrowed);
+      return union_type({truthy_part(left), right});
+    }
+    if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" ||
+        op == ">=" || op == "in") {
+      return named_type("Bool");
+    }
+    const TypeTerm right = right_expr == nullptr ? named_type("Any")
+                                                 : infer_expr(*right_expr, env);
+    if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%") &&
+        (is_named(left, "Float") || is_named(right, "Float"))) {
+      return named_type("Float");
+    }
+    if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+      return named_type("Int");
+    }
+    return named_type("Any");
+  }
+
+  TypeTerm infer_if(const ast::Expr &expr, TypeEnv env) {
+    TypeTerm then_type = infer_body(list_field(expr, "then_body"), env);
+    TypeTerm else_type = named_type("Null");
+    if (const ast::ListField *else_body = list_field(expr, "else_body")) {
+      else_type = infer_body(else_body, env);
+    }
+    return union_type({then_type, else_type});
+  }
+
+  TypeTerm infer_case(const ast::Expr &expr, TypeEnv env) {
+    const ast::Expr *scrutinee = node_field(expr, "scrutinee");
+    const TypeTerm subject =
+        scrutinee == nullptr ? named_type("Any") : infer_expr(*scrutinee, env);
+    const ast::ListField *arms = list_field(expr, "arms");
+    std::vector<TypeTerm> branch_types;
+    if (arms != nullptr) {
+      for (const std::unique_ptr<ast::Expr> &arm : arms->values) {
+        if (arm != nullptr) {
+          branch_types.push_back(infer_body(list_field(*arm, "body"), env));
+        }
+      }
+    }
+    const ast::ListField *else_body = list_field(expr, "else_body");
+    if (else_body != nullptr && !else_body->values.empty()) {
+      branch_types.push_back(infer_body(else_body, env));
+    } else if (bool_field(expr, "strict")) {
+      if (!case_exhaustive(subject, arms)) {
+        result_.diagnostics.push_back(diagnostic(
+            "T0006", "non-exhaustive case! in typed profile", expr.span));
+      }
+    } else {
+      branch_types.push_back(named_type("Null"));
+    }
+    return union_type(std::move(branch_types));
+  }
+
+  bool case_exhaustive(const TypeTerm &subject, const ast::ListField *arms) {
+    if (arms == nullptr) {
+      return false;
+    }
+    if (is_named(subject, "Bool") || is_named(subject, "True") ||
+        is_named(subject, "False")) {
+      bool saw_true = false;
+      bool saw_false = false;
+      for (const std::unique_ptr<ast::Expr> &arm : arms->values) {
+        if (arm == nullptr) {
+          continue;
+        }
+        const std::string pattern = string_field(*arm, "pattern");
+        saw_true = saw_true || pattern == "true";
+        saw_false = saw_false || pattern == "false";
+      }
+      return saw_true && saw_false;
+    }
+    return false;
+  }
+
+  void append_diagnostics(const std::vector<lexer::Diagnostic> &diagnostics) {
+    result_.diagnostics.insert(result_.diagnostics.end(), diagnostics.begin(),
+                               diagnostics.end());
+  }
+
+  const binder::Signature *signature_for_owner(const std::string &owner) const {
+    const auto found = signatures_by_owner_.find(owner);
+    return found == signatures_by_owner_.end() ? nullptr : found->second;
+  }
+
+  const std::vector<std::unique_ptr<ast::Expr>> &items_;
+  std::string module_name_;
+  const binder::BindGraph &graph_;
+  std::map<std::string, const binder::Binding *> bindings_by_id_;
+  std::multimap<std::string, const binder::Signature *> signatures_by_owner_;
+  std::set<std::string> exported_names_;
+  CheckResult result_;
+};
+
+} // namespace
+
+TypeParseResult parse_type_term(const std::string &source,
+                                const lexer::Span &span) {
+  TypeParser parser(source, span);
+  return parser.parse();
+}
+
+std::string type_term_to_string(const TypeTerm &term) {
+  if (term.kind == "Named") {
+    return term.name.empty() ? "Any" : term.name;
+  }
+  if (term.kind == "Optional") {
+    const std::string inner = type_term_to_string(term.args.front());
+    return term.args.front().kind == "Union" ? "(" + inner + ")?" : inner + "?";
+  }
+  if (term.kind == "Union") {
+    std::ostringstream out;
+    for (std::size_t i = 0; i < term.args.size(); ++i) {
+      if (i != 0U) {
+        out << " | ";
+      }
+      out << type_term_to_string(term.args[i]);
+    }
+    return out.str();
+  }
+  if (term.kind == "Generic") {
+    std::ostringstream out;
+    out << term.name << "[";
+    for (std::size_t i = 0; i < term.args.size(); ++i) {
+      if (i != 0U) {
+        out << ", ";
+      }
+      out << type_term_to_string(term.args[i]);
+    }
+    out << "]";
+    return out.str();
+  }
+  if (term.kind == "Tuple") {
+    std::ostringstream out;
+    out << "[";
+    for (std::size_t i = 0; i < term.args.size(); ++i) {
+      if (i != 0U) {
+        out << ", ";
+      }
+      out << type_term_to_string(term.args[i]);
+    }
+    out << "]";
+    return out.str();
+  }
+  if (term.kind == "Record") {
+    std::ostringstream out;
+    out << "{";
+    bool first = true;
+    for (const auto &field : term.fields) {
+      if (!first) {
+        out << ", ";
+      }
+      first = false;
+      out << field.first << ": " << type_term_to_string(field.second);
+    }
+    if (term.exact_record) {
+      if (!first) {
+        out << ", ";
+      }
+      out << "**Never";
+    }
+    out << "}";
+    return out.str();
+  }
+  return "Any";
+}
+
+CheckResult check_module(const std::vector<std::unique_ptr<ast::Expr>> &items,
+                         const std::string &module_name,
+                         const binder::BindGraph &bind_graph) {
+  Checker checker(items, module_name, bind_graph);
+  return checker.check();
+}
+
+std::string check_result_to_json(const CheckResult &result,
+                                 const std::string &module_name) {
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"schema\": \"amber.typed.v1\",\n";
+  out << "  \"status\": \"" << (result.ok() ? "ok" : "error") << "\",\n";
+  out << "  \"module\": \"" << json_escape(module_name) << "\",\n";
+  out << "  \"boundaries\": [\n";
+  for (std::size_t i = 0; i < result.boundaries.size(); ++i) {
+    const CallableBoundary &boundary = result.boundaries[i];
+    out << "    {\"owner\":\"" << json_escape(boundary.owner)
+        << "\",\"kind\":\"" << json_escape(boundary.kind)
+        << "\",\"exported\":" << (boundary.exported ? "true" : "false")
+        << ",\"return_type\":\"" << json_escape(boundary.return_type)
+        << "\",\"observed_return_type\":\""
+        << json_escape(boundary.observed_return_type) << "\",\"params\":[";
+    for (std::size_t param_i = 0; param_i < boundary.params.size(); ++param_i) {
+      const ParamBoundary &param = boundary.params[param_i];
+      if (param_i != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(param.name) << "\",\"kind\":\""
+          << json_escape(param.kind) << "\",\"type\":\""
+          << json_escape(param.type)
+          << "\",\"has_default\":" << (param.has_default ? "true" : "false")
+          << "}";
+    }
+    out << "],\"type_hooks\":[";
+    for (std::size_t hook_i = 0; hook_i < boundary.type_hooks.size();
+         ++hook_i) {
+      if (hook_i != 0U) {
+        out << ", ";
+      }
+      out << "\"" << json_escape(boundary.type_hooks[hook_i]) << "\"";
+    }
+    out << "]}";
+    if (i + 1U < result.boundaries.size()) {
+      out << ",";
+    }
+    out << "\n";
+  }
+  out << "  ],\n";
+  out << "  \"diagnostic_count\": " << result.diagnostics.size() << "\n";
+  out << "}\n";
+  return out.str();
+}
+
+} // namespace amber::checker

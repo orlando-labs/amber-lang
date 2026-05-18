@@ -135,13 +135,22 @@ LexResult Lexer::lex() {
       advance();
       emit(TokenKind::Caret, start, "^");
       break;
+    case '?':
+      advance();
+      emit(TokenKind::Question, start, "?");
+      break;
     case '+':
       advance();
       emit(TokenKind::Plus, start, "+");
       break;
     case '-':
       advance();
-      emit(TokenKind::Minus, start, "-");
+      if (!at_end() && current() == '>') {
+        advance();
+        emit(TokenKind::Arrow, start, "->");
+      } else {
+        emit(TokenKind::Minus, start, "-");
+      }
       break;
     case '*':
       advance();

@@ -57,6 +57,7 @@ Current matrix status:
 | `W8.2` | done | runtime export-cell/import-alias materialization, read-only alias readiness checks, missing-export `ImportError`, dependency format/language/ABI compatibility diagnostics, re-export chain resolution, and source-mapped loader diagnostics for init faults |
 | `W8.3` | done | runtime collections contract for sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, `EmptyCollectionError` reduce guard, and deterministic `Map` keys/values/entries/map/select/reject/transform_values/each |
 | `W8.4` | done | deterministic full conformance runner for `parse/lower/check/compile/disasm/run/load`, M1-M5 gate bundles, failure rendering, and CI one-command `make conformance` |
+| `W9.1` | done | optional Amber/Typed checker lane with `TypeTerm` parsing/canonicalization, exported callable annotation boundaries, parameter/default/return diagnostics, basic truthiness flow for `and`/`or`, strict `case!` exhaustiveness checks, runtime type-hook metadata, `amberc typed`, and M6 typed corpus |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -76,6 +77,10 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   signature descriptors, references, exports, clause/case pattern locals,
   block-param patterns, pattern assignment binders, pin references, and
   matcher-expression references;
+- `amberc typed <file>` `amber.typed.v1` JSON dump for optional Amber/Typed
+  boundary checks, normalized `TypeTerm` parameter/return hooks, inferred
+  return summaries, exported callable annotation enforcement, and typed
+  diagnostics;
 - `amberc hir <file>` `amber.hir.v1` JSON dump with `HModule`, procedure
   table, declarative items, control-flow, structured `Pat*` source patterns
   plus `HCompiledPattern` matcher IR and deterministic `match_program` for
@@ -90,9 +95,9 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,
   and default-expression preflight;
 - shape-only `frontend/binder` helpers for extracting parsed call-site shape and for ordinary signature call preflight, explicit positional/keyword bind with `MISSING` slots, default-order planning, and delayed auto-assign buffers;
-- `ambertest run <path>` corpus runner for lex, expression-parse, module-parse, bind/check, HIR/lower, bytecode compile/disasm, VM run, loader load, bind-diagnostic fixtures, deterministic discovery, focused mismatch rendering, and `--bundle M1..M5` milestone gates;
+- `ambertest run <path>` corpus runner for lex, expression-parse, module-parse, bind/check, optional typed checks, HIR/lower, bytecode compile/disasm, VM run, loader load, diagnostic fixtures, deterministic discovery, focused mismatch rendering, and `--bundle M1..M6` milestone gates;
 - `amber.bc.v1` typed schema, canonical `.amberbc` serializer/deserializer, structural verifier skeleton, JSON dump, and deterministic text disassembly for the current bytecode subset;
-- `amberc bc <file>` and `amberc bc-disasm <file>` HIR-to-bytecode emitter path for current supported methods/classes/control-flow subset, including clause-method metadata in `BcMethod.clause_table` with dedicated emitted clause pattern probe code, `default_thunk_ids[]`, `PATS` binding descriptors, matcher-expression and dynamic-matcher bridge lowering for `case`, static pattern-opcode lowering for block-param prologues and pattern assignment, and path-based `CLAS` descriptors for class/mixin owners with preserved superclass/include/extend metadata;
+- `amberc bc <file>` and `amberc bc-disasm <file>` HIR-to-bytecode emitter path for current supported methods/classes/control-flow subset, including clause-method metadata in `BcMethod.clause_table` with dedicated emitted clause pattern probe code, `default_thunk_ids[]`, `type_hook_ids[]` metadata for annotated parameter/return boundaries, `PATS` binding descriptors, matcher-expression and dynamic-matcher bridge lowering for `case`, static pattern-opcode lowering for block-param prologues and pattern assignment, and path-based `CLAS` descriptors for class/mixin owners with preserved superclass/include/extend metadata;
 - `runtime/vm` execution baseline for verified `BcCode` in unit tests: frame stack, register file, `last_result`, branches, direct entry, closure capture materialization, closure `CALL`, constructor `CALL`, eager clause-table method dispatch, scalar and collection `SEND` / `SEND_DYN`, `RAISE` / handler-table unwinding, inline matcher execution without AST-walk fallback, slot-backed instance shapes, stable runtime method tables, W6.1 heap allocation boundary for objects/arrays/closures, W6.2 lifecycle tombstones, W6.3 non-moving GC boundary, and W6.4 pinning/native-handle boundary;
 - `runtime/vm` W6.1-W6.4 memory baseline with `RuntimeHeap`, worker scopes, per-worker arena counters, object allocation ids, remote-free enqueue/drain semantics, safepoint drain hooks, allocation-heavy smoke coverage, lifecycle state transitions, tombstone payload release, destroyed/deallocated access guards, object generations, root scanning, write barriers, remembered sets, logical reclaim of unrooted cycles, parallel GC smoke coverage, active pin roots, stale-unpin guards, nested pin scopes, opaque handles, pinned value-buffer views, native wait cancellation polling, and pinned-object lifecycle guards;
 - `runtime/vm` W7.1 scheduler core with `RuntimeScheduler`, `RuntimeStrandScope`, current strand/worker TLS introspection, runnable global/local queues, timer-backed sleeping strands, explicit wake coalescing, deterministic idle waits, and parallel strand smoke coverage;

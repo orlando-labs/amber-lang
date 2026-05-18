@@ -130,9 +130,10 @@ void test_contextual_keywords_remain_identifiers() {
 }
 
 void test_pattern_punctuation() {
-  expect_kinds("pattern punctuation", "^x | y\n",
+  expect_kinds("pattern punctuation", "^x | y -> T ?\n",
                {TokenKind::Caret, TokenKind::Identifier, TokenKind::Pipe,
-                TokenKind::Identifier, TokenKind::Newline, TokenKind::Eof});
+                TokenKind::Identifier, TokenKind::Arrow, TokenKind::Identifier,
+                TokenKind::Question, TokenKind::Newline, TokenKind::Eof});
 }
 
 void test_unicode_identifier_forms() {

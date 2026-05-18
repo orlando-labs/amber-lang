@@ -74,6 +74,8 @@ private:
   std::vector<std::unique_ptr<ast::Expr>> parse_body(BodyContext context);
   std::unique_ptr<ast::Expr> parse_signature();
   std::unique_ptr<ast::Expr> parse_param();
+  std::string parse_type_term_text_until_param_boundary();
+  std::string parse_type_term_text_until_return_boundary();
   ClauseBody parse_clause_body();
   std::unique_ptr<ast::Expr> parse_clause();
   std::unique_ptr<ast::Expr> parse_if_expr();

@@ -347,6 +347,37 @@ void test_control_flow_forms() {
          "do while stmt");
 }
 
+void test_typed_signature_surface() {
+  const std::string source =
+      "def load(path as Str?, headers as Map[Str, Str]:) -> Result[Str, Err]:\n"
+      "  path\n";
+
+  amber::lexer::Lexer lexer(source, "<test>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    std::exit(1);
+  }
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult result = parser.parse_module_unit();
+  if (!result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
+    std::exit(1);
+  }
+
+  expect(result.items.size() == 1, "typed signature module item count");
+  const Expr &def = *result.items[0];
+  const Expr &signature = node_field(def, "signature");
+  expect(string_field(signature, "return_type_expr") == "Result[Str, Err]",
+         "return TypeTerm preserved");
+  const amber::ast::ListField &params = list_field(signature, "params");
+  expect(params.values.size() == 2, "typed param count");
+  expect(string_field(*params.values[0], "type_expr") == "Str?",
+         "optional param TypeTerm preserved");
+  expect(string_field(*params.values[1], "type_expr") == "Map[Str, Str]",
+         "generic keyword param TypeTerm preserved");
+}
+
 } // namespace
 
 int main() {
@@ -359,6 +390,7 @@ int main() {
   test_pattern_assignment_and_block_param_patterns();
   test_module_forms();
   test_control_flow_forms();
+  test_typed_signature_surface();
   std::cout << "parser_tests: ok\n";
   return 0;
 }

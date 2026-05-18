@@ -35,6 +35,12 @@ diagnostics:
   - { code: E3006, severity: error, phase: binder, condition: reopen mixin/class name collides with different binding kind }
   - { code: E3007, severity: error, phase: parser, condition: extend outside declarative class body }
   - { code: E3008, severity: error, phase: binder, condition: statically provable non-mixin extend target }
+  - { code: T0001, severity: error, phase: typed, condition: exported callable parameter is missing required TypeTerm annotation }
+  - { code: T0002, severity: error, phase: typed, condition: exported callable is missing required return TypeTerm annotation }
+  - { code: T0003, severity: error, phase: typed, condition: malformed TypeTerm in typed profile boundary }
+  - { code: T0004, severity: error, phase: typed, condition: default value fails statically provable parameter TypeTerm boundary }
+  - { code: T0005, severity: error, phase: typed, condition: inferred return value fails statically provable return TypeTerm boundary }
+  - { code: T0006, severity: error, phase: typed, condition: strict case bang is not statically exhaustive in typed profile }
   - { code: BC2001, severity: error, phase: bytecode, condition: malformed or unsupported HIR shape reached bytecode emitter }
   - { code: BC2002, severity: error, phase: bytecode, condition: unsupported top-level, class-body, export, or root item for current bytecode emitter slice }
   - { code: BC2003, severity: error, phase: bytecode, condition: missing procedure or code mapping required by bytecode emitter }

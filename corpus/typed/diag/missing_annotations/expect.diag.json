@@ -1,0 +1,7 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"T0001","severity":"error","phase":"typed","message":"exported callable parameter requires type annotation","primary_span":{"file":"corpus/typed/diag/missing_annotations/source.am","start":{"line":2,"col":7,"offset":15},"end":{"line":2,"col":8,"offset":16}},"related":[],"notes":[]},
+    {"code":"T0002","severity":"error","phase":"typed","message":"exported callable requires return type annotation","primary_span":{"file":"corpus/typed/diag/missing_annotations/source.am","start":{"line":2,"col":1,"offset":9},"end":{"line":3,"col":4,"offset":22}},"related":[],"notes":[]}
+  ]
+}

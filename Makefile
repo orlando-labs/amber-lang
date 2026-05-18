@@ -15,16 +15,18 @@ AST_SRCS := frontend/ast/expr.cpp
 PARSER_SRCS := frontend/parser/parser.cpp
 PATTERN_SRCS := frontend/pattern/pattern.cpp
 BINDER_SRCS := frontend/binder/binder.cpp
+CHECKER_SRCS := frontend/checker/checker.cpp
 HIR_SRCS := frontend/hir/hir.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 RUNTIME_SRCS := runtime/vm.cpp runtime/module_loader.cpp
-FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(HIR_SRCS)
+FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(CHECKER_SRCS) $(HIR_SRCS)
 CORE_SRCS := $(FRONTEND_SRCS) $(BYTECODE_SRCS)
 AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS)
 AMBERTEST_SRCS := tools/ambertest/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 LEXER_TEST_SRCS := tests/lexer_tests.cpp $(LEXER_SRCS)
 PARSER_TEST_SRCS := tests/parser_tests.cpp $(FRONTEND_SRCS)
 BINDER_TEST_SRCS := tests/binder_tests.cpp $(FRONTEND_SRCS)
+CHECKER_TEST_SRCS := tests/checker_tests.cpp $(FRONTEND_SRCS)
 HIR_TEST_SRCS := tests/hir_tests.cpp $(FRONTEND_SRCS)
 BYTECODE_TEST_SRCS := tests/bytecode_tests.cpp $(BYTECODE_SRCS) $(LEXER_SRCS) $(AST_SRCS)
 EMITTER_TEST_SRCS := tests/emitter_tests.cpp $(CORE_SRCS)
@@ -44,6 +46,8 @@ FORMAT_FILES := \
 	frontend/pattern/pattern.h \
 	frontend/binder/binder.cpp \
 	frontend/binder/binder.h \
+	frontend/checker/checker.cpp \
+	frontend/checker/checker.h \
 	frontend/hir/hir.cpp \
 	frontend/hir/hir.h \
 	bytecode/format.cpp \
@@ -59,6 +63,7 @@ FORMAT_FILES := \
 	tests/lexer_tests.cpp \
 	tests/parser_tests.cpp \
 	tests/binder_tests.cpp \
+	tests/checker_tests.cpp \
 	tests/hir_tests.cpp \
 	tests/bytecode_tests.cpp \
 	tests/emitter_tests.cpp \
@@ -69,7 +74,7 @@ FORMAT_FILES := \
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -90,6 +95,9 @@ $(BUILD_DIR)/parser_tests: $(PARSER_TEST_SRCS) | $(BUILD_DIR)/.dir
 $(BUILD_DIR)/binder_tests: $(BINDER_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BINDER_TEST_SRCS) $(LDFLAGS) -o $@
 
+$(BUILD_DIR)/checker_tests: $(CHECKER_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(CHECKER_TEST_SRCS) $(LDFLAGS) -o $@
+
 $(BUILD_DIR)/hir_tests: $(HIR_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(HIR_TEST_SRCS) $(LDFLAGS) -o $@
 
@@ -109,6 +117,7 @@ test: build
 	$(BUILD_DIR)/lexer_tests
 	$(BUILD_DIR)/parser_tests
 	$(BUILD_DIR)/binder_tests
+	$(BUILD_DIR)/checker_tests
 	$(BUILD_DIR)/hir_tests
 	$(BUILD_DIR)/bytecode_tests
 	$(BUILD_DIR)/emitter_tests

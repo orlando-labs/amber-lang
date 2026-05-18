@@ -338,6 +338,15 @@ public:
     return intern_constant(constant);
   }
 
+  std::uint32_t intern_type_hook(const std::string &mode,
+                                 const std::string &name,
+                                 const std::string &type_expr) {
+    Constant constant;
+    constant.kind = ConstantKind::StringRef;
+    constant.ref_id = intern_string(mode + ":" + name + ":" + type_expr);
+    return intern_constant(constant);
+  }
+
   std::uint32_t intern_path_ref(const std::string &name) {
     Constant constant;
     constant.kind = ConstantKind::Path;
@@ -705,10 +714,20 @@ private:
           }
           if (!bool_field(*param, "has_default")) {
             method.params.push_back(entry);
+            const std::string type_expr = string_field(*param, "type_expr");
+            if (!type_expr.empty()) {
+              method.type_hook_ids.push_back(intern_type_hook(
+                  "parameter", string_field(*param, "local_name"), type_expr));
+            }
             continue;
           }
           entry.flags |= kMethodParamFlagHasDefault;
           method.params.push_back(entry);
+          const std::string type_expr = string_field(*param, "type_expr");
+          if (!type_expr.empty()) {
+            method.type_hook_ids.push_back(intern_type_hook(
+                "parameter", string_field(*param, "local_name"), type_expr));
+          }
           const ast::Expr *default_expr = node_field(*param, "default_expr");
           if (default_expr == nullptr) {
             diag(param->span, "BC2001",
@@ -718,6 +737,12 @@ private:
           method.default_thunk_ids.push_back(emit_embedded_code(
               *procedure, *default_expr, CodeKind::DefaultThunk));
         }
+      }
+      const std::string return_type_expr =
+          string_field(*signature, "return_type_expr");
+      if (!return_type_expr.empty()) {
+        method.type_hook_ids.push_back(intern_type_hook(
+            "return", string_field(item, "name"), return_type_expr));
       }
     }
 

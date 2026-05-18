@@ -471,6 +471,7 @@ private:
     descriptor.id = "sig" + std::to_string(graph_.signatures.size());
     descriptor.scope_index = function_scope;
     descriptor.owner = graph_.scopes[function_scope].owner;
+    descriptor.return_type_expr = string_value(signature, "return_type_expr");
     descriptor.span = signature.span;
 
     std::map<std::string, std::size_t> param_positions;
@@ -1204,6 +1205,10 @@ std::string bind_graph_to_json(const BindGraph &graph,
         << json_escape(graph.scopes[signature.scope_index].id)
         << "\",\"owner\":\"" << json_escape(signature.owner) << "\",\"span\":";
     append_span_json(out, signature.span);
+    if (!signature.return_type_expr.empty()) {
+      out << ",\"return_type_expr\":\""
+          << json_escape(signature.return_type_expr) << "\"";
+    }
     out << ",\"params\":[";
     for (std::size_t param_i = 0; param_i < signature.params.size();
          ++param_i) {

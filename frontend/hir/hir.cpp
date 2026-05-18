@@ -728,6 +728,9 @@ private:
     std::vector<std::unique_ptr<Node>> params;
     if (signature != nullptr) {
       node->span = signature->span;
+      if (!signature->return_type_expr.empty()) {
+        node->string_field("return_type_expr", signature->return_type_expr);
+      }
       for (const binder::ParamDescriptor &param : signature->params) {
         auto param_node = make_node("HParam", param.span);
         param_node->string_field("external_name", param.external_name);

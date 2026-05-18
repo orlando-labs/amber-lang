@@ -1,0 +1,9 @@
+{
+  "schema": "amber.typed.v1",
+  "status": "ok",
+  "module": "typed.demo",
+  "boundaries": [
+    {"owner":"truthy","kind":"function","exported":true,"return_type":"Bool","observed_return_type":"False | True","params":[{"name":"flag","kind":"positional","type":"Bool","has_default":false}],"type_hooks":["parameter:flag:Bool", "return:truthy:Bool"]}
+  ],
+  "diagnostic_count": 0
+}
