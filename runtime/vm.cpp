@@ -3249,6 +3249,7 @@ struct RuntimeState {
   RuntimeHeap heap;
   std::vector<ClassRuntimeState> classes;
   bool owners_initialized = false;
+  bool world_frozen = false;
   std::uint64_t world_epoch = 1;
   std::unordered_map<std::uint64_t, CallCacheEntry> call_caches;
   std::unordered_map<std::uint64_t, IvarCacheEntry> ivar_caches;
@@ -7634,99 +7635,753 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
   return vm.execute(code_id, args, std::move(self), std::move(block));
 }
 
-ExecutionResult
-RuntimeWorld::define_instance_method(std::uint32_t class_index,
-                                     bytecode::BcMethod method) {
-  if (impl_ == nullptr || impl_->module == nullptr) {
-    return {Value::null(),
-            Fault{"VMError", "runtime world is not bound", 0, 0}};
+namespace {
+
+ExecutionResult runtime_world_fault(const std::string &name,
+                                    const std::string &message) {
+  return {Value::null(), Fault{name, message, 0, 0}};
+}
+
+RuntimeOwnerKind owner_kind_for_index(const bytecode::BcModule &module,
+                                      std::uint32_t owner_index) {
+  if (owner_index < module.classes.size() &&
+      (module.classes[owner_index].flags & bytecode::kClassFlagMixin) != 0U) {
+    return RuntimeOwnerKind::Mixin;
   }
-  const bytecode::BcModule &module = *impl_->module;
-  if (class_index >= module.classes.size()) {
-    return {
-        Value::null(),
-        Fault{"VMError", "define_method class index is out of range", 0, 0}};
+  return RuntimeOwnerKind::Class;
+}
+
+bool owner_is_mixin(const bytecode::BcModule &module,
+                    std::uint32_t owner_index) {
+  return owner_index < module.classes.size() &&
+         (module.classes[owner_index].flags & bytecode::kClassFlagMixin) != 0U;
+}
+
+std::string join_class_path(const std::vector<std::string> &segments) {
+  std::string out;
+  for (std::size_t i = 0; i < segments.size(); ++i) {
+    if (i != 0U) {
+      out += ".";
+    }
+    out += segments[i];
   }
-  if (method.selector_sym_id >= module.symbols.size()) {
-    return {Value::null(),
-            Fault{"VMError", "define_method selector is out of range", 0, 0}};
+  return out;
+}
+
+bool resolve_class_ref_for_world(const bytecode::BcModule &module,
+                                 std::uint32_t path_ref,
+                                 std::uint32_t *out_class_index,
+                                 std::string *error_message) {
+  if (path_ref >= module.const_pool.size()) {
+    *error_message = "class path ref is out of range";
+    return false;
   }
-  if (find_code(module, method.entry_code_id) == nullptr) {
-    return {Value::null(),
-            Fault{"VMError", "define_method entry code id is unknown", 0, 0}};
+  const bytecode::Constant &constant = module.const_pool[path_ref];
+  if (constant.kind != bytecode::ConstantKind::Path) {
+    *error_message = "class ref must point to path constant";
+    return false;
   }
-  if (impl_->state->classes.size() < module.classes.size()) {
-    impl_->state->classes.resize(module.classes.size());
+  if (constant.items.empty()) {
+    *error_message = "class path constant is empty";
+    return false;
   }
-  impl_->state->initialize_for_module(module);
-  method.owner_dispatch_ref = class_index;
-  method.flags = kMethodFlagInstance;
-  impl_->state->classes[class_index]
-      .instance_method_table.entries[method.selector_sym_id] =
-      std::move(method);
-  impl_->state->invalidate_dispatch_owner(class_index);
+
+  std::vector<std::string> segments;
+  segments.reserve(constant.items.size());
+  for (std::uint32_t symbol_id : constant.items) {
+    if (symbol_id >= module.symbols.size()) {
+      *error_message = "class path symbol ref is out of range";
+      return false;
+    }
+    segments.push_back(module.symbols[symbol_id]);
+  }
+
+  const std::string full_path = join_class_path(segments);
+  for (std::uint32_t index = 0; index < module.classes.size(); ++index) {
+    const std::uint32_t symbol_id = module.classes[index].class_name_sym_id;
+    if (symbol_id < module.symbols.size() &&
+        module.symbols[symbol_id] == full_path) {
+      *out_class_index = index;
+      return true;
+    }
+  }
+
+  const std::string &leaf = segments.back();
+  std::optional<std::uint32_t> match;
+  for (std::uint32_t index = 0; index < module.classes.size(); ++index) {
+    const std::uint32_t symbol_id = module.classes[index].class_name_sym_id;
+    if (symbol_id >= module.symbols.size() ||
+        module.symbols[symbol_id] != leaf) {
+      continue;
+    }
+    if (match.has_value()) {
+      *error_message = "class path ref is ambiguous";
+      return false;
+    }
+    match = index;
+  }
+  if (match.has_value()) {
+    *out_class_index = *match;
+    return true;
+  }
+  *error_message = "class path ref target is unknown";
+  return false;
+}
+
+bool static_direct_refs_contain(const bytecode::BcModule &module,
+                                const std::vector<std::uint32_t> &refs,
+                                std::uint32_t mixin_index,
+                                std::string *error_message) {
+  for (std::uint32_t ref : refs) {
+    std::uint32_t resolved = 0;
+    if (!resolve_class_ref_for_world(module, ref, &resolved, error_message)) {
+      return false;
+    }
+    if (resolved == mixin_index) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool effective_direct_mixins_contain(const bytecode::BcModule &module,
+                                     const RuntimeState &state,
+                                     std::uint32_t owner_index,
+                                     std::uint32_t mixin_index, bool class_side,
+                                     std::string *error_message) {
+  if (owner_index < state.classes.size()) {
+    const std::vector<std::uint32_t> &dynamic_mixins =
+        class_side ? state.classes[owner_index].direct_extend_indices
+                   : state.classes[owner_index].direct_include_indices;
+    if (std::find(dynamic_mixins.begin(), dynamic_mixins.end(), mixin_index) !=
+        dynamic_mixins.end()) {
+      return true;
+    }
+  }
+  if (owner_index >= module.classes.size()) {
+    return false;
+  }
+  const std::vector<std::uint32_t> &static_refs =
+      class_side ? module.classes[owner_index].direct_extend_refs
+                 : module.classes[owner_index].direct_include_refs;
+  return static_direct_refs_contain(module, static_refs, mixin_index,
+                                    error_message);
+}
+
+bool append_static_include_edges(const bytecode::BcModule &module,
+                                 std::uint32_t mixin_index,
+                                 std::vector<std::uint32_t> *edges,
+                                 Fault *fault) {
+  for (std::uint32_t ref : module.classes[mixin_index].direct_include_refs) {
+    std::uint32_t resolved = 0;
+    std::string message;
+    if (!resolve_class_ref_for_world(module, ref, &resolved, &message)) {
+      *fault = Fault{"VMError", message, 0, 0};
+      return false;
+    }
+    edges->push_back(resolved);
+  }
+  return true;
+}
+
+bool collect_include_edges_after_transaction(const bytecode::BcModule &module,
+                                             const RuntimeState &state,
+                                             const RuntimeWorldTransaction &tx,
+                                             std::uint32_t mixin_index,
+                                             std::vector<std::uint32_t> *edges,
+                                             Fault *fault) {
+  edges->clear();
+  if (mixin_index < state.classes.size()) {
+    const std::vector<std::uint32_t> &dynamic_mixins =
+        state.classes[mixin_index].direct_include_indices;
+    edges->insert(edges->end(), dynamic_mixins.begin(), dynamic_mixins.end());
+  }
+  if (tx.target_kind == RuntimeOwnerKind::Mixin &&
+      tx.target_index == mixin_index) {
+    edges->insert(edges->end(), tx.include_indices.begin(),
+                  tx.include_indices.end());
+  }
+  return append_static_include_edges(module, mixin_index, edges, fault);
+}
+
+bool validate_mixin_include_graph_from(
+    const bytecode::BcModule &module, const RuntimeState &state,
+    const RuntimeWorldTransaction &tx, std::uint32_t mixin_index,
+    std::vector<bool> *seen, std::vector<bool> *active, Fault *fault) {
+  if (mixin_index >= module.classes.size()) {
+    *fault = Fault{"VMError", "mixin target index is out of range", 0, 0};
+    return false;
+  }
+  if (!owner_is_mixin(module, mixin_index)) {
+    *fault = Fault{"TypeError", "include/extend target is not a mixin", 0, 0};
+    return false;
+  }
+  if ((*active)[mixin_index]) {
+    *fault = Fault{"IncludeCycleError", "cycle detected in mixin include graph",
+                   0, 0};
+    return false;
+  }
+  if ((*seen)[mixin_index]) {
+    return true;
+  }
+
+  (*seen)[mixin_index] = true;
+  (*active)[mixin_index] = true;
+
+  std::vector<std::uint32_t> edges;
+  if (!collect_include_edges_after_transaction(module, state, tx, mixin_index,
+                                               &edges, fault)) {
+    (*active)[mixin_index] = false;
+    return false;
+  }
+  for (std::uint32_t edge : edges) {
+    if (!validate_mixin_include_graph_from(module, state, tx, edge, seen,
+                                           active, fault)) {
+      (*active)[mixin_index] = false;
+      return false;
+    }
+  }
+
+  (*active)[mixin_index] = false;
+  return true;
+}
+
+ExecutionResult validate_world_transaction(const bytecode::BcModule &module,
+                                           const RuntimeState &state,
+                                           const RuntimeWorldTransaction &tx) {
+  if (state.world_frozen) {
+    return runtime_world_fault("WorldFrozenError",
+                               "world mutation after freeze barrier");
+  }
+  if (tx.target_index >= module.classes.size()) {
+    return runtime_world_fault("VMError",
+                               "world transaction target is out of range");
+  }
+
+  const RuntimeOwnerKind actual_kind =
+      owner_kind_for_index(module, tx.target_index);
+  if (actual_kind != tx.target_kind) {
+    return runtime_world_fault("TypeError",
+                               "world transaction target kind mismatch");
+  }
+  if (tx.target_kind == RuntimeOwnerKind::Mixin) {
+    if (tx.has_superclass_ref) {
+      return runtime_world_fault("TypeError",
+                                 "mixin reopen cannot declare superclass");
+    }
+    if (!tx.class_methods.empty() || !tx.extend_indices.empty()) {
+      return runtime_world_fault("TypeError",
+                                 "mixin body cannot publish class-side state");
+    }
+  }
+  if (tx.target_kind == RuntimeOwnerKind::Class && tx.has_superclass_ref) {
+    const bytecode::BcClass &owner = module.classes[tx.target_index];
+    if (!owner.has_superclass_ref) {
+      return runtime_world_fault(
+          "SuperclassMismatchError",
+          "class reopen superclass does not match original declaration");
+    }
+    std::uint32_t existing_superclass = 0;
+    std::uint32_t requested_superclass = 0;
+    std::string message;
+    if (!resolve_class_ref_for_world(module, owner.superclass_ref,
+                                     &existing_superclass, &message) ||
+        !resolve_class_ref_for_world(module, tx.superclass_ref,
+                                     &requested_superclass, &message)) {
+      return runtime_world_fault("VMError", message);
+    }
+    if (existing_superclass != requested_superclass) {
+      return runtime_world_fault(
+          "SuperclassMismatchError",
+          "class reopen superclass does not match original declaration");
+    }
+  }
+
+  for (const bytecode::BcMethod &method : tx.instance_methods) {
+    if (method.selector_sym_id >= module.symbols.size()) {
+      return runtime_world_fault("VMError",
+                                 "define_method selector is out of range");
+    }
+    if (find_code(module, method.entry_code_id) == nullptr) {
+      return runtime_world_fault("VMError",
+                                 "define_method entry code id is unknown");
+    }
+  }
+  for (const bytecode::BcMethod &method : tx.class_methods) {
+    if (method.selector_sym_id >= module.symbols.size()) {
+      return runtime_world_fault("VMError",
+                                 "define_method selector is out of range");
+    }
+    if (find_code(module, method.entry_code_id) == nullptr) {
+      return runtime_world_fault("VMError",
+                                 "define_method entry code id is unknown");
+    }
+  }
+
+  for (std::uint32_t mixin_index : tx.include_indices) {
+    if (mixin_index >= module.classes.size()) {
+      return runtime_world_fault("VMError",
+                                 "mixin target index is out of range");
+    }
+    if (!owner_is_mixin(module, mixin_index)) {
+      return runtime_world_fault("TypeError",
+                                 "include/extend target is not a mixin");
+    }
+  }
+  for (std::uint32_t mixin_index : tx.extend_indices) {
+    if (mixin_index >= module.classes.size()) {
+      return runtime_world_fault("VMError",
+                                 "mixin target index is out of range");
+    }
+    if (!owner_is_mixin(module, mixin_index)) {
+      return runtime_world_fault("TypeError",
+                                 "include/extend target is not a mixin");
+    }
+  }
+
+  if (!tx.include_indices.empty() || !tx.extend_indices.empty()) {
+    std::vector<bool> seen(module.classes.size(), false);
+    std::vector<bool> active(module.classes.size(), false);
+    Fault fault;
+    if (tx.target_kind == RuntimeOwnerKind::Mixin &&
+        !validate_mixin_include_graph_from(module, state, tx, tx.target_index,
+                                           &seen, &active, &fault)) {
+      return {Value::null(), fault};
+    }
+    for (std::uint32_t mixin_index : tx.include_indices) {
+      if (!validate_mixin_include_graph_from(module, state, tx, mixin_index,
+                                             &seen, &active, &fault)) {
+        return {Value::null(), fault};
+      }
+    }
+    for (std::uint32_t mixin_index : tx.extend_indices) {
+      if (!validate_mixin_include_graph_from(module, state, tx, mixin_index,
+                                             &seen, &active, &fault)) {
+        return {Value::null(), fault};
+      }
+    }
+  }
+
   return {Value::null(), std::nullopt};
 }
 
-namespace {
+RuntimeOwnerKind owner_kind_for_module_ptr(const bytecode::BcModule *module,
+                                           std::uint32_t owner_index) {
+  if (module == nullptr || owner_index >= module->classes.size()) {
+    return RuntimeOwnerKind::Class;
+  }
+  return owner_kind_for_index(*module, owner_index);
+}
 
-ExecutionResult add_runtime_mixin(const bytecode::BcModule &module,
-                                  RuntimeState &state,
-                                  std::uint32_t class_index,
-                                  std::uint32_t mixin_index, bool class_side) {
-  if (class_index >= module.classes.size()) {
-    return {Value::null(),
-            Fault{"VMError", "mixin owner index is out of range", 0, 0}};
+std::string symbol_name_for_mirror(const bytecode::BcModule &module,
+                                   std::uint32_t symbol_id) {
+  if (symbol_id >= module.symbols.size()) {
+    return "";
   }
-  if (mixin_index >= module.classes.size()) {
-    return {Value::null(),
-            Fault{"VMError", "mixin target index is out of range", 0, 0}};
+  return module.symbols[symbol_id];
+}
+
+std::string string_name_for_mirror(const bytecode::BcModule &module,
+                                   std::uint32_t string_id) {
+  if (string_id >= module.strings.size()) {
+    return "";
   }
-  if (class_side &&
-      (module.classes[class_index].flags & bytecode::kClassFlagMixin) != 0U) {
-    return {Value::null(),
-            Fault{"TypeError", "extend owner must be a class object", 0, 0}};
+  return module.strings[string_id];
+}
+
+std::string owner_name_for_mirror(const bytecode::BcModule &module,
+                                  std::uint32_t owner_index) {
+  if (owner_index >= module.classes.size()) {
+    return "";
   }
-  if ((module.classes[mixin_index].flags & bytecode::kClassFlagMixin) == 0U) {
-    return {Value::null(),
-            Fault{"TypeError", "include/extend target is not a mixin", 0, 0}};
+  return symbol_name_for_mirror(module,
+                                module.classes[owner_index].class_name_sym_id);
+}
+
+RuntimeMirrorSourceLocation
+source_location_for_code(const bytecode::BcModule &module,
+                         std::uint32_t code_id) {
+  RuntimeMirrorSourceLocation location;
+  location.code_id = code_id;
+
+  const bytecode::BcCode *code = find_code(module, code_id);
+  if (code != nullptr && !code->source_spans.empty()) {
+    const bytecode::SourceSpanEntry *best = &code->source_spans.front();
+    for (const bytecode::SourceSpanEntry &span : code->source_spans) {
+      if (span.pc_from < best->pc_from) {
+        best = &span;
+      }
+    }
+    location.present = true;
+    location.pc = best->pc_from;
+    location.file = best->span.file;
+    location.line = static_cast<std::uint32_t>(best->span.start.line);
+    location.column = static_cast<std::uint32_t>(best->span.start.col);
+    return location;
   }
-  if (state.classes.size() < module.classes.size()) {
-    state.classes.resize(module.classes.size());
+
+  const bytecode::LineEntry *best_line = nullptr;
+  for (const bytecode::LineEntry &entry : module.line_table) {
+    if (entry.code_id != code_id) {
+      continue;
+    }
+    if (best_line == nullptr || entry.pc < best_line->pc) {
+      best_line = &entry;
+    }
   }
-  state.initialize_for_module(module);
-  std::vector<std::uint32_t> &dynamic_mixins =
-      class_side ? state.classes[class_index].direct_extend_indices
-                 : state.classes[class_index].direct_include_indices;
-  if (std::find(dynamic_mixins.begin(), dynamic_mixins.end(), mixin_index) !=
-      dynamic_mixins.end()) {
-    return {Value::null(), std::nullopt};
+  if (best_line != nullptr) {
+    location.present = true;
+    location.pc = best_line->pc;
+    location.line = best_line->line;
   }
-  dynamic_mixins.push_back(mixin_index);
-  state.invalidate_dispatch_owner(class_index);
-  return {Value::null(), std::nullopt};
+  return location;
+}
+
+RuntimeMirrorSourceLocation
+source_location_for_owner(const bytecode::BcModule &module,
+                          const bytecode::BcClass &owner) {
+  if (owner.has_class_init_code_id) {
+    return source_location_for_code(module, owner.class_init_code_id);
+  }
+  if (owner.method_range_start + owner.method_range_count <=
+      module.methods.size()) {
+    for (std::uint32_t offset = 0; offset < owner.method_range_count;
+         ++offset) {
+      const bytecode::BcMethod &method =
+          module.methods[owner.method_range_start + offset];
+      RuntimeMirrorSourceLocation location =
+          source_location_for_code(module, method.entry_code_id);
+      if (location.present) {
+        return location;
+      }
+    }
+  }
+  return {};
+}
+
+RuntimeMethodMirror method_mirror_for(const bytecode::BcModule &module,
+                                      std::uint32_t owner_index,
+                                      MethodTableSide side,
+                                      const bytecode::BcMethod &method) {
+  RuntimeMethodMirror mirror;
+  mirror.selector_symbol_id = method.selector_sym_id;
+  mirror.selector = symbol_name_for_mirror(module, method.selector_sym_id);
+  mirror.owner_index = owner_index;
+  mirror.owner_name = owner_name_for_mirror(module, owner_index);
+  mirror.owner_kind = owner_kind_for_index(module, owner_index);
+  mirror.side = side;
+  mirror.signature_blob_id = method.signature_blob_id;
+  mirror.entry_code_id = method.entry_code_id;
+  mirror.flags = method.flags;
+  mirror.parameter_count = method.params.size();
+  mirror.default_count = method.default_thunk_ids.size();
+  mirror.type_hook_count = method.type_hook_ids.size();
+  mirror.clause_count = method.clause_table.size();
+  mirror.source_location =
+      source_location_for_code(module, method.entry_code_id);
+  return mirror;
+}
+
+std::vector<RuntimeMethodMirror>
+method_mirrors_for_table(const bytecode::BcModule &module,
+                         std::uint32_t owner_index, MethodTableSide side,
+                         const MethodTableDescriptor &table) {
+  std::vector<RuntimeMethodMirror> mirrors;
+  mirrors.reserve(table.entries.size());
+  for (const auto &[selector_id, method] : table.entries) {
+    (void)selector_id;
+    mirrors.push_back(method_mirror_for(module, owner_index, side, method));
+  }
+  std::sort(
+      mirrors.begin(), mirrors.end(),
+      [](const RuntimeMethodMirror &left, const RuntimeMethodMirror &right) {
+        if (left.selector != right.selector) {
+          return left.selector < right.selector;
+        }
+        if (left.selector_symbol_id != right.selector_symbol_id) {
+          return left.selector_symbol_id < right.selector_symbol_id;
+        }
+        return left.entry_code_id < right.entry_code_id;
+      });
+  return mirrors;
+}
+
+RuntimeDirectMixinMirror
+direct_mixin_mirror_for_index(const bytecode::BcModule &module,
+                              std::uint32_t mixin_index, bool dynamic) {
+  RuntimeDirectMixinMirror mirror;
+  mirror.index = mixin_index;
+  mirror.name = owner_name_for_mirror(module, mixin_index);
+  mirror.dynamic = dynamic;
+  return mirror;
+}
+
+void append_static_direct_mixin_mirrors(
+    const bytecode::BcModule &module, const std::vector<std::uint32_t> &refs,
+    std::vector<RuntimeDirectMixinMirror> *mirrors) {
+  for (std::uint32_t ref : refs) {
+    std::uint32_t mixin_index = 0;
+    std::string message;
+    if (resolve_class_ref_for_world(module, ref, &mixin_index, &message)) {
+      mirrors->push_back(
+          direct_mixin_mirror_for_index(module, mixin_index, false));
+    }
+  }
+}
+
+void append_dynamic_direct_mixin_mirrors(
+    const bytecode::BcModule &module, const std::vector<std::uint32_t> &indices,
+    std::vector<RuntimeDirectMixinMirror> *mirrors) {
+  for (std::uint32_t mixin_index : indices) {
+    mirrors->push_back(
+        direct_mixin_mirror_for_index(module, mixin_index, true));
+  }
+}
+
+RuntimeOwnerMirror owner_mirror_for(const bytecode::BcModule &module,
+                                    const RuntimeState &state,
+                                    std::uint32_t owner_index) {
+  RuntimeOwnerMirror mirror;
+  mirror.index = owner_index;
+  if (owner_index >= module.classes.size() ||
+      owner_index >= state.classes.size()) {
+    return mirror;
+  }
+
+  const bytecode::BcClass &owner = module.classes[owner_index];
+  const ClassRuntimeState &runtime_owner = state.classes[owner_index];
+  mirror.name = owner_name_for_mirror(module, owner_index);
+  mirror.kind = owner_kind_for_index(module, owner_index);
+  mirror.owner_flags = runtime_owner.owner_flags;
+  mirror.ivar_schema_id = runtime_owner.ivar_schema_id;
+  mirror.has_superclass = runtime_owner.has_superclass_ref;
+  mirror.method_version = runtime_owner.method_version;
+  mirror.world_epoch = state.world_epoch;
+  mirror.source_location = source_location_for_owner(module, owner);
+
+  if (runtime_owner.has_superclass_ref) {
+    std::uint32_t superclass_index = 0;
+    std::string message;
+    if (resolve_class_ref_for_world(module, runtime_owner.superclass_ref,
+                                    &superclass_index, &message)) {
+      mirror.superclass_index = superclass_index;
+      mirror.superclass_name = owner_name_for_mirror(module, superclass_index);
+    }
+  }
+
+  append_static_direct_mixin_mirrors(module, owner.direct_include_refs,
+                                     &mirror.direct_includes);
+  append_dynamic_direct_mixin_mirrors(
+      module, runtime_owner.direct_include_indices, &mirror.direct_includes);
+  append_static_direct_mixin_mirrors(module, owner.direct_extend_refs,
+                                     &mirror.direct_extends);
+  append_dynamic_direct_mixin_mirrors(
+      module, runtime_owner.direct_extend_indices, &mirror.direct_extends);
+
+  mirror.instance_methods =
+      method_mirrors_for_table(module, owner_index, MethodTableSide::Instance,
+                               runtime_owner.instance_method_table);
+  mirror.class_methods =
+      method_mirrors_for_table(module, owner_index, MethodTableSide::Class,
+                               runtime_owner.class_method_table);
+  return mirror;
+}
+
+std::string package_name_for_mirror(const bytecode::BcModule &module) {
+  for (const bytecode::AttrEntry &attr : module.attrs) {
+    const std::string key = string_name_for_mirror(module, attr.key_str_id);
+    if (key != "amber.package" && key != "package" && key != "module" &&
+        key != "module.name") {
+      continue;
+    }
+    const std::string value = string_name_for_mirror(module, attr.value_str_id);
+    if (!value.empty()) {
+      return value;
+    }
+  }
+  return "";
+}
+
+RuntimePackageMirror package_mirror_for(const bytecode::BcModule &module) {
+  RuntimePackageMirror mirror;
+  mirror.name = package_name_for_mirror(module);
+  mirror.format_version = module.format_version;
+  mirror.language_version = module.language_version;
+  mirror.profile_flags = module.profile_flags;
+  mirror.file_flags = module.file_flags;
+  mirror.has_init = module.init.has_entry_code_id;
+  mirror.init_code_id = module.init.entry_code_id;
+
+  for (const bytecode::DepEntry &dependency : module.dependencies) {
+    RuntimePackageDependencyMirror dep;
+    dep.module_name =
+        string_name_for_mirror(module, dependency.module_name_str_id);
+    dep.required_format = dependency.required_format;
+    dep.min_language_version = dependency.min_language_version;
+    dep.has_max_language_version = dependency.has_max_language_version;
+    dep.max_language_version = dependency.max_language_version;
+    dep.has_abi_requirement = dependency.has_abi_requirement;
+    mirror.dependencies.push_back(dep);
+  }
+  std::sort(mirror.dependencies.begin(), mirror.dependencies.end(),
+            [](const RuntimePackageDependencyMirror &left,
+               const RuntimePackageDependencyMirror &right) {
+              return left.module_name < right.module_name;
+            });
+
+  for (const bytecode::ExportEntry &entry : module.exports) {
+    RuntimePackageExportMirror export_mirror;
+    export_mirror.public_name = symbol_name_for_mirror(module, entry.symbol_id);
+    export_mirror.target_kind =
+        string_name_for_mirror(module, entry.target_kind_str_id);
+    export_mirror.target_index = entry.target_index;
+    export_mirror.visibility_flags = entry.visibility_flags;
+    export_mirror.has_reexport = entry.has_reexport_module_name;
+    export_mirror.reexport_module_name =
+        string_name_for_mirror(module, entry.reexport_module_name_str_id);
+    mirror.exports.push_back(export_mirror);
+  }
+  std::sort(mirror.exports.begin(), mirror.exports.end(),
+            [](const RuntimePackageExportMirror &left,
+               const RuntimePackageExportMirror &right) {
+              if (left.public_name != right.public_name) {
+                return left.public_name < right.public_name;
+              }
+              if (left.target_kind != right.target_kind) {
+                return left.target_kind < right.target_kind;
+              }
+              return left.target_index < right.target_index;
+            });
+
+  for (const bytecode::AttrEntry &attr : module.attrs) {
+    mirror.attrs.push_back({string_name_for_mirror(module, attr.key_str_id),
+                            string_name_for_mirror(module, attr.value_str_id)});
+  }
+  std::sort(mirror.attrs.begin(), mirror.attrs.end(),
+            [](const RuntimePackageAttrMirror &left,
+               const RuntimePackageAttrMirror &right) {
+              if (left.key != right.key) {
+                return left.key < right.key;
+              }
+              return left.value < right.value;
+            });
+
+  return mirror;
 }
 
 } // namespace
 
+ExecutionResult
+RuntimeWorld::define_instance_method(std::uint32_t class_index,
+                                     bytecode::BcMethod method) {
+  RuntimeWorldTransaction tx;
+  tx.target_index = class_index;
+  if (impl_ != nullptr) {
+    tx.target_kind = owner_kind_for_module_ptr(impl_->module, class_index);
+  }
+  tx.instance_methods.push_back(std::move(method));
+  return commit_transaction(tx);
+}
+
+ExecutionResult RuntimeWorld::define_class_method(std::uint32_t class_index,
+                                                  bytecode::BcMethod method) {
+  RuntimeWorldTransaction tx;
+  tx.target_kind = RuntimeOwnerKind::Class;
+  tx.target_index = class_index;
+  tx.class_methods.push_back(std::move(method));
+  return commit_transaction(tx);
+}
+
 ExecutionResult RuntimeWorld::include_mixin(std::uint32_t class_index,
                                             std::uint32_t mixin_index) {
-  if (impl_ == nullptr) {
-    return {Value::null(),
-            Fault{"VMError", "runtime world is not bound", 0, 0}};
+  RuntimeWorldTransaction tx;
+  tx.target_index = class_index;
+  if (impl_ != nullptr) {
+    tx.target_kind = owner_kind_for_module_ptr(impl_->module, class_index);
   }
-  return add_runtime_mixin(*impl_->module, *impl_->state, class_index,
-                           mixin_index, false);
+  tx.include_indices.push_back(mixin_index);
+  return commit_transaction(tx);
 }
 
 ExecutionResult RuntimeWorld::extend_mixin(std::uint32_t class_index,
                                            std::uint32_t mixin_index) {
-  if (impl_ == nullptr) {
+  RuntimeWorldTransaction tx;
+  tx.target_kind = RuntimeOwnerKind::Class;
+  tx.target_index = class_index;
+  tx.extend_indices.push_back(mixin_index);
+  return commit_transaction(tx);
+}
+
+ExecutionResult
+RuntimeWorld::commit_transaction(const RuntimeWorldTransaction &tx) {
+  if (impl_ == nullptr || impl_->module == nullptr || impl_->state == nullptr) {
     return {Value::null(),
             Fault{"VMError", "runtime world is not bound", 0, 0}};
   }
-  return add_runtime_mixin(*impl_->module, *impl_->state, class_index,
-                           mixin_index, true);
+  const bytecode::BcModule &module = *impl_->module;
+  RuntimeState &state = *impl_->state;
+  if (state.classes.size() < module.classes.size()) {
+    state.classes.resize(module.classes.size());
+  }
+  state.initialize_for_module(module);
+
+  const ExecutionResult validation =
+      validate_world_transaction(module, state, tx);
+  if (!validation.ok()) {
+    return validation;
+  }
+
+  ClassRuntimeState &runtime_owner = state.classes[tx.target_index];
+  bool changed = false;
+  for (bytecode::BcMethod method : tx.instance_methods) {
+    method.owner_dispatch_ref = tx.target_index;
+    method.flags = kMethodFlagInstance;
+    runtime_owner.instance_method_table.entries[method.selector_sym_id] =
+        std::move(method);
+    changed = true;
+  }
+  for (bytecode::BcMethod method : tx.class_methods) {
+    method.owner_dispatch_ref = tx.target_index;
+    method.flags = kMethodFlagClass;
+    runtime_owner.class_method_table.entries[method.selector_sym_id] =
+        std::move(method);
+    changed = true;
+  }
+
+  for (std::uint32_t mixin_index : tx.include_indices) {
+    std::string message;
+    if (!effective_direct_mixins_contain(module, state, tx.target_index,
+                                         mixin_index, false, &message)) {
+      runtime_owner.direct_include_indices.push_back(mixin_index);
+      changed = true;
+    }
+  }
+  for (std::uint32_t mixin_index : tx.extend_indices) {
+    std::string message;
+    if (!effective_direct_mixins_contain(module, state, tx.target_index,
+                                         mixin_index, true, &message)) {
+      runtime_owner.direct_extend_indices.push_back(mixin_index);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    state.invalidate_dispatch_owner(tx.target_index);
+  }
+  return {Value::null(), std::nullopt};
+}
+
+ExecutionResult RuntimeWorld::freeze_world() {
+  if (impl_ == nullptr || impl_->module == nullptr || impl_->state == nullptr) {
+    return {Value::null(),
+            Fault{"VMError", "runtime world is not bound", 0, 0}};
+  }
+  impl_->state->initialize_for_module(*impl_->module);
+  if (!impl_->state->world_frozen) {
+    impl_->state->world_frozen = true;
+    ++impl_->state->world_epoch;
+  }
+  return {Value::null(), std::nullopt};
 }
 
 std::uint64_t RuntimeWorld::world_epoch() const {
@@ -7734,6 +8389,18 @@ std::uint64_t RuntimeWorld::world_epoch() const {
     return 0;
   }
   return impl_->state->world_epoch;
+}
+
+RuntimeWorldState RuntimeWorld::world_state() const {
+  if (impl_ == nullptr || impl_->state == nullptr ||
+      !impl_->state->world_frozen) {
+    return RuntimeWorldState::Open;
+  }
+  return RuntimeWorldState::Frozen;
+}
+
+bool RuntimeWorld::is_world_frozen() const {
+  return world_state() == RuntimeWorldState::Frozen;
 }
 
 std::uint64_t RuntimeWorld::method_version(std::uint32_t class_index) const {
@@ -7754,6 +8421,64 @@ std::size_t RuntimeWorld::method_table_size(std::uint32_t class_index,
   return side == MethodTableSide::Class
              ? owner.class_method_table.entries.size()
              : owner.instance_method_table.entries.size();
+}
+
+RuntimePackageMirror RuntimeWorld::package_mirror() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return package_mirror_for(*impl_->module);
+}
+
+std::optional<RuntimeOwnerMirror>
+RuntimeWorld::owner_mirror(std::uint32_t owner_index) const {
+  if (impl_ == nullptr || impl_->module == nullptr || impl_->state == nullptr ||
+      owner_index >= impl_->module->classes.size()) {
+    return std::nullopt;
+  }
+  impl_->state->initialize_for_module(*impl_->module);
+  return owner_mirror_for(*impl_->module, *impl_->state, owner_index);
+}
+
+std::optional<RuntimeOwnerMirror>
+RuntimeWorld::class_mirror(std::uint32_t class_index) const {
+  if (impl_ == nullptr || impl_->module == nullptr ||
+      class_index >= impl_->module->classes.size() ||
+      owner_kind_for_index(*impl_->module, class_index) !=
+          RuntimeOwnerKind::Class) {
+    return std::nullopt;
+  }
+  return owner_mirror(class_index);
+}
+
+std::optional<RuntimeOwnerMirror>
+RuntimeWorld::mixin_mirror(std::uint32_t mixin_index) const {
+  if (impl_ == nullptr || impl_->module == nullptr ||
+      mixin_index >= impl_->module->classes.size() ||
+      owner_kind_for_index(*impl_->module, mixin_index) !=
+          RuntimeOwnerKind::Mixin) {
+    return std::nullopt;
+  }
+  return owner_mirror(mixin_index);
+}
+
+RuntimeWorldMirror RuntimeWorld::world_mirror() const {
+  RuntimeWorldMirror mirror;
+  if (impl_ == nullptr || impl_->module == nullptr || impl_->state == nullptr) {
+    return mirror;
+  }
+  impl_->state->initialize_for_module(*impl_->module);
+  mirror.state = impl_->state->world_frozen ? RuntimeWorldState::Frozen
+                                            : RuntimeWorldState::Open;
+  mirror.world_epoch = impl_->state->world_epoch;
+  mirror.package = package_mirror_for(*impl_->module);
+  mirror.owners.reserve(impl_->module->classes.size());
+  for (std::uint32_t index = 0; index < impl_->module->classes.size();
+       ++index) {
+    mirror.owners.push_back(
+        owner_mirror_for(*impl_->module, *impl_->state, index));
+  }
+  return mirror;
 }
 
 RuntimeHeapStats RuntimeWorld::heap_stats() const {

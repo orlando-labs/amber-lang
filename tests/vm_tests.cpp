@@ -330,6 +330,35 @@ std::uint32_t ensure_symbol_id(amber::bytecode::BcModule *module,
   return static_cast<std::uint32_t>(module->symbols.size() - 1U);
 }
 
+std::uint32_t append_string(amber::bytecode::BcModule *module,
+                            const std::string &value) {
+  for (std::uint32_t i = 0; i < module->strings.size(); ++i) {
+    if (module->strings[i] == value) {
+      return i;
+    }
+  }
+  module->strings.push_back(value);
+  return static_cast<std::uint32_t>(module->strings.size() - 1U);
+}
+
+std::uint32_t append_path_const(amber::bytecode::BcModule *module,
+                                std::initializer_list<std::uint32_t> items) {
+  amber::bytecode::Constant path;
+  path.kind = amber::bytecode::ConstantKind::Path;
+  path.items = items;
+  module->const_pool.push_back(path);
+  return static_cast<std::uint32_t>(module->const_pool.size() - 1U);
+}
+
+std::uint32_t append_integer_const(amber::bytecode::BcModule *module,
+                                   std::int64_t value) {
+  amber::bytecode::Constant constant;
+  constant.kind = amber::bytecode::ConstantKind::Integer;
+  constant.int_value = value;
+  module->const_pool.push_back(constant);
+  return static_cast<std::uint32_t>(module->const_pool.size() - 1U);
+}
+
 amber::runtime::Value make_closure_value(std::uint32_t code_id) {
   auto closure = std::make_shared<amber::runtime::ClosureValue>();
   closure->header.kind = amber::runtime::HeapObjectKind::Closure;
@@ -3330,6 +3359,546 @@ void test_runtime_world_include_invalidates_send_cache() {
          "late include should dominate and invalidate cached dispatch");
 }
 
+void test_runtime_world_transaction_replaces_mixin_method_for_cached_class() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"Box", "Trait", "value"};
+  append_path_const(&module, {});
+  const std::uint32_t trait_ref = append_path_const(&module, {1});
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+  const std::uint32_t two_id = append_integer_const(&module, 2);
+
+  BcClass box;
+  box.class_name_sym_id = 0;
+  box.direct_include_refs.push_back(trait_ref);
+  module.classes.push_back(box);
+
+  BcClass trait;
+  trait.class_name_sym_id = 1;
+  trait.method_range_start = 0;
+  trait.method_range_count = 1;
+  trait.flags = kClassFlagMixin;
+  module.classes.push_back(trait);
+
+  BcMethod original;
+  original.selector_sym_id = 2;
+  original.owner_dispatch_ref = 1;
+  original.entry_code_id = 2;
+  original.flags = 1;
+  module.methods.push_back(original);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 2;
+  caller.instructions.push_back(send_instr(1, 0, 2, {}, -1, 0));
+  caller.instructions.push_back({Opcode::Return, {{1, false}}});
+
+  BcCode body_one;
+  body_one.code_id = 2;
+  body_one.kind = CodeKind::Method;
+  body_one.reg_count = 1;
+  body_one.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {one_id, false}}});
+  body_one.instructions.push_back({Opcode::Return, {{0, false}}});
+
+  BcCode body_two;
+  body_two.code_id = 3;
+  body_two.kind = CodeKind::Method;
+  body_two.reg_count = 1;
+  body_two.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {two_id, false}}});
+  body_two.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body_one, body_two};
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  amber::runtime::RuntimeWorld world(module);
+
+  const amber::runtime::ExecutionResult before =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(before.ok(), "mixin reopen preflight send failed");
+  expect(before.value.is_integer() && before.value.as_integer() == 1,
+         "static mixin method should answer before reopen");
+
+  amber::runtime::RuntimeWorldTransaction tx;
+  tx.target_kind = amber::runtime::RuntimeOwnerKind::Mixin;
+  tx.target_index = 1;
+  BcMethod replacement = original;
+  replacement.entry_code_id = 3;
+  tx.instance_methods.push_back(replacement);
+
+  const std::uint64_t epoch_before = world.world_epoch();
+  const amber::runtime::ExecutionResult committed =
+      world.commit_transaction(tx);
+  expect(committed.ok(), "mixin reopen transaction should commit");
+  expect(world.world_epoch() == epoch_before + 1,
+         "mixin reopen should bump world epoch once");
+
+  const amber::runtime::ExecutionResult after =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(after.ok(), "mixin reopen post-commit send failed");
+  expect(after.value.is_integer() && after.value.as_integer() == 2,
+         "mixin reopen should invalidate class receiver cache");
+}
+
+void test_runtime_world_transaction_rolls_back_on_invalid_include() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"Box", "Trait", "Plain", "value"};
+  append_path_const(&module, {});
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+
+  BcClass box;
+  box.class_name_sym_id = 0;
+  module.classes.push_back(box);
+
+  BcClass trait;
+  trait.class_name_sym_id = 1;
+  trait.flags = kClassFlagMixin;
+  module.classes.push_back(trait);
+
+  BcClass plain;
+  plain.class_name_sym_id = 2;
+  module.classes.push_back(plain);
+
+  BcMethod method;
+  method.selector_sym_id = 3;
+  method.entry_code_id = 2;
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 2;
+  caller.instructions.push_back(send_instr(1, 0, 3, {}, -1, 0));
+  caller.instructions.push_back({Opcode::Return, {{1, false}}});
+
+  BcCode body;
+  body.code_id = 2;
+  body.kind = CodeKind::Method;
+  body.reg_count = 1;
+  body.instructions.push_back({Opcode::LoadK, {{0, false}, {one_id, false}}});
+  body.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body};
+
+  amber::runtime::RuntimeWorld world(module);
+  const std::uint64_t epoch_before = world.world_epoch();
+  amber::runtime::RuntimeWorldTransaction tx;
+  tx.target_kind = amber::runtime::RuntimeOwnerKind::Class;
+  tx.target_index = 0;
+  tx.instance_methods.push_back(method);
+  tx.include_indices.push_back(2);
+
+  const amber::runtime::ExecutionResult failed = world.commit_transaction(tx);
+  expect(!failed.ok(), "invalid include transaction should fail");
+  expect(failed.fault.has_value() && failed.fault->error_name == "TypeError",
+         "invalid include should report TypeError");
+  expect(world.world_epoch() == epoch_before,
+         "failed transaction should not bump world epoch");
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  const amber::runtime::ExecutionResult send =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(!send.ok(), "rolled-back method should not be visible");
+  expect(send.fault.has_value() && send.fault->error_name == "NoMethodError",
+         "rolled-back method should leave dispatch unchanged");
+}
+
+void test_runtime_world_freeze_rejects_world_mutation_but_keeps_send() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"Box", "value"};
+  append_path_const(&module, {});
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+  const std::uint32_t two_id = append_integer_const(&module, 2);
+
+  BcClass box;
+  box.class_name_sym_id = 0;
+  box.method_range_start = 0;
+  box.method_range_count = 1;
+  module.classes.push_back(box);
+
+  BcMethod original;
+  original.selector_sym_id = 1;
+  original.owner_dispatch_ref = 0;
+  original.entry_code_id = 2;
+  original.flags = 1;
+  module.methods.push_back(original);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 2;
+  caller.instructions.push_back(send_instr(1, 0, 1, {}, -1, 0));
+  caller.instructions.push_back({Opcode::Return, {{1, false}}});
+
+  BcCode body_one;
+  body_one.code_id = 2;
+  body_one.kind = CodeKind::Method;
+  body_one.reg_count = 1;
+  body_one.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {one_id, false}}});
+  body_one.instructions.push_back({Opcode::Return, {{0, false}}});
+
+  BcCode body_two;
+  body_two.code_id = 3;
+  body_two.kind = CodeKind::Method;
+  body_two.reg_count = 1;
+  body_two.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {two_id, false}}});
+  body_two.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body_one, body_two};
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  amber::runtime::RuntimeWorld world(module);
+  const amber::runtime::ExecutionResult before =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(before.ok() && before.value.is_integer() &&
+             before.value.as_integer() == 1,
+         "pre-freeze send should use original method");
+
+  const amber::runtime::ExecutionResult frozen = world.freeze_world();
+  expect(frozen.ok(), "freeze_world should succeed");
+  expect(world.world_state() == amber::runtime::RuntimeWorldState::Frozen,
+         "world should report frozen state");
+
+  BcMethod replacement = original;
+  replacement.entry_code_id = 3;
+  const amber::runtime::ExecutionResult rejected =
+      world.define_instance_method(0, replacement);
+  expect(!rejected.ok(), "post-freeze define_method should fail");
+  expect(rejected.fault.has_value() &&
+             rejected.fault->error_name == "WorldFrozenError",
+         "post-freeze mutation should report WorldFrozenError");
+
+  const amber::runtime::ExecutionResult after =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(after.ok() && after.value.is_integer() &&
+             after.value.as_integer() == 1,
+         "ordinary send should remain legal after freeze");
+}
+
+void test_runtime_world_transaction_rejects_superclass_mismatch() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"Parent", "Other", "Child"};
+  const std::uint32_t parent_ref = append_path_const(&module, {0});
+  const std::uint32_t other_ref = append_path_const(&module, {1});
+
+  BcClass parent;
+  parent.class_name_sym_id = 0;
+  module.classes.push_back(parent);
+
+  BcClass other;
+  other.class_name_sym_id = 1;
+  module.classes.push_back(other);
+
+  BcClass child;
+  child.class_name_sym_id = 2;
+  child.has_superclass_ref = true;
+  child.superclass_ref = parent_ref;
+  module.classes.push_back(child);
+
+  amber::runtime::RuntimeWorld world(module);
+  const std::uint64_t epoch_before = world.world_epoch();
+  amber::runtime::RuntimeWorldTransaction tx;
+  tx.target_kind = amber::runtime::RuntimeOwnerKind::Class;
+  tx.target_index = 2;
+  tx.has_superclass_ref = true;
+  tx.superclass_ref = other_ref;
+
+  const amber::runtime::ExecutionResult failed = world.commit_transaction(tx);
+  expect(!failed.ok(), "superclass mismatch transaction should fail");
+  expect(failed.fault.has_value() &&
+             failed.fault->error_name == "SuperclassMismatchError",
+         "superclass mismatch should report SuperclassMismatchError");
+  expect(world.world_epoch() == epoch_before,
+         "superclass mismatch should not publish transaction");
+}
+
+void test_runtime_world_transaction_rejects_include_cycle_before_commit() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"MixA", "MixB"};
+
+  BcClass mix_a;
+  mix_a.class_name_sym_id = 0;
+  mix_a.flags = kClassFlagMixin;
+  module.classes.push_back(mix_a);
+
+  BcClass mix_b;
+  mix_b.class_name_sym_id = 1;
+  mix_b.flags = kClassFlagMixin;
+  module.classes.push_back(mix_b);
+
+  amber::runtime::RuntimeWorld world(module);
+  amber::runtime::RuntimeWorldTransaction first;
+  first.target_kind = amber::runtime::RuntimeOwnerKind::Mixin;
+  first.target_index = 0;
+  first.include_indices.push_back(1);
+  expect(world.commit_transaction(first).ok(),
+         "initial acyclic mixin include should commit");
+
+  const std::uint64_t epoch_before = world.world_epoch();
+  amber::runtime::RuntimeWorldTransaction cycle;
+  cycle.target_kind = amber::runtime::RuntimeOwnerKind::Mixin;
+  cycle.target_index = 1;
+  cycle.include_indices.push_back(0);
+
+  const amber::runtime::ExecutionResult failed =
+      world.commit_transaction(cycle);
+  expect(!failed.ok(), "cyclic include transaction should fail");
+  expect(failed.fault.has_value() &&
+             failed.fault->error_name == "IncludeCycleError",
+         "cyclic include should report IncludeCycleError");
+  expect(world.world_epoch() == epoch_before,
+         "cyclic include should not bump world epoch");
+}
+
+void test_runtime_world_extend_invalidates_class_side_send_cache() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"Box", "Older", "Newer", "label"};
+  append_path_const(&module, {});
+  const std::uint32_t older_ref = append_path_const(&module, {1});
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+  const std::uint32_t two_id = append_integer_const(&module, 2);
+
+  BcClass box;
+  box.class_name_sym_id = 0;
+  box.direct_extend_refs.push_back(older_ref);
+  module.classes.push_back(box);
+
+  BcClass older;
+  older.class_name_sym_id = 1;
+  older.method_range_start = 0;
+  older.method_range_count = 1;
+  older.flags = kClassFlagMixin;
+  module.classes.push_back(older);
+
+  BcClass newer;
+  newer.class_name_sym_id = 2;
+  newer.method_range_start = 1;
+  newer.method_range_count = 1;
+  newer.flags = kClassFlagMixin;
+  module.classes.push_back(newer);
+
+  BcMethod older_method;
+  older_method.selector_sym_id = 3;
+  older_method.owner_dispatch_ref = 1;
+  older_method.entry_code_id = 2;
+  older_method.flags = 1;
+  module.methods.push_back(older_method);
+
+  BcMethod newer_method = older_method;
+  newer_method.owner_dispatch_ref = 2;
+  newer_method.entry_code_id = 3;
+  module.methods.push_back(newer_method);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 2;
+  caller.instructions.push_back(send_instr(1, 0, 3, {}, -1, 0));
+  caller.instructions.push_back({Opcode::Return, {{1, false}}});
+
+  BcCode old_body;
+  old_body.code_id = 2;
+  old_body.kind = CodeKind::Method;
+  old_body.reg_count = 1;
+  old_body.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {one_id, false}}});
+  old_body.instructions.push_back({Opcode::Return, {{0, false}}});
+
+  BcCode new_body;
+  new_body.code_id = 3;
+  new_body.kind = CodeKind::Method;
+  new_body.reg_count = 1;
+  new_body.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {two_id, false}}});
+  new_body.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, old_body, new_body};
+
+  amber::runtime::RuntimeWorld world(module);
+  const amber::runtime::ExecutionResult before =
+      world.execute(1, {amber::runtime::Value::class_object(0)});
+  expect(before.ok(), "extend preflight class-side send failed");
+  expect(before.value.is_integer() && before.value.as_integer() == 1,
+         "static extend should answer before late extend");
+
+  const std::uint64_t epoch_before = world.world_epoch();
+  const amber::runtime::ExecutionResult extended = world.extend_mixin(0, 2);
+  expect(extended.ok(), "runtime extend_mixin should commit");
+  expect(world.world_epoch() == epoch_before + 1,
+         "late extend should bump world epoch");
+
+  const amber::runtime::ExecutionResult after =
+      world.execute(1, {amber::runtime::Value::class_object(0)});
+  expect(after.ok(), "extend post-mutation class-side send failed");
+  expect(after.value.is_integer() && after.value.as_integer() == 2,
+         "late extend should dominate and invalidate class-side cache");
+}
+
+void test_runtime_reflection_mirrors_are_read_only_stable_and_ordered() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+  module.symbols = {"Box", "Trait", "Later", "zeta", "alpha", "beta"};
+
+  const std::uint32_t package_key = append_string(&module, "amber.package");
+  const std::uint32_t package_value = append_string(&module, "reflect.demo");
+  const std::uint32_t dependency_name = append_string(&module, "dep.core");
+  const std::uint32_t export_kind = append_string(&module, "class");
+  module.attrs.push_back({package_key, package_value});
+
+  DepEntry dependency;
+  dependency.module_name_str_id = dependency_name;
+  dependency.required_format = {1, 0};
+  dependency.min_language_version = {1, 0};
+  module.dependencies.push_back(dependency);
+  module.exports.push_back({0, export_kind, 0, 0});
+
+  const std::uint32_t trait_ref = append_path_const(&module, {1});
+
+  BcClass box;
+  box.class_name_sym_id = 0;
+  box.method_range_start = 0;
+  box.method_range_count = 2;
+  box.direct_include_refs.push_back(trait_ref);
+  module.classes.push_back(box);
+
+  BcClass trait;
+  trait.class_name_sym_id = 1;
+  trait.method_range_start = 2;
+  trait.method_range_count = 1;
+  trait.flags = kClassFlagMixin;
+  module.classes.push_back(trait);
+
+  BcClass later;
+  later.class_name_sym_id = 2;
+  later.method_range_start = 3;
+  later.method_range_count = 1;
+  later.flags = kClassFlagMixin;
+  module.classes.push_back(later);
+
+  BcMethod zeta;
+  zeta.selector_sym_id = 3;
+  zeta.owner_dispatch_ref = 0;
+  zeta.entry_code_id = 10;
+  zeta.flags = 1;
+  module.methods.push_back(zeta);
+
+  BcMethod alpha = zeta;
+  alpha.selector_sym_id = 4;
+  alpha.entry_code_id = 11;
+  module.methods.push_back(alpha);
+
+  BcMethod beta = zeta;
+  beta.selector_sym_id = 5;
+  beta.owner_dispatch_ref = 1;
+  beta.entry_code_id = 12;
+  module.methods.push_back(beta);
+
+  BcMethod later_method = zeta;
+  later_method.selector_sym_id = 5;
+  later_method.owner_dispatch_ref = 2;
+  later_method.entry_code_id = 13;
+  module.methods.push_back(later_method);
+
+  BcCode zeta_code;
+  zeta_code.code_id = 10;
+  zeta_code.kind = CodeKind::Method;
+  zeta_code.source_spans.push_back(
+      {0, 1, {"reflect.am", {20, 3, 100}, {20, 8, 105}}});
+  BcCode alpha_code;
+  alpha_code.code_id = 11;
+  alpha_code.kind = CodeKind::Method;
+  alpha_code.source_spans.push_back(
+      {0, 1, {"reflect.am", {12, 5, 50}, {12, 10, 55}}});
+  BcCode beta_code;
+  beta_code.code_id = 12;
+  beta_code.kind = CodeKind::Method;
+  beta_code.source_spans.push_back(
+      {0, 1, {"reflect.am", {30, 3, 150}, {30, 8, 155}}});
+  BcCode later_code;
+  later_code.code_id = 13;
+  later_code.kind = CodeKind::Method;
+  later_code.source_spans.push_back(
+      {0, 1, {"reflect.am", {40, 3, 200}, {40, 8, 205}}});
+  module.code_objects = {zeta_code, alpha_code, beta_code, later_code};
+
+  amber::runtime::RuntimeWorld world(module);
+  amber::runtime::RuntimeWorldMirror snapshot = world.world_mirror();
+  expect(snapshot.read_only, "world mirror should advertise read-only state");
+  expect(snapshot.package.read_only, "package mirror should be read-only");
+  expect(snapshot.package.name == "reflect.demo",
+         "package mirror should expose package name attr");
+  expect(snapshot.package.dependencies.size() == 1 &&
+             snapshot.package.dependencies[0].module_name == "dep.core",
+         "package mirror should expose deterministic dependencies");
+  expect(snapshot.package.exports.size() == 1 &&
+             snapshot.package.exports[0].public_name == "Box",
+         "package mirror should expose deterministic exports");
+  expect(snapshot.owners.size() == 3, "world mirror should expose all owners");
+
+  std::optional<amber::runtime::RuntimeOwnerMirror> box_mirror =
+      world.class_mirror(0);
+  expect(box_mirror.has_value(), "class mirror should resolve class owner");
+  expect(!world.mixin_mirror(0).has_value(),
+         "mixin mirror should reject class owner");
+  expect(world.mixin_mirror(1).has_value(),
+         "mixin mirror should resolve mixin owner");
+  expect(box_mirror->read_only, "owner mirror should be read-only");
+  expect(box_mirror->kind == amber::runtime::RuntimeOwnerKind::Class,
+         "owner mirror should report class kind");
+  expect(box_mirror->instance_methods.size() == 2,
+         "class mirror should expose instance method table");
+  expect(box_mirror->instance_methods[0].selector == "alpha" &&
+             box_mirror->instance_methods[1].selector == "zeta",
+         "method mirrors should be sorted by selector name");
+  expect(box_mirror->instance_methods[0].read_only,
+         "method mirror should be read-only");
+  expect(box_mirror->instance_methods[0].source_location.present &&
+             box_mirror->instance_methods[0].source_location.file ==
+                 "reflect.am" &&
+             box_mirror->instance_methods[0].source_location.line == 12,
+         "method mirror should expose source location");
+  expect(box_mirror->direct_includes.size() == 1 &&
+             box_mirror->direct_includes[0].name == "Trait" &&
+             !box_mirror->direct_includes[0].dynamic,
+         "class mirror should expose static direct includes");
+
+  snapshot.owners[0].instance_methods.clear();
+  expect(world.class_mirror(0)->instance_methods.size() == 2,
+         "mutating a mirror copy should not mutate runtime state");
+
+  const std::uint64_t epoch_before = world.world_epoch();
+  const amber::runtime::ExecutionResult included = world.include_mixin(0, 2);
+  expect(included.ok(), "late include for mirror test should commit");
+  std::optional<amber::runtime::RuntimeOwnerMirror> after_include =
+      world.class_mirror(0);
+  expect(after_include.has_value(),
+         "class mirror after include should resolve");
+  expect(after_include->world_epoch == epoch_before + 1,
+         "owner mirror should carry current world epoch");
+  expect(after_include->direct_includes.size() == 2 &&
+             after_include->direct_includes[1].name == "Later" &&
+             after_include->direct_includes[1].dynamic,
+         "class mirror should expose late dynamic includes after static ones");
+  expect(snapshot.owners[0].direct_includes.size() == 1,
+         "old world mirror snapshot should stay stable after mutation");
+}
+
 void test_manual_pattern_deconstruct_protocol_sequence() {
   using namespace amber::bytecode;
 
@@ -3760,6 +4329,13 @@ int main() {
   test_runtime_lifecycle_dealloc_clears_collection_payload();
   test_runtime_world_define_method_invalidates_send_cache();
   test_runtime_world_include_invalidates_send_cache();
+  test_runtime_world_transaction_replaces_mixin_method_for_cached_class();
+  test_runtime_world_transaction_rolls_back_on_invalid_include();
+  test_runtime_world_freeze_rejects_world_mutation_but_keeps_send();
+  test_runtime_world_transaction_rejects_superclass_mismatch();
+  test_runtime_world_transaction_rejects_include_cycle_before_commit();
+  test_runtime_world_extend_invalidates_class_side_send_cache();
+  test_runtime_reflection_mirrors_are_read_only_stable_and_ordered();
   test_manual_pattern_deconstruct_protocol_sequence();
   test_manual_pattern_deconstruct_protocol_map();
   test_manual_raise_handler_table_recovers();

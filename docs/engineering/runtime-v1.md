@@ -1,7 +1,9 @@
 # amber.runtime.v1
 
-Status: `W5.1` through `W8.3` runtime acceptance is satisfied, and the
-`W8.4` full conformance runner gate is satisfied through `ambertest`.
+Status: `W5.1` through `W8.3` runtime acceptance is satisfied, the `W8.4`
+full conformance runner gate is satisfied through `ambertest`, and `W9.2`
+open-world transaction/freeze plus `W9.3` reflection mirror behavior is covered
+in VM tests.
 
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
 
@@ -32,10 +34,18 @@ Current implemented slice:
   `LOAD_IVAR` / `STORE_IVAR` slot lookup, guarded by receiver class,
   selector/name, dispatch method version, `world_epoch`, and ivar
   `shape_id` / `shape_version` where applicable;
-- persistent `RuntimeWorld` execution context with public instance-method
-  replacement plus direct `include` / `extend` mutation hooks, dynamic method
-  and ancestor overlays, and observable `world_epoch` / owner
-  `method_version` invalidation;
+- persistent `RuntimeWorld` execution context with atomic
+  `RuntimeWorldTransaction` commits for class/mixin reopen, instance/class
+  method replacement, direct `include`, and class-side `extend`, with
+  pre-commit kind/superclass/include-cycle validation, rollback on failure,
+  `open -> frozen` state, `WorldFrozenError` guards, and observable
+  `world_epoch` / owner `method_version` invalidation;
+- runtime reflection mirror snapshots for package/world/class/mixin/method
+  state through `RuntimeWorld::{package,world,class,mixin,owner}_mirror`,
+  returning copied read-only views with deterministic method/export/dependency
+  ordering, direct include/extend visibility for static and late dynamic edges,
+  source locations from bytecode debug spans, and no mutable method-table
+  backdoor;
 - `method_missing` fallback on class/instance dispatch without recursive
   fallback on the `method_missing` selector itself;
 - constructor `CALL` on class objects, allocating an instance and routing to
@@ -150,8 +160,12 @@ Current implemented slice:
   dependency init order, single-run init, cycle detection, failed-init, export
   alias, missing export, version/ABI mismatch, re-export, and source-mapped
   loader diagnostic coverage, plus W8.3 eager sequence chaining, `reduce`
-  empty-error, `flat_map`, `count`, `find`, `group_by`, and ordered `Map`
-  projection/transform coverage.
+  empty-error, `flat_map`, `count`, `find`, `group_by`, ordered `Map`
+  projection/transform coverage, and W9.2 open-world transaction coverage for
+  rollback, `WorldFrozenError`, `SuperclassMismatchError`, include-cycle
+  rejection, mixin method replacement, and late class-side `extend`
+  invalidation, plus W9.3 mirror coverage for read-only snapshots,
+  deterministic ordering, source locations, and post-mutation stability.
 
 Still intentionally missing in later layers:
 

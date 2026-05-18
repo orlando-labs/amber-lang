@@ -1,7 +1,9 @@
 # amber.conformance.v1
 
-Status: `W8.4` full conformance runner gate is satisfied, and `W9.1`
-typed-profile fixtures are available behind the cumulative `M6` bundle.
+Status: `W8.4` full conformance runner gate is satisfied, `W9.1`
+typed-profile fixtures are available behind the cumulative `M6` bundle, and
+`W9.2` open-world plus `W9.3` reflection mirror runtime behavior is covered by
+focused VM tests.
 
 `ambertest run <path>` is the canonical corpus entrypoint. It discovers
 `meta.json` fixtures deterministically, dispatches by fixture phase, compares
@@ -54,4 +56,7 @@ Current limits:
   through `RuntimeModuleLoader`, and initialize all mapped modules;
 - `typed` fixtures run the optional Amber/Typed profile without changing
   dynamic conformance or the `make conformance` M5 gate;
+- W9.2 transaction/freeze and W9.3 reflection mirror checks are runtime API
+  tests today; source-level multi-module open-world fixtures belong with later
+  package/hot-reload work;
 - multi-source package/build-graph corpus belongs to later package work.

@@ -666,6 +666,116 @@ Value make_tuple_value(std::vector<Value> items);
 Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen = false);
 
 enum class MethodTableSide { Instance, Class };
+enum class RuntimeWorldState { Open, Frozen };
+enum class RuntimeOwnerKind { Class, Mixin };
+
+struct RuntimeWorldTransaction {
+  RuntimeOwnerKind target_kind = RuntimeOwnerKind::Class;
+  std::uint32_t target_index = 0;
+  bool has_superclass_ref = false;
+  std::uint32_t superclass_ref = 0;
+  std::vector<bytecode::BcMethod> instance_methods;
+  std::vector<bytecode::BcMethod> class_methods;
+  std::vector<std::uint32_t> include_indices;
+  std::vector<std::uint32_t> extend_indices;
+};
+
+struct RuntimeMirrorSourceLocation {
+  bool present = false;
+  std::uint32_t code_id = 0;
+  std::uint32_t pc = 0;
+  std::string file;
+  std::uint32_t line = 0;
+  std::uint32_t column = 0;
+};
+
+struct RuntimeMethodMirror {
+  bool read_only = true;
+  std::uint32_t selector_symbol_id = 0;
+  std::string selector;
+  std::uint32_t owner_index = 0;
+  std::string owner_name;
+  RuntimeOwnerKind owner_kind = RuntimeOwnerKind::Class;
+  MethodTableSide side = MethodTableSide::Instance;
+  std::uint32_t signature_blob_id = 0;
+  std::uint32_t entry_code_id = 0;
+  std::uint32_t flags = 0;
+  std::size_t parameter_count = 0;
+  std::size_t default_count = 0;
+  std::size_t type_hook_count = 0;
+  std::size_t clause_count = 0;
+  RuntimeMirrorSourceLocation source_location;
+};
+
+struct RuntimeDirectMixinMirror {
+  std::uint32_t index = 0;
+  std::string name;
+  bool dynamic = false;
+};
+
+struct RuntimePackageDependencyMirror {
+  std::string module_name;
+  bytecode::Version required_format;
+  bytecode::Version min_language_version;
+  bool has_max_language_version = false;
+  bytecode::Version max_language_version;
+  bool has_abi_requirement = false;
+};
+
+struct RuntimePackageExportMirror {
+  std::string public_name;
+  std::string target_kind;
+  std::uint32_t target_index = 0;
+  std::uint32_t visibility_flags = 0;
+  bool has_reexport = false;
+  std::string reexport_module_name;
+};
+
+struct RuntimePackageAttrMirror {
+  std::string key;
+  std::string value;
+};
+
+struct RuntimePackageMirror {
+  bool read_only = true;
+  std::string name;
+  bytecode::Version format_version;
+  bytecode::Version language_version;
+  std::uint32_t profile_flags = 0;
+  std::uint32_t file_flags = 0;
+  bool has_init = false;
+  std::uint32_t init_code_id = 0;
+  std::vector<RuntimePackageDependencyMirror> dependencies;
+  std::vector<RuntimePackageExportMirror> exports;
+  std::vector<RuntimePackageAttrMirror> attrs;
+};
+
+struct RuntimeOwnerMirror {
+  bool read_only = true;
+  std::uint32_t index = 0;
+  std::string name;
+  RuntimeOwnerKind kind = RuntimeOwnerKind::Class;
+  std::uint32_t owner_flags = 0;
+  std::uint32_t ivar_schema_id = 0;
+  bool has_superclass = false;
+  std::uint32_t superclass_index = 0;
+  std::string superclass_name;
+  std::uint64_t method_version = 0;
+  std::uint64_t world_epoch = 0;
+  RuntimeMirrorSourceLocation source_location;
+  std::vector<RuntimeDirectMixinMirror> direct_includes;
+  std::vector<RuntimeDirectMixinMirror> direct_extends;
+  std::vector<RuntimeMethodMirror> instance_methods;
+  std::vector<RuntimeMethodMirror> class_methods;
+};
+
+struct RuntimeWorldMirror {
+  bool read_only = true;
+  RuntimeWorldState state = RuntimeWorldState::Open;
+  std::uint64_t world_epoch = 0;
+  RuntimePackageMirror package;
+  std::vector<RuntimeOwnerMirror> owners;
+};
 
 struct TraceFrame {
   std::uint32_t code_id = 0;
@@ -709,15 +819,29 @@ public:
 
   ExecutionResult define_instance_method(std::uint32_t class_index,
                                          bytecode::BcMethod method);
+  ExecutionResult define_class_method(std::uint32_t class_index,
+                                      bytecode::BcMethod method);
   ExecutionResult include_mixin(std::uint32_t class_index,
                                 std::uint32_t mixin_index);
   ExecutionResult extend_mixin(std::uint32_t class_index,
                                std::uint32_t mixin_index);
+  ExecutionResult commit_transaction(const RuntimeWorldTransaction &tx);
+  ExecutionResult freeze_world();
 
   std::uint64_t world_epoch() const;
+  RuntimeWorldState world_state() const;
+  bool is_world_frozen() const;
   std::uint64_t method_version(std::uint32_t class_index) const;
   std::size_t method_table_size(std::uint32_t class_index,
                                 MethodTableSide side) const;
+  RuntimePackageMirror package_mirror() const;
+  std::optional<RuntimeOwnerMirror>
+  owner_mirror(std::uint32_t owner_index) const;
+  std::optional<RuntimeOwnerMirror>
+  class_mirror(std::uint32_t class_index) const;
+  std::optional<RuntimeOwnerMirror>
+  mixin_mirror(std::uint32_t mixin_index) const;
+  RuntimeWorldMirror world_mirror() const;
   RuntimeHeapStats heap_stats() const;
   std::uint64_t drain_remote_frees();
   std::uint64_t drain_remote_frees(std::uint64_t worker_id);
