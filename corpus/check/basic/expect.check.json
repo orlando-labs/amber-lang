@@ -1,0 +1,6 @@
+{
+  "schema": "amber.check.v1",
+  "status": "ok",
+  "module": "conformance.check",
+  "diagnostic_count": 0
+}

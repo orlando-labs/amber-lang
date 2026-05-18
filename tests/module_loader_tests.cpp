@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,51 @@ serialized_module(const amber::bytecode::BcModule &module) {
   return amber::bytecode::serialize_module(module);
 }
 
+std::uint32_t append_string(amber::bytecode::BcModule *module,
+                            const std::string &value) {
+  module->strings.push_back(value);
+  return static_cast<std::uint32_t>(module->strings.size() - 1U);
+}
+
+std::uint32_t append_symbol(amber::bytecode::BcModule *module,
+                            const std::string &value) {
+  module->symbols.push_back(value);
+  return static_cast<std::uint32_t>(module->symbols.size() - 1U);
+}
+
+void add_dependency(amber::bytecode::BcModule *module,
+                    const std::string &dep_name) {
+  amber::bytecode::DepEntry dep;
+  dep.module_name_str_id = append_string(module, dep_name);
+  dep.required_format = {1, 0};
+  dep.min_language_version = {1, 0};
+  module->dependencies.push_back(dep);
+}
+
+void add_code_export(amber::bytecode::BcModule *module,
+                     const std::string &public_name) {
+  amber::bytecode::ExportEntry entry;
+  entry.symbol_id = append_symbol(module, public_name);
+  entry.target_kind_str_id = append_string(module, "code");
+  entry.target_index = 1;
+  entry.visibility_flags = 1;
+  module->exports.push_back(entry);
+}
+
+void add_reexport(amber::bytecode::BcModule *module,
+                  const std::string &public_name,
+                  const std::string &dependency_name,
+                  const std::string &source_name) {
+  amber::bytecode::ExportEntry entry;
+  entry.symbol_id = append_symbol(module, public_name);
+  entry.target_kind_str_id = append_string(module, "reexport");
+  entry.target_index = append_string(module, source_name);
+  entry.visibility_flags = 1;
+  entry.has_reexport_module_name = true;
+  entry.reexport_module_name_str_id = append_string(module, dependency_name);
+  module->exports.push_back(entry);
+}
+
 amber::bytecode::BcModule make_module(const std::vector<std::string> &deps,
                                       std::int64_t init_value,
                                       bool failing_init = false) {
@@ -31,14 +77,7 @@ amber::bytecode::BcModule make_module(const std::vector<std::string> &deps,
   module.language_version = {1, 0};
 
   for (const std::string &dep_name : deps) {
-    const std::uint32_t dep_name_id =
-        static_cast<std::uint32_t>(module.strings.size());
-    module.strings.push_back(dep_name);
-    DepEntry dep;
-    dep.module_name_str_id = dep_name_id;
-    dep.required_format = {1, 0};
-    dep.min_language_version = {1, 0};
-    module.dependencies.push_back(dep);
+    add_dependency(&module, dep_name);
   }
 
   BcCode init;
@@ -192,6 +231,158 @@ void test_loader_marks_failed_init() {
          "failed init message should preserve VM fault");
 }
 
+void test_loader_materializes_exports_and_import_aliases() {
+  amber::runtime::RuntimeModuleLoader loader;
+  amber::bytecode::BcModule core = make_module({}, 42);
+  add_code_export(&core, "Answer");
+  amber::bytecode::BcModule app = make_module({"core.values"}, 1);
+
+  add_ok(loader, "core.values", core);
+  add_ok(loader, "app.main", app);
+  const amber::runtime::RuntimeModuleLoadResult alias_added =
+      loader.add_import_alias("app.main", "Answer", "core.values", "Answer");
+  expect(alias_added.ok, "import alias registration should succeed");
+
+  const amber::runtime::RuntimeModuleLoadResult linked = loader.link();
+  expect(linked.ok, "export/import link should succeed");
+  const std::optional<amber::runtime::RuntimeExportCellSnapshot> before =
+      loader.export_snapshot("core.values", "Answer");
+  expect(before.has_value(), "linked export cell should be visible");
+  expect(before->state == amber::runtime::RuntimeExportCellState::Uninitialized,
+         "linked export should be uninitialized before module init");
+
+  const amber::runtime::RuntimeModuleLoadResult early_read =
+      loader.read_import_alias("app.main", "Answer");
+  expect(!early_read.ok, "early import alias read should fail");
+  expect(early_read.error_name == "ModuleInitError",
+         "early import alias read should report ModuleInitError");
+
+  const amber::runtime::RuntimeModuleLoadResult initialized =
+      loader.initialize_all();
+  expect(initialized.ok, "export/import modules should initialize");
+  const std::optional<amber::runtime::RuntimeImportAliasSnapshot> alias =
+      loader.import_alias_snapshot("app.main", "Answer");
+  expect(alias.has_value(), "import alias snapshot should be visible");
+  expect(alias->read_only, "import alias should be read-only");
+  expect(alias->export_cell.state ==
+             amber::runtime::RuntimeExportCellState::Ready,
+         "import alias should observe ready export cell after init");
+  expect(alias->export_cell.resolved_module_name == "core.values",
+         "import alias should resolve to exporting module");
+}
+
+void test_loader_reports_missing_export() {
+  amber::runtime::RuntimeModuleLoader loader;
+  add_ok(loader, "core.values", make_module({}, 1));
+  add_ok(loader, "app.main", make_module({"core.values"}, 1));
+  const amber::runtime::RuntimeModuleLoadResult alias_added =
+      loader.add_import_alias("app.main", "Missing", "core.values", "Missing");
+  expect(alias_added.ok,
+         "missing export alias registration should be accepted");
+
+  const amber::runtime::RuntimeModuleLoadResult linked = loader.link();
+  expect(!linked.ok, "link should fail for missing export");
+  expect(linked.error_name == "ImportError",
+         "missing export should report ImportError");
+  expect(linked.message.find("Missing") != std::string::npos,
+         "missing export message should name export");
+  expect(!linked.diagnostics.empty(),
+         "missing export should include diagnostic");
+  expect(linked.diagnostics[0].module_name == "app.main",
+         "missing export diagnostic should name importer");
+  expect(linked.diagnostics[0].dependency_name == "core.values",
+         "missing export diagnostic should name dependency");
+  expect(linked.diagnostics[0].export_name == "Missing",
+         "missing export diagnostic should name export");
+}
+
+void test_loader_reports_version_and_abi_mismatch() {
+  amber::runtime::RuntimeModuleLoader version_loader;
+  amber::bytecode::BcModule versioned_app = make_module({"core.versioned"}, 1);
+  versioned_app.dependencies[0].required_format = {1, 1};
+  add_ok(version_loader, "core.versioned", make_module({}, 1));
+  add_ok(version_loader, "app.versioned", versioned_app);
+
+  const amber::runtime::RuntimeModuleLoadResult version_linked =
+      version_loader.link();
+  expect(!version_linked.ok, "link should fail for dependency format mismatch");
+  expect(version_linked.error_name == "ImportError",
+         "version mismatch should report ImportError");
+  expect(version_linked.message.find("1.1") != std::string::npos,
+         "version mismatch should include required version");
+
+  amber::runtime::RuntimeModuleLoader abi_loader;
+  amber::bytecode::BcModule abi_app = make_module({"core.abi"}, 1);
+  abi_app.dependencies[0].has_abi_requirement = true;
+  abi_app.dependencies[0].abi_requirement.fill(0xAB);
+  add_ok(abi_loader, "core.abi", make_module({}, 1));
+  add_ok(abi_loader, "app.abi", abi_app);
+
+  const amber::runtime::RuntimeModuleLoadResult abi_linked = abi_loader.link();
+  expect(!abi_linked.ok, "link should fail for dependency ABI mismatch");
+  expect(abi_linked.error_name == "ImportError",
+         "ABI mismatch should report ImportError");
+  expect(abi_linked.message.find("ABI") != std::string::npos,
+         "ABI mismatch should include ABI context");
+}
+
+void test_loader_resolves_reexport_chain() {
+  amber::runtime::RuntimeModuleLoader loader;
+  amber::bytecode::BcModule leaf = make_module({}, 1);
+  add_code_export(&leaf, "Thing");
+
+  amber::bytecode::BcModule facade = make_module({"core.leaf"}, 2);
+  add_reexport(&facade, "Thing", "core.leaf", "Thing");
+
+  amber::bytecode::BcModule app = make_module({"core.facade"}, 3);
+
+  add_ok(loader, "core.leaf", leaf);
+  add_ok(loader, "core.facade", facade);
+  add_ok(loader, "app.main", app);
+  const amber::runtime::RuntimeModuleLoadResult alias_added =
+      loader.add_import_alias("app.main", "Thing", "core.facade", "Thing");
+  expect(alias_added.ok, "re-export import alias registration should succeed");
+
+  const amber::runtime::RuntimeModuleLoadResult initialized =
+      loader.initialize_all();
+  expect(initialized.ok, "re-export module chain should initialize");
+  const std::optional<amber::runtime::RuntimeImportAliasSnapshot> alias =
+      loader.import_alias_snapshot("app.main", "Thing");
+  expect(alias.has_value(), "re-export alias snapshot should be visible");
+  expect(alias->export_cell.has_reexport,
+         "facade export should be marked as re-export");
+  expect(alias->export_cell.resolved_module_name == "core.leaf",
+         "re-export should resolve to leaf module");
+  expect(alias->export_cell.resolved_export_name == "Thing",
+         "re-export should resolve target export name");
+  expect(alias->export_cell.state ==
+             amber::runtime::RuntimeExportCellState::Ready,
+         "re-export alias should observe ready leaf export");
+}
+
+void test_loader_reports_source_mapped_init_failure() {
+  amber::runtime::RuntimeModuleLoader loader;
+  amber::bytecode::BcModule module = make_module({}, 1, true);
+  module.code_objects[0].source_spans.push_back(
+      {1, 2, {"bad_init.am", {9, 3, 80}, {9, 12, 89}}});
+  module.line_table.push_back({1, 1, 9});
+  add_ok(loader, "bad.init", module);
+
+  const amber::runtime::RuntimeModuleLoadResult initialized =
+      loader.initialize_module("bad.init");
+  expect(!initialized.ok, "source-mapped failing init should fail");
+  expect(initialized.error_name == "ModuleInitError",
+         "source-mapped failing init should report ModuleInitError");
+  expect(!initialized.diagnostics.empty(),
+         "source-mapped failing init should include diagnostic");
+  expect(initialized.diagnostics[0].location.file == "bad_init.am",
+         "loader diagnostic should preserve source file");
+  expect(initialized.diagnostics[0].location.line == 9,
+         "loader diagnostic should preserve source line");
+  expect(initialized.message.find("bad_init.am") != std::string::npos,
+         "loader message should include trace text");
+}
+
 } // namespace
 
 int main() {
@@ -200,5 +391,10 @@ int main() {
   test_loader_rejects_unverified_bytecode();
   test_loader_detects_init_cycles();
   test_loader_marks_failed_init();
+  test_loader_materializes_exports_and_import_aliases();
+  test_loader_reports_missing_export();
+  test_loader_reports_version_and_abi_mismatch();
+  test_loader_resolves_reexport_chain();
+  test_loader_reports_source_mapped_init_failure();
   return 0;
 }

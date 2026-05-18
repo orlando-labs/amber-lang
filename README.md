@@ -15,6 +15,7 @@ Useful commands:
 ```sh
 make build
 make test
+make conformance
 make fmt
 make clean
 build/amberc lex corpus/parse/lexer/basic/source.am
@@ -28,6 +29,7 @@ build/amberc amberbc-dump /path/to/module.amberbc
 build/amberc amberbc-verify /path/to/module.amberbc
 build/amberc amberbc-disasm /path/to/module.amberbc
 build/ambertest run corpus
+build/ambertest run corpus --bundle M5
 ```
 
 Current matrix status:
@@ -52,6 +54,9 @@ Current matrix status:
 | `W7.2` | done | task lifecycle runtime with task TLS, join/rethrow, join timeouts without auto-cancel, cooperative cancellation safepoints, waiting parent scope exit, structured child sets, and first-failure sibling cancellation |
 | `W7.3` | done | concurrency runtime primitives with rendezvous/buffered `RuntimeChannel`, FIFO send/recv wait queues, explicit close and `ChannelClosedError`, shareability-gated payloads, non-reentrant `RuntimeMutex`, and seq-cst `RuntimeAtomic` |
 | `W8.1` | done | `RuntimeModuleLoader` for serialized `.amberbc`, verifier-gated module mapping, dependency linking, deterministic init order, single-run init, missing-dependency import failures, cycle-aware `ModuleInitError`, and failed-init snapshots |
+| `W8.2` | done | runtime export-cell/import-alias materialization, read-only alias readiness checks, missing-export `ImportError`, dependency format/language/ABI compatibility diagnostics, re-export chain resolution, and source-mapped loader diagnostics for init faults |
+| `W8.3` | done | runtime collections contract for sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, `EmptyCollectionError` reduce guard, and deterministic `Map` keys/values/entries/map/select/reject/transform_values/each |
+| `W8.4` | done | deterministic full conformance runner for `parse/lower/check/compile/disasm/run/load`, M1-M5 gate bundles, failure rendering, and CI one-command `make conformance` |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -85,7 +90,7 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,
   and default-expression preflight;
 - shape-only `frontend/binder` helpers for extracting parsed call-site shape and for ordinary signature call preflight, explicit positional/keyword bind with `MISSING` slots, default-order planning, and delayed auto-assign buffers;
-- minimal `ambertest run <path>` corpus runner for lex, expression-parse, module-parse, bind, HIR, and bind-diagnostic fixtures;
+- `ambertest run <path>` corpus runner for lex, expression-parse, module-parse, bind/check, HIR/lower, bytecode compile/disasm, VM run, loader load, bind-diagnostic fixtures, deterministic discovery, focused mismatch rendering, and `--bundle M1..M5` milestone gates;
 - `amber.bc.v1` typed schema, canonical `.amberbc` serializer/deserializer, structural verifier skeleton, JSON dump, and deterministic text disassembly for the current bytecode subset;
 - `amberc bc <file>` and `amberc bc-disasm <file>` HIR-to-bytecode emitter path for current supported methods/classes/control-flow subset, including clause-method metadata in `BcMethod.clause_table` with dedicated emitted clause pattern probe code, `default_thunk_ids[]`, `PATS` binding descriptors, matcher-expression and dynamic-matcher bridge lowering for `case`, static pattern-opcode lowering for block-param prologues and pattern assignment, and path-based `CLAS` descriptors for class/mixin owners with preserved superclass/include/extend metadata;
 - `runtime/vm` execution baseline for verified `BcCode` in unit tests: frame stack, register file, `last_result`, branches, direct entry, closure capture materialization, closure `CALL`, constructor `CALL`, eager clause-table method dispatch, scalar and collection `SEND` / `SEND_DYN`, `RAISE` / handler-table unwinding, inline matcher execution without AST-walk fallback, slot-backed instance shapes, stable runtime method tables, W6.1 heap allocation boundary for objects/arrays/closures, W6.2 lifecycle tombstones, W6.3 non-moving GC boundary, and W6.4 pinning/native-handle boundary;
@@ -93,5 +98,6 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
 - `runtime/vm` W7.1 scheduler core with `RuntimeScheduler`, `RuntimeStrandScope`, current strand/worker TLS introspection, runnable global/local queues, timer-backed sleeping strands, explicit wake coalescing, deterministic idle waits, and parallel strand smoke coverage;
 - `runtime/vm` W7.2 task runtime with `spawn_task`, task TLS/cancellation polling, `join_task` failure propagation and timeout results, cooperative cancellation safepoints, waiting scope-exit parents, structured child snapshots, first-failure propagation, and sibling cancellation coverage;
 - `runtime/vm` W7.3 concurrency base with `RuntimeChannel` rendezvous/buffered modes, FIFO blocking send/recv queues, explicit `close()`, `ChannelClosedError`, timeout/cancellation-aware blocking results, recursive shareability checks for channel payloads, non-reentrant `RuntimeMutex`, and seq-cst `RuntimeAtomic`;
-- `runtime/module_loader` W8.1 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency `ImportError`, cycle-aware `ModuleInitError`, and VM fault propagation for failed module init;
+- `runtime/vm` W8.3 collections contract with closure-block execution for eager sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, deterministic `EmptyCollectionError` for empty `reduce` without init, and ordered `Map#keys/#values/#entries/#map/#select/#reject/#transform_values/#each`;
+- `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
 - early token, bytecode section, opcode, and diagnostic registries plus engineering notes.

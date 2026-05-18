@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -3780,6 +3781,44 @@ private:
     return state_->heap.make_instance_value(class_index);
   }
 
+  std::optional<Value> call_block_to_value(const Frame &frame,
+                                           const Value &block,
+                                           const std::vector<Value> &args) {
+    if (block.is_null()) {
+      set_fault(frame, "TypeError", "builtin collection SEND requires block");
+      return std::nullopt;
+    }
+    if (!block.is_closure()) {
+      set_fault(frame, "TypeError", "builtin collection block must be closure");
+      return std::nullopt;
+    }
+    if (!ensure_lifecycle_access(frame, block)) {
+      return std::nullopt;
+    }
+    const std::shared_ptr<ClosureValue> closure = block.as_closure();
+    if (closure == nullptr) {
+      set_fault(frame, "TypeError", "closure value is null");
+      return std::nullopt;
+    }
+    const BcCode *code = find_code(module_, closure->code_id);
+    if (code == nullptr) {
+      set_fault(frame, "VMError", "closure code id is unknown");
+      return std::nullopt;
+    }
+
+    Vm nested(module_, state_);
+    nested.push_frame(*code, args, closure->captures, closure->self,
+                      Value::null(), std::nullopt);
+    while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
+      nested.step();
+    }
+    if (nested.fault_.has_value()) {
+      fault_ = nested.fault_;
+      return std::nullopt;
+    }
+    return nested.final_value_;
+  }
+
   bool apply_write_barrier(const Frame &frame, const Value &owner,
                            const Value &value) {
     const RuntimeWriteBarrierResult barrier =
@@ -4723,8 +4762,8 @@ private:
     }
 
     Value result = Value::null();
-    const SendStatus scalar_status =
-        try_apply_scalar_send(frame, matcher, "===", {value}, &result);
+    const SendStatus scalar_status = try_apply_scalar_send(
+        frame, matcher, "===", {value}, Value::null(), false, &result);
     if (scalar_status == SendStatus::Faulted) {
       return false;
     }
@@ -5086,8 +5125,8 @@ private:
                                const std::vector<Value> &args, Value *out,
                                bool *handled) {
     *handled = false;
-    const SendStatus scalar_status =
-        try_apply_scalar_send(frame, receiver, selector, args, out);
+    const SendStatus scalar_status = try_apply_scalar_send(
+        frame, receiver, selector, args, Value::null(), false, out);
     if (scalar_status == SendStatus::Faulted) {
       return false;
     }
@@ -5684,7 +5723,9 @@ private:
 
   SendStatus try_apply_scalar_send(const Frame &frame, const Value &receiver,
                                    const std::string &selector,
-                                   const std::vector<Value> &args, Value *out) {
+                                   const std::vector<Value> &args,
+                                   const Value &block, bool has_keywords,
+                                   Value *out) {
     if (!ensure_lifecycle_access(frame, receiver)) {
       return SendStatus::Faulted;
     }
@@ -5707,8 +5748,45 @@ private:
       return true;
     };
 
+    auto require_no_block = [&]() -> bool {
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError",
+                  "builtin SEND selector does not accept block arguments");
+        return false;
+      }
+      return true;
+    };
+
+    auto selector_in = [&](std::initializer_list<const char *> names) -> bool {
+      for (const char *name : names) {
+        if (selector == name) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const bool builtin_selector =
+        selector_in({"==", "==="}) ||
+        ((receiver.is_list() || receiver.is_tuple()) &&
+         selector_in({"empty?", "[]", "deconstruct", "first", "count", "to_a",
+                      "lazy", "each", "map", "flat_map", "select", "reject",
+                      "find", "group_by", "any?", "all?", "none?",
+                      "reduce"})) ||
+        (receiver.is_map() &&
+         selector_in({"empty?", "[]", "deconstruct_keys", "keys", "values",
+                      "entries", "to_a", "each", "map", "select", "reject",
+                      "transform_values"})) ||
+        (receiver.is_integer() &&
+         selector_in({"+", "-", "*", "/", ">", "<", ">=", "<="}));
+    if (has_keywords && builtin_selector) {
+      set_fault(frame, "TypeError",
+                "builtin SEND does not accept keyword arguments");
+      return SendStatus::Faulted;
+    }
+
     if (selector == "==" || selector == "===") {
-      if (!require_arity(1)) {
+      if (!require_arity(1) || !require_no_block()) {
         return SendStatus::Faulted;
       }
       if (!ensure_lifecycle_access(frame, args[0])) {
@@ -5729,7 +5807,7 @@ private:
       if (extracted.has_value()) {
         items = *extracted;
         if (selector == "empty?") {
-          if (!require_arity(0)) {
+          if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           *out = Value::boolean(items.empty());
@@ -5737,7 +5815,8 @@ private:
         }
         if (selector == "[]") {
           std::int64_t index = 0;
-          if (!require_arity(1) || !require_integer_arg(0, &index)) {
+          if (!require_arity(1) || !require_no_block() ||
+              !require_integer_arg(0, &index)) {
             return SendStatus::Faulted;
           }
           if (index < 0 || static_cast<std::size_t>(index) >= items.size()) {
@@ -5748,10 +5827,263 @@ private:
           return SendStatus::Matched;
         }
         if (selector == "deconstruct") {
-          if (!require_arity(0)) {
+          if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           *out = receiver;
+          return SendStatus::Matched;
+        }
+        if (selector == "first") {
+          if (!require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (args.empty()) {
+            *out = items.empty() ? Value::null() : items.front();
+            return SendStatus::Matched;
+          }
+          std::int64_t count = 0;
+          if (!require_arity(1) || !require_integer_arg(0, &count)) {
+            return SendStatus::Faulted;
+          }
+          const std::size_t take =
+              count <= 0 ? 0U
+                         : std::min<std::size_t>(
+                               static_cast<std::size_t>(count), items.size());
+          *out = make_list_value(
+              std::vector<Value>(items.begin(), items.begin() + take));
+          return SendStatus::Matched;
+        }
+        if (selector == "count") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          if (block.is_null()) {
+            *out = Value::integer(static_cast<std::int64_t>(items.size()));
+            return SendStatus::Matched;
+          }
+          std::int64_t count = 0;
+          for (const Value &item : items) {
+            const std::optional<Value> predicate =
+                call_block_to_value(frame, block, {item});
+            if (!predicate.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (is_truthy(*predicate)) {
+              ++count;
+            }
+          }
+          *out = Value::integer(count);
+          return SendStatus::Matched;
+        }
+        if (selector == "to_a") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = make_list_value(items);
+          return SendStatus::Matched;
+        }
+        if (selector == "lazy") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = receiver;
+          return SendStatus::Matched;
+        }
+        if (selector == "each") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          for (const Value &item : items) {
+            if (!call_block_to_value(frame, block, {item}).has_value()) {
+              return SendStatus::Faulted;
+            }
+          }
+          *out = receiver;
+          return SendStatus::Matched;
+        }
+        if (selector == "map" || selector == "select" || selector == "reject" ||
+            selector == "flat_map" || selector == "find" ||
+            selector == "group_by") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "map") {
+            std::vector<Value> mapped;
+            mapped.reserve(items.size());
+            for (const Value &item : items) {
+              const std::optional<Value> value =
+                  call_block_to_value(frame, block, {item});
+              if (!value.has_value()) {
+                return SendStatus::Faulted;
+              }
+              mapped.push_back(*value);
+            }
+            *out = make_list_value(std::move(mapped));
+            return SendStatus::Matched;
+          }
+          if (selector == "flat_map") {
+            std::vector<Value> mapped;
+            for (const Value &item : items) {
+              const std::optional<Value> value =
+                  call_block_to_value(frame, block, {item});
+              if (!value.has_value()) {
+                return SendStatus::Faulted;
+              }
+              bool nested_was_tuple = false;
+              const std::optional<std::vector<Value>> nested =
+                  extract_sequence_items(frame, *value, &nested_was_tuple);
+              if (fault_.has_value()) {
+                return SendStatus::Faulted;
+              }
+              if (!nested.has_value()) {
+                set_fault(frame, "TypeError",
+                          "flat_map block must return sequence");
+                return SendStatus::Faulted;
+              }
+              mapped.insert(mapped.end(), nested->begin(), nested->end());
+            }
+            *out = make_list_value(std::move(mapped));
+            return SendStatus::Matched;
+          }
+          if (selector == "find") {
+            for (const Value &item : items) {
+              const std::optional<Value> predicate =
+                  call_block_to_value(frame, block, {item});
+              if (!predicate.has_value()) {
+                return SendStatus::Faulted;
+              }
+              if (is_truthy(*predicate)) {
+                *out = item;
+                return SendStatus::Matched;
+              }
+            }
+            *out = Value::null();
+            return SendStatus::Matched;
+          }
+          if (selector == "group_by") {
+            std::vector<std::pair<std::uint32_t, std::vector<Value>>> groups;
+            for (const Value &item : items) {
+              const std::optional<Value> key =
+                  call_block_to_value(frame, block, {item});
+              if (!key.has_value()) {
+                return SendStatus::Faulted;
+              }
+              std::optional<std::uint32_t> key_symbol_id;
+              if (key->is_symbol()) {
+                key_symbol_id = key->as_symbol().symbol_id;
+              } else if (key->is_string()) {
+                const std::optional<std::string> text =
+                    string_text_from_id(key->as_string().string_id);
+                if (!text.has_value()) {
+                  set_fault(frame, "VMError",
+                            "group_by string key ref is invalid");
+                  return SendStatus::Faulted;
+                }
+                key_symbol_id = symbol_id_for_text(*text);
+              }
+              if (!key_symbol_id.has_value()) {
+                set_fault(frame, "TypeError",
+                          "group_by block must return Symbol key");
+                return SendStatus::Faulted;
+              }
+              auto group = std::find_if(groups.begin(), groups.end(),
+                                        [&](const auto &entry) {
+                                          return entry.first == *key_symbol_id;
+                                        });
+              if (group == groups.end()) {
+                groups.push_back({*key_symbol_id, {}});
+                group = groups.end() - 1;
+              }
+              group->second.push_back(item);
+            }
+            std::vector<MapEntry> entries;
+            entries.reserve(groups.size());
+            for (auto &group : groups) {
+              entries.push_back(
+                  {group.first, make_list_value(std::move(group.second))});
+            }
+            *out = make_symbol_map_value(std::move(entries));
+            return SendStatus::Matched;
+          }
+          std::vector<Value> filtered;
+          filtered.reserve(items.size());
+          for (const Value &item : items) {
+            const std::optional<Value> predicate =
+                call_block_to_value(frame, block, {item});
+            if (!predicate.has_value()) {
+              return SendStatus::Faulted;
+            }
+            const bool keep = is_truthy(*predicate);
+            if ((selector == "select" && keep) ||
+                (selector == "reject" && !keep)) {
+              filtered.push_back(item);
+            }
+          }
+          *out = make_list_value(std::move(filtered));
+          return SendStatus::Matched;
+        }
+        if (selector == "any?" || selector == "all?" || selector == "none?") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          bool saw_any = false;
+          bool all_match = true;
+          bool any_match = false;
+          for (const Value &item : items) {
+            saw_any = true;
+            Value predicate = item;
+            if (!block.is_null()) {
+              const std::optional<Value> value =
+                  call_block_to_value(frame, block, {item});
+              if (!value.has_value()) {
+                return SendStatus::Faulted;
+              }
+              predicate = *value;
+            }
+            const bool truthy = is_truthy(predicate);
+            any_match = any_match || truthy;
+            all_match = all_match && truthy;
+          }
+          if (selector == "any?") {
+            *out = Value::boolean(any_match);
+          } else if (selector == "all?") {
+            *out = Value::boolean(!saw_any || all_match);
+          } else {
+            *out = Value::boolean(!any_match);
+          }
+          return SendStatus::Matched;
+        }
+        if (selector == "reduce") {
+          if (args.size() > 1U) {
+            set_fault(frame, "TypeError", "wrong builtin SEND arity");
+            return SendStatus::Faulted;
+          }
+          if (items.empty() && args.empty()) {
+            set_fault(frame, "EmptyCollectionError",
+                      "reduce without initial value on empty sequence");
+            return SendStatus::Faulted;
+          }
+          if (block.is_null()) {
+            set_fault(frame, "TypeError", "reduce requires block");
+            return SendStatus::Faulted;
+          }
+          Value accumulator = Value::null();
+          std::size_t index = 0;
+          if (args.empty()) {
+            accumulator = items.front();
+            index = 1;
+          } else {
+            accumulator = args[0];
+          }
+          for (; index < items.size(); ++index) {
+            const std::optional<Value> value =
+                call_block_to_value(frame, block, {accumulator, items[index]});
+            if (!value.has_value()) {
+              return SendStatus::Faulted;
+            }
+            accumulator = *value;
+          }
+          *out = accumulator;
           return SendStatus::Matched;
         }
       }
@@ -5765,14 +6097,14 @@ private:
       }
       if (extracted.has_value()) {
         if (selector == "empty?") {
-          if (!require_arity(0)) {
+          if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           *out = Value::boolean(extracted->empty());
           return SendStatus::Matched;
         }
         if (selector == "[]") {
-          if (!require_arity(1)) {
+          if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           std::optional<std::uint32_t> key_symbol_id;
@@ -5806,7 +6138,7 @@ private:
           return SendStatus::Matched;
         }
         if (selector == "deconstruct_keys") {
-          if (!require_arity(1)) {
+          if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           bool keyset_is_valid = false;
@@ -5836,6 +6168,113 @@ private:
           *out = receiver;
           return SendStatus::Matched;
         }
+        if (selector == "keys") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> keys;
+          keys.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            keys.push_back(Value::symbol(entry.symbol_id));
+          }
+          *out = make_list_value(std::move(keys));
+          return SendStatus::Matched;
+        }
+        if (selector == "values") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> values;
+          values.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            values.push_back(entry.value);
+          }
+          *out = make_list_value(std::move(values));
+          return SendStatus::Matched;
+        }
+        if (selector == "entries" || selector == "to_a") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> entries;
+          entries.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            entries.push_back(make_tuple_value(
+                {Value::symbol(entry.symbol_id), entry.value}));
+          }
+          *out = make_list_value(std::move(entries));
+          return SendStatus::Matched;
+        }
+        if (selector == "each") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          for (const MapEntry &entry : *extracted) {
+            if (!call_block_to_value(
+                     frame, block,
+                     {Value::symbol(entry.symbol_id), entry.value})
+                     .has_value()) {
+              return SendStatus::Faulted;
+            }
+          }
+          *out = receiver;
+          return SendStatus::Matched;
+        }
+        if (selector == "map") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> mapped;
+          mapped.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            const std::optional<Value> value = call_block_to_value(
+                frame, block, {Value::symbol(entry.symbol_id), entry.value});
+            if (!value.has_value()) {
+              return SendStatus::Faulted;
+            }
+            mapped.push_back(*value);
+          }
+          *out = make_list_value(std::move(mapped));
+          return SendStatus::Matched;
+        }
+        if (selector == "select" || selector == "reject") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          std::vector<MapEntry> filtered;
+          filtered.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            const std::optional<Value> predicate = call_block_to_value(
+                frame, block, {Value::symbol(entry.symbol_id), entry.value});
+            if (!predicate.has_value()) {
+              return SendStatus::Faulted;
+            }
+            const bool keep = is_truthy(*predicate);
+            if ((selector == "select" && keep) ||
+                (selector == "reject" && !keep)) {
+              filtered.push_back(entry);
+            }
+          }
+          *out = make_symbol_map_value(std::move(filtered));
+          return SendStatus::Matched;
+        }
+        if (selector == "transform_values") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          std::vector<MapEntry> transformed;
+          transformed.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            const std::optional<Value> value =
+                call_block_to_value(frame, block, {entry.value});
+            if (!value.has_value()) {
+              return SendStatus::Faulted;
+            }
+            transformed.push_back({entry.symbol_id, *value});
+          }
+          *out = make_symbol_map_value(std::move(transformed));
+          return SendStatus::Matched;
+        }
       }
     }
 
@@ -5843,28 +6282,32 @@ private:
       const std::int64_t lhs = receiver.as_integer();
       std::int64_t rhs = 0;
       if (selector == "+") {
-        if (!require_arity(1) || !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::integer(lhs + rhs);
         return SendStatus::Matched;
       }
       if (selector == "-") {
-        if (!require_arity(1) || !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::integer(lhs - rhs);
         return SendStatus::Matched;
       }
       if (selector == "*") {
-        if (!require_arity(1) || !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::integer(lhs * rhs);
         return SendStatus::Matched;
       }
       if (selector == "/") {
-        if (!require_arity(1) || !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         if (rhs == 0) {
@@ -5875,28 +6318,32 @@ private:
         return SendStatus::Matched;
       }
       if (selector == ">") {
-        if (!require_arity(1) || !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::boolean(lhs > rhs);
         return SendStatus::Matched;
       }
       if (selector == "<") {
-        if (!require_arity(1) || !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::boolean(lhs < rhs);
         return SendStatus::Matched;
       }
       if (selector == ">=") {
-        if (!require_arity(1) || !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::boolean(lhs >= rhs);
         return SendStatus::Matched;
       }
       if (selector == "<=") {
-        if (!require_arity(1) || !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::boolean(lhs <= rhs);
@@ -6026,17 +6473,12 @@ private:
       return true;
     }
     Value result = Value::null();
-    const SendStatus scalar_status =
-        try_apply_scalar_send(frame, receiver, *selector, args, &result);
+    const SendStatus scalar_status = try_apply_scalar_send(
+        frame, receiver, *selector, args, block, !kw_args.empty(), &result);
     if (scalar_status == SendStatus::Faulted) {
       return false;
     }
     if (scalar_status == SendStatus::Matched) {
-      if (!block.is_null()) {
-        set_fault(frame, "TypeError",
-                  "builtin SEND does not accept block arguments");
-        return false;
-      }
       if (!kw_args.empty()) {
         set_fault(frame, "TypeError",
                   "builtin SEND does not accept keyword arguments");

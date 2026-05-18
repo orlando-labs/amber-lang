@@ -330,6 +330,32 @@ std::uint32_t ensure_symbol_id(amber::bytecode::BcModule *module,
   return static_cast<std::uint32_t>(module->symbols.size() - 1U);
 }
 
+amber::runtime::Value make_closure_value(std::uint32_t code_id) {
+  auto closure = std::make_shared<amber::runtime::ClosureValue>();
+  closure->header.kind = amber::runtime::HeapObjectKind::Closure;
+  closure->code_id = code_id;
+  return amber::runtime::Value::closure(std::move(closure));
+}
+
+amber::bytecode::Instruction
+send_instr(std::uint32_t dst, std::uint32_t recv, std::uint32_t selector,
+           const std::vector<std::uint32_t> &arg_regs = {},
+           std::int64_t block_reg = -1, std::uint32_t site_id = 0) {
+  amber::bytecode::Instruction insn;
+  insn.opcode = amber::bytecode::Opcode::Send;
+  insn.operands.push_back({dst, false});
+  insn.operands.push_back({recv, false});
+  insn.operands.push_back({selector, false});
+  insn.operands.push_back({static_cast<std::int64_t>(arg_regs.size()), false});
+  for (std::uint32_t reg : arg_regs) {
+    insn.operands.push_back({reg, false});
+  }
+  insn.operands.push_back({0, false});
+  insn.operands.push_back({block_reg, block_reg < 0});
+  insn.operands.push_back({site_id, false});
+  return insn;
+}
+
 amber::runtime::Value make_symbol_map(
     const amber::bytecode::BcModule &module,
     std::initializer_list<std::pair<const char *, amber::runtime::Value>>
@@ -911,6 +937,380 @@ void test_manual_make_map() {
   expect(map->entries[1].symbol_id == 1 && map->entries[1].value.is_integer() &&
              map->entries[1].value.as_integer() == 2,
          "MAKE_MAP should preserve second entry");
+}
+
+void expect_integer_list(const amber::runtime::Value &value,
+                         const std::vector<std::int64_t> &expected,
+                         const std::string &message) {
+  expect(value.is_list(), message + " should be a list");
+  const std::shared_ptr<amber::runtime::ListValue> list = value.as_list();
+  expect(list != nullptr && list->items.size() == expected.size(),
+         message + " list size");
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    expect(list->items[i].is_integer() &&
+               list->items[i].as_integer() == expected[i],
+           message + " item " + std::to_string(i));
+  }
+}
+
+void test_runtime_sequence_collections_contract() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"lazy",     "map",      "select", "reduce", "+",     ">",
+                    "flat_map", "group_by", "count",  "find",   "first", "to_a",
+                    "any?",     "all?",     "none?",  "low",    "high"};
+
+  Constant one;
+  one.kind = ConstantKind::Integer;
+  one.int_value = 1;
+  Constant low;
+  low.kind = ConstantKind::SymbolRef;
+  low.ref_id = symbol_id_or_die(module, "low");
+  Constant high;
+  high.kind = ConstantKind::SymbolRef;
+  high.ref_id = symbol_id_or_die(module, "high");
+  module.const_pool = {one, low, high};
+
+  BcCode chain;
+  chain.code_id = 1;
+  chain.kind = CodeKind::Method;
+  chain.reg_count = 8;
+  chain.instructions.push_back(
+      send_instr(4, 0, symbol_id_or_die(module, "lazy")));
+  chain.instructions.push_back(
+      send_instr(5, 4, symbol_id_or_die(module, "map"), {}, 1, 1));
+  chain.instructions.push_back(
+      send_instr(6, 5, symbol_id_or_die(module, "select"), {}, 2, 2));
+  chain.instructions.push_back(
+      send_instr(7, 6, symbol_id_or_die(module, "reduce"), {}, 3, 3));
+  chain.instructions.push_back({Opcode::Return, {{7, false}}});
+
+  BcCode empty_reduce;
+  empty_reduce.code_id = 2;
+  empty_reduce.kind = CodeKind::Method;
+  empty_reduce.reg_count = 3;
+  empty_reduce.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "reduce"), {}, 1));
+  empty_reduce.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode flat_map;
+  flat_map.code_id = 3;
+  flat_map.kind = CodeKind::Method;
+  flat_map.reg_count = 3;
+  flat_map.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "flat_map"), {}, 1));
+  flat_map.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode group_by;
+  group_by.code_id = 4;
+  group_by.kind = CodeKind::Method;
+  group_by.reg_count = 3;
+  group_by.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "group_by"), {}, 1));
+  group_by.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode count_find;
+  count_find.code_id = 5;
+  count_find.kind = CodeKind::Method;
+  count_find.reg_count = 5;
+  count_find.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "count"), {}, 1));
+  count_find.instructions.push_back(
+      send_instr(3, 0, symbol_id_or_die(module, "find"), {}, 1));
+  count_find.instructions.push_back(
+      {Opcode::MakeList, {{4, false}, {2, false}, {2, false}}});
+  count_find.instructions.push_back({Opcode::Return, {{4, false}}});
+
+  BcCode reduce_init;
+  reduce_init.code_id = 6;
+  reduce_init.kind = CodeKind::Method;
+  reduce_init.reg_count = 4;
+  reduce_init.instructions.push_back({Opcode::LoadK, {{2, false}, {0, false}}});
+  reduce_init.instructions.push_back(
+      send_instr(3, 0, symbol_id_or_die(module, "reduce"), {2}, 1));
+  reduce_init.instructions.push_back({Opcode::Return, {{3, false}}});
+
+  BcCode shape_probe;
+  shape_probe.code_id = 7;
+  shape_probe.kind = CodeKind::Method;
+  shape_probe.reg_count = 11;
+  shape_probe.instructions.push_back({Opcode::LoadK, {{2, false}, {0, false}}});
+  shape_probe.instructions.push_back(
+      send_instr(3, 0, symbol_id_or_die(module, "first")));
+  shape_probe.instructions.push_back(
+      send_instr(4, 0, symbol_id_or_die(module, "first"), {2}));
+  shape_probe.instructions.push_back(
+      send_instr(5, 0, symbol_id_or_die(module, "to_a")));
+  shape_probe.instructions.push_back(
+      send_instr(6, 0, symbol_id_or_die(module, "any?")));
+  shape_probe.instructions.push_back(
+      send_instr(7, 0, symbol_id_or_die(module, "all?")));
+  shape_probe.instructions.push_back(
+      send_instr(8, 0, symbol_id_or_die(module, "none?")));
+  shape_probe.instructions.push_back(
+      {Opcode::MakeList, {{9, false}, {3, false}, {6, false}}});
+  shape_probe.instructions.push_back({Opcode::Return, {{9, false}}});
+
+  BcCode inc;
+  inc.code_id = 10;
+  inc.kind = CodeKind::Block;
+  inc.reg_count = 3;
+  inc.instructions.push_back({Opcode::LoadK, {{1, false}, {0, false}}});
+  inc.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "+"), {1}));
+  inc.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode gt_one;
+  gt_one.code_id = 11;
+  gt_one.kind = CodeKind::Block;
+  gt_one.reg_count = 3;
+  gt_one.instructions.push_back({Opcode::LoadK, {{1, false}, {0, false}}});
+  gt_one.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, ">"), {1}));
+  gt_one.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode add;
+  add.code_id = 12;
+  add.kind = CodeKind::Block;
+  add.reg_count = 3;
+  add.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "+"), {1}));
+  add.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode pairify;
+  pairify.code_id = 13;
+  pairify.kind = CodeKind::Block;
+  pairify.reg_count = 3;
+  pairify.instructions.push_back({Opcode::LoadK, {{1, false}, {0, false}}});
+  pairify.instructions.push_back(
+      send_instr(1, 0, symbol_id_or_die(module, "+"), {1}));
+  pairify.instructions.push_back(
+      {Opcode::MakeList, {{2, false}, {0, false}, {2, false}}});
+  pairify.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode low_high_key;
+  low_high_key.code_id = 14;
+  low_high_key.kind = CodeKind::Block;
+  low_high_key.reg_count = 5;
+  low_high_key.instructions.push_back(
+      {Opcode::LoadK, {{1, false}, {0, false}}});
+  low_high_key.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, ">"), {1}));
+  low_high_key.instructions.push_back(
+      {Opcode::JumpIfFalse, {{2, false}, {5, false}}});
+  low_high_key.instructions.push_back(
+      {Opcode::LoadK, {{3, false}, {2, false}}});
+  low_high_key.instructions.push_back({Opcode::Return, {{3, false}}});
+  low_high_key.instructions.push_back(
+      {Opcode::LoadK, {{4, false}, {1, false}}});
+  low_high_key.instructions.push_back({Opcode::Return, {{4, false}}});
+
+  module.code_objects = {chain,      empty_reduce, flat_map,    group_by,
+                         count_find, reduce_init,  shape_probe, inc,
+                         gt_one,     add,          pairify,     low_high_key};
+
+  const amber::runtime::Value source = amber::runtime::make_list_value(
+      {amber::runtime::Value::integer(0), amber::runtime::Value::integer(1),
+       amber::runtime::Value::integer(2)});
+  const amber::runtime::ExecutionResult chained = amber::runtime::execute_code(
+      module, 1,
+      {source, make_closure_value(10), make_closure_value(11),
+       make_closure_value(12)});
+  expect(chained.ok(), "lazy/map/select/reduce chain should execute");
+  expect(chained.value.is_integer() && chained.value.as_integer() == 5,
+         "lazy/map/select/reduce should produce deterministic eager result");
+
+  const amber::runtime::ExecutionResult empty = amber::runtime::execute_code(
+      module, 2, {amber::runtime::make_list_value({}), make_closure_value(12)});
+  expect(!empty.ok() && empty.fault.has_value() &&
+             empty.fault->error_name == "EmptyCollectionError",
+         "empty reduce without init should raise EmptyCollectionError");
+
+  const amber::runtime::ExecutionResult flattened =
+      amber::runtime::execute_code(
+          module, 3,
+          {amber::runtime::make_list_value({amber::runtime::Value::integer(1),
+                                            amber::runtime::Value::integer(2)}),
+           make_closure_value(13)});
+  expect(flattened.ok(), "flat_map should execute");
+  expect_integer_list(flattened.value, {1, 2, 2, 3}, "flat_map");
+
+  const amber::runtime::ExecutionResult counted =
+      amber::runtime::execute_code(module, 5, {source, make_closure_value(11)});
+  expect(counted.ok(), "count/find should execute");
+  expect_integer_list(counted.value, {1, 2}, "count/find");
+
+  const amber::runtime::ExecutionResult reduced_with_init =
+      amber::runtime::execute_code(module, 6, {source, make_closure_value(12)});
+  expect(reduced_with_init.ok() && reduced_with_init.value.is_integer() &&
+             reduced_with_init.value.as_integer() == 4,
+         "reduce(init) should start from explicit accumulator");
+
+  const amber::runtime::ExecutionResult shaped =
+      amber::runtime::execute_code(module, 7, {source});
+  expect(shaped.ok() && shaped.value.is_list(),
+         "first/to_a/predicate probe should execute");
+  const std::shared_ptr<amber::runtime::ListValue> shape_parts =
+      shaped.value.as_list();
+  expect(shape_parts != nullptr && shape_parts->items.size() == 6,
+         "first/to_a/predicate probe shape");
+  expect(shape_parts->items[0].is_integer() &&
+             shape_parts->items[0].as_integer() == 0,
+         "first should return first item");
+  expect_integer_list(shape_parts->items[1], {0}, "first(count)");
+  expect_integer_list(shape_parts->items[2], {0, 1, 2}, "to_a");
+  expect(shape_parts->items[3].is_bool() && shape_parts->items[3].as_bool(),
+         "any? should see truthy items");
+  expect(shape_parts->items[4].is_bool() && shape_parts->items[4].as_bool(),
+         "all? should see all truthy items");
+  expect(shape_parts->items[5].is_bool() && !shape_parts->items[5].as_bool(),
+         "none? should reject truthy items");
+
+  const amber::runtime::ExecutionResult grouped =
+      amber::runtime::execute_code(module, 4, {source, make_closure_value(14)});
+  expect(grouped.ok(), "group_by should execute");
+  expect(grouped.value.is_map(), "group_by should return map");
+  const std::shared_ptr<amber::runtime::MapValue> groups =
+      grouped.value.as_map();
+  expect(groups != nullptr && groups->entries.size() == 2,
+         "group_by should preserve first-key ordering");
+  expect(groups->entries[0].symbol_id == symbol_id_or_die(module, "low"),
+         "group_by low key first");
+  expect_integer_list(groups->entries[0].value, {0, 1}, "group_by low");
+  expect(groups->entries[1].symbol_id == symbol_id_or_die(module, "high"),
+         "group_by high key second");
+  expect_integer_list(groups->entries[1].value, {2}, "group_by high");
+}
+
+void test_runtime_map_collections_contract() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"keys",
+                    "values",
+                    "entries",
+                    "select",
+                    "reject",
+                    "map",
+                    "transform_values",
+                    "each",
+                    "+",
+                    ">",
+                    "alpha",
+                    "beta"};
+
+  Constant one;
+  one.kind = ConstantKind::Integer;
+  one.int_value = 1;
+  module.const_pool = {one};
+
+  BcCode probe;
+  probe.code_id = 1;
+  probe.kind = CodeKind::Method;
+  probe.reg_count = 12;
+  probe.instructions.push_back(
+      send_instr(4, 0, symbol_id_or_die(module, "keys")));
+  probe.instructions.push_back(
+      send_instr(5, 0, symbol_id_or_die(module, "values")));
+  probe.instructions.push_back(
+      send_instr(6, 0, symbol_id_or_die(module, "entries")));
+  probe.instructions.push_back(
+      send_instr(7, 0, symbol_id_or_die(module, "select"), {}, 1));
+  probe.instructions.push_back(
+      send_instr(8, 0, symbol_id_or_die(module, "reject"), {}, 1));
+  probe.instructions.push_back(
+      send_instr(9, 0, symbol_id_or_die(module, "transform_values"), {}, 2));
+  probe.instructions.push_back(
+      send_instr(10, 0, symbol_id_or_die(module, "map"), {}, 3));
+  probe.instructions.push_back(
+      {Opcode::MakeList, {{11, false}, {4, false}, {7, false}}});
+  probe.instructions.push_back({Opcode::Return, {{11, false}}});
+
+  BcCode each_probe;
+  each_probe.code_id = 2;
+  each_probe.kind = CodeKind::Method;
+  each_probe.reg_count = 3;
+  each_probe.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "each"), {}, 1));
+  each_probe.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode map_value_gt_one;
+  map_value_gt_one.code_id = 20;
+  map_value_gt_one.kind = CodeKind::Block;
+  map_value_gt_one.reg_count = 4;
+  map_value_gt_one.instructions.push_back(
+      {Opcode::LoadK, {{2, false}, {0, false}}});
+  map_value_gt_one.instructions.push_back(
+      send_instr(3, 1, symbol_id_or_die(module, ">"), {2}));
+  map_value_gt_one.instructions.push_back({Opcode::Return, {{3, false}}});
+
+  BcCode inc_value;
+  inc_value.code_id = 21;
+  inc_value.kind = CodeKind::Block;
+  inc_value.reg_count = 3;
+  inc_value.instructions.push_back({Opcode::LoadK, {{1, false}, {0, false}}});
+  inc_value.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "+"), {1}));
+  inc_value.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode map_pair_value;
+  map_pair_value.code_id = 22;
+  map_pair_value.kind = CodeKind::Block;
+  map_pair_value.reg_count = 4;
+  map_pair_value.instructions.push_back(
+      {Opcode::LoadK, {{2, false}, {0, false}}});
+  map_pair_value.instructions.push_back(
+      send_instr(3, 1, symbol_id_or_die(module, "+"), {2}));
+  map_pair_value.instructions.push_back({Opcode::Return, {{3, false}}});
+
+  module.code_objects = {probe, each_probe, map_value_gt_one, inc_value,
+                         map_pair_value};
+
+  const amber::runtime::Value map =
+      make_symbol_map(module, {{"alpha", amber::runtime::Value::integer(1)},
+                               {"beta", amber::runtime::Value::integer(2)}});
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      module, 1,
+      {map, make_closure_value(20), make_closure_value(21),
+       make_closure_value(22)});
+  expect(exec.ok(), "map collections probe should execute");
+  expect(exec.value.is_list(), "map collections probe should return list");
+  const std::shared_ptr<amber::runtime::ListValue> parts = exec.value.as_list();
+  expect(parts != nullptr && parts->items.size() == 7,
+         "map collections probe should return seven parts");
+  expect(parts->items[0].is_list() &&
+             parts->items[0].as_list()->items[0].as_symbol().symbol_id ==
+                 symbol_id_or_die(module, "alpha") &&
+             parts->items[0].as_list()->items[1].as_symbol().symbol_id ==
+                 symbol_id_or_die(module, "beta"),
+         "Map#keys should preserve entry order");
+  expect_integer_list(parts->items[1], {1, 2}, "Map#values");
+  expect(parts->items[2].is_list() &&
+             parts->items[2].as_list()->items.size() == 2 &&
+             parts->items[2].as_list()->items[0].is_tuple(),
+         "Map#entries should return key/value tuples");
+  expect(parts->items[3].is_map() &&
+             parts->items[3].as_map()->entries.size() == 1 &&
+             parts->items[3].as_map()->entries[0].symbol_id ==
+                 symbol_id_or_die(module, "beta"),
+         "Map#select should keep matching entries in order");
+  expect(parts->items[4].is_map() &&
+             parts->items[4].as_map()->entries.size() == 1 &&
+             parts->items[4].as_map()->entries[0].symbol_id ==
+                 symbol_id_or_die(module, "alpha"),
+         "Map#reject should keep non-matching entries in order");
+  expect(parts->items[5].is_map() &&
+             parts->items[5].as_map()->entries[0].value.as_integer() == 2 &&
+             parts->items[5].as_map()->entries[1].value.as_integer() == 3,
+         "Map#transform_values should preserve keys and transform values");
+  expect_integer_list(parts->items[6], {2, 3}, "Map#map");
+
+  const amber::runtime::ExecutionResult each =
+      amber::runtime::execute_code(module, 2, {map, make_closure_value(22)});
+  expect(each.ok() && each.value.is_map() &&
+             each.value.as_map() == map.as_map(),
+         "Map#each should return the receiver after visiting entries");
 }
 
 void test_manual_instance_send_dispatch() {
@@ -3316,6 +3716,8 @@ int main() {
   test_execute_emitted_case_map_strict_null();
   test_execute_emitted_clause_method_dispatch();
   test_manual_make_map();
+  test_runtime_sequence_collections_contract();
+  test_runtime_map_collections_contract();
   test_manual_instance_send_dispatch();
   test_manual_store_and_load_ivar();
   test_manual_store_and_load_cvar();

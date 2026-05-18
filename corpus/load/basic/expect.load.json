@@ -1,0 +1,9 @@
+{
+  "schema": "amber.load.v1",
+  "root": "conformance.load",
+  "status": "ok",
+  "init_order": ["conformance.load"],
+  "modules": [
+    {"name":"conformance.load","state":"ready","init_runs":1,"dependencies":[],"exports":[{"name":"answer","state":"ready","target_kind":"method"}]}
+  ]
+}

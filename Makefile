@@ -21,7 +21,7 @@ RUNTIME_SRCS := runtime/vm.cpp runtime/module_loader.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(HIR_SRCS)
 CORE_SRCS := $(FRONTEND_SRCS) $(BYTECODE_SRCS)
 AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS)
-AMBERTEST_SRCS := tools/ambertest/main.cpp $(CORE_SRCS)
+AMBERTEST_SRCS := tools/ambertest/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 LEXER_TEST_SRCS := tests/lexer_tests.cpp $(LEXER_SRCS)
 PARSER_TEST_SRCS := tests/parser_tests.cpp $(FRONTEND_SRCS)
 BINDER_TEST_SRCS := tests/binder_tests.cpp $(FRONTEND_SRCS)
@@ -65,7 +65,7 @@ FORMAT_FILES := \
 	tests/module_loader_tests.cpp \
 	tests/vm_tests.cpp
 
-.PHONY: all build test fmt clean
+.PHONY: all build test conformance fmt clean
 
 all: build
 
@@ -116,6 +116,9 @@ test: build
 	$(BUILD_DIR)/module_loader_tests
 	$(BUILD_DIR)/amberc lex corpus/parse/lexer/basic/source.am > $(BUILD_DIR)/lexer-basic.tokens.json
 	$(BUILD_DIR)/ambertest run corpus
+
+conformance: $(BUILD_DIR)/ambertest
+	$(BUILD_DIR)/ambertest run corpus --bundle M5
 
 fmt:
 	@if command -v clang-format >/dev/null 2>&1; then \

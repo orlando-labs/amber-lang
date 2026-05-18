@@ -20,10 +20,62 @@ enum class RuntimeModuleState {
   Failed
 };
 
+enum class RuntimeExportCellState {
+  Uninitialized,
+  Initializing,
+  Ready,
+  Failed
+};
+
+struct RuntimeDebugLocation {
+  std::string module_name;
+  std::uint32_t code_id = 0;
+  std::uint32_t pc = 0;
+  std::string file;
+  std::uint32_t line = 0;
+  std::uint32_t column = 0;
+};
+
+struct RuntimeLoaderDiagnostic {
+  std::string error_name;
+  std::string message;
+  std::string module_name;
+  std::string dependency_name;
+  std::string export_name;
+  RuntimeDebugLocation location;
+};
+
+struct RuntimeExportCellSnapshot {
+  std::string module_name;
+  std::string public_name;
+  std::string target_kind;
+  std::uint32_t target_index = 0;
+  bool has_reexport = false;
+  std::string reexport_module_name;
+  std::string reexport_export_name;
+  std::string resolved_module_name;
+  std::string resolved_export_name;
+  RuntimeExportCellState state = RuntimeExportCellState::Uninitialized;
+  bool read_only = true;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeImportAliasSnapshot {
+  std::string module_name;
+  std::string local_name;
+  std::string dependency_name;
+  std::string export_name;
+  bool read_only = true;
+  RuntimeExportCellSnapshot export_cell;
+};
+
 struct RuntimeModuleSnapshot {
   std::string name;
   RuntimeModuleState state = RuntimeModuleState::Unloaded;
   std::vector<std::string> dependencies;
+  std::vector<RuntimeExportCellSnapshot> exports;
+  std::vector<RuntimeImportAliasSnapshot> imports;
   bool has_init = false;
   std::uint32_t init_code_id = 0;
   std::uint64_t init_runs = 0;
@@ -37,9 +89,11 @@ struct RuntimeModuleLoadResult {
   std::string message;
   std::vector<std::string> init_order;
   std::vector<RuntimeModuleSnapshot> modules;
+  std::vector<RuntimeLoaderDiagnostic> diagnostics;
 };
 
 const char *runtime_module_state_name(RuntimeModuleState state);
+const char *runtime_export_cell_state_name(RuntimeExportCellState state);
 
 class RuntimeModuleLoader {
 public:
@@ -54,13 +108,25 @@ public:
   RuntimeModuleLoadResult
   add_serialized_module(const std::string &name,
                         const std::vector<std::uint8_t> &bytes);
+  RuntimeModuleLoadResult add_import_alias(const std::string &module_name,
+                                           const std::string &local_name,
+                                           const std::string &dependency_name,
+                                           const std::string &export_name);
   RuntimeModuleLoadResult link();
   RuntimeModuleLoadResult initialize_module(const std::string &name);
   RuntimeModuleLoadResult initialize_all();
+  RuntimeModuleLoadResult read_import_alias(const std::string &module_name,
+                                            const std::string &local_name);
 
   std::optional<RuntimeModuleSnapshot>
   module_snapshot(const std::string &name) const;
   std::vector<RuntimeModuleSnapshot> snapshots() const;
+  std::optional<RuntimeExportCellSnapshot>
+  export_snapshot(const std::string &module_name,
+                  const std::string &export_name) const;
+  std::optional<RuntimeImportAliasSnapshot>
+  import_alias_snapshot(const std::string &module_name,
+                        const std::string &local_name) const;
 
 private:
   struct Impl;

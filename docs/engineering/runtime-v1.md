@@ -1,6 +1,7 @@
 # amber.runtime.v1
 
-Status: `W5.1` through `W8.1` runtime acceptance is satisfied.
+Status: `W5.1` through `W8.3` runtime acceptance is satisfied, and the
+`W8.4` full conformance runner gate is satisfied through `ambertest`.
 
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
 
@@ -20,8 +21,8 @@ Current implemented slice:
 - builtin scalar dispatch for integer arithmetic/comparison selectors and
   dynamic selector decoding from `Symbol` / `String`;
 - runtime container values for list/tuple/map plus builtin `empty?`,
-  collection indexing, and minimal `deconstruct` / `deconstruct_keys`
-  bridging for the currently emitted matcher paths;
+  collection indexing, `deconstruct` / `deconstruct_keys` bridging for matcher
+  paths, and W8.3 eager collection SEND selectors for sequences and maps;
 - local class-object lookup for single- and multi-segment `KONS[path]`
   constants, with exact full-path matching before unique leaf fallback;
 - class/instance method dispatch through `CLAS.method_range_*`, direct
@@ -101,11 +102,24 @@ Current implemented slice:
   `ChannelClosedError`, timeout/cancellation-aware blocking results,
   recursive shareability checks for channel payloads, non-reentrant
   `RuntimeMutex`, and seq-cst `RuntimeAtomic`;
-- `W8.1` loader baseline in `runtime/module_loader.{h,cpp}` with serialized
-  `.amberbc` decode/verify on every load path, dependency graph linking,
-  deterministic dependency-before-dependent module init, single-run init
-  snapshots, missing-dependency `ImportError`, cycle-aware `ModuleInitError`,
-  and VM fault propagation for failed module init;
+- `W8.1`-`W8.2` loader baseline in `runtime/module_loader.{h,cpp}` with
+  serialized `.amberbc` decode/verify on every load path, dependency graph
+  linking, deterministic dependency-before-dependent module init, single-run
+  init snapshots, missing-dependency/export `ImportError`, dependency
+  format/language/ABI compatibility diagnostics, export-cell/import-alias
+  snapshots, read-only alias readiness checks, re-export chain resolution,
+  cycle-aware `ModuleInitError`, and source-mapped VM fault propagation for
+  failed module init;
+- `W8.3` collections baseline in `runtime/vm.{h,cpp}` with closure-block
+  execution for eager sequence `each`, `map`, `flat_map`, `select`, `reject`,
+  `reduce`, `find`, `any?`, `all?`, `none?`, `first`, `count`, `group_by`,
+  `to_a`, and eager-compatible `lazy`, plus `Map#each`, `Map#map`,
+  `Map#select`, `Map#reject`, `transform_values`, `keys`, `values`, and
+  `entries` with insertion-order-preserving results;
+- `W8.4` conformance gate in `tools/ambertest` with deterministic fixture
+  discovery, focused mismatch rendering, phase aliases for
+  `lower`/`compile`/`disasm`, positive `check`/`run`/`load` lanes, and
+  cumulative `M1`-`M5` bundle filtering exposed through `make conformance`;
 - direct `P_PREP_SEQ` / `P_PREP_MAP` coercion through object-level
   `deconstruct` / `deconstruct_keys(keys)` when native list/tuple/map
   matching is not available, with `null` as no-match and wrong protocol return
@@ -132,13 +146,14 @@ Current implemented slice:
   structured child, and first-failure sibling-cancellation coverage, plus W7.3
   rendezvous/buffered channel close/FIFO/isolation coverage, mutex
   reentrancy/contention coverage, and atomic compare-and-set contention
-  coverage, plus W8.1 verifier-gated module load, missing dependency,
-  dependency init order, single-run init, cycle detection, and failed-init
-  coverage.
+  coverage, plus W8.1-W8.2 verifier-gated module load, missing dependency,
+  dependency init order, single-run init, cycle detection, failed-init, export
+  alias, missing export, version/ABI mismatch, re-export, and source-mapped
+  loader diagnostic coverage, plus W8.3 eager sequence chaining, `reduce`
+  empty-error, `flat_map`, `count`, `find`, `group_by`, and ordered `Map`
+  projection/transform coverage.
 
 Still intentionally missing in later layers:
 
-- `W8.2`: export/import table materialization, debug sections, and
-  human/machine-readable loader diagnostics;
 - stdlib/language surfacing for the concurrency primitives, `select`-style
   multi-wait paths, and deeper memory/runtime integration.

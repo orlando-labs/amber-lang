@@ -1,0 +1,6 @@
+{
+  "format": "amber.corpus.meta.v1",
+  "phase": "check",
+  "source": "source.am",
+  "expect": "expect.check.json"
+}
