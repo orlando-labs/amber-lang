@@ -7,6 +7,7 @@
 #include "frontend/hir/hir.h"
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
+#include "package/package.h"
 
 #include <atomic>
 #include <chrono>
@@ -16,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -357,6 +359,83 @@ std::uint32_t append_integer_const(amber::bytecode::BcModule *module,
   constant.int_value = value;
   module->const_pool.push_back(constant);
   return static_cast<std::uint32_t>(module->const_pool.size() - 1U);
+}
+
+amber::bytecode::Instruction
+send_instr(std::uint32_t dst, std::uint32_t recv, std::uint32_t selector,
+           const std::vector<std::uint32_t> &arg_regs, std::int64_t block_reg,
+           std::uint32_t site_id);
+
+amber::pkg::PackageArtifact
+make_reload_artifact(const amber::bytecode::BcModule &module,
+                     const std::string &version = "0.1.0") {
+  amber::pkg::PackageArtifact artifact;
+  artifact.manifest.name = "reload.pkg";
+  artifact.manifest.version = version;
+  artifact.manifest.root_module = "reload.core";
+  artifact.manifest.modules.push_back({"reload.core", "src/core.am"});
+
+  amber::pkg::PackageModuleBlob blob;
+  blob.name = "reload.core";
+  blob.path = "src/core.am";
+  blob.bytes = amber::bytecode::serialize_module(module);
+  artifact.modules.push_back(std::move(blob));
+  return artifact;
+}
+
+amber::bytecode::BcModule make_reload_module(std::int64_t value,
+                                             bool export_class = true,
+                                             bool method_has_param = false) {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+  const std::uint32_t box_id = ensure_symbol_id(&module, "Box");
+  const std::uint32_t value_id = ensure_symbol_id(&module, "value");
+  const std::uint32_t x_symbol_id = ensure_symbol_id(&module, "x");
+  const std::uint32_t class_kind_id = append_string(&module, "class");
+  const std::uint32_t x_string_id = append_string(&module, "x");
+  const std::uint32_t empty_signature_id = append_path_const(&module, {});
+  const std::uint32_t integer_id = append_integer_const(&module, value);
+
+  BcClass box;
+  box.class_name_sym_id = box_id;
+  box.method_range_start = 0;
+  box.method_range_count = 1;
+  module.classes.push_back(box);
+
+  BcMethod method;
+  method.selector_sym_id = value_id;
+  method.owner_dispatch_ref = 0;
+  method.signature_blob_id = empty_signature_id;
+  method.entry_code_id = 2;
+  method.flags = 1;
+  if (method_has_param) {
+    method.params.push_back({x_symbol_id, x_string_id, 0});
+  }
+  module.methods.push_back(method);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 2;
+  caller.instructions.push_back(send_instr(1, 0, value_id, {}, -1, 0));
+  caller.instructions.push_back({Opcode::Return, {{1, false}}});
+
+  BcCode body;
+  body.code_id = 2;
+  body.kind = CodeKind::Method;
+  body.reg_count = 1;
+  body.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {integer_id, false}}});
+  body.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body};
+
+  if (export_class) {
+    module.exports.push_back({box_id, class_kind_id, 0, 1, false, 0});
+  }
+  return module;
 }
 
 amber::runtime::Value make_closure_value(std::uint32_t code_id) {
@@ -2385,6 +2464,161 @@ void test_runtime_native_wait_cancel_poll_uses_active_pin() {
   heap.unpin(&pin.token);
 }
 
+void test_runtime_awaitable_select_ready_timeout_and_failure() {
+  amber::runtime::RuntimeAwaitable awaitable;
+
+  const amber::runtime::RuntimeSelectResult idle =
+      amber::runtime::runtime_select(
+          {amber::runtime::RuntimeSelectArm::awaitable_arm(awaitable)},
+          std::chrono::hours(1), true);
+  expect(idle.ok && idle.else_selected,
+         "select else should run for a pending awaitable");
+
+  const amber::runtime::RuntimeSelectResult timed_out =
+      amber::runtime::runtime_select(
+          {amber::runtime::RuntimeSelectArm::awaitable_arm(awaitable)},
+          std::chrono::milliseconds(5), false);
+  expect(!timed_out.ok && timed_out.timed_out &&
+             timed_out.error_name == "TimeoutError",
+         "select should time out for a pending awaitable");
+
+  expect(awaitable.complete(amber::runtime::Value::integer(44)),
+         "awaitable completion should transition pending token to ready");
+  const amber::runtime::RuntimeSelectResult selected =
+      amber::runtime::runtime_select(
+          {amber::runtime::RuntimeSelectArm::awaitable_arm(awaitable)},
+          std::chrono::milliseconds(20), false);
+  expect(selected.ok && selected.selected &&
+             selected.kind == amber::runtime::RuntimeSelectArmKind::Await &&
+             selected.awaitable_result.ready &&
+             selected.awaitable_result.value.as_integer() == 44,
+         "select should choose a ready awaitable arm");
+
+  amber::runtime::RuntimeAwaitable failed;
+  expect(failed.fail("TypeError", "synthetic awaitable failure"),
+         "awaitable fail should publish terminal failure");
+  const amber::runtime::RuntimeSelectResult failed_selected =
+      amber::runtime::runtime_select(
+          {amber::runtime::RuntimeSelectArm::awaitable_arm(failed)},
+          std::chrono::milliseconds(20), false);
+  expect(!failed_selected.ok && failed_selected.selected &&
+             failed_selected.awaitable_result.failed &&
+             failed_selected.error_name == "TypeError",
+         "select should surface failed awaitables as selected terminal arms");
+
+  const amber::runtime::RuntimeAwaitableStats stats = awaitable.stats();
+  expect(stats.completions == 1 && stats.polls >= 3,
+         "awaitable stats should count completion and select polls");
+}
+
+void test_runtime_awaitable_native_wait_pin_bridge_and_scheduler() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value value =
+      heap.make_list_value({amber::runtime::Value::integer(1)});
+  amber::runtime::RuntimePinResult pin = heap.pin(value);
+  expect(pin.ok, "native-backed awaitable needs active pin");
+
+  amber::runtime::RuntimeAwaitable io =
+      amber::runtime::RuntimeAwaitable::from_native_wait(heap, pin.token);
+  expect(io.state() == amber::runtime::RuntimeAwaitableState::Pending &&
+             io.stats().native_backed,
+         "native-backed awaitable should start pending with native bridge");
+
+  amber::runtime::RuntimeScheduler scheduler(2);
+  std::atomic<bool> waiter_started{false};
+  std::atomic<std::int64_t> observed{0};
+  const std::uint64_t waiter =
+      scheduler.spawn_task([&io, &waiter_started, &observed]() {
+        waiter_started = true;
+        const amber::runtime::RuntimeAwaitableResult result =
+            io.await(std::chrono::milliseconds(500));
+        if (result.ok && result.ready && result.value.is_integer()) {
+          observed = result.value.as_integer();
+        }
+      });
+  expect(
+      wait_for_condition([&waiter_started]() { return waiter_started.load(); },
+                         std::chrono::milliseconds(100)),
+      "awaitable waiter task should start");
+  const std::uint64_t completer =
+      scheduler.spawn_sleeping_task(std::chrono::milliseconds(10), [&io]() {
+        expect(io.complete(amber::runtime::Value::integer(99)),
+               "native-backed awaitable should complete once");
+      });
+
+  const amber::runtime::RuntimeTaskJoinResult waiter_join =
+      scheduler.join_task(waiter, std::chrono::milliseconds(1000));
+  const amber::runtime::RuntimeTaskJoinResult completer_join =
+      scheduler.join_task(completer, std::chrono::milliseconds(1000));
+  expect(waiter_join.ok,
+         "native-backed awaitable waiter task should complete successfully");
+  expect(completer_join.ok,
+         "native-backed awaitable completer task should complete successfully");
+  expect(observed.load() == 99,
+         "native-backed awaitable should wake scheduler task with value");
+
+  const amber::runtime::RuntimeAwaitableStats io_stats = io.stats();
+  expect(io_stats.completions == 1 && io_stats.native_polls > 0 &&
+             io_stats.native_finishes == 1,
+         "native-backed completion should poll and finish native wait");
+  expect(heap.unpin(&pin.token).unpinned,
+         "completed native-backed awaitable should release its pin normally");
+
+  amber::runtime::RuntimePinResult stale_pin = heap.pin(value);
+  expect(stale_pin.ok, "stale-pin awaitable needs active pin first");
+  amber::runtime::RuntimeAwaitable stale =
+      amber::runtime::RuntimeAwaitable::from_native_wait(heap, stale_pin.token);
+  expect(heap.unpin(&stale_pin.token).unpinned,
+         "test should make native wait pin stale before await");
+  const amber::runtime::RuntimeAwaitableResult stale_result =
+      stale.await(std::chrono::milliseconds(0));
+  expect(!stale_result.ok && stale_result.failed &&
+             stale_result.error_name == "LifetimeError",
+         "native-backed awaitable should fail when its pin becomes stale");
+}
+
+void test_runtime_awaitable_cancellation_finishes_native_wait() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::Value value = heap.make_list_value({});
+  amber::runtime::RuntimePinResult pin = heap.pin(value);
+  expect(pin.ok, "cancelled native-backed awaitable needs active pin");
+
+  amber::runtime::RuntimeAwaitable awaitable =
+      amber::runtime::RuntimeAwaitable::from_native_wait(heap, pin.token);
+  amber::runtime::RuntimeScheduler scheduler(2);
+  std::atomic<bool> entered{false};
+  std::atomic<bool> saw_cancelled_result{false};
+
+  const std::uint64_t task =
+      scheduler.spawn_task([&awaitable, &entered, &saw_cancelled_result]() {
+        entered = true;
+        const amber::runtime::RuntimeAwaitableResult result =
+            awaitable.await(std::chrono::hours(1));
+        if (result.cancelled && result.error_name == "CancelledError") {
+          saw_cancelled_result = true;
+        }
+        amber::runtime::throw_if_runtime_task_cancelled();
+      });
+
+  expect(wait_for_condition([&entered]() { return entered.load(); },
+                            std::chrono::milliseconds(100)),
+         "cancellable awaitable task should enter await");
+  expect(scheduler.cancel_task(task),
+         "scheduler should request cancellation for awaitable task");
+  const amber::runtime::RuntimeTaskJoinResult joined =
+      scheduler.join_task(task, std::chrono::milliseconds(1000));
+  expect(joined.cancelled && joined.error_name == "CancelledError" &&
+             saw_cancelled_result.load(),
+         "awaitable task cancellation should surface and rethrow");
+
+  const amber::runtime::RuntimeAwaitableStats stats = awaitable.stats();
+  expect(stats.cancellations == 1 && stats.native_cancellations == 1 &&
+             stats.native_finishes == 1,
+         "awaitable cancellation should cancel and finish native wait");
+  expect(heap.unpin(&pin.token).unpinned,
+         "cancelled native-backed awaitable should leave pin releasable");
+}
+
 void test_runtime_scheduler_runs_strands_in_parallel() {
   amber::runtime::RuntimeScheduler scheduler(4);
   std::atomic<int> entered{0};
@@ -2775,6 +3009,336 @@ void test_runtime_channel_buffered_close_and_shareability_gate() {
   expect(stats.sends == 3 && stats.receives == 3 &&
              stats.receive_timeouts == 1 && stats.isolation_rejections == 2,
          "buffered channel stats should count success, timeout, and isolation");
+}
+
+void test_runtime_move_slot_channel_transfer_and_moved_guard() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::RuntimeChannel plain_channel(1);
+
+  amber::runtime::Value list;
+  {
+    amber::runtime::RuntimeStrandScope sender_scope(41);
+    list = heap.make_list_value({amber::runtime::Value::integer(7)}, false);
+  }
+
+  const amber::runtime::RuntimeChannelResult plain_send =
+      plain_channel.send(list, std::chrono::milliseconds(0));
+  expect(!plain_send.ok && plain_send.error_name == "IsolationError",
+         "plain channel send should reject confined mutable payload");
+
+  amber::runtime::RuntimeMoveSlot slot(list);
+  amber::runtime::RuntimeChannel moved_channel(1);
+  {
+    amber::runtime::RuntimeStrandScope sender_scope(41);
+    const amber::runtime::RuntimeChannelResult moved_send =
+        moved_channel.send(slot, std::chrono::milliseconds(10));
+    expect(moved_send.ok && moved_send.sent,
+           "moved channel send should accept confined payload");
+  }
+  expect(slot.moved(), "successful moved send should mark slot moved");
+
+  const amber::runtime::RuntimeMoveResult moved_read = slot.read();
+  expect(!moved_read.ok && moved_read.error_name == "MovedValueError",
+         "reading moved-from slot should fail");
+  expect(list.as_list()->header.owner.kind ==
+             amber::runtime::OwnerTokenKind::Sync,
+         "moved payload should be in transit before recv");
+
+  {
+    amber::runtime::RuntimeStrandScope receiver_scope(42);
+    const amber::runtime::RuntimeChannelResult moved_recv =
+        moved_channel.recv(std::chrono::milliseconds(10));
+    expect(moved_recv.ok && moved_recv.received && moved_recv.value.is_list(),
+           "moved channel recv should return payload");
+    expect(moved_recv.value.as_list()->header.owner.kind ==
+                   amber::runtime::OwnerTokenKind::Confined &&
+               moved_recv.value.as_list()->header.owner.strand_id == 42,
+           "recv should adopt moved payload to receiver strand");
+  }
+
+  const amber::runtime::Value frozen = heap.make_list_value({}, true);
+  amber::runtime::RuntimeMoveSlot frozen_slot(frozen);
+  const amber::runtime::RuntimeChannelResult rejected_move =
+      moved_channel.send(frozen_slot, std::chrono::milliseconds(0));
+  expect(!rejected_move.ok && rejected_move.error_name == "MoveError",
+         "move should reject already-shareable payloads");
+  expect(frozen_slot.read().ok,
+         "failed move reservation should leave source slot readable");
+}
+
+void test_runtime_select_rotates_ready_arms_and_handles_else_timeout() {
+  amber::runtime::RuntimeChannel first(1);
+  amber::runtime::RuntimeChannel second(1);
+  int first_selected = 0;
+  int second_selected = 0;
+
+  for (int iteration = 0; iteration < 8; ++iteration) {
+    expect(first.send(amber::runtime::Value::integer(iteration)).ok,
+           "first select channel should accept buffered value");
+    expect(second.send(amber::runtime::Value::integer(100 + iteration)).ok,
+           "second select channel should accept buffered value");
+
+    const amber::runtime::RuntimeSelectResult selected =
+        amber::runtime::runtime_select(
+            {amber::runtime::RuntimeSelectArm::recv(first),
+             amber::runtime::RuntimeSelectArm::recv(second)},
+            std::chrono::milliseconds(20));
+    expect(selected.ok && selected.selected &&
+               selected.kind == amber::runtime::RuntimeSelectArmKind::Recv,
+           "select should choose a ready recv arm");
+    if (selected.arm_index == 0) {
+      ++first_selected;
+      expect(second.recv().ok, "unselected second channel should drain");
+    } else {
+      ++second_selected;
+      expect(first.recv().ok, "unselected first channel should drain");
+    }
+  }
+  expect(first_selected > 0 && second_selected > 0,
+         "select should rotate among ready arms instead of fixed left bias");
+
+  amber::runtime::RuntimeChannel empty(0);
+  const amber::runtime::RuntimeSelectResult else_result =
+      amber::runtime::runtime_select(
+          {amber::runtime::RuntimeSelectArm::recv(empty)},
+          std::chrono::hours(1), true);
+  expect(else_result.ok && else_result.else_selected,
+         "select else should run immediately when no arm is ready");
+
+  const amber::runtime::RuntimeSelectResult timeout_result =
+      amber::runtime::runtime_select(
+          {amber::runtime::RuntimeSelectArm::recv(empty)},
+          std::chrono::milliseconds(5), false);
+  expect(!timeout_result.ok && timeout_result.timed_out &&
+             timeout_result.error_name == "TimeoutError",
+         "select without else should support bounded timeout");
+}
+
+void test_runtime_select_send_move_arm_commits_only_when_ready() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::RuntimeChannel rendezvous(0);
+  amber::runtime::RuntimeChannel buffered(1);
+  amber::runtime::Value packet;
+  {
+    amber::runtime::RuntimeStrandScope sender_scope(71);
+    packet = heap.make_list_value({amber::runtime::Value::integer(71)}, false);
+  }
+
+  amber::runtime::RuntimeMoveSlot slot(packet);
+  {
+    amber::runtime::RuntimeStrandScope sender_scope(71);
+    const amber::runtime::RuntimeSelectResult idle =
+        amber::runtime::runtime_select(
+            {amber::runtime::RuntimeSelectArm::send_moved(rendezvous, slot)},
+            std::chrono::hours(1), true);
+    expect(
+        idle.ok && idle.else_selected,
+        "select send arm should not commit move when rendezvous is not ready");
+    expect(slot.read().ok,
+           "unselected moved send arm should leave slot readable");
+
+    const amber::runtime::RuntimeSelectResult sent =
+        amber::runtime::runtime_select(
+            {amber::runtime::RuntimeSelectArm::send_moved(buffered, slot)},
+            std::chrono::milliseconds(20), false);
+    expect(sent.ok && sent.selected && sent.channel_result.sent,
+           "ready select send arm should commit moved payload");
+  }
+  expect(!slot.read().ok && slot.moved(),
+         "selected moved send arm should mark slot moved-from");
+
+  {
+    amber::runtime::RuntimeStrandScope receiver_scope(72);
+    const amber::runtime::RuntimeChannelResult recv = buffered.recv();
+    expect(recv.ok && recv.value.as_list()->header.owner.strand_id == 72,
+           "select moved send payload should be adopted by receiver");
+  }
+}
+
+void test_runtime_supervisor_one_for_one_keeps_sibling_running() {
+  amber::runtime::RuntimeScheduler scheduler(3);
+  std::atomic<bool> sibling_started{false};
+  std::atomic<bool> sibling_cancelled{false};
+  std::atomic<bool> release_sibling{false};
+  std::atomic<bool> allow_failure{false};
+
+  amber::runtime::RuntimeTaskOptions options;
+  options.policy = amber::runtime::RuntimeSupervisorPolicy::OneForOne;
+  const std::uint64_t parent_id = scheduler.spawn_task(
+      options, [&scheduler, &sibling_started, &sibling_cancelled,
+                &release_sibling, &allow_failure]() {
+        scheduler.spawn_task(
+            [&sibling_started, &sibling_cancelled, &release_sibling]() {
+              sibling_started = true;
+              while (!release_sibling.load() &&
+                     !amber::runtime::current_runtime_task_cancel_requested()) {
+                std::this_thread::yield();
+              }
+              if (amber::runtime::current_runtime_task_cancel_requested()) {
+                sibling_cancelled = true;
+                amber::runtime::throw_if_runtime_task_cancelled();
+              }
+            });
+        scheduler.spawn_task([&allow_failure]() {
+          while (!allow_failure.load()) {
+            std::this_thread::yield();
+          }
+          throw amber::runtime::RuntimeTaskFailure("ChildBoom",
+                                                   "one-for-one child failed");
+        });
+      });
+
+  expect(wait_for_condition(
+             [&scheduler, parent_id, &sibling_started]() {
+               const auto snapshot = scheduler.task_snapshot(parent_id);
+               return snapshot.has_value() && snapshot->active_children == 2 &&
+                      sibling_started.load();
+             },
+             std::chrono::milliseconds(1000)),
+         "one-for-one parent should wait for both children");
+
+  allow_failure = true;
+  expect(wait_for_condition(
+             [&scheduler, parent_id]() {
+               const auto snapshot = scheduler.task_snapshot(parent_id);
+               return snapshot.has_value() && snapshot->active_children == 1;
+             },
+             std::chrono::milliseconds(1000)),
+         "one-for-one child failure should leave sibling active");
+  expect(!sibling_cancelled.load(),
+         "one-for-one policy should not cancel unrelated sibling");
+
+  const amber::runtime::RuntimeTaskJoinResult timed =
+      scheduler.join_task(parent_id, std::chrono::milliseconds(10));
+  expect(!timed.ok && timed.timed_out,
+         "one-for-one parent should keep waiting for live sibling");
+
+  release_sibling = true;
+  const amber::runtime::RuntimeTaskJoinResult joined =
+      scheduler.join_task(parent_id, std::chrono::milliseconds(1000));
+  expect(!joined.ok && joined.joined && joined.error_name == "ChildBoom",
+         "one-for-one parent should report failed child after siblings drain");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.supervisor_one_for_one_failures == 1 &&
+             stats.first_failure_cancellations == 0,
+         "one-for-one stats should record non-cancelling child failure");
+}
+
+void test_runtime_supervisor_one_for_all_cancels_all_siblings() {
+  amber::runtime::RuntimeScheduler scheduler(4);
+  std::atomic<int> sibling_cancellations{0};
+  std::atomic<bool> allow_failure{false};
+
+  amber::runtime::RuntimeTaskOptions options;
+  options.policy = amber::runtime::RuntimeSupervisorPolicy::OneForAll;
+  const std::uint64_t parent_id = scheduler.spawn_task(
+      options, [&scheduler, &sibling_cancellations, &allow_failure]() {
+        for (int index = 0; index < 2; ++index) {
+          scheduler.spawn_task([&sibling_cancellations]() {
+            while (!amber::runtime::current_runtime_task_cancel_requested()) {
+              std::this_thread::yield();
+            }
+            sibling_cancellations.fetch_add(1);
+            amber::runtime::throw_if_runtime_task_cancelled();
+          });
+        }
+        scheduler.spawn_task([&allow_failure]() {
+          while (!allow_failure.load()) {
+            std::this_thread::yield();
+          }
+          throw amber::runtime::RuntimeTaskFailure("AllBoom",
+                                                   "one-for-all failed");
+        });
+      });
+
+  expect(wait_for_condition(
+             [&scheduler, parent_id]() {
+               const auto snapshot = scheduler.task_snapshot(parent_id);
+               return snapshot.has_value() && snapshot->active_children == 3;
+             },
+             std::chrono::milliseconds(1000)),
+         "one-for-all parent should start all children");
+  allow_failure = true;
+
+  const amber::runtime::RuntimeTaskJoinResult joined =
+      scheduler.join_task(parent_id, std::chrono::milliseconds(1000));
+  expect(!joined.ok && joined.error_name == "AllBoom",
+         "one-for-all parent should fail with child error");
+  expect(sibling_cancellations.load() == 2,
+         "one-for-all should cancel all running siblings");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.supervisor_one_for_all_cancellations == 1,
+         "one-for-all stats should record policy cancellation");
+}
+
+void test_runtime_supervisor_rest_for_one_cancels_later_siblings_only() {
+  amber::runtime::RuntimeScheduler scheduler(4);
+  std::atomic<bool> earlier_started{false};
+  std::atomic<bool> earlier_cancelled{false};
+  std::atomic<bool> later_cancelled{false};
+  std::atomic<bool> release_earlier{false};
+  std::atomic<bool> allow_failure{false};
+
+  amber::runtime::RuntimeTaskOptions options;
+  options.policy = amber::runtime::RuntimeSupervisorPolicy::RestForOne;
+  const std::uint64_t parent_id = scheduler.spawn_task(
+      options, [&scheduler, &earlier_started, &earlier_cancelled,
+                &later_cancelled, &release_earlier, &allow_failure]() {
+        scheduler.spawn_task(
+            [&earlier_started, &earlier_cancelled, &release_earlier]() {
+              earlier_started = true;
+              while (!release_earlier.load() &&
+                     !amber::runtime::current_runtime_task_cancel_requested()) {
+                std::this_thread::yield();
+              }
+              if (amber::runtime::current_runtime_task_cancel_requested()) {
+                earlier_cancelled = true;
+                amber::runtime::throw_if_runtime_task_cancelled();
+              }
+            });
+        scheduler.spawn_task([&allow_failure]() {
+          while (!allow_failure.load()) {
+            std::this_thread::yield();
+          }
+          throw amber::runtime::RuntimeTaskFailure("RestBoom",
+                                                   "middle child failed");
+        });
+        scheduler.spawn_task([&later_cancelled]() {
+          while (!amber::runtime::current_runtime_task_cancel_requested()) {
+            std::this_thread::yield();
+          }
+          later_cancelled = true;
+          amber::runtime::throw_if_runtime_task_cancelled();
+        });
+      });
+
+  expect(wait_for_condition(
+             [&scheduler, parent_id, &earlier_started]() {
+               const auto snapshot = scheduler.task_snapshot(parent_id);
+               return snapshot.has_value() && snapshot->active_children == 3 &&
+                      earlier_started.load();
+             },
+             std::chrono::milliseconds(1000)),
+         "rest-for-one parent should start ordered children");
+  allow_failure = true;
+  expect(wait_for_condition(
+             [&later_cancelled]() { return later_cancelled.load(); },
+             std::chrono::milliseconds(1000)),
+         "rest-for-one should cancel later sibling");
+  expect(!earlier_cancelled.load(),
+         "rest-for-one should leave earlier sibling running");
+
+  release_earlier = true;
+  const amber::runtime::RuntimeTaskJoinResult joined =
+      scheduler.join_task(parent_id, std::chrono::milliseconds(1000));
+  expect(!joined.ok && joined.error_name == "RestBoom",
+         "rest-for-one parent should fail with first child error");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.supervisor_rest_for_one_cancellations == 1,
+         "rest-for-one stats should count later sibling cancellation");
 }
 
 void test_runtime_mutex_non_reentrant_and_contention() {
@@ -3899,6 +4463,131 @@ void test_runtime_reflection_mirrors_are_read_only_stable_and_ordered() {
          "old world mirror snapshot should stay stable after mutation");
 }
 
+void test_runtime_package_reload_swaps_compatible_package_atomically() {
+  const amber::pkg::PackageArtifact original =
+      make_reload_artifact(make_reload_module(1));
+  const amber::pkg::PackageArtifact replacement =
+      make_reload_artifact(make_reload_module(2));
+  amber::runtime::RuntimeWorld world(original);
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  const amber::runtime::ExecutionResult before =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(before.ok() && before.value.is_integer() &&
+             before.value.as_integer() == 1,
+         "package reload preflight should execute original method body");
+
+  const std::uint64_t epoch_before = world.world_epoch();
+  const amber::runtime::RuntimePackageReloadResult reloaded =
+      world.reload_package_artifact(replacement);
+  expect(reloaded.ok && reloaded.swapped,
+         "compatible package reload should swap active package");
+  expect(world.world_epoch() == epoch_before + 1,
+         "compatible package reload should bump world epoch once");
+
+  const amber::runtime::ExecutionResult after =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(after.ok() && after.value.is_integer() &&
+             after.value.as_integer() == 2,
+         "package reload should execute replacement method body");
+}
+
+void test_runtime_package_reload_rejects_incompatible_surface_without_swap() {
+  const amber::pkg::PackageArtifact original =
+      make_reload_artifact(make_reload_module(1));
+  const amber::pkg::PackageArtifact removed_export =
+      make_reload_artifact(make_reload_module(2, false));
+  const amber::pkg::PackageArtifact arity_change =
+      make_reload_artifact(make_reload_module(3, true, true));
+  amber::runtime::RuntimeWorld world(original);
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  const std::uint64_t epoch_before = world.world_epoch();
+  const amber::runtime::RuntimePackageReloadResult rejected_export =
+      world.reload_package_artifact(removed_export);
+  expect(!rejected_export.ok && !rejected_export.swapped,
+         "export-surface reload should be rejected");
+  expect(!rejected_export.diagnostics.empty() &&
+             rejected_export.diagnostics[0].error_name ==
+                 "ReloadIncompatibleError",
+         "export-surface reload should report ReloadIncompatibleError");
+  expect(world.world_epoch() == epoch_before,
+         "rejected export-surface reload should not bump epoch");
+
+  const amber::runtime::RuntimePackageReloadResult rejected_arity =
+      world.reload_package_artifact(arity_change);
+  expect(!rejected_arity.ok && !rejected_arity.swapped,
+         "selector/arity reload should be rejected");
+  expect(!rejected_arity.diagnostics.empty() &&
+             rejected_arity.diagnostics[0].error_name ==
+                 "ReloadIncompatibleError",
+         "selector/arity reload should report ReloadIncompatibleError");
+
+  const amber::runtime::ExecutionResult after =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(after.ok() && after.value.is_integer() &&
+             after.value.as_integer() == 1,
+         "incompatible reload should leave original method body active");
+}
+
+void test_runtime_package_reload_rejects_frozen_world_without_swap() {
+  const amber::pkg::PackageArtifact original =
+      make_reload_artifact(make_reload_module(1));
+  const amber::pkg::PackageArtifact replacement =
+      make_reload_artifact(make_reload_module(2));
+  amber::runtime::RuntimeWorld world(original);
+
+  expect(world.freeze_world().ok(), "freeze before reload should succeed");
+  const std::uint64_t epoch_before = world.world_epoch();
+  const amber::runtime::RuntimePackageReloadResult reloaded =
+      world.reload_package_artifact(replacement);
+  expect(!reloaded.ok && !reloaded.swapped,
+         "frozen package reload should be rejected");
+  expect(!reloaded.diagnostics.empty() &&
+             reloaded.diagnostics[0].error_name == "WorldFrozenError",
+         "frozen package reload should report WorldFrozenError");
+  expect(world.world_epoch() == epoch_before,
+         "frozen reload rejection should not bump epoch");
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  const amber::runtime::ExecutionResult after =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(after.ok() && after.value.is_integer() &&
+             after.value.as_integer() == 1,
+         "frozen reload rejection should leave original method body active");
+}
+
+void test_runtime_package_reload_rolls_back_failed_decode() {
+  const amber::pkg::PackageArtifact original =
+      make_reload_artifact(make_reload_module(1));
+  amber::pkg::PackageArtifact broken =
+      make_reload_artifact(make_reload_module(2));
+  broken.modules[0].bytes = {0x00};
+  amber::runtime::RuntimeWorld world(original);
+
+  const std::uint64_t epoch_before = world.world_epoch();
+  const amber::runtime::RuntimePackageReloadResult reloaded =
+      world.reload_package_artifact(broken);
+  expect(!reloaded.ok && !reloaded.swapped,
+         "broken package reload should fail before swap");
+  expect(!reloaded.diagnostics.empty() &&
+             reloaded.diagnostics[0].error_name == "BytecodeVerificationError",
+         "broken package reload should report bytecode verification failure");
+  expect(world.world_epoch() == epoch_before,
+         "broken reload should not bump epoch");
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  const amber::runtime::ExecutionResult after =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(after.ok() && after.value.is_integer() &&
+             after.value.as_integer() == 1,
+         "broken reload should leave original method body active");
+}
+
 void test_manual_pattern_deconstruct_protocol_sequence() {
   using namespace amber::bytecode;
 
@@ -4312,6 +5001,9 @@ int main() {
   test_runtime_pin_dealloc_after_pin_violation();
   test_runtime_pin_parallel_race_smoke();
   test_runtime_native_wait_cancel_poll_uses_active_pin();
+  test_runtime_awaitable_select_ready_timeout_and_failure();
+  test_runtime_awaitable_native_wait_pin_bridge_and_scheduler();
+  test_runtime_awaitable_cancellation_finishes_native_wait();
   test_runtime_scheduler_runs_strands_in_parallel();
   test_runtime_scheduler_timer_queue_wakes_sleeping_strand();
   test_runtime_scheduler_explicit_wake_coalesces_sleeping_strand();
@@ -4321,6 +5013,12 @@ int main() {
   test_runtime_structured_task_scope_propagates_first_failure();
   test_runtime_channel_rendezvous_fifo_close();
   test_runtime_channel_buffered_close_and_shareability_gate();
+  test_runtime_move_slot_channel_transfer_and_moved_guard();
+  test_runtime_select_rotates_ready_arms_and_handles_else_timeout();
+  test_runtime_select_send_move_arm_commits_only_when_ready();
+  test_runtime_supervisor_one_for_one_keeps_sibling_running();
+  test_runtime_supervisor_one_for_all_cancels_all_siblings();
+  test_runtime_supervisor_rest_for_one_cancels_later_siblings_only();
   test_runtime_mutex_non_reentrant_and_contention();
   test_runtime_atomic_seq_cst_compare_and_set_visibility();
   test_runtime_world_heap_tracks_vm_allocations();
@@ -4336,6 +5034,10 @@ int main() {
   test_runtime_world_transaction_rejects_include_cycle_before_commit();
   test_runtime_world_extend_invalidates_class_side_send_cache();
   test_runtime_reflection_mirrors_are_read_only_stable_and_ordered();
+  test_runtime_package_reload_swaps_compatible_package_atomically();
+  test_runtime_package_reload_rejects_incompatible_surface_without_swap();
+  test_runtime_package_reload_rejects_frozen_world_without_swap();
+  test_runtime_package_reload_rolls_back_failed_decode();
   test_manual_pattern_deconstruct_protocol_sequence();
   test_manual_pattern_deconstruct_protocol_map();
   test_manual_raise_handler_table_recovers();

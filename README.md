@@ -23,6 +23,9 @@ build/amberc parse corpus/parse/module/basic/source.am
 build/amberc parse-expr corpus/parse/expr/postfix/source.am
 build/amberc bind corpus/bind/module/basic/source.am
 build/amberc hir corpus/hir/module/basic/source.am
+build/amberc mir corpus/hir/module/basic/source.am
+build/amberc mir-dump corpus/hir/module/basic/source.am
+build/amberc mir-verify corpus/hir/module/basic/source.am
 build/amberc bc corpus/bc/module/basic/source.am
 build/amberc bc-disasm corpus/bc/disasm/basic/source.am
 build/amberc amberbc-dump /path/to/module.amberbc
@@ -60,6 +63,11 @@ Current matrix status:
 | `W9.1` | done | optional Amber/Typed checker lane with `TypeTerm` parsing/canonicalization, exported callable annotation boundaries, parameter/default/return diagnostics, basic truthiness flow for `and`/`or`, strict `case!` exhaustiveness checks, runtime type-hook metadata, `amberc typed`, and M6 typed corpus |
 | `W9.2` | done | open-world runtime transactions for class/mixin reopen, instance/class method replacement, direct `include` / class-side `extend`, pre-commit kind/superclass/include-cycle validation, `open -> frozen` world state with `WorldFrozenError`, atomic rollback, and dispatch invalidation via `world_epoch` / owner versions |
 | `W9.3` | done | read-only runtime reflection mirrors for package/world/class/mixin/method state, deterministic method/export/dependency ordering, source-location exposure from bytecode debug spans, and stable snapshot semantics without mutation backdoors |
+| `W9.4` | done | package manifest/lock/artifact tooling with restricted `amber.toml`, deterministic `amber.lock`, reproducible `.amberpkg` bundles over verified `.amberbc` bytes, SHA-256 dev signatures, and filesystem registry install/publish smoke |
+| `W9.5` | done | open-world dev-profile hot reload as atomic package artifact swap, with package/module bytecode predecode, manifest identity checks, ABI/profile/export surface and selector/arity compatibility guards, frozen-world rejection, rollback on failed swap, and `world_epoch` dispatch invalidation |
+| `W10.1` | done | advanced concurrency runtime with explicit `RuntimeMoveSlot` ownership transfer for channel/select boundaries, moved-from `MovedValueError` guards, fair-ish `runtime_select` recv/send arms with timeout/else behavior, and structured-task supervisor policies `cancel_scope`, `one_for_one`, `one_for_all`, and `rest_for_one` |
+| `W10.2` | done | `amber.io` awaitable/readiness runtime bridge with `RuntimeAwaitable`, awaitable-compatible `runtime_select` arms, timeout/failure/cancellation states, and native wait integration through active W6.4 pin tokens |
+| `W10.3` | done | `amber.mir.v1` optimizer IR with HIR-to-MIR lowering, SSA value/block validation, deterministic JSON/text dumps, `mir`/`mir-dump`/`mir-verify` CLI, and pass harness phase/invalidation checks |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -92,6 +100,9 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   matcher explicit-binding metadata, canonical safe-nav null-guards,
   reflective `send(...)` lowering, inline block closures, and explicit closure
   captures;
+- `amberc mir <file>`, `amberc mir-dump <file>`, and `amberc mir-verify <file>`
+  for `amber.mir.v1` HIR-to-MIR lowering, SSA/block validation, deterministic
+  JSON/text dumps, and pass harness metadata for future optimizer phases;
 - binder diagnostics for exports/import writes/duplicates, wildcard misuse,
   placeholder misuse, structural pattern validation including bare matcher
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,
@@ -100,11 +111,25 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
 - `ambertest run <path>` corpus runner for lex, expression-parse, module-parse, bind/check, optional typed checks, HIR/lower, bytecode compile/disasm, VM run, loader load, diagnostic fixtures, deterministic discovery, focused mismatch rendering, and `--bundle M1..M6` milestone gates;
 - `amber.bc.v1` typed schema, canonical `.amberbc` serializer/deserializer, structural verifier skeleton, JSON dump, and deterministic text disassembly for the current bytecode subset;
 - `amberc bc <file>` and `amberc bc-disasm <file>` HIR-to-bytecode emitter path for current supported methods/classes/control-flow subset, including clause-method metadata in `BcMethod.clause_table` with dedicated emitted clause pattern probe code, `default_thunk_ids[]`, `type_hook_ids[]` metadata for annotated parameter/return boundaries, `PATS` binding descriptors, matcher-expression and dynamic-matcher bridge lowering for `case`, static pattern-opcode lowering for block-param prologues and pattern assignment, and path-based `CLAS` descriptors for class/mixin owners with preserved superclass/include/extend metadata;
-- `runtime/vm` execution baseline for verified `BcCode` in unit tests: frame stack, register file, `last_result`, branches, direct entry, closure capture materialization, closure `CALL`, constructor `CALL`, eager clause-table method dispatch, scalar and collection `SEND` / `SEND_DYN`, `RAISE` / handler-table unwinding, inline matcher execution without AST-walk fallback, slot-backed instance shapes, stable runtime method tables, W6.1 heap allocation boundary for objects/arrays/closures, W6.2 lifecycle tombstones, W6.3 non-moving GC boundary, W6.4 pinning/native-handle boundary, W9.2 atomic open-world transactions/freeze guards, and W9.3 immutable reflection mirror snapshots;
+- `runtime/vm` execution baseline for verified `BcCode` in unit tests: frame stack, register file, `last_result`, branches, direct entry, closure capture materialization, closure `CALL`, constructor `CALL`, eager clause-table method dispatch, scalar and collection `SEND` / `SEND_DYN`, `RAISE` / handler-table unwinding, inline matcher execution without AST-walk fallback, slot-backed instance shapes, stable runtime method tables, W6.1 heap allocation boundary for objects/arrays/closures, W6.2 lifecycle tombstones, W6.3 non-moving GC boundary, W6.4 pinning/native-handle boundary, W9.2 atomic open-world transactions/freeze guards, W9.3 immutable reflection mirror snapshots, W9.5 atomic package hot-reload swaps, W10.1 advanced concurrency primitives, and W10.2 awaitable readiness bridge;
 - `runtime/vm` W6.1-W6.4 memory baseline with `RuntimeHeap`, worker scopes, per-worker arena counters, object allocation ids, remote-free enqueue/drain semantics, safepoint drain hooks, allocation-heavy smoke coverage, lifecycle state transitions, tombstone payload release, destroyed/deallocated access guards, object generations, root scanning, write barriers, remembered sets, logical reclaim of unrooted cycles, parallel GC smoke coverage, active pin roots, stale-unpin guards, nested pin scopes, opaque handles, pinned value-buffer views, native wait cancellation polling, and pinned-object lifecycle guards;
 - `runtime/vm` W7.1 scheduler core with `RuntimeScheduler`, `RuntimeStrandScope`, current strand/worker TLS introspection, runnable global/local queues, timer-backed sleeping strands, explicit wake coalescing, deterministic idle waits, and parallel strand smoke coverage;
 - `runtime/vm` W7.2 task runtime with `spawn_task`, task TLS/cancellation polling, `join_task` failure propagation and timeout results, cooperative cancellation safepoints, waiting scope-exit parents, structured child snapshots, first-failure propagation, and sibling cancellation coverage;
 - `runtime/vm` W7.3 concurrency base with `RuntimeChannel` rendezvous/buffered modes, FIFO blocking send/recv queues, explicit `close()`, `ChannelClosedError`, timeout/cancellation-aware blocking results, recursive shareability checks for channel payloads, non-reentrant `RuntimeMutex`, and seq-cst `RuntimeAtomic`;
+- `runtime/vm` W10.1 advanced concurrency runtime with explicit `RuntimeMoveSlot` moved-from guards, move-aware `RuntimeChannel::send`, receiver-side adoption of moved confined graphs, `runtime_select` recv/send/moved-send arms with timeout and else semantics plus rotating ready-arm selection, and structured-task supervisor policies exposed through `RuntimeTaskOptions`;
+- `runtime/vm` W10.2 `amber.io` awaitable bridge with `RuntimeAwaitable` pending/ready/failed/cancelled states, awaitable select arms, bounded await/poll behavior, scheduler-task cancellation propagation, and native wait completion/cancellation/failure paths backed by active W6.4 pin tokens;
+- `optimizer/mir` W10.3 MIR/SSA baseline with one MIR function per HIR
+  procedure, explicit basic blocks, `%vN` SSA values, phi nodes for `HIf`
+  expression results, loop/control-flow terminators, structural SSA validation,
+  deterministic dumps, and pass pipeline phase/invalidation records;
 - `runtime/vm` W8.3 collections contract with closure-block execution for eager sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, deterministic `EmptyCollectionError` for empty `reduce` without init, and ordered `Map#keys/#values/#entries/#map/#select/#reject/#transform_values/#each`;
 - `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
+- `package/package` W9.4 package tooling with restricted `amber.toml` parsing,
+  deterministic `amber.lock` rendering, reproducible signed `.amberpkg`
+  artifacts, artifact verify/inspect JSON, and filesystem registry
+  install/publish smoke helpers exposed through `amberc package-*`;
+- `runtime/vm` W9.5 dev-profile package hot reload through
+  `RuntimeWorld::reload_package_artifact`, with whole-artifact predecode,
+  manifest identity and public ABI/export/arity compatibility guards,
+  frozen-world rejection, failed-swap rollback, and dispatch invalidation;
 - early token, bytecode section, opcode, and diagnostic registries plus engineering notes.

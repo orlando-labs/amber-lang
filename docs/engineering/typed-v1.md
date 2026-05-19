@@ -39,8 +39,9 @@ Diagnostic codes:
 
 Current limits:
 
-- package-level typed mode is represented by invoking `amberc typed`; package
-  manifest/profile selection belongs to `W9.4`;
+- package-level typed mode is represented by invoking `amberc typed`; W9.4
+  provides package manifests, but profile selection is not wired into typed
+  checking yet;
 - reflective `Any` boundaries are modeled conservatively as `Any` inference;
 - generic terms are invariant by canonical equality, while runtime deep generic
   checks remain future stdlib/runtime work;

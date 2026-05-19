@@ -286,6 +286,165 @@ runtime_value_shareability_error(const Value &value) {
   return runtime_value_shareability_error_impl(value, &visited);
 }
 
+RuntimeSyncBoundaryError runtime_move_error(const std::string &message) {
+  return RuntimeSyncBoundaryError{"MoveError", message};
+}
+
+bool runtime_header_is_shared_or_sync(const ObjHeader &header) {
+  return header.owner.kind == OwnerTokenKind::Shareable ||
+         header.owner.kind == OwnerTokenKind::Sync ||
+         header.generation == ObjectGeneration::Shared ||
+         (header.flags & kObjectFlagShareable) != 0U;
+}
+
+void runtime_append_child_values(const Value &value,
+                                 std::vector<Value> *children) {
+  if (children == nullptr) {
+    return;
+  }
+  if (value.is_closure()) {
+    const std::shared_ptr<ClosureValue> closure = value.as_closure();
+    if (closure == nullptr) {
+      return;
+    }
+    children->insert(children->end(), closure->captures.begin(),
+                     closure->captures.end());
+    if (!closure->self.is_null()) {
+      children->push_back(closure->self);
+    }
+    return;
+  }
+  if (value.is_list()) {
+    const std::shared_ptr<ListValue> list = value.as_list();
+    if (list != nullptr) {
+      children->insert(children->end(), list->items.begin(), list->items.end());
+    }
+    return;
+  }
+  if (value.is_tuple()) {
+    const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+    if (tuple != nullptr) {
+      children->insert(children->end(), tuple->items.begin(),
+                       tuple->items.end());
+    }
+    return;
+  }
+  if (value.is_map()) {
+    const std::shared_ptr<MapValue> map = value.as_map();
+    if (map != nullptr) {
+      for (const MapEntry &entry : map->entries) {
+        children->push_back(entry.value);
+      }
+    }
+    return;
+  }
+  if (value.is_instance_object()) {
+    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    if (instance == nullptr) {
+      return;
+    }
+    children->insert(children->end(), instance->ivar_storage.begin(),
+                     instance->ivar_storage.end());
+    for (const auto &[name, ivar] : instance->ivars) {
+      (void)name;
+      children->push_back(ivar);
+    }
+  }
+}
+
+std::optional<RuntimeSyncBoundaryError>
+runtime_value_move_error_impl(const Value &value, bool top_level,
+                              std::unordered_set<std::uint64_t> *visited) {
+  if (!value_has_heap_payload_tag(value)) {
+    if (top_level) {
+      return runtime_move_error("move expects a confined heap object");
+    }
+    return std::nullopt;
+  }
+
+  const ObjHeader *header = heap_header_from_value(value);
+  if (header == nullptr) {
+    return RuntimeSyncBoundaryError{"TypeError",
+                                    "heap object reference is null"};
+  }
+  const std::optional<std::string> lifecycle_error =
+      lifecycle_access_error_name(*header);
+  if (lifecycle_error.has_value()) {
+    return RuntimeSyncBoundaryError{
+        *lifecycle_error, lifecycle_access_error_message(*lifecycle_error)};
+  }
+  if (header->allocation_id != 0 &&
+      !visited->insert(header->allocation_id).second) {
+    return std::nullopt;
+  }
+  if (runtime_header_is_shared_or_sync(*header)) {
+    if (top_level) {
+      return runtime_move_error(
+          "move is only valid for strand-confined heap objects");
+    }
+    return std::nullopt;
+  }
+  if (header->owner.kind == OwnerTokenKind::Confined &&
+      header->owner.strand_id != current_runtime_owner_strand_id()) {
+    return RuntimeSyncBoundaryError{"IsolationError",
+                                    "move must run on the owner strand"};
+  }
+
+  std::vector<Value> children;
+  runtime_append_child_values(value, &children);
+  for (const Value &child : children) {
+    std::optional<RuntimeSyncBoundaryError> error =
+        runtime_value_move_error_impl(child, false, visited);
+    if (error.has_value()) {
+      return error;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<RuntimeSyncBoundaryError>
+runtime_value_move_error(const Value &value) {
+  std::unordered_set<std::uint64_t> visited;
+  return runtime_value_move_error_impl(value, true, &visited);
+}
+
+void runtime_reown_move_graph_impl(const Value &value, OwnerTokenKind kind,
+                                   std::uint64_t strand_id,
+                                   std::unordered_set<std::uint64_t> *visited) {
+  ObjHeader *header = mutable_heap_header_from_value(value);
+  if (header == nullptr) {
+    return;
+  }
+  if (header->allocation_id != 0 &&
+      !visited->insert(header->allocation_id).second) {
+    return;
+  }
+  if (header->owner.kind == OwnerTokenKind::Shareable ||
+      header->generation == ObjectGeneration::Shared ||
+      (header->flags & kObjectFlagShareable) != 0U) {
+    return;
+  }
+  header->owner.kind = kind;
+  header->owner.strand_id = strand_id;
+
+  std::vector<Value> children;
+  runtime_append_child_values(value, &children);
+  for (const Value &child : children) {
+    runtime_reown_move_graph_impl(child, kind, strand_id, visited);
+  }
+}
+
+void runtime_mark_moved_value_in_transit(const Value &value) {
+  std::unordered_set<std::uint64_t> visited;
+  runtime_reown_move_graph_impl(value, OwnerTokenKind::Sync, 0, &visited);
+}
+
+void runtime_adopt_moved_value(const Value &value) {
+  std::unordered_set<std::uint64_t> visited;
+  runtime_reown_move_graph_impl(value, OwnerTokenKind::Confined,
+                                current_runtime_owner_strand_id(), &visited);
+}
+
 std::optional<std::chrono::steady_clock::time_point>
 runtime_sync_deadline(std::chrono::milliseconds timeout) {
   if (timeout == std::chrono::milliseconds::max()) {
@@ -377,6 +536,473 @@ bool runtime_value_is_shareable(const Value &value) {
   return !runtime_value_shareability_error(value).has_value();
 }
 
+class RuntimeAwaitable::Impl {
+public:
+  RuntimeAwaitableResult await(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++stats_.waits;
+    const std::optional<std::chrono::steady_clock::time_point> deadline =
+        runtime_sync_deadline(timeout);
+
+    while (true) {
+      if (state_ != RuntimeAwaitableState::Pending) {
+        return terminal_result_locked();
+      }
+      if (current_runtime_task_cancel_requested()) {
+        mark_cancelled_locked("awaitable await cancelled");
+        cv_.notify_all();
+        return terminal_result_locked();
+      }
+      if (refresh_native_wait_locked()) {
+        cv_.notify_all();
+        return terminal_result_locked();
+      }
+      if (runtime_sync_deadline_expired(deadline)) {
+        ++stats_.timeouts;
+        return timeout_result_locked();
+      }
+
+      const std::chrono::steady_clock::duration wait_duration =
+          runtime_sync_wait_duration(deadline);
+      if (wait_duration <= std::chrono::steady_clock::duration::zero()) {
+        continue;
+      }
+      cv_.wait_for(lock, wait_duration);
+    }
+  }
+
+  RuntimeAwaitableResult poll() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++stats_.polls;
+    if (state_ != RuntimeAwaitableState::Pending) {
+      return terminal_result_locked();
+    }
+    if (refresh_native_wait_locked()) {
+      cv_.notify_all();
+      return terminal_result_locked();
+    }
+    return timeout_result_locked();
+  }
+
+  bool complete(Value value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != RuntimeAwaitableState::Pending) {
+      return false;
+    }
+    if (refresh_native_wait_locked()) {
+      cv_.notify_all();
+      return false;
+    }
+    std::string error_name;
+    std::string message;
+    if (!finish_native_wait_locked(&error_name, &message)) {
+      mark_failed_locked(std::move(error_name), std::move(message));
+      cv_.notify_all();
+      return false;
+    }
+    state_ = RuntimeAwaitableState::Ready;
+    value_ = std::move(value);
+    ++stats_.completions;
+    cv_.notify_all();
+    return true;
+  }
+
+  bool fail(std::string error_name, std::string message) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != RuntimeAwaitableState::Pending) {
+      return false;
+    }
+    (void)finish_native_wait_locked(nullptr, nullptr);
+    mark_failed_locked(std::move(error_name), std::move(message));
+    cv_.notify_all();
+    return true;
+  }
+
+  bool cancel() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != RuntimeAwaitableState::Pending) {
+      return false;
+    }
+    mark_cancelled_locked("awaitable cancelled");
+    cv_.notify_all();
+    return true;
+  }
+
+  void attach_native_wait(RuntimeHeap &heap, const RuntimePinToken &token) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ != RuntimeAwaitableState::Pending || native_backed_) {
+      return;
+    }
+    native_heap_ = &heap;
+    RuntimeNativeWaitResult wait = heap.register_native_wait(token);
+    if (!wait.ok) {
+      native_heap_ = nullptr;
+      mark_failed_locked(wait.error_name, wait.message);
+      return;
+    }
+    native_backed_ = true;
+    native_handle_ = wait.handle;
+    stats_.native_backed = true;
+  }
+
+  RuntimeAwaitableState state() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_;
+  }
+
+  RuntimeAwaitableStats stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RuntimeAwaitableStats out = stats_;
+    out.state = state_;
+    out.native_backed = native_backed_;
+    return out;
+  }
+
+private:
+  RuntimeAwaitableResult terminal_result_locked() const {
+    RuntimeAwaitableResult result;
+    result.state = state_;
+    result.value = value_;
+    result.error_name = error_name_;
+    result.message = message_;
+    switch (state_) {
+    case RuntimeAwaitableState::Ready:
+      result.ok = true;
+      result.ready = true;
+      break;
+    case RuntimeAwaitableState::Failed:
+      result.failed = true;
+      break;
+    case RuntimeAwaitableState::Cancelled:
+      result.cancelled = true;
+      break;
+    case RuntimeAwaitableState::Pending:
+      break;
+    }
+    return result;
+  }
+
+  RuntimeAwaitableResult timeout_result_locked() const {
+    RuntimeAwaitableResult result;
+    result.state = state_;
+    result.timed_out = true;
+    result.error_name = "TimeoutError";
+    result.message = "awaitable is not ready";
+    return result;
+  }
+
+  void mark_failed_locked(std::string error_name, std::string message) {
+    if (state_ != RuntimeAwaitableState::Pending) {
+      return;
+    }
+    state_ = RuntimeAwaitableState::Failed;
+    error_name_ = error_name.empty() ? "RuntimeError" : std::move(error_name);
+    message_ = message.empty() ? "awaitable failed" : std::move(message);
+    ++stats_.failures;
+  }
+
+  void mark_cancelled_locked(std::string message) {
+    if (state_ != RuntimeAwaitableState::Pending) {
+      return;
+    }
+    std::string error_name;
+    std::string native_message;
+    if (!cancel_native_wait_locked(&error_name, &native_message)) {
+      mark_failed_locked(std::move(error_name), std::move(native_message));
+      return;
+    }
+    state_ = RuntimeAwaitableState::Cancelled;
+    error_name_ = "CancelledError";
+    message_ = std::move(message);
+    ++stats_.cancellations;
+  }
+
+  bool refresh_native_wait_locked() {
+    if (!native_backed_ || native_heap_ == nullptr || !native_handle_.active) {
+      return false;
+    }
+    RuntimeNativeWaitResult poll =
+        native_heap_->poll_native_wait(native_handle_);
+    ++stats_.native_polls;
+    if (!poll.ok) {
+      (void)finish_native_wait_locked(nullptr, nullptr);
+      mark_failed_locked(std::move(poll.error_name), std::move(poll.message));
+      return true;
+    }
+    native_handle_ = poll.handle;
+    if (poll.cancelled) {
+      (void)finish_native_wait_locked(nullptr, nullptr);
+      state_ = RuntimeAwaitableState::Cancelled;
+      error_name_ = "CancelledError";
+      message_ = "native wait cancelled";
+      ++stats_.cancellations;
+      return true;
+    }
+    return false;
+  }
+
+  bool cancel_native_wait_locked(std::string *error_name,
+                                 std::string *message) {
+    if (!native_backed_ || native_heap_ == nullptr || !native_handle_.active) {
+      return true;
+    }
+    RuntimeNativeWaitResult cancel =
+        native_heap_->cancel_native_wait(&native_handle_);
+    if (!cancel.ok) {
+      if (error_name != nullptr) {
+        *error_name = cancel.error_name;
+      }
+      if (message != nullptr) {
+        *message = cancel.message;
+      }
+      return false;
+    }
+    native_handle_ = cancel.handle;
+    ++stats_.native_cancellations;
+    return finish_native_wait_locked(error_name, message);
+  }
+
+  bool finish_native_wait_locked(std::string *error_name,
+                                 std::string *message) {
+    if (!native_backed_ || native_heap_ == nullptr || !native_handle_.active) {
+      return true;
+    }
+    RuntimeNativeWaitResult finish =
+        native_heap_->finish_native_wait(&native_handle_);
+    if (!finish.ok) {
+      if (error_name != nullptr) {
+        *error_name = finish.error_name;
+      }
+      if (message != nullptr) {
+        *message = finish.message;
+      }
+      return false;
+    }
+    native_handle_ = finish.handle;
+    ++stats_.native_finishes;
+    return true;
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  RuntimeAwaitableState state_ = RuntimeAwaitableState::Pending;
+  Value value_ = Value::null();
+  std::string error_name_;
+  std::string message_;
+  RuntimeHeap *native_heap_ = nullptr;
+  RuntimeNativeWaitHandle native_handle_;
+  bool native_backed_ = false;
+  RuntimeAwaitableStats stats_;
+};
+
+RuntimeAwaitable::RuntimeAwaitable() : impl_(std::make_shared<Impl>()) {}
+
+RuntimeAwaitable::RuntimeAwaitable(RuntimeAwaitable &&) noexcept = default;
+
+RuntimeAwaitable &
+RuntimeAwaitable::operator=(RuntimeAwaitable &&) noexcept = default;
+
+RuntimeAwaitable::~RuntimeAwaitable() = default;
+
+RuntimeAwaitable RuntimeAwaitable::ready(Value value) {
+  RuntimeAwaitable awaitable;
+  (void)awaitable.complete(std::move(value));
+  return awaitable;
+}
+
+RuntimeAwaitable
+RuntimeAwaitable::from_native_wait(RuntimeHeap &heap,
+                                   const RuntimePinToken &token) {
+  RuntimeAwaitable awaitable;
+  awaitable.impl_->attach_native_wait(heap, token);
+  return awaitable;
+}
+
+bool RuntimeAwaitable::complete(Value value) {
+  return impl_->complete(std::move(value));
+}
+
+bool RuntimeAwaitable::fail(std::string error_name, std::string message) {
+  return impl_->fail(std::move(error_name), std::move(message));
+}
+
+bool RuntimeAwaitable::cancel() { return impl_->cancel(); }
+
+RuntimeAwaitableResult
+RuntimeAwaitable::await(std::chrono::milliseconds timeout) {
+  return impl_->await(timeout);
+}
+
+RuntimeAwaitableResult RuntimeAwaitable::poll() { return impl_->poll(); }
+
+RuntimeAwaitableState RuntimeAwaitable::state() const { return impl_->state(); }
+
+RuntimeAwaitableStats RuntimeAwaitable::stats() const { return impl_->stats(); }
+
+namespace {
+
+RuntimeMoveResult runtime_move_result_error(RuntimeMoveSlotState state,
+                                            std::string error_name,
+                                            std::string message) {
+  RuntimeMoveResult result;
+  result.state = state;
+  result.error_name = std::move(error_name);
+  result.message = std::move(message);
+  result.moved = state == RuntimeMoveSlotState::Moved;
+  return result;
+}
+
+} // namespace
+
+class RuntimeMoveSlot::Impl {
+public:
+  explicit Impl(Value value) : value_(std::move(value)) {}
+
+  RuntimeMoveResult read() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ == RuntimeMoveSlotState::Moved) {
+      return runtime_move_result_error(state_, "MovedValueError",
+                                       "value has already been moved");
+    }
+    RuntimeMoveResult result;
+    result.ok = true;
+    result.state = state_;
+    result.value = value_;
+    result.reserved = state_ == RuntimeMoveSlotState::Reserved;
+    return result;
+  }
+
+  RuntimeMoveResult reserve_move() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ == RuntimeMoveSlotState::Moved) {
+      return runtime_move_result_error(state_, "MovedValueError",
+                                       "value has already been moved");
+    }
+    if (state_ == RuntimeMoveSlotState::Reserved) {
+      return runtime_move_result_error(state_, "MoveError",
+                                       "value already has a pending move");
+    }
+    std::optional<RuntimeSyncBoundaryError> error =
+        runtime_value_move_error(value_);
+    if (error.has_value()) {
+      return runtime_move_result_error(state_, error->error_name,
+                                       error->message);
+    }
+
+    RuntimeMoveReservation reservation;
+    reservation.reservation_id = next_reservation_id_++;
+    reservation.value = value_;
+    reservation.active = true;
+    active_reservation_id_ = reservation.reservation_id;
+    state_ = RuntimeMoveSlotState::Reserved;
+
+    RuntimeMoveResult result;
+    result.ok = true;
+    result.reserved = true;
+    result.state = state_;
+    result.reservation = reservation;
+    result.value = value_;
+    return result;
+  }
+
+  RuntimeMoveResult commit_move(RuntimeMoveReservation *reservation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (reservation == nullptr || !reservation->active ||
+        reservation->reservation_id == 0 ||
+        reservation->reservation_id != active_reservation_id_ ||
+        state_ != RuntimeMoveSlotState::Reserved) {
+      return runtime_move_result_error(state_, "MoveError",
+                                       "move reservation is not active");
+    }
+
+    runtime_mark_moved_value_in_transit(value_);
+    state_ = RuntimeMoveSlotState::Moved;
+    active_reservation_id_ = 0;
+    reservation->active = false;
+
+    RuntimeMoveResult result;
+    result.ok = true;
+    result.moved = true;
+    result.state = state_;
+    result.value = value_;
+    return result;
+  }
+
+  RuntimeMoveResult release_move(RuntimeMoveReservation *reservation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (reservation == nullptr || !reservation->active ||
+        reservation->reservation_id == 0 ||
+        reservation->reservation_id != active_reservation_id_ ||
+        state_ != RuntimeMoveSlotState::Reserved) {
+      return runtime_move_result_error(state_, "MoveError",
+                                       "move reservation is not active");
+    }
+
+    state_ = RuntimeMoveSlotState::Ready;
+    active_reservation_id_ = 0;
+    reservation->active = false;
+
+    RuntimeMoveResult result;
+    result.ok = true;
+    result.state = state_;
+    result.value = value_;
+    return result;
+  }
+
+  void reset(Value value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    value_ = std::move(value);
+    state_ = RuntimeMoveSlotState::Ready;
+    active_reservation_id_ = 0;
+  }
+
+  RuntimeMoveSlotState state() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  Value value_ = Value::null();
+  RuntimeMoveSlotState state_ = RuntimeMoveSlotState::Ready;
+  std::uint64_t next_reservation_id_ = 1;
+  std::uint64_t active_reservation_id_ = 0;
+};
+
+RuntimeMoveSlot::RuntimeMoveSlot(Value value)
+    : impl_(std::make_shared<Impl>(std::move(value))) {}
+
+RuntimeMoveSlot::RuntimeMoveSlot(RuntimeMoveSlot &&) noexcept = default;
+
+RuntimeMoveSlot &
+RuntimeMoveSlot::operator=(RuntimeMoveSlot &&) noexcept = default;
+
+RuntimeMoveSlot::~RuntimeMoveSlot() = default;
+
+RuntimeMoveResult RuntimeMoveSlot::read() const { return impl_->read(); }
+
+RuntimeMoveResult RuntimeMoveSlot::reserve_move() {
+  return impl_->reserve_move();
+}
+
+RuntimeMoveResult
+RuntimeMoveSlot::commit_move(RuntimeMoveReservation *reservation) {
+  return impl_->commit_move(reservation);
+}
+
+RuntimeMoveResult
+RuntimeMoveSlot::release_move(RuntimeMoveReservation *reservation) {
+  return impl_->release_move(reservation);
+}
+
+void RuntimeMoveSlot::reset(Value value) { impl_->reset(std::move(value)); }
+
+RuntimeMoveSlotState RuntimeMoveSlot::state() const { return impl_->state(); }
+
+bool RuntimeMoveSlot::moved() const {
+  return state() == RuntimeMoveSlotState::Moved;
+}
+
 class RuntimeChannel::Impl {
 public:
   explicit Impl(std::size_t capacity) : capacity_(capacity) {}
@@ -394,70 +1020,38 @@ public:
       return result;
     }
 
-    std::unique_lock<std::mutex> lock(mutex_);
-    promote_pending_sends_locked();
-    if (closed_) {
-      return runtime_channel_closed_result();
-    }
-    if (pending_sends_.empty() && capacity_ > 0 && buffer_.size() < capacity_) {
-      buffer_.push_back(value);
-      ++stats_.sends;
-      cv_.notify_all();
-      result.ok = true;
-      result.sent = true;
+    ChannelPayload payload;
+    payload.value = value;
+    return send_payload(std::move(payload), nullptr, {}, timeout);
+  }
+
+  RuntimeChannelResult send(RuntimeMoveSlot &slot,
+                            std::chrono::milliseconds timeout) {
+    RuntimeMoveResult reservation_result = slot.reserve_move();
+    if (!reservation_result.ok) {
+      RuntimeChannelResult result;
+      result.error_name = reservation_result.error_name;
+      result.message = reservation_result.message;
       return result;
     }
 
-    const std::shared_ptr<PendingSend> pending =
-        std::make_shared<PendingSend>();
-    pending->value = value;
-    pending_sends_.push_back(pending);
-    cv_.notify_all();
-
-    const std::optional<std::chrono::steady_clock::time_point> deadline =
-        runtime_sync_deadline(timeout);
-    while (!pending->consumed) {
-      if (closed_) {
-        remove_pending_send_locked(pending);
-        cv_.notify_all();
-        return runtime_channel_closed_result();
-      }
-      if (current_runtime_task_cancel_requested()) {
-        remove_pending_send_locked(pending);
-        ++stats_.send_cancellations;
-        cv_.notify_all();
-        return runtime_channel_cancelled_result(true);
-      }
-      if (runtime_sync_deadline_expired(deadline)) {
-        remove_pending_send_locked(pending);
-        ++stats_.send_timeouts;
-        cv_.notify_all();
-        return runtime_channel_timeout_result(true);
-      }
-      const std::chrono::steady_clock::duration wait_duration =
-          runtime_sync_wait_duration(deadline);
-      if (wait_duration <= std::chrono::steady_clock::duration::zero()) {
-        continue;
-      }
-      cv_.wait_for(lock, wait_duration);
-    }
-
-    ++stats_.sends;
-    result.ok = true;
-    result.sent = true;
-    return result;
+    ChannelPayload payload;
+    payload.value = reservation_result.reservation.value;
+    payload.moved_transfer = true;
+    return send_payload(std::move(payload), &slot,
+                        reservation_result.reservation, timeout);
   }
 
   RuntimeChannelResult recv(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
     promote_pending_sends_locked();
     if (recv_waiters_.empty()) {
-      std::optional<Value> immediate = take_value_locked();
+      std::optional<ChannelPayload> immediate = take_value_locked();
       if (immediate.has_value()) {
         RuntimeChannelResult result;
         result.ok = true;
         result.received = true;
-        result.value = std::move(*immediate);
+        result.value = adopt_payload(std::move(*immediate));
         ++stats_.receives;
         cv_.notify_all();
         return result;
@@ -478,13 +1072,13 @@ public:
           !recv_waiters_.empty() && recv_waiters_.front() == waiter_id;
       if (at_front) {
         promote_pending_sends_locked();
-        std::optional<Value> value = take_value_locked();
-        if (value.has_value()) {
+        std::optional<ChannelPayload> payload = take_value_locked();
+        if (payload.has_value()) {
           recv_waiters_.pop_front();
           RuntimeChannelResult result;
           result.ok = true;
           result.received = true;
-          result.value = std::move(*value);
+          result.value = adopt_payload(std::move(*payload));
           ++stats_.receives;
           cv_.notify_all();
           return result;
@@ -544,10 +1138,96 @@ public:
   }
 
 private:
-  struct PendingSend {
+  struct ChannelPayload {
     Value value = Value::null();
-    bool consumed = false;
+    bool moved_transfer = false;
   };
+
+  struct PendingSend {
+    ChannelPayload payload;
+    RuntimeMoveSlot *move_slot = nullptr;
+    RuntimeMoveReservation reservation;
+    bool consumed = false;
+    bool failed = false;
+    std::string error_name;
+    std::string message;
+  };
+
+  RuntimeChannelResult send_payload(ChannelPayload payload,
+                                    RuntimeMoveSlot *move_slot,
+                                    RuntimeMoveReservation reservation,
+                                    std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    promote_pending_sends_locked();
+    if (closed_) {
+      release_move_reservation(move_slot, &reservation);
+      return runtime_channel_closed_result();
+    }
+    if (pending_sends_.empty() && capacity_ > 0 && buffer_.size() < capacity_) {
+      if (!commit_payload_move(move_slot, &reservation, &payload)) {
+        return move_commit_channel_result(reservation);
+      }
+      buffer_.push_back(std::move(payload));
+      ++stats_.sends;
+      cv_.notify_all();
+      RuntimeChannelResult result;
+      result.ok = true;
+      result.sent = true;
+      return result;
+    }
+
+    const std::shared_ptr<PendingSend> pending =
+        std::make_shared<PendingSend>();
+    pending->payload = std::move(payload);
+    pending->move_slot = move_slot;
+    pending->reservation = reservation;
+    pending_sends_.push_back(pending);
+    cv_.notify_all();
+
+    const std::optional<std::chrono::steady_clock::time_point> deadline =
+        runtime_sync_deadline(timeout);
+    while (!pending->consumed) {
+      if (closed_) {
+        remove_pending_send_locked(pending);
+        release_move_reservation(move_slot, &pending->reservation);
+        cv_.notify_all();
+        return runtime_channel_closed_result();
+      }
+      if (current_runtime_task_cancel_requested()) {
+        remove_pending_send_locked(pending);
+        release_move_reservation(move_slot, &pending->reservation);
+        ++stats_.send_cancellations;
+        cv_.notify_all();
+        return runtime_channel_cancelled_result(true);
+      }
+      if (runtime_sync_deadline_expired(deadline)) {
+        remove_pending_send_locked(pending);
+        release_move_reservation(move_slot, &pending->reservation);
+        ++stats_.send_timeouts;
+        cv_.notify_all();
+        return runtime_channel_timeout_result(true);
+      }
+      const std::chrono::steady_clock::duration wait_duration =
+          runtime_sync_wait_duration(deadline);
+      if (wait_duration <= std::chrono::steady_clock::duration::zero()) {
+        continue;
+      }
+      cv_.wait_for(lock, wait_duration);
+    }
+
+    if (pending->failed) {
+      RuntimeChannelResult result;
+      result.error_name = pending->error_name;
+      result.message = pending->message;
+      return result;
+    }
+
+    ++stats_.sends;
+    RuntimeChannelResult result;
+    result.ok = true;
+    result.sent = true;
+    return result;
+  }
 
   void remove_pending_send_locked(const std::shared_ptr<PendingSend> &pending) {
     auto found =
@@ -575,17 +1255,20 @@ private:
       if (pending->consumed) {
         continue;
       }
-      buffer_.push_back(pending->value);
+      if (!commit_pending_move(pending)) {
+        continue;
+      }
+      buffer_.push_back(std::move(pending->payload));
       pending->consumed = true;
     }
   }
 
-  std::optional<Value> take_value_locked() {
+  std::optional<ChannelPayload> take_value_locked() {
     if (!buffer_.empty()) {
-      Value value = buffer_.front();
+      ChannelPayload payload = std::move(buffer_.front());
       buffer_.pop_front();
       promote_pending_sends_locked();
-      return value;
+      return payload;
     }
     while (!closed_ && !pending_sends_.empty()) {
       const std::shared_ptr<PendingSend> pending = pending_sends_.front();
@@ -593,16 +1276,75 @@ private:
       if (pending->consumed) {
         continue;
       }
+      if (!commit_pending_move(pending)) {
+        continue;
+      }
       pending->consumed = true;
-      return pending->value;
+      return std::move(pending->payload);
     }
     return std::nullopt;
+  }
+
+  static RuntimeChannelResult
+  move_commit_channel_result(const RuntimeMoveReservation &reservation) {
+    (void)reservation;
+    RuntimeChannelResult result;
+    result.error_name = "MoveError";
+    result.message = "move reservation could not be committed";
+    return result;
+  }
+
+  bool commit_payload_move(RuntimeMoveSlot *move_slot,
+                           RuntimeMoveReservation *reservation,
+                           ChannelPayload *payload) {
+    if (move_slot == nullptr || reservation == nullptr ||
+        !reservation->active || payload == nullptr) {
+      return true;
+    }
+    RuntimeMoveResult committed = move_slot->commit_move(reservation);
+    if (!committed.ok) {
+      payload->moved_transfer = false;
+      return false;
+    }
+    payload->value = committed.value;
+    payload->moved_transfer = true;
+    return true;
+  }
+
+  bool commit_pending_move(const std::shared_ptr<PendingSend> &pending) {
+    if (pending == nullptr) {
+      return false;
+    }
+    if (!commit_payload_move(pending->move_slot, &pending->reservation,
+                             &pending->payload)) {
+      pending->consumed = true;
+      pending->failed = true;
+      pending->error_name = "MoveError";
+      pending->message = "move reservation could not be committed";
+      cv_.notify_all();
+      return false;
+    }
+    return true;
+  }
+
+  static void release_move_reservation(RuntimeMoveSlot *move_slot,
+                                       RuntimeMoveReservation *reservation) {
+    if (move_slot != nullptr && reservation != nullptr && reservation->active) {
+      (void)move_slot->release_move(reservation);
+    }
+  }
+
+  static Value adopt_payload(ChannelPayload payload) {
+    if (payload.moved_transfer) {
+      runtime_adopt_moved_value(payload.value);
+    }
+    return payload.value;
   }
 
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   std::size_t capacity_ = 0;
-  std::deque<Value> buffer_;
+  std::deque<ChannelPayload> buffer_;
   std::deque<std::shared_ptr<PendingSend>> pending_sends_;
   std::deque<std::uint64_t> recv_waiters_;
   RuntimeChannelStats stats_;
@@ -624,6 +1366,11 @@ RuntimeChannelResult RuntimeChannel::send(const Value &value,
   return impl_->send(value, timeout);
 }
 
+RuntimeChannelResult RuntimeChannel::send(RuntimeMoveSlot &slot,
+                                          std::chrono::milliseconds timeout) {
+  return impl_->send(slot, timeout);
+}
+
 RuntimeChannelResult RuntimeChannel::recv(std::chrono::milliseconds timeout) {
   return impl_->recv(timeout);
 }
@@ -633,6 +1380,140 @@ bool RuntimeChannel::close() { return impl_->close(); }
 bool RuntimeChannel::closed() const { return impl_->closed(); }
 
 RuntimeChannelStats RuntimeChannel::stats() const { return impl_->stats(); }
+
+RuntimeSelectArm RuntimeSelectArm::recv(RuntimeChannel &channel) {
+  RuntimeSelectArm arm;
+  arm.kind = RuntimeSelectArmKind::Recv;
+  arm.channel = &channel;
+  return arm;
+}
+
+RuntimeSelectArm RuntimeSelectArm::send(RuntimeChannel &channel, Value value) {
+  RuntimeSelectArm arm;
+  arm.kind = RuntimeSelectArmKind::Send;
+  arm.channel = &channel;
+  arm.value = std::move(value);
+  return arm;
+}
+
+RuntimeSelectArm RuntimeSelectArm::send_moved(RuntimeChannel &channel,
+                                              RuntimeMoveSlot &slot) {
+  RuntimeSelectArm arm;
+  arm.kind = RuntimeSelectArmKind::Send;
+  arm.channel = &channel;
+  arm.move_slot = &slot;
+  return arm;
+}
+
+RuntimeSelectArm RuntimeSelectArm::awaitable_arm(RuntimeAwaitable &awaitable) {
+  RuntimeSelectArm arm;
+  arm.kind = RuntimeSelectArmKind::Await;
+  arm.awaitable = &awaitable;
+  return arm;
+}
+
+RuntimeSelectResult runtime_select(const std::vector<RuntimeSelectArm> &arms,
+                                   std::chrono::milliseconds timeout,
+                                   bool has_else) {
+  static std::atomic<std::uint64_t> select_cursor{0};
+
+  RuntimeSelectResult result;
+  if (arms.empty()) {
+    if (has_else) {
+      result.ok = true;
+      result.else_selected = true;
+      return result;
+    }
+    result.error_name = "TypeError";
+    result.message = "select expects at least one arm";
+    return result;
+  }
+
+  const std::optional<std::chrono::steady_clock::time_point> deadline =
+      runtime_sync_deadline(timeout);
+  while (true) {
+    if (current_runtime_task_cancel_requested()) {
+      result.cancelled = true;
+      result.error_name = "CancelledError";
+      result.message = "select cancelled";
+      return result;
+    }
+
+    const std::size_t start =
+        static_cast<std::size_t>(select_cursor.fetch_add(1)) % arms.size();
+    for (std::size_t offset = 0; offset < arms.size(); ++offset) {
+      const std::size_t index = (start + offset) % arms.size();
+      const RuntimeSelectArm &arm = arms[index];
+      if (arm.kind == RuntimeSelectArmKind::Await) {
+        if (arm.awaitable == nullptr) {
+          result.error_name = "TypeError";
+          result.message = "select await arm is missing an awaitable";
+          return result;
+        }
+        RuntimeAwaitableResult awaitable_result = arm.awaitable->poll();
+        if (!awaitable_result.timed_out) {
+          result.ok = awaitable_result.ok;
+          result.selected = true;
+          result.arm_index = index;
+          result.kind = arm.kind;
+          result.awaitable_result = std::move(awaitable_result);
+          result.error_name = result.awaitable_result.error_name;
+          result.message = result.awaitable_result.message;
+          result.cancelled = result.awaitable_result.cancelled;
+          return result;
+        }
+        continue;
+      }
+
+      if (arm.channel == nullptr) {
+        result.error_name = "TypeError";
+        result.message = "select arm is missing a channel";
+        return result;
+      }
+
+      RuntimeChannelResult channel_result;
+      if (arm.kind == RuntimeSelectArmKind::Recv) {
+        channel_result = arm.channel->recv(std::chrono::milliseconds(0));
+      } else if (arm.move_slot != nullptr) {
+        channel_result =
+            arm.channel->send(*arm.move_slot, std::chrono::milliseconds(0));
+      } else {
+        channel_result =
+            arm.channel->send(arm.value, std::chrono::milliseconds(0));
+      }
+
+      if (!channel_result.timed_out) {
+        result.ok = channel_result.ok;
+        result.selected = true;
+        result.arm_index = index;
+        result.kind = arm.kind;
+        result.channel_result = std::move(channel_result);
+        result.error_name = result.channel_result.error_name;
+        result.message = result.channel_result.message;
+        return result;
+      }
+    }
+
+    if (has_else) {
+      result.ok = true;
+      result.else_selected = true;
+      return result;
+    }
+    if (runtime_sync_deadline_expired(deadline)) {
+      result.timed_out = true;
+      result.error_name = "TimeoutError";
+      result.message = "select timed out";
+      return result;
+    }
+
+    const std::chrono::steady_clock::duration wait_duration =
+        runtime_sync_wait_duration(deadline);
+    if (wait_duration <= std::chrono::steady_clock::duration::zero()) {
+      continue;
+    }
+    std::this_thread::sleep_for(wait_duration);
+  }
+}
 
 class RuntimeMutex::Impl {
 public:
@@ -844,21 +1725,35 @@ public:
   }
 
   std::uint64_t spawn_strand(StrandFunction function) {
-    return spawn_impl(std::chrono::milliseconds(0), std::move(function), false);
+    return spawn_impl(std::chrono::milliseconds(0), std::move(function), false,
+                      RuntimeTaskOptions{});
   }
 
   std::uint64_t spawn_sleeping_strand(std::chrono::milliseconds delay,
                                       StrandFunction function) {
-    return spawn_impl(delay, std::move(function), true);
+    return spawn_impl(delay, std::move(function), true, RuntimeTaskOptions{});
   }
 
   std::uint64_t spawn_task(StrandFunction function) {
-    return spawn_strand(std::move(function));
+    return spawn_impl(std::chrono::milliseconds(0), std::move(function), false,
+                      RuntimeTaskOptions{});
+  }
+
+  std::uint64_t spawn_task(RuntimeTaskOptions options,
+                           StrandFunction function) {
+    return spawn_impl(std::chrono::milliseconds(0), std::move(function), false,
+                      options);
   }
 
   std::uint64_t spawn_sleeping_task(std::chrono::milliseconds delay,
                                     StrandFunction function) {
-    return spawn_sleeping_strand(delay, std::move(function));
+    return spawn_impl(delay, std::move(function), true, RuntimeTaskOptions{});
+  }
+
+  std::uint64_t spawn_sleeping_task(std::chrono::milliseconds delay,
+                                    RuntimeTaskOptions options,
+                                    StrandFunction function) {
+    return spawn_impl(delay, std::move(function), true, options);
   }
 
   bool wake_strand(std::uint64_t strand_id) {
@@ -1078,12 +1973,15 @@ private:
     std::uint64_t timer_wakes = 0;
     std::uint64_t parent_task_id = 0;
     std::unordered_set<std::uint64_t> child_task_ids;
+    std::vector<std::uint64_t> child_task_order;
     std::shared_ptr<std::atomic<bool>> cancellation_requested =
         std::make_shared<std::atomic<bool>>(false);
     RuntimeStrandState pending_completion_state = RuntimeStrandState::New;
     TaskError pending_error;
     TaskError error;
     std::optional<TaskError> first_child_error;
+    RuntimeSupervisorPolicy supervisor_policy =
+        RuntimeSupervisorPolicy::CancelScope;
   };
 
   struct TimerEntry {
@@ -1117,7 +2015,8 @@ private:
   }
 
   std::uint64_t spawn_impl(std::chrono::milliseconds delay,
-                           StrandFunction function, bool may_sleep) {
+                           StrandFunction function, bool may_sleep,
+                           RuntimeTaskOptions options) {
     if (!function) {
       function = []() {};
     }
@@ -1134,12 +2033,14 @@ private:
     strand.parent_task_id = parent_task_id;
     strand.function = std::move(function);
     strand.state = RuntimeStrandState::Runnable;
+    strand.supervisor_policy = options.policy;
     strands_[strand_id] = std::move(strand);
     ++stats_.strands_created;
     ++stats_.tasks_created;
 
     if (parent_task_id != 0) {
       strands_[parent_task_id].child_task_ids.insert(strand_id);
+      strands_[parent_task_id].child_task_order.push_back(strand_id);
       ++stats_.structured_child_tasks;
       if (strands_[parent_task_id].cancellation_requested->load()) {
         strands_[strand_id].cancellation_requested->store(true);
@@ -1181,7 +2082,7 @@ private:
     }
   }
 
-  void promote_expired_timers_locked() {
+  void promote_expired_timers_locked(std::size_t worker_index) {
     const auto now = std::chrono::steady_clock::now();
     while (!timers_.empty() && timers_.top().deadline <= now) {
       const TimerEntry entry = timers_.top();
@@ -1197,13 +2098,12 @@ private:
       strand.wake_pending = true;
       ++strand.timer_wakes;
       ++stats_.timer_wakes;
-      const std::size_t worker_index = timer_wake_cursor_++ % worker_count_;
       enqueue_runnable_locked(entry.strand_id, worker_index);
     }
   }
 
   std::uint64_t next_runnable_locked(std::size_t worker_index) {
-    promote_expired_timers_locked();
+    promote_expired_timers_locked(worker_index);
     while (!local_queues_[worker_index].empty()) {
       const std::uint64_t strand_id = local_queues_[worker_index].front();
       local_queues_[worker_index].pop_front();
@@ -1302,6 +2202,26 @@ private:
     }
   }
 
+  std::uint64_t cancel_children_after_locked(std::uint64_t parent_task_id,
+                                             std::uint64_t failed_child_id) {
+    auto found = strands_.find(parent_task_id);
+    if (found == strands_.end()) {
+      return 0;
+    }
+    bool after_failed = false;
+    std::uint64_t cancelled = 0;
+    for (const std::uint64_t child_id : found->second.child_task_order) {
+      if (child_id == failed_child_id) {
+        after_failed = true;
+        continue;
+      }
+      if (after_failed && request_cancel_locked(child_id)) {
+        ++cancelled;
+      }
+    }
+    return cancelled;
+  }
+
   void finish_or_wait_locked(std::uint64_t task_id,
                              const TaskCompletion &completion) {
     auto found = strands_.find(task_id);
@@ -1394,9 +2314,26 @@ private:
     if (child->second.state == RuntimeStrandState::Failed &&
         !parent->second.first_child_error.has_value()) {
       parent->second.first_child_error = child->second.error;
-      mark_cancel_requested_locked(parent->second);
-      ++stats_.first_failure_cancellations;
-      cancel_active_children_locked(parent_task_id, task_id);
+      switch (parent->second.supervisor_policy) {
+      case RuntimeSupervisorPolicy::CancelScope:
+        mark_cancel_requested_locked(parent->second);
+        ++stats_.first_failure_cancellations;
+        cancel_active_children_locked(parent_task_id, task_id);
+        break;
+      case RuntimeSupervisorPolicy::OneForOne:
+        ++stats_.supervisor_one_for_one_failures;
+        break;
+      case RuntimeSupervisorPolicy::OneForAll:
+        ++stats_.first_failure_cancellations;
+        cancel_active_children_locked(parent_task_id, task_id);
+        ++stats_.supervisor_one_for_all_cancellations;
+        break;
+      case RuntimeSupervisorPolicy::RestForOne:
+        ++stats_.first_failure_cancellations;
+        stats_.supervisor_rest_for_one_cancellations +=
+            cancel_children_after_locked(parent_task_id, task_id);
+        break;
+      }
     }
 
     if (parent->second.state == RuntimeStrandState::Waiting &&
@@ -1536,7 +2473,6 @@ private:
   RuntimeSchedulerStats stats_;
   std::uint64_t next_strand_id_ = 1;
   std::uint64_t running_count_ = 0;
-  std::uint64_t timer_wake_cursor_ = 0;
   bool started_ = false;
   bool shutdown_requested_ = false;
 };
@@ -1578,10 +2514,22 @@ std::uint64_t RuntimeScheduler::spawn_task(StrandFunction function) {
   return impl_->spawn_task(std::move(function));
 }
 
+std::uint64_t RuntimeScheduler::spawn_task(RuntimeTaskOptions options,
+                                           StrandFunction function) {
+  return impl_->spawn_task(options, std::move(function));
+}
+
 std::uint64_t
 RuntimeScheduler::spawn_sleeping_task(std::chrono::milliseconds delay,
                                       StrandFunction function) {
   return impl_->spawn_sleeping_task(delay, std::move(function));
+}
+
+std::uint64_t
+RuntimeScheduler::spawn_sleeping_task(std::chrono::milliseconds delay,
+                                      RuntimeTaskOptions options,
+                                      StrandFunction function) {
+  return impl_->spawn_sleeping_task(delay, options, std::move(function));
 }
 
 bool RuntimeScheduler::cancel_task(std::uint64_t task_id) {
@@ -3352,6 +4300,53 @@ struct RuntimeState {
       return;
     }
     ++classes[class_index].method_version;
+    ++world_epoch;
+  }
+
+  void replace_module_runtime_state(const BcModule &module) {
+    std::vector<ClassRuntimeState> previous_classes = std::move(classes);
+    classes.clear();
+    classes.resize(module.classes.size());
+    if (root_shapes.size() < module.classes.size()) {
+      root_shapes.resize(module.classes.size());
+    }
+
+    for (std::uint32_t index = 0; index < module.classes.size(); ++index) {
+      ClassRuntimeState &runtime = classes[index];
+      if (index < previous_classes.size()) {
+        runtime.cvars = std::move(previous_classes[index].cvars);
+        runtime.direct_include_indices =
+            std::move(previous_classes[index].direct_include_indices);
+        runtime.direct_extend_indices =
+            std::move(previous_classes[index].direct_extend_indices);
+        runtime.method_version = previous_classes[index].method_version + 1U;
+      }
+
+      const bytecode::BcClass &owner = module.classes[index];
+      runtime.owner_flags = owner.flags;
+      runtime.ivar_schema_id = owner.ivar_schema_id;
+      runtime.has_superclass_ref = owner.has_superclass_ref;
+      runtime.superclass_ref = owner.superclass_ref;
+      runtime.method_range_valid =
+          owner.method_range_start + owner.method_range_count <=
+          module.methods.size();
+      if (!runtime.method_range_valid) {
+        continue;
+      }
+      for (std::uint32_t offset = 0; offset < owner.method_range_count;
+           ++offset) {
+        bytecode::BcMethod method =
+            module.methods[owner.method_range_start + offset];
+        MethodTableDescriptor &table = method.flags == kMethodFlagClass
+                                           ? runtime.class_method_table
+                                           : runtime.instance_method_table;
+        table.entries[method.selector_sym_id] = std::move(method);
+      }
+    }
+
+    owners_initialized = true;
+    call_caches.clear();
+    ivar_caches.clear();
     ++world_epoch;
   }
 };
@@ -7600,6 +8595,94 @@ private:
 
 } // namespace
 
+namespace {
+
+struct RuntimePackageImage {
+  pkg::PackageManifest manifest;
+  std::map<std::string, bytecode::BcModule> modules;
+};
+
+struct RuntimePackageImageDecode {
+  bool ok = false;
+  RuntimePackageImage image;
+  std::vector<RuntimePackageReloadDiagnostic> diagnostics;
+};
+
+RuntimePackageReloadDiagnostic
+runtime_reload_diagnostic(std::string error_name, std::string message,
+                          std::string module_name = {}) {
+  RuntimePackageReloadDiagnostic diagnostic;
+  diagnostic.error_name = std::move(error_name);
+  diagnostic.message = std::move(message);
+  diagnostic.module_name = std::move(module_name);
+  return diagnostic;
+}
+
+RuntimePackageImageDecode
+decode_runtime_package_image(const pkg::PackageArtifact &artifact) {
+  RuntimePackageImageDecode decoded;
+  decoded.image.manifest = artifact.manifest;
+
+  for (const pkg::PackageModuleBlob &blob : artifact.modules) {
+    if (blob.name.empty()) {
+      decoded.diagnostics.push_back(runtime_reload_diagnostic(
+          "PackageReloadError", "package module name is empty"));
+      continue;
+    }
+    bytecode::DecodeResult module = bytecode::deserialize_module(blob.bytes);
+    if (!module.ok()) {
+      decoded.diagnostics.push_back(runtime_reload_diagnostic(
+          "BytecodeVerificationError",
+          bytecode::verify_errors_to_json(module.errors), blob.name));
+      continue;
+    }
+    if (!decoded.image.modules.emplace(blob.name, std::move(module.module))
+             .second) {
+      decoded.diagnostics.push_back(runtime_reload_diagnostic(
+          "PackageReloadError", "duplicate package module: " + blob.name,
+          blob.name));
+    }
+  }
+
+  if (!artifact.manifest.root_module.empty() &&
+      decoded.image.modules.find(artifact.manifest.root_module) ==
+          decoded.image.modules.end()) {
+    decoded.diagnostics.push_back(runtime_reload_diagnostic(
+        "PackageReloadError",
+        "package root module is missing: " + artifact.manifest.root_module,
+        artifact.manifest.root_module));
+  }
+
+  decoded.ok = decoded.diagnostics.empty();
+  return decoded;
+}
+
+bytecode::BcModule
+root_module_or_empty_for_package(const pkg::PackageArtifact &artifact,
+                                 std::optional<RuntimePackageImage> *image) {
+  RuntimePackageImageDecode decoded = decode_runtime_package_image(artifact);
+  if (!decoded.ok) {
+    if (image != nullptr) {
+      image->reset();
+    }
+    return {};
+  }
+  const auto found = decoded.image.modules.find(artifact.manifest.root_module);
+  if (found == decoded.image.modules.end()) {
+    if (image != nullptr) {
+      image->reset();
+    }
+    return {};
+  }
+  bytecode::BcModule root = found->second;
+  if (image != nullptr) {
+    *image = std::move(decoded.image);
+  }
+  return root;
+}
+
+} // namespace
+
 ExecutionResult execute_code(const bytecode::BcModule &module,
                              std::uint32_t code_id,
                              const std::vector<Value> &args, Value self,
@@ -7610,16 +8693,31 @@ ExecutionResult execute_code(const bytecode::BcModule &module,
 
 struct RuntimeWorld::Impl {
   explicit Impl(const bytecode::BcModule &module_ref)
-      : module(&module_ref), state(std::make_shared<RuntimeState>()) {
+      : Impl(bytecode::BcModule(module_ref), std::nullopt) {}
+
+  Impl(bytecode::BcModule module_value,
+       std::optional<RuntimePackageImage> package_image)
+      : owned_module(
+            std::make_shared<bytecode::BcModule>(std::move(module_value))),
+        module(owned_module.get()), state(std::make_shared<RuntimeState>()),
+        package(std::move(package_image)) {
     state->initialize_for_module(*module);
   }
 
+  std::shared_ptr<bytecode::BcModule> owned_module;
   const bytecode::BcModule *module = nullptr;
   std::shared_ptr<RuntimeState> state;
+  std::optional<RuntimePackageImage> package;
 };
 
 RuntimeWorld::RuntimeWorld(const bytecode::BcModule &module)
     : impl_(std::make_shared<Impl>(module)) {}
+
+RuntimeWorld::RuntimeWorld(const pkg::PackageArtifact &artifact) {
+  std::optional<RuntimePackageImage> image;
+  bytecode::BcModule root = root_module_or_empty_for_package(artifact, &image);
+  impl_ = std::make_shared<Impl>(std::move(root), std::move(image));
+}
 
 RuntimeWorld::~RuntimeWorld() = default;
 
@@ -8269,6 +9367,252 @@ RuntimePackageMirror package_mirror_for(const bytecode::BcModule &module) {
   return mirror;
 }
 
+std::string version_signature(const bytecode::Version &version) {
+  return std::to_string(version.major) + "." + std::to_string(version.minor);
+}
+
+std::string bytes_hex_signature(const std::array<std::uint8_t, 32> &bytes) {
+  std::ostringstream out;
+  const char *hex = "0123456789abcdef";
+  for (const std::uint8_t byte : bytes) {
+    out << hex[(byte >> 4U) & 0x0FU] << hex[byte & 0x0FU];
+  }
+  return out.str();
+}
+
+std::string module_contract_signature(const bytecode::BcModule &module) {
+  std::ostringstream out;
+  out << "format=" << version_signature(module.format_version)
+      << "\nlanguage=" << version_signature(module.language_version)
+      << "\nprofile=" << module.profile_flags << "\nfile=" << module.file_flags
+      << "\nabi=" << bytes_hex_signature(module.abi_hash) << "\n";
+  return out.str();
+}
+
+std::string path_ref_signature(const bytecode::BcModule &module,
+                               std::uint32_t ref) {
+  if (ref >= module.const_pool.size()) {
+    return "#invalid";
+  }
+  const bytecode::Constant &constant = module.const_pool[ref];
+  if (constant.kind != bytecode::ConstantKind::Path) {
+    return "#non-path";
+  }
+  std::vector<std::string> segments;
+  for (const std::uint32_t symbol_id : constant.items) {
+    segments.push_back(symbol_name_for_mirror(module, symbol_id));
+  }
+  return join_class_path(segments);
+}
+
+std::string method_boundary_signature(const bytecode::BcModule &module,
+                                      const bytecode::BcMethod &method) {
+  std::ostringstream out;
+  out << symbol_name_for_mirror(module, method.selector_sym_id) << "|"
+      << (method.flags == kMethodFlagClass ? "class" : "instance") << "|"
+      << "defaults=" << method.default_thunk_ids.size() << "|"
+      << "type_hooks=" << method.type_hook_ids.size() << "|params=";
+  for (std::size_t i = 0; i < method.params.size(); ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    const bytecode::MethodParamEntry &param = method.params[i];
+    out << symbol_name_for_mirror(module, param.external_name_sym_id) << ":"
+        << param.flags;
+  }
+  return out.str();
+}
+
+std::vector<std::string>
+owner_method_boundary_signatures(const bytecode::BcModule &module,
+                                 const bytecode::BcClass &owner) {
+  std::vector<std::string> out;
+  if (owner.method_range_start + owner.method_range_count >
+      module.methods.size()) {
+    out.push_back("#invalid-method-range");
+    return out;
+  }
+  for (std::uint32_t offset = 0; offset < owner.method_range_count; ++offset) {
+    out.push_back(method_boundary_signature(
+        module, module.methods[owner.method_range_start + offset]));
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+std::string owner_boundary_signature(const bytecode::BcModule &module,
+                                     std::uint32_t owner_index) {
+  if (owner_index >= module.classes.size()) {
+    return "#missing-owner";
+  }
+  const bytecode::BcClass &owner = module.classes[owner_index];
+  std::ostringstream out;
+  out << "name=" << owner_name_for_mirror(module, owner_index) << "\nkind="
+      << ((owner.flags & bytecode::kClassFlagMixin) != 0U ? "mixin" : "class")
+      << "\nivar_schema=" << owner.ivar_schema_id
+      << "\nhas_super=" << (owner.has_superclass_ref ? "true" : "false");
+  if (owner.has_superclass_ref) {
+    out << "\nsuper=" << path_ref_signature(module, owner.superclass_ref);
+  }
+  out << "\ninclude=";
+  for (std::uint32_t ref : owner.direct_include_refs) {
+    out << path_ref_signature(module, ref) << ";";
+  }
+  out << "\nextend=";
+  for (std::uint32_t ref : owner.direct_extend_refs) {
+    out << path_ref_signature(module, ref) << ";";
+  }
+  out << "\nmethods=";
+  const std::vector<std::string> methods =
+      owner_method_boundary_signatures(module, owner);
+  for (const std::string &method : methods) {
+    out << method << "\n";
+  }
+  return out.str();
+}
+
+std::string reexport_export_name_for(const bytecode::BcModule &module,
+                                     const bytecode::ExportEntry &entry,
+                                     const std::string &public_name) {
+  if (entry.target_index < module.strings.size()) {
+    return module.strings[entry.target_index];
+  }
+  return public_name;
+}
+
+std::vector<std::string>
+export_surface_signature(const bytecode::BcModule &module) {
+  std::vector<std::string> out;
+  for (const bytecode::ExportEntry &entry : module.exports) {
+    const std::string public_name =
+        symbol_name_for_mirror(module, entry.symbol_id);
+    const std::string target_kind =
+        string_name_for_mirror(module, entry.target_kind_str_id);
+    std::ostringstream line;
+    line << public_name << "|" << target_kind << "|" << entry.target_index
+         << "|" << entry.visibility_flags << "|"
+         << (entry.has_reexport_module_name ? "reexport" : "local") << "|"
+         << string_name_for_mirror(module, entry.reexport_module_name_str_id)
+         << "|" << reexport_export_name_for(module, entry, public_name);
+    out.push_back(line.str());
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+std::vector<std::string>
+exported_callable_boundary_signature(const bytecode::BcModule &module) {
+  std::vector<std::string> out;
+  for (const bytecode::ExportEntry &entry : module.exports) {
+    const std::string public_name =
+        symbol_name_for_mirror(module, entry.symbol_id);
+    const std::string target_kind =
+        string_name_for_mirror(module, entry.target_kind_str_id);
+    if (target_kind == "class") {
+      out.push_back("class|" + public_name + "|" +
+                    owner_boundary_signature(module, entry.target_index));
+    } else if (target_kind == "method") {
+      if (entry.target_index >= module.methods.size()) {
+        out.push_back("method|" + public_name + "|#missing-method");
+      } else {
+        out.push_back("method|" + public_name + "|" +
+                      method_boundary_signature(
+                          module, module.methods[entry.target_index]));
+      }
+    }
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+std::vector<std::string>
+manifest_identity_signature(const pkg::PackageManifest &manifest) {
+  std::vector<std::string> out;
+  out.push_back("name=" + manifest.name);
+  out.push_back("version=" + manifest.version);
+  out.push_back("root=" + manifest.root_module);
+  for (const pkg::PackageModule &module : manifest.modules) {
+    out.push_back("module=" + module.name + "|" + module.path);
+  }
+  for (const pkg::PackageDependency &dependency : manifest.dependencies) {
+    out.push_back("dependency=" + dependency.name + "|" + dependency.version +
+                  "|" + dependency.source + "|" + dependency.checksum);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+bool append_reload_incompatibility(
+    std::vector<RuntimePackageReloadDiagnostic> *diagnostics,
+    const std::string &message, const std::string &module_name = {}) {
+  diagnostics->push_back(runtime_reload_diagnostic("ReloadIncompatibleError",
+                                                   message, module_name));
+  return false;
+}
+
+bool validate_module_reload_compatible(
+    const bytecode::BcModule &current, const bytecode::BcModule &next,
+    const std::string &module_name,
+    std::vector<RuntimePackageReloadDiagnostic> *diagnostics) {
+  if (module_contract_signature(current) != module_contract_signature(next)) {
+    return append_reload_incompatibility(
+        diagnostics, "package reload changes ABI/profile contract",
+        module_name);
+  }
+  if (export_surface_signature(current) != export_surface_signature(next)) {
+    return append_reload_incompatibility(
+        diagnostics, "package reload changes public export surface",
+        module_name);
+  }
+  if (exported_callable_boundary_signature(current) !=
+      exported_callable_boundary_signature(next)) {
+    return append_reload_incompatibility(
+        diagnostics, "package reload changes exported selector/arity boundary",
+        module_name);
+  }
+  return true;
+}
+
+bool validate_package_reload_compatible(
+    const RuntimePackageImage *current_package,
+    const bytecode::BcModule &current_root, const RuntimePackageImage &next,
+    std::vector<RuntimePackageReloadDiagnostic> *diagnostics) {
+  if (current_package == nullptr) {
+    const auto root = next.modules.find(next.manifest.root_module);
+    if (root == next.modules.end()) {
+      return append_reload_incompatibility(
+          diagnostics, "package reload root module is missing",
+          next.manifest.root_module);
+    }
+    return validate_module_reload_compatible(
+        current_root, root->second, next.manifest.root_module, diagnostics);
+  }
+
+  if (manifest_identity_signature(current_package->manifest) !=
+      manifest_identity_signature(next.manifest)) {
+    return append_reload_incompatibility(
+        diagnostics, "package reload changes manifest identity");
+  }
+
+  if (current_package->modules.size() != next.modules.size()) {
+    return append_reload_incompatibility(diagnostics,
+                                         "package reload changes module set");
+  }
+  for (const auto &[module_name, current_module] : current_package->modules) {
+    const auto found = next.modules.find(module_name);
+    if (found == next.modules.end()) {
+      return append_reload_incompatibility(
+          diagnostics, "package reload removes module: " + module_name,
+          module_name);
+    }
+    if (!validate_module_reload_compatible(current_module, found->second,
+                                           module_name, diagnostics)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 ExecutionResult
@@ -8382,6 +9726,78 @@ ExecutionResult RuntimeWorld::freeze_world() {
     ++impl_->state->world_epoch;
   }
   return {Value::null(), std::nullopt};
+}
+
+RuntimePackageReloadResult
+RuntimeWorld::reload_package_artifact(const pkg::PackageArtifact &artifact) {
+  RuntimePackageReloadResult result;
+  if (impl_ == nullptr || impl_->module == nullptr || impl_->state == nullptr) {
+    result.diagnostics.push_back(
+        runtime_reload_diagnostic("VMError", "runtime world is not bound"));
+    return result;
+  }
+
+  result.previous_world_epoch = impl_->state->world_epoch;
+  result.new_world_epoch = impl_->state->world_epoch;
+  result.package_name = impl_->package.has_value()
+                            ? impl_->package->manifest.name
+                            : package_name_for_mirror(*impl_->module);
+  result.previous_version =
+      impl_->package.has_value() ? impl_->package->manifest.version : "";
+  result.new_version = artifact.manifest.version;
+  result.root_module = artifact.manifest.root_module;
+
+  impl_->state->initialize_for_module(*impl_->module);
+  if (impl_->state->world_frozen) {
+    result.diagnostics.push_back(runtime_reload_diagnostic(
+        "WorldFrozenError", "package reload after freeze barrier",
+        artifact.manifest.root_module));
+    return result;
+  }
+
+  RuntimePackageImageDecode decoded = decode_runtime_package_image(artifact);
+  if (!decoded.ok) {
+    result.diagnostics = std::move(decoded.diagnostics);
+    return result;
+  }
+
+  const RuntimePackageImage *current_package =
+      impl_->package.has_value() ? &*impl_->package : nullptr;
+  if (!validate_package_reload_compatible(current_package, *impl_->module,
+                                          decoded.image, &result.diagnostics)) {
+    return result;
+  }
+
+  const auto root =
+      decoded.image.modules.find(decoded.image.manifest.root_module);
+  if (root == decoded.image.modules.end()) {
+    result.diagnostics.push_back(runtime_reload_diagnostic(
+        "PackageReloadError",
+        "package root module is missing: " + decoded.image.manifest.root_module,
+        decoded.image.manifest.root_module));
+    return result;
+  }
+
+  auto next_state = std::make_shared<RuntimeState>(*impl_->state);
+  next_state->replace_module_runtime_state(root->second);
+  auto next_module =
+      std::make_shared<bytecode::BcModule>(bytecode::BcModule(root->second));
+
+  impl_->state = std::move(next_state);
+  impl_->owned_module = std::move(next_module);
+  impl_->module = impl_->owned_module.get();
+  impl_->package = std::move(decoded.image);
+
+  result.ok = true;
+  result.swapped = true;
+  result.package_name = impl_->package->manifest.name;
+  result.previous_version = result.previous_version.empty()
+                                ? impl_->package->manifest.version
+                                : result.previous_version;
+  result.new_version = impl_->package->manifest.version;
+  result.root_module = impl_->package->manifest.root_module;
+  result.new_world_epoch = impl_->state->world_epoch;
+  return result;
 }
 
 std::uint64_t RuntimeWorld::world_epoch() const {

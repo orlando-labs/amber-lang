@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bytecode/format.h"
+#include "package/package.h"
 
 #include <chrono>
 #include <cstddef>
@@ -23,6 +24,7 @@ struct ListValue;
 struct TupleValue;
 struct MapValue;
 struct MapEntry;
+class RuntimeHeap;
 
 enum class HeapObjectKind { Instance, List, Tuple, Map, Closure };
 
@@ -404,6 +406,9 @@ struct RuntimeSchedulerStats {
   std::uint64_t task_wait_state_entries = 0;
   std::uint64_t structured_child_tasks = 0;
   std::uint64_t first_failure_cancellations = 0;
+  std::uint64_t supervisor_one_for_one_failures = 0;
+  std::uint64_t supervisor_one_for_all_cancellations = 0;
+  std::uint64_t supervisor_rest_for_one_cancellations = 0;
 };
 
 struct RuntimeStrandSnapshot {
@@ -439,6 +444,17 @@ struct RuntimeTaskJoinResult {
   std::string message;
 };
 
+enum class RuntimeSupervisorPolicy {
+  CancelScope,
+  OneForOne,
+  OneForAll,
+  RestForOne
+};
+
+struct RuntimeTaskOptions {
+  RuntimeSupervisorPolicy policy = RuntimeSupervisorPolicy::CancelScope;
+};
+
 struct RuntimeChannelResult {
   bool ok = false;
   bool sent = false;
@@ -467,6 +483,102 @@ struct RuntimeChannelStats {
   bool closed = false;
 };
 
+enum class RuntimeAwaitableState { Pending, Ready, Failed, Cancelled };
+
+struct RuntimeAwaitableResult {
+  bool ok = false;
+  bool ready = false;
+  bool timed_out = false;
+  bool cancelled = false;
+  bool failed = false;
+  RuntimeAwaitableState state = RuntimeAwaitableState::Pending;
+  Value value = Value::null();
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeAwaitableStats {
+  std::uint64_t waits = 0;
+  std::uint64_t polls = 0;
+  std::uint64_t completions = 0;
+  std::uint64_t failures = 0;
+  std::uint64_t cancellations = 0;
+  std::uint64_t timeouts = 0;
+  std::uint64_t native_polls = 0;
+  std::uint64_t native_cancellations = 0;
+  std::uint64_t native_finishes = 0;
+  RuntimeAwaitableState state = RuntimeAwaitableState::Pending;
+  bool native_backed = false;
+};
+
+class RuntimeAwaitable {
+public:
+  RuntimeAwaitable();
+  RuntimeAwaitable(const RuntimeAwaitable &) = delete;
+  RuntimeAwaitable &operator=(const RuntimeAwaitable &) = delete;
+  RuntimeAwaitable(RuntimeAwaitable &&) noexcept;
+  RuntimeAwaitable &operator=(RuntimeAwaitable &&) noexcept;
+  ~RuntimeAwaitable();
+
+  static RuntimeAwaitable ready(Value value = Value::null());
+  static RuntimeAwaitable from_native_wait(RuntimeHeap &heap,
+                                           const RuntimePinToken &token);
+
+  bool complete(Value value = Value::null());
+  bool fail(std::string error_name, std::string message);
+  bool cancel();
+  RuntimeAwaitableResult
+  await(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+  RuntimeAwaitableResult poll();
+  RuntimeAwaitableState state() const;
+  RuntimeAwaitableStats stats() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+enum class RuntimeMoveSlotState { Ready, Reserved, Moved };
+
+struct RuntimeMoveReservation {
+  std::uint64_t reservation_id = 0;
+  Value value = Value::null();
+  bool active = false;
+};
+
+struct RuntimeMoveResult {
+  bool ok = false;
+  bool moved = false;
+  bool reserved = false;
+  RuntimeMoveSlotState state = RuntimeMoveSlotState::Ready;
+  RuntimeMoveReservation reservation;
+  Value value = Value::null();
+  std::string error_name;
+  std::string message;
+};
+
+class RuntimeMoveSlot {
+public:
+  explicit RuntimeMoveSlot(Value value = Value::null());
+  RuntimeMoveSlot(const RuntimeMoveSlot &) = delete;
+  RuntimeMoveSlot &operator=(const RuntimeMoveSlot &) = delete;
+  RuntimeMoveSlot(RuntimeMoveSlot &&) noexcept;
+  RuntimeMoveSlot &operator=(RuntimeMoveSlot &&) noexcept;
+  ~RuntimeMoveSlot();
+
+  RuntimeMoveResult read() const;
+  RuntimeMoveResult reserve_move();
+  RuntimeMoveResult commit_move(RuntimeMoveReservation *reservation);
+  RuntimeMoveResult release_move(RuntimeMoveReservation *reservation);
+  void reset(Value value);
+  RuntimeMoveSlotState state() const;
+  bool moved() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
 class RuntimeChannel {
 public:
   explicit RuntimeChannel(std::size_t capacity = 0);
@@ -480,6 +592,9 @@ public:
   send(const Value &value,
        std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
   RuntimeChannelResult
+  send(RuntimeMoveSlot &slot,
+       std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+  RuntimeChannelResult
   recv(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
   bool close();
   bool closed() const;
@@ -489,6 +604,41 @@ private:
   class Impl;
   std::shared_ptr<Impl> impl_;
 };
+
+enum class RuntimeSelectArmKind { Recv, Send, Await };
+
+struct RuntimeSelectArm {
+  RuntimeSelectArmKind kind = RuntimeSelectArmKind::Recv;
+  RuntimeChannel *channel = nullptr;
+  RuntimeAwaitable *awaitable = nullptr;
+  Value value = Value::null();
+  RuntimeMoveSlot *move_slot = nullptr;
+
+  static RuntimeSelectArm recv(RuntimeChannel &channel);
+  static RuntimeSelectArm send(RuntimeChannel &channel, Value value);
+  static RuntimeSelectArm send_moved(RuntimeChannel &channel,
+                                     RuntimeMoveSlot &slot);
+  static RuntimeSelectArm awaitable_arm(RuntimeAwaitable &awaitable);
+};
+
+struct RuntimeSelectResult {
+  bool ok = false;
+  bool selected = false;
+  bool else_selected = false;
+  bool timed_out = false;
+  bool cancelled = false;
+  std::size_t arm_index = 0;
+  RuntimeSelectArmKind kind = RuntimeSelectArmKind::Recv;
+  RuntimeChannelResult channel_result;
+  RuntimeAwaitableResult awaitable_result;
+  std::string error_name;
+  std::string message;
+};
+
+RuntimeSelectResult runtime_select(
+    const std::vector<RuntimeSelectArm> &arms,
+    std::chrono::milliseconds timeout = std::chrono::milliseconds::max(),
+    bool has_else = false);
 
 struct RuntimeMutexResult {
   bool ok = false;
@@ -571,7 +721,11 @@ public:
   std::uint64_t spawn_sleeping_strand(std::chrono::milliseconds delay,
                                       StrandFunction function);
   std::uint64_t spawn_task(StrandFunction function);
+  std::uint64_t spawn_task(RuntimeTaskOptions options, StrandFunction function);
   std::uint64_t spawn_sleeping_task(std::chrono::milliseconds delay,
+                                    StrandFunction function);
+  std::uint64_t spawn_sleeping_task(std::chrono::milliseconds delay,
+                                    RuntimeTaskOptions options,
                                     StrandFunction function);
   bool wake_strand(std::uint64_t strand_id);
   bool cancel_task(std::uint64_t task_id);
@@ -777,6 +931,24 @@ struct RuntimeWorldMirror {
   std::vector<RuntimeOwnerMirror> owners;
 };
 
+struct RuntimePackageReloadDiagnostic {
+  std::string error_name;
+  std::string message;
+  std::string module_name;
+};
+
+struct RuntimePackageReloadResult {
+  bool ok = false;
+  bool swapped = false;
+  std::string package_name;
+  std::string previous_version;
+  std::string new_version;
+  std::string root_module;
+  std::uint64_t previous_world_epoch = 0;
+  std::uint64_t new_world_epoch = 0;
+  std::vector<RuntimePackageReloadDiagnostic> diagnostics;
+};
+
 struct TraceFrame {
   std::uint32_t code_id = 0;
   std::uint32_t pc = 0;
@@ -810,6 +982,7 @@ struct ExecutionResult {
 class RuntimeWorld {
 public:
   explicit RuntimeWorld(const bytecode::BcModule &module);
+  explicit RuntimeWorld(const pkg::PackageArtifact &artifact);
   ~RuntimeWorld();
 
   ExecutionResult execute(std::uint32_t code_id,
@@ -827,6 +1000,8 @@ public:
                                std::uint32_t mixin_index);
   ExecutionResult commit_transaction(const RuntimeWorldTransaction &tx);
   ExecutionResult freeze_world();
+  RuntimePackageReloadResult
+  reload_package_artifact(const pkg::PackageArtifact &artifact);
 
   std::uint64_t world_epoch() const;
   RuntimeWorldState world_state() const;

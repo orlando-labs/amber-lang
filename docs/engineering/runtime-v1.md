@@ -1,9 +1,11 @@
 # amber.runtime.v1
 
 Status: `W5.1` through `W8.3` runtime acceptance is satisfied, the `W8.4`
-full conformance runner gate is satisfied through `ambertest`, and `W9.2`
+full conformance runner gate is satisfied through `ambertest`, `W9.2`
 open-world transaction/freeze plus `W9.3` reflection mirror behavior is covered
-in VM tests.
+in VM tests, `W9.4` package artifact tooling is covered by package tests, and
+`W9.5` package hot-reload swaps, `W10.1` advanced concurrency runtime behavior,
+and `W10.2` awaitable/native-readiness behavior are covered by VM tests.
 
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
 
@@ -40,6 +42,11 @@ Current implemented slice:
   pre-commit kind/superclass/include-cycle validation, rollback on failure,
   `open -> frozen` state, `WorldFrozenError` guards, and observable
   `world_epoch` / owner `method_version` invalidation;
+- open-world dev-profile package hot reload in `RuntimeWorld`, using
+  `reload_package_artifact` to predecode a whole `.amberpkg` module set,
+  reject frozen worlds, enforce manifest identity plus ABI/profile/export
+  surface and selector/arity compatibility, publish the root module atomically,
+  and invalidate dispatch through a single `world_epoch` bump;
 - runtime reflection mirror snapshots for package/world/class/mixin/method
   state through `RuntimeWorld::{package,world,class,mixin,owner}_mirror`,
   returning copied read-only views with deterministic method/export/dependency
@@ -112,6 +119,19 @@ Current implemented slice:
   `ChannelClosedError`, timeout/cancellation-aware blocking results,
   recursive shareability checks for channel payloads, non-reentrant
   `RuntimeMutex`, and seq-cst `RuntimeAtomic`;
+- `W10.1` advanced concurrency runtime in `runtime/vm.{h,cpp}` with
+  `RuntimeMoveSlot` ownership-transfer reservations, moved-from
+  `MovedValueError` reads, move-aware `RuntimeChannel::send` for confined heap
+  graphs, receiver-side adoption of moved payloads, `runtime_select` recv/send
+  arms with timeout and immediate `else` behavior, rotating ready-arm selection
+  to avoid fixed left bias, and structured-task supervisor policies
+  `CancelScope`, `OneForOne`, `OneForAll`, and `RestForOne` through
+  `RuntimeTaskOptions`;
+- `W10.2` async-I/O awaitable bridge in `runtime/vm.{h,cpp}` with
+  `RuntimeAwaitable` pending/ready/failed/cancelled states, awaitable-compatible
+  `runtime_select` arms, bounded await/poll behavior, cooperative task
+  cancellation propagation, and native wait readiness tokens backed by active
+  W6.4 pin handles;
 - `W8.1`-`W8.2` loader baseline in `runtime/module_loader.{h,cpp}` with
   serialized `.amberbc` decode/verify on every load path, dependency graph
   linking, deterministic dependency-before-dependent module init, single-run
@@ -130,6 +150,13 @@ Current implemented slice:
   discovery, focused mismatch rendering, phase aliases for
   `lower`/`compile`/`disasm`, positive `check`/`run`/`load` lanes, and
   cumulative `M1`-`M5` bundle filtering exposed through `make conformance`;
+- `W9.4` package tooling in `package/package.{h,cpp}` and `amberc package-*`
+  commands with restricted manifest parsing, deterministic lock rendering,
+  reproducible `.amberpkg` serialization, SHA-256 dev signatures, artifact
+  verification, and filesystem registry install/publish smoke;
+- `W9.5` package hot-reload runtime path in `runtime/vm.{h,cpp}` with
+  compatible body-swap success, incompatible export/arity rejection,
+  frozen-world rejection, and failed-decode rollback coverage;
 - direct `P_PREP_SEQ` / `P_PREP_MAP` coercion through object-level
   `deconstruct` / `deconstruct_keys(keys)` when native list/tuple/map
   matching is not available, with `null` as no-match and wrong protocol return
@@ -165,9 +192,18 @@ Current implemented slice:
   rollback, `WorldFrozenError`, `SuperclassMismatchError`, include-cycle
   rejection, mixin method replacement, and late class-side `extend`
   invalidation, plus W9.3 mirror coverage for read-only snapshots,
-  deterministic ordering, source locations, and post-mutation stability.
+  deterministic ordering, source locations, and post-mutation stability, plus
+  W9.4 package manifest/lock determinism, signed artifact reproducibility,
+  signature rejection, and registry publish/install smoke coverage, plus W9.5
+  package hot-reload coverage for compatible swaps, incompatible export/arity
+  guards, frozen-world rejection, and failed-decode rollback, plus W10.1
+  runtime coverage for moved channel payloads and moved-from reads,
+  `select` fairness/else/timeout paths, moved send-arm commit behavior, and
+  supervisor `one_for_one`, `one_for_all`, and `rest_for_one` propagation, plus
+  W10.2 awaitable coverage for select readiness/timeout/failure, scheduler wake
+  after native wait completion, stale-pin failure, and cancellation finishing
+  native waits.
 
 Still intentionally missing in later layers:
 
-- stdlib/language surfacing for the concurrency primitives, `select`-style
-  multi-wait paths, and deeper memory/runtime integration.
+- stdlib/language surfacing for the W10.1-W10.2 runtime primitives.

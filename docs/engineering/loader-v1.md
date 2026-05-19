@@ -40,8 +40,9 @@ Implemented surface:
 
 Current limits:
 
-- module identity is supplied by the caller; package manifest/build graph
-  identity belongs to later package work;
+- module identity is still supplied to `RuntimeModuleLoader` by the caller;
+  W9.4 package tooling now owns manifest/build graph identity before bytes are
+  mapped into the loader;
 - the decoded `.amberbc` v1 format still stores dependency module ids in
   `DEPS`; the exact source import-name table is supplied to the runtime loader
   by host/tooling as import aliases;

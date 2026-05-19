@@ -18,3 +18,5 @@ errors:
   - CancelledError
   - ChannelClosedError
   - DeadlockError
+  - MoveError
+  - MovedValueError

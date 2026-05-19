@@ -6,12 +6,15 @@
 #include "frontend/hir/hir.h"
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
+#include "optimizer/mir.h"
+#include "package/package.h"
 
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -33,11 +36,24 @@ void usage(std::ostream &out) {
   out << "  amberc bind <file>\n";
   out << "  amberc typed <file>\n";
   out << "  amberc hir <file>\n";
+  out << "  amberc mir <file>\n";
+  out << "  amberc mir-dump <file>\n";
+  out << "  amberc mir-verify <file>\n";
   out << "  amberc bc <file>\n";
   out << "  amberc bc-disasm <file>\n";
   out << "  amberc amberbc-dump <file>\n";
   out << "  amberc amberbc-verify <file>\n";
   out << "  amberc amberbc-disasm <file>\n";
+  out << "  amberc package-manifest <amber.toml>\n";
+  out << "  amberc package-lock <amber.toml>\n";
+  out << "  amberc package-build <amber.toml> <out.amberpkg> "
+         "[--sign-key <key>] [--key-id <id>]\n";
+  out << "  amberc package-inspect <file.amberpkg>\n";
+  out << "  amberc package-verify <file.amberpkg> [--sign-key <key>]\n";
+  out << "  amberc package-install <file.amberpkg> <registry-dir> "
+         "[--sign-key <key>]\n";
+  out << "  amberc package-publish <file.amberpkg> <registry-dir> "
+         "[--sign-key <key>]\n";
   out << "  amberc --version\n";
 }
 
@@ -45,6 +61,224 @@ amber::lexer::LexResult lex_source(const std::string &source,
                                    const std::string &path) {
   amber::lexer::Lexer lexer(source, path);
   return lexer.lex();
+}
+
+std::string dirname(const std::string &path) {
+  const std::size_t slash = path.find_last_of("/\\");
+  if (slash == std::string::npos) {
+    return ".";
+  }
+  if (slash == 0U) {
+    return path.substr(0, 1);
+  }
+  return path.substr(0, slash);
+}
+
+std::string join_path(const std::string &left, const std::string &right) {
+  if (left.empty() || left == ".") {
+    return right;
+  }
+  if (!right.empty() && (right[0] == '/' || right[0] == '\\')) {
+    return right;
+  }
+  if (left[left.size() - 1U] == '/' || left[left.size() - 1U] == '\\') {
+    return left + right;
+  }
+  return left + "/" + right;
+}
+
+void write_file(const std::string &path, const std::string &contents) {
+  std::ofstream output(path, std::ios::binary);
+  if (!output) {
+    throw std::runtime_error("failed to open output file: " + path);
+  }
+  output << contents;
+  if (!output) {
+    throw std::runtime_error("failed to write output file: " + path);
+  }
+}
+
+std::string package_diagnostics_to_string(
+    const std::vector<amber::pkg::PackageDiagnostic> &diagnostics) {
+  std::ostringstream out;
+  for (const amber::pkg::PackageDiagnostic &diagnostic : diagnostics) {
+    out << diagnostic.error_name << ": " << diagnostic.message;
+    if (!diagnostic.path.empty()) {
+      out << " (" << diagnostic.path << ")";
+    }
+    out << "\n";
+  }
+  return out.str();
+}
+
+std::vector<std::uint8_t>
+compile_source_to_bytecode(const std::string &path,
+                           const std::string &expected_module_name) {
+  const std::string source = read_file(path);
+  amber::lexer::LexResult lex_result = lex_source(source, path);
+  if (!lex_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(lex_result.diagnostics));
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(parse_result.diagnostics));
+  }
+  if (!expected_module_name.empty() &&
+      parse_result.module_name != expected_module_name) {
+    throw std::runtime_error("manifest module '" + expected_module_name +
+                             "' does not match source package '" +
+                             parse_result.module_name + "' in " + path);
+  }
+
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(bind_result.diagnostics));
+  }
+
+  amber::hir::Program program = amber::hir::lower_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  amber::bytecode::EmitResult emit_result =
+      amber::bytecode::emit_program(program, parse_result.module_name);
+  if (!emit_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(emit_result.diagnostics));
+  }
+  const std::vector<std::uint8_t> bytes =
+      amber::bytecode::serialize_module(emit_result.module);
+  amber::bytecode::DecodeResult decode_result =
+      amber::bytecode::deserialize_module(bytes);
+  if (!decode_result.ok()) {
+    throw std::runtime_error(
+        amber::bytecode::verify_errors_to_json(decode_result.errors));
+  }
+  return bytes;
+}
+
+amber::pkg::PackageBuildOptions
+parse_package_build_options(int argc, char **argv, int start_index) {
+  amber::pkg::PackageBuildOptions options;
+  for (int i = start_index; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--sign-key" && i + 1 < argc) {
+      options.signing_key = argv[++i];
+    } else if (arg == "--key-id" && i + 1 < argc) {
+      options.key_id = argv[++i];
+    } else {
+      throw std::runtime_error("unknown package option: " + arg);
+    }
+  }
+  return options;
+}
+
+std::string parse_package_signing_key(int argc, char **argv, int start_index) {
+  std::string signing_key;
+  for (int i = start_index; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--sign-key" && i + 1 < argc) {
+      signing_key = argv[++i];
+    } else {
+      throw std::runtime_error("unknown package option: " + arg);
+    }
+  }
+  return signing_key;
+}
+
+int run_package_command(int argc, char **argv) {
+  const std::string command = argv[1];
+  if ((command == "package-manifest" || command == "package-lock") &&
+      argc == 3) {
+    const std::string manifest_source = read_file(argv[2]);
+    const amber::pkg::PackageManifestResult manifest =
+        amber::pkg::parse_manifest_toml(manifest_source, argv[2]);
+    if (!manifest.ok()) {
+      std::cerr << package_diagnostics_to_string(manifest.diagnostics);
+      return 1;
+    }
+    if (command == "package-manifest") {
+      std::cout << amber::pkg::manifest_to_json(manifest.manifest);
+    } else {
+      std::cout << amber::pkg::render_lockfile(manifest.manifest);
+    }
+    return 0;
+  }
+
+  if (command == "package-build" && argc >= 4) {
+    const std::string manifest_path = argv[2];
+    const std::string out_path = argv[3];
+    const amber::pkg::PackageBuildOptions options =
+        parse_package_build_options(argc, argv, 4);
+    const std::string manifest_source = read_file(manifest_path);
+    const amber::pkg::PackageManifestResult manifest =
+        amber::pkg::parse_manifest_toml(manifest_source, manifest_path);
+    if (!manifest.ok()) {
+      std::cerr << package_diagnostics_to_string(manifest.diagnostics);
+      return 1;
+    }
+
+    std::vector<amber::pkg::PackageModuleBlob> modules;
+    const std::string root_dir = dirname(manifest_path);
+    for (const amber::pkg::PackageModule &module : manifest.manifest.modules) {
+      amber::pkg::PackageModuleBlob blob;
+      blob.name = module.name;
+      blob.path = module.path;
+      blob.bytes = compile_source_to_bytecode(join_path(root_dir, module.path),
+                                              module.name);
+      modules.push_back(std::move(blob));
+    }
+    const amber::pkg::PackageBuildResult built =
+        amber::pkg::build_package_artifact(manifest.manifest, modules, options);
+    if (!built.ok) {
+      std::cerr << package_diagnostics_to_string(built.diagnostics);
+      return 1;
+    }
+    write_file(out_path, built.serialized);
+    std::cout << amber::pkg::artifact_to_json(built.artifact);
+    return 0;
+  }
+
+  if (command == "package-inspect" && argc == 3) {
+    const std::string serialized = read_file(argv[2]);
+    const amber::pkg::PackageParseResult parsed =
+        amber::pkg::parse_package_artifact(serialized, argv[2]);
+    if (!parsed.ok()) {
+      std::cerr << package_diagnostics_to_string(parsed.diagnostics);
+      return 1;
+    }
+    std::cout << amber::pkg::artifact_to_json(parsed.artifact);
+    return 0;
+  }
+
+  if (command == "package-verify" && argc >= 3) {
+    const std::string serialized = read_file(argv[2]);
+    const std::string signing_key = parse_package_signing_key(argc, argv, 3);
+    const amber::pkg::PackageVerifyResult verified =
+        amber::pkg::verify_package_artifact(serialized, signing_key, argv[2]);
+    std::cout << amber::pkg::verify_result_to_json(verified);
+    return verified.ok ? 0 : 1;
+  }
+
+  if ((command == "package-install" || command == "package-publish") &&
+      argc >= 4) {
+    const std::string serialized = read_file(argv[2]);
+    const std::string signing_key = parse_package_signing_key(argc, argv, 4);
+    const amber::pkg::PackageRegistryResult result =
+        command == "package-install"
+            ? amber::pkg::install_package_artifact(serialized, argv[3],
+                                                   signing_key)
+            : amber::pkg::publish_package_artifact(serialized, argv[3],
+                                                   signing_key);
+    std::cout << amber::pkg::registry_result_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+
+  usage(std::cerr);
+  return 2;
 }
 
 } // namespace
@@ -55,10 +289,15 @@ int main(int argc, char **argv) {
       std::cout << "amberc 0.1.0-dev\n";
       return 0;
     }
+    if (argc >= 2 && std::string(argv[1]).find("package-") == 0U) {
+      return run_package_command(argc, argv);
+    }
     if (argc != 3 ||
         (std::string(argv[1]) != "lex" && std::string(argv[1]) != "parse" &&
          std::string(argv[1]) != "bind" && std::string(argv[1]) != "typed" &&
-         std::string(argv[1]) != "hir" && std::string(argv[1]) != "bc" &&
+         std::string(argv[1]) != "hir" && std::string(argv[1]) != "mir" &&
+         std::string(argv[1]) != "mir-dump" &&
+         std::string(argv[1]) != "mir-verify" && std::string(argv[1]) != "bc" &&
          std::string(argv[1]) != "bc-disasm" &&
          std::string(argv[1]) != "parse-expr" &&
          std::string(argv[1]) != "amberbc-dump" &&
@@ -111,7 +350,8 @@ int main(int argc, char **argv) {
 
     amber::parser::Parser parser(lex_result.tokens);
     if (command == "parse" || command == "bind" || command == "typed" ||
-        command == "hir" || command == "bc" || command == "bc-disasm") {
+        command == "hir" || command == "mir" || command == "mir-dump" ||
+        command == "mir-verify" || command == "bc" || command == "bc-disasm") {
       amber::parser::ParseModuleResult parse_result =
           parser.parse_module_unit();
       if (!parse_result.ok()) {
@@ -120,7 +360,9 @@ int main(int argc, char **argv) {
         return 1;
       }
       if (command == "bind" || command == "typed" || command == "hir" ||
-          command == "bc" || command == "bc-disasm") {
+          command == "mir" || command == "mir-dump" ||
+          command == "mir-verify" || command == "bc" ||
+          command == "bc-disasm") {
         amber::binder::BindResult bind_result = amber::binder::bind_module(
             parse_result.items, parse_result.module_name);
         if (!bind_result.diagnostics.empty()) {
@@ -152,6 +394,30 @@ int main(int argc, char **argv) {
         }
         amber::hir::Program program = amber::hir::lower_module(
             parse_result.items, parse_result.module_name, bind_result.graph);
+        if (command == "mir" || command == "mir-dump" ||
+            command == "mir-verify") {
+          amber::mir::Module mir_module =
+              amber::mir::lower_program(program, parse_result.module_name);
+          amber::mir::ValidationResult validation =
+              amber::mir::validate_module(mir_module);
+          if (command == "mir-verify") {
+            std::cout << amber::mir::validation_errors_to_json(
+                validation.errors);
+            return validation.ok() ? 0 : 1;
+          }
+          if (!validation.ok()) {
+            std::cerr << amber::mir::validation_errors_to_json(
+                validation.errors);
+            return 1;
+          }
+          const std::string source_hash = amber::lexer::sha256_hex(source);
+          if (command == "mir-dump") {
+            std::cout << amber::mir::module_to_dump(mir_module, source_hash);
+            return 0;
+          }
+          std::cout << amber::mir::module_to_json(mir_module, source_hash);
+          return 0;
+        }
         if (command == "bc" || command == "bc-disasm") {
           amber::bytecode::EmitResult emit_result =
               amber::bytecode::emit_program(program, parse_result.module_name);
