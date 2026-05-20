@@ -6,6 +6,7 @@
 #include "frontend/hir/hir.h"
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
+#include "frozen/image.h"
 #include "optimizer/mir.h"
 #include "optimizer/native.h"
 #include "package/package.h"
@@ -58,6 +59,10 @@ void usage(std::ostream &out) {
          "[--sign-key <key>]\n";
   out << "  amberc package-publish <file.amberpkg> <registry-dir> "
          "[--sign-key <key>]\n";
+  out << "  amberc image-build <amber.toml> <out.amberimg> "
+         "[--sign-key <key>] [--key-id <id>]\n";
+  out << "  amberc image-inspect <file.amberimg>\n";
+  out << "  amberc image-verify <file.amberimg> [--sign-key <key>]\n";
   out << "  amberc --version\n";
 }
 
@@ -113,6 +118,92 @@ std::string package_diagnostics_to_string(
     out << "\n";
   }
   return out.str();
+}
+
+std::string frozen_diagnostics_to_string(
+    const std::vector<amber::frozen::FrozenImageDiagnostic> &diagnostics) {
+  std::ostringstream out;
+  for (const amber::frozen::FrozenImageDiagnostic &diagnostic : diagnostics) {
+    out << diagnostic.error_name << ": " << diagnostic.message;
+    if (!diagnostic.module_name.empty()) {
+      out << " (" << diagnostic.module_name << ")";
+    }
+    out << "\n";
+  }
+  return out.str();
+}
+
+struct CompiledModuleArtifact {
+  std::vector<std::uint8_t> bytes;
+  amber::native::NativeModule native_module;
+};
+
+CompiledModuleArtifact
+compile_source_to_module_artifact(const std::string &path,
+                                  const std::string &expected_module_name) {
+  const std::string source = read_file(path);
+  amber::lexer::LexResult lex_result = lex_source(source, path);
+  if (!lex_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(lex_result.diagnostics));
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(parse_result.diagnostics));
+  }
+  if (!expected_module_name.empty() &&
+      parse_result.module_name != expected_module_name) {
+    throw std::runtime_error("manifest module '" + expected_module_name +
+                             "' does not match source package '" +
+                             parse_result.module_name + "' in " + path);
+  }
+
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(bind_result.diagnostics));
+  }
+
+  amber::hir::Program program = amber::hir::lower_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  amber::mir::Module mir_module =
+      amber::mir::lower_program(program, parse_result.module_name);
+  amber::mir::ValidationResult mir_validation =
+      amber::mir::validate_module(mir_module);
+  if (!mir_validation.ok()) {
+    throw std::runtime_error(
+        amber::mir::validation_errors_to_json(mir_validation.errors));
+  }
+
+  amber::bytecode::EmitResult emit_result =
+      amber::bytecode::emit_program(program, parse_result.module_name);
+  if (!emit_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(emit_result.diagnostics));
+  }
+  const std::vector<std::uint8_t> bytes =
+      amber::bytecode::serialize_module(emit_result.module);
+  amber::bytecode::DecodeResult decode_result =
+      amber::bytecode::deserialize_module(bytes);
+  if (!decode_result.ok()) {
+    throw std::runtime_error(
+        amber::bytecode::verify_errors_to_json(decode_result.errors));
+  }
+
+  amber::native::NativeModule native_module =
+      amber::native::compile_native_module(decode_result.module, mir_module);
+  amber::native::NativeValidationResult native_validation =
+      amber::native::validate_native_module(native_module,
+                                            &decode_result.module);
+  if (!native_validation.ok()) {
+    throw std::runtime_error(
+        amber::native::diagnostics_to_json(native_validation.diagnostics));
+  }
+  return {bytes, std::move(native_module)};
 }
 
 std::vector<std::uint8_t>
@@ -285,6 +376,81 @@ int run_package_command(int argc, char **argv) {
   return 2;
 }
 
+int run_image_command(int argc, char **argv) {
+  const std::string command = argv[1];
+  if (command == "image-build" && argc >= 4) {
+    const std::string manifest_path = argv[2];
+    const std::string out_path = argv[3];
+    const amber::pkg::PackageBuildOptions package_options =
+        parse_package_build_options(argc, argv, 4);
+    const std::string manifest_source = read_file(manifest_path);
+    const amber::pkg::PackageManifestResult manifest =
+        amber::pkg::parse_manifest_toml(manifest_source, manifest_path);
+    if (!manifest.ok()) {
+      std::cerr << package_diagnostics_to_string(manifest.diagnostics);
+      return 1;
+    }
+
+    std::vector<amber::pkg::PackageModuleBlob> modules;
+    std::vector<amber::native::NativeModule> native_modules;
+    const std::string root_dir = dirname(manifest_path);
+    for (const amber::pkg::PackageModule &module : manifest.manifest.modules) {
+      CompiledModuleArtifact compiled = compile_source_to_module_artifact(
+          join_path(root_dir, module.path), module.name);
+      amber::pkg::PackageModuleBlob blob;
+      blob.name = module.name;
+      blob.path = module.path;
+      blob.bytes = std::move(compiled.bytes);
+      modules.push_back(std::move(blob));
+      native_modules.push_back(std::move(compiled.native_module));
+    }
+
+    const amber::pkg::PackageBuildResult package =
+        amber::pkg::build_package_artifact(manifest.manifest, modules,
+                                           package_options);
+    if (!package.ok) {
+      std::cerr << package_diagnostics_to_string(package.diagnostics);
+      return 1;
+    }
+
+    const amber::frozen::FrozenImageBuildResult image =
+        amber::frozen::build_frozen_image_artifact(
+            package.artifact, package.serialized, native_modules);
+    if (!image.ok) {
+      std::cerr << frozen_diagnostics_to_string(image.diagnostics);
+      return 1;
+    }
+    write_file(out_path, image.serialized);
+    std::cout << amber::frozen::artifact_to_json(image.artifact);
+    return 0;
+  }
+
+  if (command == "image-inspect" && argc == 3) {
+    const std::string serialized = read_file(argv[2]);
+    const amber::frozen::FrozenImageParseResult parsed =
+        amber::frozen::parse_frozen_image_artifact(serialized, argv[2]);
+    if (!parsed.ok()) {
+      std::cerr << frozen_diagnostics_to_string(parsed.diagnostics);
+      return 1;
+    }
+    std::cout << amber::frozen::artifact_to_json(parsed.artifact);
+    return 0;
+  }
+
+  if (command == "image-verify" && argc >= 3) {
+    const std::string serialized = read_file(argv[2]);
+    const std::string signing_key = parse_package_signing_key(argc, argv, 3);
+    const amber::frozen::FrozenImageVerifyResult verified =
+        amber::frozen::verify_frozen_image_artifact(serialized, signing_key,
+                                                    argv[2]);
+    std::cout << amber::frozen::verify_result_to_json(verified);
+    return verified.ok ? 0 : 1;
+  }
+
+  usage(std::cerr);
+  return 2;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -295,6 +461,9 @@ int main(int argc, char **argv) {
     }
     if (argc >= 2 && std::string(argv[1]).find("package-") == 0U) {
       return run_package_command(argc, argv);
+    }
+    if (argc >= 2 && std::string(argv[1]).find("image-") == 0U) {
+      return run_image_command(argc, argv);
     }
     if (argc != 3 ||
         (std::string(argv[1]) != "lex" && std::string(argv[1]) != "parse" &&

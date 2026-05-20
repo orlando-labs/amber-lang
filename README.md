@@ -72,6 +72,7 @@ Current matrix status:
 | `W10.2` | done | `amber.io` awaitable/readiness runtime bridge with `RuntimeAwaitable`, awaitable-compatible `runtime_select` arms, timeout/failure/cancellation states, and native wait integration through active W6.4 pin tokens |
 | `W10.3` | done | `amber.mir.v1` optimizer IR with HIR-to-MIR lowering, SSA value/block validation, deterministic JSON/text dumps, `mir`/`mir-dump`/`mir-verify` CLI, and pass harness phase/invalidation checks |
 | `W10.4` | done | `amber.native.v1` native/JIT metadata backend over MIR+bytecode with frozen-world assumptions, runtime call stubs, JIT patchpoint descriptors, root/exception/safepoint maps, `native`/`native-dump`/`native-verify` CLI, and frozen runtime trampoline execution with stale-assumption bytecode fallback |
+| `W10.5` | done | `amber.image.v1` frozen image builder with reproducible `.amberimg` artifacts over signed `.amberpkg` payloads, embedded native metadata summaries, freeze-analysis verification, `image-build`/`image-inspect`/`image-verify` CLI, and runtime load that installs the frozen-world/reload barrier |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -112,6 +113,11 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   metadata over verified bytecode and MIR, including call stubs, patchpoints,
   conservative root maps, exception maps, safepoint maps, and frozen-world
   assumptions;
+- `amberc image-build <amber.toml> <out.amberimg>`,
+  `amberc image-inspect <file.amberimg>`, and
+  `amberc image-verify <file.amberimg>` for `amber.image.v1` W10.5 frozen
+  images that embed reproducible package bytes, native metadata summaries,
+  freeze-analysis records, and package signature verification hooks;
 - binder diagnostics for exports/import writes/duplicates, wildcard misuse,
   placeholder misuse, structural pattern validation including bare matcher
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,
@@ -137,6 +143,11 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   patchpoint descriptors, root/exception/safepoint maps, and recorded
   world-epoch/method-table assumptions, plus `runtime/native_bridge` frozen
   execution and stale-assumption bytecode re-entry;
+- `frozen/image` and `runtime/frozen_image` W10.5 frozen-image path with
+  deterministic `.amberimg` serialization, package/native digest checks,
+  bytecode/native verification, explicit freeze-analysis records, runtime
+  `RuntimeWorld` load with an immediate freeze barrier, native binding to the
+  frozen world mirror, and package hot-reload rejection after image load;
 - `runtime/vm` W8.3 collections contract with closure-block execution for eager sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, deterministic `EmptyCollectionError` for empty `reduce` without init, and ordered `Map#keys/#values/#entries/#map/#select/#reject/#transform_values/#each`;
 - `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
 - `package/package` W9.4 package tooling with restricted `amber.toml` parsing,

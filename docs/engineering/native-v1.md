@@ -1,6 +1,7 @@
 # amber.native.v1
 
-Status: implemented for the `W10.4` native/JIT readiness baseline.
+Status: implemented for the `W10.4` native/JIT readiness baseline and consumed
+by the `W10.5` frozen image layer.
 
 The native layer follows the compile-closure convention in
 [amber_compilable_project_layer_v20_1_complete.md](/Users/slowpilot/workspace/amber/amber_compilable_project_layer_v20_1_complete.md:5515):
@@ -20,6 +21,10 @@ Implemented surface:
   - `amberc native <file>`
   - `amberc native-dump <file>`
   - `amberc native-verify <file>`
+- frozen image embedding through
+  [frozen/image.cpp](/Users/slowpilot/workspace/amber/frozen/image.cpp:1),
+  which stores deterministic `amber.native.v1` metadata summaries inside
+  `.amberimg` artifacts.
 
 ## Code Objects
 

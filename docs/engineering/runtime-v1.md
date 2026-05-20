@@ -5,8 +5,9 @@ full conformance runner gate is satisfied through `ambertest`, `W9.2`
 open-world transaction/freeze plus `W9.3` reflection mirror behavior is covered
 in VM tests, `W9.4` package artifact tooling is covered by package tests, and
 `W9.5` package hot-reload swaps, `W10.1` advanced concurrency runtime behavior,
-`W10.2` awaitable/native-readiness behavior, and `W10.4` frozen native
-trampoline behavior are covered by VM/native tests.
+`W10.2` awaitable/native-readiness behavior, `W10.4` frozen native trampoline
+behavior, and `W10.5` frozen image load barriers are covered by VM/native/image
+tests.
 
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
 
@@ -138,6 +139,11 @@ Current implemented slice:
   frozen-world rejection, deterministic bytecode-trampoline execution through
   `RuntimeWorld::execute`, and explicit bytecode fallback for stale native
   assumptions when the caller discards invalid native code;
+- `W10.5` frozen image runtime loader in `runtime/frozen_image.{h,cpp}` with
+  verified `.amberimg` package load, immediate `RuntimeWorld::freeze_world()`,
+  native metadata binding to the frozen world mirror when in-memory metadata is
+  available, and package hot-reload rejection through the existing
+  `WorldFrozenError` barrier;
 - `W8.1`-`W8.2` loader baseline in `runtime/module_loader.{h,cpp}` with
   serialized `.amberbc` decode/verify on every load path, dependency graph
   linking, deterministic dependency-before-dependent module init, single-run
@@ -210,7 +216,9 @@ Current implemented slice:
   after native wait completion, stale-pin failure, and cancellation finishing
   native waits, plus W10.4 native metadata/trampoline coverage for root maps,
   reflective `SEND_DYN` stubs, frozen-world execution, and stale-assumption
-  bytecode fallback.
+  bytecode fallback, plus W10.5 frozen image coverage for reproducible
+  `.amberimg` build/verify, frozen runtime load, bound native execution, and
+  reload-barrier rejection.
 
 Still intentionally missing in later layers:
 
