@@ -7,6 +7,7 @@
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
 #include "optimizer/mir.h"
+#include "optimizer/native.h"
 #include "package/package.h"
 
 #include <fstream>
@@ -39,6 +40,9 @@ void usage(std::ostream &out) {
   out << "  amberc mir <file>\n";
   out << "  amberc mir-dump <file>\n";
   out << "  amberc mir-verify <file>\n";
+  out << "  amberc native <file>\n";
+  out << "  amberc native-dump <file>\n";
+  out << "  amberc native-verify <file>\n";
   out << "  amberc bc <file>\n";
   out << "  amberc bc-disasm <file>\n";
   out << "  amberc amberbc-dump <file>\n";
@@ -298,6 +302,9 @@ int main(int argc, char **argv) {
          std::string(argv[1]) != "hir" && std::string(argv[1]) != "mir" &&
          std::string(argv[1]) != "mir-dump" &&
          std::string(argv[1]) != "mir-verify" && std::string(argv[1]) != "bc" &&
+         std::string(argv[1]) != "native" &&
+         std::string(argv[1]) != "native-dump" &&
+         std::string(argv[1]) != "native-verify" &&
          std::string(argv[1]) != "bc-disasm" &&
          std::string(argv[1]) != "parse-expr" &&
          std::string(argv[1]) != "amberbc-dump" &&
@@ -351,7 +358,9 @@ int main(int argc, char **argv) {
     amber::parser::Parser parser(lex_result.tokens);
     if (command == "parse" || command == "bind" || command == "typed" ||
         command == "hir" || command == "mir" || command == "mir-dump" ||
-        command == "mir-verify" || command == "bc" || command == "bc-disasm") {
+        command == "mir-verify" || command == "native" ||
+        command == "native-dump" || command == "native-verify" ||
+        command == "bc" || command == "bc-disasm") {
       amber::parser::ParseModuleResult parse_result =
           parser.parse_module_unit();
       if (!parse_result.ok()) {
@@ -361,8 +370,9 @@ int main(int argc, char **argv) {
       }
       if (command == "bind" || command == "typed" || command == "hir" ||
           command == "mir" || command == "mir-dump" ||
-          command == "mir-verify" || command == "bc" ||
-          command == "bc-disasm") {
+          command == "mir-verify" || command == "native" ||
+          command == "native-dump" || command == "native-verify" ||
+          command == "bc" || command == "bc-disasm") {
         amber::binder::BindResult bind_result = amber::binder::bind_module(
             parse_result.items, parse_result.module_name);
         if (!bind_result.diagnostics.empty()) {
@@ -395,7 +405,8 @@ int main(int argc, char **argv) {
         amber::hir::Program program = amber::hir::lower_module(
             parse_result.items, parse_result.module_name, bind_result.graph);
         if (command == "mir" || command == "mir-dump" ||
-            command == "mir-verify") {
+            command == "mir-verify" || command == "native" ||
+            command == "native-dump" || command == "native-verify") {
           amber::mir::Module mir_module =
               amber::mir::lower_program(program, parse_result.module_name);
           amber::mir::ValidationResult validation =
@@ -413,6 +424,50 @@ int main(int argc, char **argv) {
           const std::string source_hash = amber::lexer::sha256_hex(source);
           if (command == "mir-dump") {
             std::cout << amber::mir::module_to_dump(mir_module, source_hash);
+            return 0;
+          }
+          if (command == "native" || command == "native-dump" ||
+              command == "native-verify") {
+            amber::bytecode::EmitResult emit_result =
+                amber::bytecode::emit_program(program,
+                                              parse_result.module_name);
+            if (!emit_result.ok()) {
+              std::cerr << amber::lexer::diagnostics_to_json(
+                  emit_result.diagnostics);
+              return 1;
+            }
+            const std::vector<std::uint8_t> bytes =
+                amber::bytecode::serialize_module(emit_result.module);
+            amber::bytecode::DecodeResult decode_result =
+                amber::bytecode::deserialize_module(bytes);
+            if (!decode_result.ok()) {
+              std::cerr << amber::bytecode::verify_errors_to_json(
+                  decode_result.errors);
+              return 1;
+            }
+            amber::native::NativeModule native_module =
+                amber::native::compile_native_module(decode_result.module,
+                                                     mir_module);
+            amber::native::NativeValidationResult native_validation =
+                amber::native::validate_native_module(native_module,
+                                                      &decode_result.module);
+            if (command == "native-verify") {
+              std::cout << amber::native::diagnostics_to_json(
+                  native_validation.diagnostics);
+              return native_validation.ok() ? 0 : 1;
+            }
+            if (!native_validation.ok()) {
+              std::cerr << amber::native::diagnostics_to_json(
+                  native_validation.diagnostics);
+              return 1;
+            }
+            if (command == "native-dump") {
+              std::cout << amber::native::module_to_dump(native_module,
+                                                         source_hash);
+              return 0;
+            }
+            std::cout << amber::native::module_to_json(native_module,
+                                                       source_hash);
             return 0;
           }
           std::cout << amber::mir::module_to_json(mir_module, source_hash);

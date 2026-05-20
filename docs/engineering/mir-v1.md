@@ -7,6 +7,10 @@ native/JIT backends. It does not replace the existing HIR-to-bytecode execution
 path yet; it exposes a separately testable artifact for `ISS-067` and
 `ISS-068`.
 
+W10.4 now consumes this layer through `amber.native.v1`; see
+[native-v1.md](/Users/slowpilot/workspace/amber/docs/engineering/native-v1.md:1)
+for the native/JIT metadata and frozen runtime bridge.
+
 Implemented surface:
 
 - typed MIR schema in [optimizer/mir.h](/Users/slowpilot/workspace/amber/optimizer/mir.h:1)

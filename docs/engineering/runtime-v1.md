@@ -5,7 +5,8 @@ full conformance runner gate is satisfied through `ambertest`, `W9.2`
 open-world transaction/freeze plus `W9.3` reflection mirror behavior is covered
 in VM tests, `W9.4` package artifact tooling is covered by package tests, and
 `W9.5` package hot-reload swaps, `W10.1` advanced concurrency runtime behavior,
-and `W10.2` awaitable/native-readiness behavior are covered by VM tests.
+`W10.2` awaitable/native-readiness behavior, and `W10.4` frozen native
+trampoline behavior are covered by VM/native tests.
 
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
 
@@ -132,6 +133,11 @@ Current implemented slice:
   `runtime_select` arms, bounded await/poll behavior, cooperative task
   cancellation propagation, and native wait readiness tokens backed by active
   W6.4 pin handles;
+- `W10.4` native/JIT runtime bridge in `runtime/native_bridge.{h,cpp}` with
+  `amber.native.v1` world-epoch and method-version assumption checks,
+  frozen-world rejection, deterministic bytecode-trampoline execution through
+  `RuntimeWorld::execute`, and explicit bytecode fallback for stale native
+  assumptions when the caller discards invalid native code;
 - `W8.1`-`W8.2` loader baseline in `runtime/module_loader.{h,cpp}` with
   serialized `.amberbc` decode/verify on every load path, dependency graph
   linking, deterministic dependency-before-dependent module init, single-run
@@ -202,7 +208,9 @@ Current implemented slice:
   supervisor `one_for_one`, `one_for_all`, and `rest_for_one` propagation, plus
   W10.2 awaitable coverage for select readiness/timeout/failure, scheduler wake
   after native wait completion, stale-pin failure, and cancellation finishing
-  native waits.
+  native waits, plus W10.4 native metadata/trampoline coverage for root maps,
+  reflective `SEND_DYN` stubs, frozen-world execution, and stale-assumption
+  bytecode fallback.
 
 Still intentionally missing in later layers:
 

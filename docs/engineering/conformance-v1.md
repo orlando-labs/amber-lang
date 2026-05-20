@@ -7,7 +7,9 @@ focused VM tests, and `W9.4` package tooling is covered by focused package
 tests. `W9.5` package hot-reload swap behavior, `W10.1` advanced concurrency
 runtime behavior, and `W10.2` awaitable/native-readiness behavior are covered
 by focused VM tests. `W10.3` MIR/SSA lowering, validation, dump stability, and
-pass harness behavior are covered by focused MIR tests.
+pass harness behavior are covered by focused MIR tests. `W10.4`
+native/JIT-readiness metadata and frozen-world trampoline behavior are covered
+by focused native tests.
 
 `ambertest run <path>` is the canonical corpus entrypoint. It discovers
 `meta.json` fixtures deterministically, dispatches by fixture phase, compares
@@ -62,11 +64,14 @@ Current limits:
   dynamic conformance or the `make conformance` M5 gate;
 - `mir` / `mir-dump` / `mir-verify` are available through `amberc` and focused
   unit tests; corpus phases are not wired yet;
+- `native` / `native-dump` / `native-verify` are available through `amberc`
+  and focused unit tests; corpus phases are not wired yet;
 - W9.2 transaction/freeze, W9.3 reflection mirror, W9.4 package artifact,
   W9.5 package hot-reload, W10.1 advanced concurrency, W10.2 awaitable, and
-  W10.3 MIR/SSA checks are focused API/tooling tests today;
+  W10.3 MIR/SSA, and W10.4 native/JIT metadata checks are focused API/tooling
+  tests today;
 - multi-source package/build-graph corpus can now target W9.4 package artifacts
   and W9.5 reload fixtures when the corpus runner grows package phases;
-- W10.1-W10.3 `move`/`select`/supervisor/awaitable/MIR language-surface
+- W10.1-W10.4 `move`/`select`/supervisor/awaitable/MIR/native language-surface
   fixtures can be added once those forms are exposed above the runtime API and
   corpus runner phases.

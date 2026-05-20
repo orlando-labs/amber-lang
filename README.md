@@ -26,6 +26,9 @@ build/amberc hir corpus/hir/module/basic/source.am
 build/amberc mir corpus/hir/module/basic/source.am
 build/amberc mir-dump corpus/hir/module/basic/source.am
 build/amberc mir-verify corpus/hir/module/basic/source.am
+build/amberc native corpus/bc/module/basic/source.am
+build/amberc native-dump corpus/bc/module/basic/source.am
+build/amberc native-verify corpus/bc/module/basic/source.am
 build/amberc bc corpus/bc/module/basic/source.am
 build/amberc bc-disasm corpus/bc/disasm/basic/source.am
 build/amberc amberbc-dump /path/to/module.amberbc
@@ -68,6 +71,7 @@ Current matrix status:
 | `W10.1` | done | advanced concurrency runtime with explicit `RuntimeMoveSlot` ownership transfer for channel/select boundaries, moved-from `MovedValueError` guards, fair-ish `runtime_select` recv/send arms with timeout/else behavior, and structured-task supervisor policies `cancel_scope`, `one_for_one`, `one_for_all`, and `rest_for_one` |
 | `W10.2` | done | `amber.io` awaitable/readiness runtime bridge with `RuntimeAwaitable`, awaitable-compatible `runtime_select` arms, timeout/failure/cancellation states, and native wait integration through active W6.4 pin tokens |
 | `W10.3` | done | `amber.mir.v1` optimizer IR with HIR-to-MIR lowering, SSA value/block validation, deterministic JSON/text dumps, `mir`/`mir-dump`/`mir-verify` CLI, and pass harness phase/invalidation checks |
+| `W10.4` | done | `amber.native.v1` native/JIT metadata backend over MIR+bytecode with frozen-world assumptions, runtime call stubs, JIT patchpoint descriptors, root/exception/safepoint maps, `native`/`native-dump`/`native-verify` CLI, and frozen runtime trampoline execution with stale-assumption bytecode fallback |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -103,6 +107,11 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
 - `amberc mir <file>`, `amberc mir-dump <file>`, and `amberc mir-verify <file>`
   for `amber.mir.v1` HIR-to-MIR lowering, SSA/block validation, deterministic
   JSON/text dumps, and pass harness metadata for future optimizer phases;
+- `amberc native <file>`, `amberc native-dump <file>`, and
+  `amberc native-verify <file>` for `amber.native.v1` W10.4 native/JIT
+  metadata over verified bytecode and MIR, including call stubs, patchpoints,
+  conservative root maps, exception maps, safepoint maps, and frozen-world
+  assumptions;
 - binder diagnostics for exports/import writes/duplicates, wildcard misuse,
   placeholder misuse, structural pattern validation including bare matcher
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,
@@ -122,6 +131,12 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   procedure, explicit basic blocks, `%vN` SSA values, phi nodes for `HIf`
   expression results, loop/control-flow terminators, structural SSA validation,
   deterministic dumps, and pass pipeline phase/invalidation records;
+- `optimizer/native` W10.4 native/JIT readiness layer with one
+  `NativeCodeObject` per `BcCode`, bytecode-trampoline machine-code payloads,
+  reflective slow stubs for dynamic dispatch/type/pattern hooks, call/ivar IC
+  patchpoint descriptors, root/exception/safepoint maps, and recorded
+  world-epoch/method-table assumptions, plus `runtime/native_bridge` frozen
+  execution and stale-assumption bytecode re-entry;
 - `runtime/vm` W8.3 collections contract with closure-block execution for eager sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, deterministic `EmptyCollectionError` for empty `reduce` without init, and ordered `Map#keys/#values/#entries/#map/#select/#reject/#transform_values/#each`;
 - `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
 - `package/package` W9.4 package tooling with restricted `amber.toml` parsing,
