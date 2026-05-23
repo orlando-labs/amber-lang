@@ -58,6 +58,15 @@ std::string string_value(const ast::Expr &expr, const std::string &name) {
   return value == nullptr ? "" : *value;
 }
 
+bool bool_value(const ast::Expr &expr, const std::string &name) {
+  for (const ast::BoolField &field : expr.bool_fields) {
+    if (field.name == name) {
+      return field.value;
+    }
+  }
+  return false;
+}
+
 bool param_nodes_match(const ast::Expr &left, const ast::Expr &right) {
   if (left.kind != right.kind) {
     return false;
@@ -87,6 +96,12 @@ bool param_nodes_match(const ast::Expr &left, const ast::Expr &right) {
 bool signatures_match(const ast::Expr &left, const ast::Expr &right) {
   if (string_value(left, "return_type_expr") !=
       string_value(right, "return_type_expr")) {
+    return false;
+  }
+  if (bool_value(left, "has_effect_row") !=
+          bool_value(right, "has_effect_row") ||
+      string_value(left, "effect_row_expr") !=
+          string_value(right, "effect_row_expr")) {
     return false;
   }
   const ast::ListField *left_params = find_list_field(left, "params");
@@ -575,6 +590,12 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
       signature->span = ast::join_spans(signature->span, previous().span);
     }
   }
+  if (check(lexer::TokenKind::Bang)) {
+    const std::string effect_row = parse_effect_row_text();
+    signature->bool_field("has_effect_row", true);
+    signature->string_field("effect_row_expr", effect_row);
+    signature->span = ast::join_spans(signature->span, previous().span);
+  }
   consume(lexer::TokenKind::Colon, "expected ':' after function signature");
   if (!class_method && starts_clause_body()) {
     ClauseBody clause_body = parse_clause_body();
@@ -782,8 +803,8 @@ std::string Parser::parse_type_term_text_until_return_boundary() {
   while (!at_end()) {
     const lexer::TokenKind kind = current().kind;
     if (depth == 0 &&
-        (kind == lexer::TokenKind::Colon || kind == lexer::TokenKind::Newline ||
-         kind == lexer::TokenKind::Eof)) {
+        (kind == lexer::TokenKind::Bang || kind == lexer::TokenKind::Colon ||
+         kind == lexer::TokenKind::Newline || kind == lexer::TokenKind::Eof)) {
       break;
     }
     if (kind == lexer::TokenKind::LParen ||
@@ -807,6 +828,22 @@ std::string Parser::parse_type_term_text_until_return_boundary() {
       --depth;
     }
   }
+  return text;
+}
+
+std::string Parser::parse_effect_row_text() {
+  consume(lexer::TokenKind::Bang, "expected '!' before effect row");
+  consume(lexer::TokenKind::LBrace, "expected '{' after '!'");
+  std::string text = "!{";
+  const lexer::Token *previous_effect_token = nullptr;
+  while (!at_end() && !check(lexer::TokenKind::RBrace) &&
+         !check(lexer::TokenKind::Newline)) {
+    append_pattern_token(&text, current(), previous_effect_token);
+    previous_effect_token = &current();
+    advance();
+  }
+  consume(lexer::TokenKind::RBrace, "expected '}' after effect row");
+  text += "}";
   return text;
 }
 

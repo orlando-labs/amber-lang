@@ -80,6 +80,55 @@ void test_manifest_and_lock_are_deterministic() {
          "lockfile should include dependency checksums");
 }
 
+void test_capability_manifest_and_policy_resolution() {
+  const std::string manifest_source = "[package]\n"
+                                      "name = \"caps.pkg\"\n"
+                                      "version = \"0.1.0\"\n"
+                                      "root = \"caps.core\"\n"
+                                      "\n"
+                                      "[[modules]]\n"
+                                      "name = \"caps.core\"\n"
+                                      "path = \"src/core.am\"\n"
+                                      "\n"
+                                      "[capabilities]\n"
+                                      "fs.read = [\"./data\"]\n"
+                                      "net.connect = [\"api.example:443\"]\n"
+                                      "time = true\n"
+                                      "ffi = false\n";
+  const amber::pkg::PackageManifestResult parsed =
+      amber::pkg::parse_manifest_toml(manifest_source, "amber.toml");
+  expect(parsed.ok(), "capability manifest should parse");
+  expect(parsed.manifest.capabilities.size() == 4,
+         "capability manifest should canonicalize aliases");
+
+  std::vector<amber::capability::CapabilityRequest> grants;
+  grants.push_back(amber::capability::make_capability("fs.read", "./data"));
+  grants.push_back(
+      amber::capability::make_capability("net.connect", "api.example:443"));
+  grants.push_back(amber::capability::make_capability(
+      "time.now", "*", "host policy",
+      amber::capability::kCapabilityFlagWildcardTarget));
+  grants.push_back(amber::capability::make_capability(
+      "time.sleep", "*", "host policy",
+      amber::capability::kCapabilityFlagWildcardTarget));
+  const amber::capability::CapabilityResolutionResult allowed =
+      amber::capability::resolve_capabilities(parsed.manifest.capabilities,
+                                              grants);
+  expect(allowed.ok, "matching grants should satisfy requested capabilities");
+  expect(amber::capability::capability_set_allows(allowed.effective, "fs.read",
+                                                  "./data/orders.csv"),
+         "fs.read grant should allow paths under target");
+  expect(!amber::capability::capability_set_allows(allowed.effective, "fs.read",
+                                                   "./private/orders.csv"),
+         "fs.read grant should deny paths outside target");
+
+  const amber::capability::CapabilityResolutionResult denied =
+      amber::capability::resolve_capabilities(parsed.manifest.capabilities, {});
+  expect(!denied.ok, "deny-by-default policy should reject missing grants");
+  expect(denied.denied.size() == parsed.manifest.capabilities.size(),
+         "all requested capabilities should be denied without grants");
+}
+
 void test_package_artifact_is_reproducible_and_signed() {
   const amber::pkg::PackageManifest manifest = sample_manifest();
   amber::pkg::PackageBuildOptions options;
@@ -149,6 +198,7 @@ void test_registry_publish_and_install_smoke() {
 
 int main() {
   test_manifest_and_lock_are_deterministic();
+  test_capability_manifest_and_policy_resolution();
   test_package_artifact_is_reproducible_and_signed();
   test_registry_publish_and_install_smoke();
   return 0;

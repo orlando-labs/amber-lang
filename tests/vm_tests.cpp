@@ -92,6 +92,65 @@ void test_execute_emitted_method() {
   expect(exec.value.as_integer() == 7, "echo should return argument");
 }
 
+void test_runtime_capability_checks() {
+  amber::bytecode::BcModule module;
+  module.capabilities.push_back(
+      amber::capability::make_capability("fs.read", "./data"));
+
+  amber::runtime::RuntimeWorldOptions options;
+  options.capability_grants.push_back(
+      amber::capability::make_capability("fs.read", "./data"));
+  amber::runtime::RuntimeWorld world(module, std::move(options));
+
+  const amber::runtime::RuntimeCapabilityCheckResult allowed =
+      world.check_capability("fs.read", "./data/orders.csv");
+  expect(allowed.ok, "runtime capability should allow granted path");
+  const amber::runtime::RuntimeCapabilityCheckResult denied =
+      world.check_capability("fs.read", "./private/orders.csv");
+  expect(!denied.ok && denied.error_name == "CapabilityError",
+         "runtime capability should deny ungranted path");
+  const amber::runtime::RuntimeCapabilityResolution resolution =
+      world.capability_resolution();
+  expect(resolution.ok, "runtime capability resolution should be satisfied");
+
+  amber::runtime::RuntimeWorld denied_world(module);
+  const amber::runtime::RuntimeCapabilityCheckResult missing =
+      denied_world.check_capability("fs.read", "./data/orders.csv");
+  expect(!missing.ok && missing.error_name == "CapabilityError",
+         "default runtime world should deny requested host resources");
+}
+
+void test_runtime_effect_checks() {
+  amber::bytecode::BcModule module;
+  module.effects.push_back(amber::effect::make_effect_summary(
+      "clocky", "function", {"time"}, {"time"}, true));
+
+  amber::runtime::RuntimeWorldOptions options;
+  options.enforce_effects = true;
+  options.allowed_effects = {"time"};
+  amber::runtime::RuntimeWorld world(module, options);
+  const amber::runtime::RuntimeEffectValidation validation =
+      world.effect_validation();
+  expect(validation.ok, "matching declared/observed effects should validate");
+
+  const amber::runtime::RuntimeEffectCheckResult allowed =
+      world.check_effects({"time"});
+  expect(allowed.ok, "runtime effect allowance should accept time");
+  const amber::runtime::RuntimeEffectCheckResult denied =
+      world.check_effects({"fs"});
+  expect(!denied.ok && denied.error_name == "EffectViolationError",
+         "runtime effect allowance should reject fs");
+
+  amber::bytecode::BcModule mismatch;
+  mismatch.effects.push_back(amber::effect::make_effect_summary(
+      "bad", "function", {}, {"time"}, true));
+  amber::runtime::RuntimeWorld mismatch_world(mismatch);
+  const amber::runtime::RuntimeEffectValidation mismatch_validation =
+      mismatch_world.effect_validation();
+  expect(!mismatch_validation.ok,
+         "runtime effect validation should catch row mismatch");
+}
+
 void test_branching_and_last_result() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def flag(x):\n"
                                                           "  if x:\n"
@@ -4973,6 +5032,8 @@ int main() {
   test_execute_emitted_case_map_rest();
   test_execute_emitted_case_map_strict_null();
   test_execute_emitted_clause_method_dispatch();
+  test_runtime_capability_checks();
+  test_runtime_effect_checks();
   test_manual_make_map();
   test_runtime_sequence_collections_contract();
   test_runtime_map_collections_contract();

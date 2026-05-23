@@ -323,6 +323,10 @@ const char *section_tag(SectionKind kind) {
     return "LOCS";
   case SectionKind::Attr:
     return "ATTR";
+  case SectionKind::Caps:
+    return "CAPS";
+  case SectionKind::Efct:
+    return "EFCT";
   case SectionKind::Hash:
     return "HASH";
   }
@@ -387,6 +391,14 @@ bool decode_section_kind(const std::array<char, 4> &tag, SectionKind &kind) {
     kind = SectionKind::Attr;
     return true;
   }
+  if (value == "CAPS") {
+    kind = SectionKind::Caps;
+    return true;
+  }
+  if (value == "EFCT") {
+    kind = SectionKind::Efct;
+    return true;
+  }
   if (value == "HASH") {
     kind = SectionKind::Hash;
     return true;
@@ -417,6 +429,10 @@ bool optional_section_present(const BcModule &module, SectionKind kind) {
     return !module.local_debug.empty();
   case SectionKind::Attr:
     return !module.attrs.empty();
+  case SectionKind::Caps:
+    return !module.capabilities.empty();
+  case SectionKind::Efct:
+    return !module.effects.empty();
   case SectionKind::Hash:
     return !module.hashes.empty();
   default:
@@ -730,6 +746,43 @@ std::vector<std::uint8_t> serialize_attrs(const std::vector<AttrEntry> &attrs) {
   return out;
 }
 
+std::vector<std::uint8_t> serialize_capabilities(
+    const std::vector<capability::CapabilityRequest> &capabilities) {
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(capabilities.size()));
+  for (const capability::CapabilityRequest &entry : capabilities) {
+    append_string(out, entry.name);
+    append_string(out, entry.target);
+    append_string(out, entry.reason);
+    append_u32(out, entry.flags);
+  }
+  return out;
+}
+
+std::vector<std::uint8_t>
+serialize_effects(const std::vector<effect::EffectSummary> &effects) {
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(effects.size()));
+  for (const effect::EffectSummary &entry : effects) {
+    append_string(out, entry.owner);
+    append_string(out, entry.kind);
+    const std::vector<std::string> declared =
+        effect::normalize_effects(entry.declared_effects);
+    append_u32(out, static_cast<std::uint32_t>(declared.size()));
+    for (const std::string &label : declared) {
+      append_string(out, label);
+    }
+    const std::vector<std::string> observed =
+        effect::normalize_effects(entry.observed_effects);
+    append_u32(out, static_cast<std::uint32_t>(observed.size()));
+    for (const std::string &label : observed) {
+      append_string(out, label);
+    }
+    append_u32(out, entry.flags);
+  }
+  return out;
+}
+
 std::vector<std::uint8_t>
 serialize_hashes(const std::vector<HashEntry> &hashes) {
   std::vector<std::uint8_t> out;
@@ -782,6 +835,14 @@ std::vector<SectionPayload> build_sections(const BcModule &module) {
   if (optional_section_present(module, SectionKind::Attr)) {
     sections.push_back(
         {SectionKind::Attr, serialize_attrs(module.attrs), 1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Caps)) {
+    sections.push_back(
+        {SectionKind::Caps, serialize_capabilities(module.capabilities), 1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Efct)) {
+    sections.push_back(
+        {SectionKind::Efct, serialize_effects(module.effects), 1, 0});
   }
   if (optional_section_present(module, SectionKind::Hash)) {
     sections.push_back(
@@ -1573,6 +1634,69 @@ bool parse_attrs(Reader &reader, std::vector<AttrEntry> &out) {
   return true;
 }
 
+bool parse_capabilities(Reader &reader,
+                        std::vector<capability::CapabilityRequest> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  out.clear();
+  out.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    capability::CapabilityRequest entry;
+    if (!reader.read_string(entry.name) || !reader.read_string(entry.target) ||
+        !reader.read_string(entry.reason) || !reader.read_u32(entry.flags)) {
+      return false;
+    }
+    out.push_back(std::move(entry));
+  }
+  return true;
+}
+
+bool parse_effects(Reader &reader, std::vector<effect::EffectSummary> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  out.clear();
+  out.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    effect::EffectSummary entry;
+    if (!reader.read_string(entry.owner) || !reader.read_string(entry.kind)) {
+      return false;
+    }
+    std::uint32_t declared_count = 0;
+    if (!reader.read_u32(declared_count)) {
+      return false;
+    }
+    entry.declared_effects.reserve(declared_count);
+    for (std::uint32_t j = 0; j < declared_count; ++j) {
+      std::string label;
+      if (!reader.read_string(label)) {
+        return false;
+      }
+      entry.declared_effects.push_back(std::move(label));
+    }
+    std::uint32_t observed_count = 0;
+    if (!reader.read_u32(observed_count)) {
+      return false;
+    }
+    entry.observed_effects.reserve(observed_count);
+    for (std::uint32_t j = 0; j < observed_count; ++j) {
+      std::string label;
+      if (!reader.read_string(label)) {
+        return false;
+      }
+      entry.observed_effects.push_back(std::move(label));
+    }
+    if (!reader.read_u32(entry.flags)) {
+      return false;
+    }
+    out.push_back(std::move(entry));
+  }
+  return true;
+}
+
 bool parse_hashes(Reader &reader, std::vector<HashEntry> &out) {
   std::uint32_t count = 0;
   if (!reader.read_u32(count)) {
@@ -2020,6 +2144,39 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
     }
   }
 
+  for (const capability::CapabilityRequest &entry : module.capabilities) {
+    if (!capability::valid_capability_name(entry.name)) {
+      add_verify_error(errors, "BC1401", "invalid capability name",
+                       SectionKind::Caps, 0);
+    }
+  }
+
+  const effect::EffectValidationResult effect_validation =
+      effect::validate_effect_summaries(module.effects);
+  for (const effect::EffectDiagnostic &diagnostic :
+       effect_validation.diagnostics) {
+    add_verify_error(errors, "BC1402", diagnostic.message, SectionKind::Efct,
+                     0);
+  }
+  for (const effect::EffectSummary &entry : module.effects) {
+    if (entry.owner.empty() || entry.kind.empty()) {
+      add_verify_error(errors, "BC1403", "effect summary owner/kind is empty",
+                       SectionKind::Efct, 0);
+    }
+    for (const std::string &label : entry.declared_effects) {
+      if (!effect::valid_effect_name(label)) {
+        add_verify_error(errors, "BC1404", "invalid declared effect label",
+                         SectionKind::Efct, 0);
+      }
+    }
+    for (const std::string &label : entry.observed_effects) {
+      if (!effect::valid_effect_name(label)) {
+        add_verify_error(errors, "BC1404", "invalid observed effect label",
+                         SectionKind::Efct, 0);
+      }
+    }
+  }
+
   for (const HashEntry &entry : module.hashes) {
     if (entry.digest.size() != 32U) {
       add_verify_error(errors, "BC1306", "hash digest must be 32 bytes",
@@ -2374,6 +2531,15 @@ DecodeResult deserialize_module(const std::vector<std::uint8_t> &bytes) {
   if (by_kind.find(SectionKind::Attr) != by_kind.end()) {
     parse_section(SectionKind::Attr, "ATTR",
                   [&](Reader &r) { parse_attrs(r, result.module.attrs); });
+  }
+  if (by_kind.find(SectionKind::Caps) != by_kind.end()) {
+    parse_section(SectionKind::Caps, "CAPS", [&](Reader &r) {
+      parse_capabilities(r, result.module.capabilities);
+    });
+  }
+  if (by_kind.find(SectionKind::Efct) != by_kind.end()) {
+    parse_section(SectionKind::Efct, "EFCT",
+                  [&](Reader &r) { parse_effects(r, result.module.effects); });
   }
   if (by_kind.find(SectionKind::Hash) != by_kind.end()) {
     parse_section(SectionKind::Hash, "HASH",
@@ -2842,6 +3008,31 @@ std::string module_to_json(const BcModule &module,
         << ",\"value_str_id\":" << entry.value_str_id << "}";
   }
   out << "],\n";
+  out << "  \"capabilities\": [";
+  for (std::size_t i = 0; i < module.capabilities.size(); ++i) {
+    const capability::CapabilityRequest &entry = module.capabilities[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"name\":\"" << json_escape(entry.name) << "\",\"target\":\""
+        << json_escape(entry.target) << "\",\"reason\":\""
+        << json_escape(entry.reason) << "\",\"flags\":" << entry.flags << "}";
+  }
+  out << "],\n";
+  out << "  \"effects\": [";
+  for (std::size_t i = 0; i < module.effects.size(); ++i) {
+    const effect::EffectSummary &entry = module.effects[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"owner\":\"" << json_escape(entry.owner) << "\",\"kind\":\""
+        << json_escape(entry.kind) << "\",\"declared\":\""
+        << json_escape(effect::effect_row_to_text(entry.declared_effects))
+        << "\",\"observed\":\""
+        << json_escape(effect::effect_row_to_text(entry.observed_effects))
+        << "\",\"flags\":" << entry.flags << "}";
+  }
+  out << "],\n";
   out << "  \"hashes\": [";
   for (std::size_t i = 0; i < module.hashes.size(); ++i) {
     const HashEntry &entry = module.hashes[i];
@@ -3124,6 +3315,30 @@ std::string module_to_disasm(const BcModule &module,
           << json_escape(
                  string_or_placeholder(module.strings, entry.value_str_id))
           << ")\n";
+    }
+  }
+  if (!module.capabilities.empty()) {
+    out << ".caps\n";
+    for (const capability::CapabilityRequest &entry : module.capabilities) {
+      out << "  " << entry.name;
+      if (!entry.target.empty()) {
+        out << " target=\"" << json_escape(entry.target) << "\"";
+      }
+      if (!entry.reason.empty()) {
+        out << " reason=\"" << json_escape(entry.reason) << "\"";
+      }
+      out << " flags=" << entry.flags << "\n";
+    }
+  }
+  if (!module.effects.empty()) {
+    out << ".efct\n";
+    for (const effect::EffectSummary &entry : module.effects) {
+      out << "  " << entry.owner << " kind=\"" << json_escape(entry.kind)
+          << "\" declared=\""
+          << json_escape(effect::effect_row_to_text(entry.declared_effects))
+          << "\" observed=\""
+          << json_escape(effect::effect_row_to_text(entry.observed_effects))
+          << "\" flags=" << entry.flags << "\n";
     }
   }
   if (!module.hashes.empty()) {

@@ -78,6 +78,15 @@ std::string string_value(const ast::Expr &expr, const std::string &name) {
   return value == nullptr ? "" : *value;
 }
 
+bool bool_value(const ast::Expr &expr, const std::string &name) {
+  for (const ast::BoolField &field : expr.bool_fields) {
+    if (field.name == name) {
+      return field.value;
+    }
+  }
+  return false;
+}
+
 const ast::Expr *node_field(const ast::Expr &expr, const std::string &name) {
   for (const ast::NodeField &field : expr.node_fields) {
     if (field.name == name) {
@@ -472,6 +481,8 @@ private:
     descriptor.scope_index = function_scope;
     descriptor.owner = graph_.scopes[function_scope].owner;
     descriptor.return_type_expr = string_value(signature, "return_type_expr");
+    descriptor.effect_row_expr = string_value(signature, "effect_row_expr");
+    descriptor.has_effect_row = bool_value(signature, "has_effect_row");
     descriptor.span = signature.span;
 
     std::map<std::string, std::size_t> param_positions;
@@ -1208,6 +1219,10 @@ std::string bind_graph_to_json(const BindGraph &graph,
     if (!signature.return_type_expr.empty()) {
       out << ",\"return_type_expr\":\""
           << json_escape(signature.return_type_expr) << "\"";
+    }
+    if (signature.has_effect_row) {
+      out << ",\"effect_row_expr\":\"" << json_escape(signature.effect_row_expr)
+          << "\"";
     }
     out << ",\"params\":[";
     for (std::size_t param_i = 0; param_i < signature.params.size();

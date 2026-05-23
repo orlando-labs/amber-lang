@@ -2,6 +2,7 @@
 
 #include "bytecode/format.h"
 #include "package/package.h"
+#include "profile/capabilities.h"
 
 #include <chrono>
 #include <cstddef>
@@ -890,6 +891,11 @@ struct RuntimePackageAttrMirror {
   std::string value;
 };
 
+using RuntimeCapabilityGrant = capability::CapabilityRequest;
+using RuntimeCapabilityResolution = capability::CapabilityResolutionResult;
+using RuntimeEffectSummary = effect::EffectSummary;
+using RuntimeEffectValidation = effect::EffectValidationResult;
+
 struct RuntimePackageMirror {
   bool read_only = true;
   std::string name;
@@ -902,6 +908,8 @@ struct RuntimePackageMirror {
   std::vector<RuntimePackageDependencyMirror> dependencies;
   std::vector<RuntimePackageExportMirror> exports;
   std::vector<RuntimePackageAttrMirror> attrs;
+  std::vector<RuntimeCapabilityGrant> capabilities;
+  std::vector<RuntimeEffectSummary> effects;
 };
 
 struct RuntimeOwnerMirror {
@@ -949,6 +957,27 @@ struct RuntimePackageReloadResult {
   std::vector<RuntimePackageReloadDiagnostic> diagnostics;
 };
 
+struct RuntimeCapabilityCheckResult {
+  bool ok = false;
+  std::string error_name;
+  std::string message;
+  std::string capability;
+  std::string target;
+};
+
+struct RuntimeEffectCheckResult {
+  bool ok = false;
+  std::string error_name;
+  std::string message;
+  std::vector<std::string> effects;
+};
+
+struct RuntimeWorldOptions {
+  std::vector<RuntimeCapabilityGrant> capability_grants;
+  std::vector<std::string> allowed_effects;
+  bool enforce_effects = false;
+};
+
 struct TraceFrame {
   std::uint32_t code_id = 0;
   std::uint32_t pc = 0;
@@ -982,7 +1011,10 @@ struct ExecutionResult {
 class RuntimeWorld {
 public:
   explicit RuntimeWorld(const bytecode::BcModule &module);
+  RuntimeWorld(const bytecode::BcModule &module, RuntimeWorldOptions options);
   explicit RuntimeWorld(const pkg::PackageArtifact &artifact);
+  RuntimeWorld(const pkg::PackageArtifact &artifact,
+               RuntimeWorldOptions options);
   ~RuntimeWorld();
 
   ExecutionResult execute(std::uint32_t code_id,
@@ -1002,6 +1034,13 @@ public:
   ExecutionResult freeze_world();
   RuntimePackageReloadResult
   reload_package_artifact(const pkg::PackageArtifact &artifact);
+  RuntimeCapabilityCheckResult
+  check_capability(const std::string &capability,
+                   const std::string &target = {}) const;
+  RuntimeCapabilityResolution capability_resolution() const;
+  RuntimeEffectCheckResult
+  check_effects(const std::vector<std::string> &effects) const;
+  RuntimeEffectValidation effect_validation() const;
 
   std::uint64_t world_epoch() const;
   RuntimeWorldState world_state() const;

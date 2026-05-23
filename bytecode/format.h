@@ -1,6 +1,8 @@
 #pragma once
 
 #include "frontend/lexer/token.h"
+#include "profile/capabilities.h"
+#include "profile/effects.h"
 
 #include <array>
 #include <cstdint>
@@ -29,6 +31,8 @@ enum class SectionKind {
   Line,
   Locs,
   Attr,
+  Caps,
+  Efct,
   Hash
 };
 
@@ -306,6 +310,8 @@ struct BcModule {
   std::vector<LineEntry> line_table;
   std::vector<LocalDebugEntry> local_debug;
   std::vector<AttrEntry> attrs;
+  std::vector<capability::CapabilityRequest> capabilities;
+  std::vector<effect::EffectSummary> effects;
   std::vector<HashEntry> hashes;
 };
 

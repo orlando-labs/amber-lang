@@ -44,6 +44,12 @@ sections:
   - tag: ATTR
     required: false
     meaning: compiler/build attributes
+  - tag: CAPS
+    required: false
+    meaning: capability profile requests metadata
+  - tag: EFCT
+    required: false
+    meaning: effect summaries per callable/site
   - tag: HASH
     required: false
     meaning: section digests

@@ -179,7 +179,7 @@ LexResult Lexer::lex() {
         advance();
         emit(TokenKind::BangEqual, start, "!=");
       } else {
-        error(start, "unexpected '!'; Amber uses 'not' for boolean negation");
+        emit(TokenKind::Bang, start, "!");
       }
       break;
     case '<':

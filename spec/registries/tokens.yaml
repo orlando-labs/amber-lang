@@ -27,6 +27,7 @@ tokens:
     - RBRACE
     - PIPE
     - CARET
+    - BANG
   operators:
     - PLUS
     - MINUS

@@ -20,27 +20,28 @@ HIR_SRCS := frontend/hir/hir.cpp
 MIR_SRCS := optimizer/mir.cpp
 NATIVE_SRCS := optimizer/native.cpp
 FROZEN_SRCS := frozen/image.cpp
+PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 RUNTIME_SRCS := runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(CHECKER_SRCS) $(HIR_SRCS)
-CORE_SRCS := $(FRONTEND_SRCS) $(MIR_SRCS) $(NATIVE_SRCS) $(BYTECODE_SRCS)
+CORE_SRCS := $(PROFILE_SRCS) $(FRONTEND_SRCS) $(MIR_SRCS) $(NATIVE_SRCS) $(BYTECODE_SRCS)
 AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS) $(PACKAGE_SRCS) $(FROZEN_SRCS)
 AMBERTEST_SRCS := tools/ambertest/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
 LEXER_TEST_SRCS := tests/lexer_tests.cpp $(LEXER_SRCS)
-PARSER_TEST_SRCS := tests/parser_tests.cpp $(FRONTEND_SRCS)
-BINDER_TEST_SRCS := tests/binder_tests.cpp $(FRONTEND_SRCS)
-CHECKER_TEST_SRCS := tests/checker_tests.cpp $(FRONTEND_SRCS)
-HIR_TEST_SRCS := tests/hir_tests.cpp $(FRONTEND_SRCS)
-MIR_TEST_SRCS := tests/mir_tests.cpp $(FRONTEND_SRCS) $(MIR_SRCS)
+PARSER_TEST_SRCS := tests/parser_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
+BINDER_TEST_SRCS := tests/binder_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
+CHECKER_TEST_SRCS := tests/checker_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
+HIR_TEST_SRCS := tests/hir_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
+MIR_TEST_SRCS := tests/mir_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS) $(MIR_SRCS)
 NATIVE_TEST_SRCS := tests/native_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 FROZEN_IMAGE_TEST_SRCS := tests/frozen_image_tests.cpp $(CORE_SRCS) $(PACKAGE_SRCS) $(FROZEN_SRCS) $(RUNTIME_SRCS) $(FROZEN_RUNTIME_SRCS)
-BYTECODE_TEST_SRCS := tests/bytecode_tests.cpp $(BYTECODE_SRCS) $(LEXER_SRCS) $(AST_SRCS)
+BYTECODE_TEST_SRCS := tests/bytecode_tests.cpp $(PROFILE_SRCS) $(BYTECODE_SRCS) $(LEXER_SRCS) $(AST_SRCS)
 EMITTER_TEST_SRCS := tests/emitter_tests.cpp $(CORE_SRCS)
 VM_TEST_SRCS := tests/vm_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
-MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
-PACKAGE_TEST_SRCS := tests/package_tests.cpp $(PACKAGE_SRCS) $(LEXER_SRCS)
+MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
+PACKAGE_TEST_SRCS := tests/package_tests.cpp $(PROFILE_SRCS) $(PACKAGE_SRCS) $(LEXER_SRCS)
 
 FORMAT_FILES := \
 	frontend/lexer/lexer.cpp \
@@ -63,6 +64,10 @@ FORMAT_FILES := \
 	optimizer/mir.h \
 	optimizer/native.cpp \
 	optimizer/native.h \
+	profile/capabilities.cpp \
+	profile/capabilities.h \
+	profile/effects.cpp \
+	profile/effects.h \
 	frozen/image.cpp \
 	frozen/image.h \
 	bytecode/format.cpp \

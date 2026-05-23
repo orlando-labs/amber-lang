@@ -76,6 +76,7 @@ private:
   std::unique_ptr<ast::Expr> parse_param();
   std::string parse_type_term_text_until_param_boundary();
   std::string parse_type_term_text_until_return_boundary();
+  std::string parse_effect_row_text();
   ClauseBody parse_clause_body();
   std::unique_ptr<ast::Expr> parse_clause();
   std::unique_ptr<ast::Expr> parse_if_expr();

@@ -37,5 +37,7 @@
   "line_table": [{"code_id":1,"pc":0,"line":1},{"code_id":1,"pc":1,"line":1},{"code_id":1,"pc":2,"line":1},{"code_id":2,"pc":0,"line":7},{"code_id":2,"pc":1,"line":7},{"code_id":2,"pc":2,"line":6},{"code_id":2,"pc":3,"line":6},{"code_id":2,"pc":4,"line":6},{"code_id":3,"pc":0,"line":10},{"code_id":3,"pc":1,"line":10},{"code_id":3,"pc":2,"line":10},{"code_id":3,"pc":3,"line":11},{"code_id":3,"pc":4,"line":10},{"code_id":3,"pc":5,"line":13},{"code_id":3,"pc":6,"line":13},{"code_id":3,"pc":7,"line":10},{"code_id":3,"pc":8,"line":10},{"code_id":3,"pc":9,"line":9},{"code_id":3,"pc":10,"line":9},{"code_id":3,"pc":11,"line":9}],
   "local_debug": [{"code_id":1,"slot":0,"name_str_id":0,"start_pc":0,"end_pc":3},{"code_id":2,"slot":0,"name_str_id":3,"start_pc":0,"end_pc":5},{"code_id":2,"slot":1,"name_str_id":5,"start_pc":0,"end_pc":5},{"code_id":3,"slot":0,"name_str_id":3,"start_pc":0,"end_pc":12}],
   "attrs": [],
+  "capabilities": [],
+  "effects": [],
   "hashes": []
 }

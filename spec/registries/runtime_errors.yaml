@@ -1,5 +1,5 @@
 schema: amber.runtime_errors.registry.v1
-spec_anchor: amber_spec_consolidated_v19_1.md
+spec_anchor: amber_spec_consolidated_v20_1.md
 errors:
   - MatchError
   - TypeError
@@ -20,3 +20,5 @@ errors:
   - DeadlockError
   - MoveError
   - MovedValueError
+  - CapabilityError
+  - EffectViolationError

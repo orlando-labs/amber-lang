@@ -23,6 +23,7 @@ build/amberc parse corpus/parse/module/basic/source.am
 build/amberc parse-expr corpus/parse/expr/postfix/source.am
 build/amberc bind corpus/bind/module/basic/source.am
 build/amberc hir corpus/hir/module/basic/source.am
+build/amberc effects-check /path/to/source.am
 build/amberc mir corpus/hir/module/basic/source.am
 build/amberc mir-dump corpus/hir/module/basic/source.am
 build/amberc mir-verify corpus/hir/module/basic/source.am
@@ -73,6 +74,8 @@ Current matrix status:
 | `W10.3` | done | `amber.mir.v1` optimizer IR with HIR-to-MIR lowering, SSA value/block validation, deterministic JSON/text dumps, `mir`/`mir-dump`/`mir-verify` CLI, and pass harness phase/invalidation checks |
 | `W10.4` | done | `amber.native.v1` native/JIT metadata backend over MIR+bytecode with frozen-world assumptions, runtime call stubs, JIT patchpoint descriptors, root/exception/safepoint maps, `native`/`native-dump`/`native-verify` CLI, and frozen runtime trampoline execution with stale-assumption bytecode fallback |
 | `W10.5` | done | `amber.image.v1` frozen image builder with reproducible `.amberimg` artifacts over signed `.amberpkg` payloads, embedded native metadata summaries, freeze-analysis verification, `image-build`/`image-inspect`/`image-verify` CLI, and runtime load that installs the frozen-world/reload barrier |
+| `W11.1` | done | `amber.capabilities.v1` manifest/profile baseline with `[capabilities]` parsing, canonical capability taxonomy and alias normalization, `CAPS` bytecode metadata, package/image propagation, host grant resolution, `CapabilityError` runtime checks, and `capabilities-check` CLI |
+| `W11.2` | done | `amber.effects.v1` callable effect rows with `!{...}` parser/binder/HIR preservation, typed/effects summaries and subset diagnostics, `EFCT` bytecode metadata, package/image/reload propagation, `EffectViolationError` runtime checks, and `effects-check` CLI |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -118,6 +121,12 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   `amberc image-verify <file.amberimg>` for `amber.image.v1` W10.5 frozen
   images that embed reproducible package bytes, native metadata summaries,
   freeze-analysis records, and package signature verification hooks;
+- `amberc capabilities-check <amber.toml> [--grant <cap[=target]>...]` for
+  `amber.capabilities.v1` W11.1 manifest preflight, host grant intersection,
+  denied-capability JSON diagnostics, and path-scoped capability checks;
+- `amberc effects-check <file>` for `amber.effects.v1` W11.2 callable effect
+  summaries, pure-boundary validation, and deterministic `FX0001`/`FX0003`
+  diagnostics;
 - binder diagnostics for exports/import writes/duplicates, wildcard misuse,
   placeholder misuse, structural pattern validation including bare matcher
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,
@@ -148,6 +157,14 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   bytecode/native verification, explicit freeze-analysis records, runtime
   `RuntimeWorld` load with an immediate freeze barrier, native binding to the
   frozen world mirror, and package hot-reload rejection after image load;
+- `profile/capabilities`, `.amberbc` `CAPS`, and `runtime/vm` W11.1
+  capability baseline with deny-by-default manifest requests, host-grant
+  resolution, prefix-scoped resource targets, package/image propagation, and
+  `CapabilityError` runtime preflight for host operations;
+- `profile/effects`, callable `!{...}` rows, `.amberbc` `EFCT`, and
+  `runtime/vm` W11.2 effects baseline with declared/observed row validation,
+  HIR/checker summaries, package/image/reload propagation, and host-enforced
+  `EffectViolationError` checks;
 - `runtime/vm` W8.3 collections contract with closure-block execution for eager sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, deterministic `EmptyCollectionError` for empty `reduce` without init, and ordered `Map#keys/#values/#entries/#map/#select/#reject/#transform_values/#each`;
 - `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
 - `package/package` W9.4 package tooling with restricted `amber.toml` parsing,

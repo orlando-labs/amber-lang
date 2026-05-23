@@ -3,6 +3,7 @@
 #include "frontend/ast/expr.h"
 #include "frontend/binder/binder.h"
 #include "frontend/lexer/token.h"
+#include "profile/effects.h"
 
 #include <memory>
 #include <string>
@@ -39,12 +40,17 @@ struct CallableBoundary {
   bool exported = false;
   std::string return_type;
   std::string observed_return_type;
+  bool has_effect_row = false;
+  std::vector<std::string> declared_effects;
+  std::vector<std::string> observed_effects;
   std::vector<ParamBoundary> params;
   std::vector<std::string> type_hooks;
+  std::vector<std::string> effect_hooks;
 };
 
 struct CheckResult {
   std::vector<CallableBoundary> boundaries;
+  std::vector<effect::EffectSummary> effect_summaries;
   std::vector<lexer::Diagnostic> diagnostics;
 
   bool ok() const { return diagnostics.empty(); }
@@ -60,5 +66,7 @@ CheckResult check_module(const std::vector<std::unique_ptr<ast::Expr>> &items,
 
 std::string check_result_to_json(const CheckResult &result,
                                  const std::string &module_name);
+std::string effects_result_to_json(const CheckResult &result,
+                                   const std::string &module_name);
 
 } // namespace amber::checker

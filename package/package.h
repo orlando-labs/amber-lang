@@ -1,5 +1,7 @@
 #pragma once
 
+#include "profile/capabilities.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -30,6 +32,7 @@ struct PackageManifest {
   std::string root_module;
   std::vector<PackageModule> modules;
   std::vector<PackageDependency> dependencies;
+  std::vector<capability::CapabilityRequest> capabilities;
 };
 
 struct PackageManifestResult {

@@ -731,6 +731,10 @@ private:
       if (!signature->return_type_expr.empty()) {
         node->string_field("return_type_expr", signature->return_type_expr);
       }
+      if (signature->has_effect_row) {
+        node->bool_field("has_effect_row", true);
+        node->string_field("effect_row_expr", signature->effect_row_expr);
+      }
       for (const binder::ParamDescriptor &param : signature->params) {
         auto param_node = make_node("HParam", param.span);
         param_node->string_field("external_name", param.external_name);

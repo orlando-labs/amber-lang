@@ -96,6 +96,19 @@ lexer::Diagnostic diagnostic(const std::string &code,
   return lexer::Diagnostic{code, "error", "typed", message, span};
 }
 
+lexer::Diagnostic effect_diagnostic(const std::string &code,
+                                    const std::string &message,
+                                    const lexer::Span &span) {
+  return lexer::Diagnostic{code, "error", "effects", message, span};
+}
+
+std::string lower_ascii(std::string value) {
+  std::transform(
+      value.begin(), value.end(), value.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return value;
+}
+
 TypeTerm named_type(const std::string &name) {
   TypeTerm term;
   term.kind = "Named";
@@ -411,6 +424,12 @@ public:
     }
     for (const binder::Signature &signature : graph_.signatures) {
       signatures_by_owner_.emplace(signature.owner, &signature);
+      if (signature.has_effect_row) {
+        std::vector<std::string> effects;
+        effect::parse_effect_row(signature.effect_row_expr, &effects, nullptr,
+                                 signature.owner);
+        declared_effects_by_owner_[signature.owner] = std::move(effects);
+      }
     }
     for (const binder::Export &export_record : graph_.exports) {
       if (!export_record.resolved) {
@@ -430,6 +449,7 @@ public:
 
 private:
   using TypeEnv = std::map<std::string, TypeTerm>;
+  using EffectSet = std::set<std::string>;
 
   void visit_items(const std::vector<std::unique_ptr<ast::Expr>> &items) {
     for (const std::unique_ptr<ast::Expr> &item : items) {
@@ -516,8 +536,44 @@ private:
       }
     }
 
+    if (signature != nullptr && signature->has_effect_row) {
+      boundary.has_effect_row = true;
+      std::vector<effect::EffectDiagnostic> effect_diagnostics;
+      effect::parse_effect_row(signature->effect_row_expr,
+                               &boundary.declared_effects, &effect_diagnostics,
+                               owner);
+      for (const effect::EffectDiagnostic &diag : effect_diagnostics) {
+        result_.diagnostics.push_back(
+            effect_diagnostic("FX0001", diag.message, signature->span));
+      }
+      EffectSet observed;
+      collect_body_effects(body, observed);
+      boundary.observed_effects = effect::normalize_effects(
+          std::vector<std::string>(observed.begin(), observed.end()));
+      boundary.effect_hooks.push_back(
+          "declared:" + owner + ":" +
+          effect::effect_row_to_text(boundary.declared_effects));
+      boundary.effect_hooks.push_back(
+          "observed:" + owner + ":" +
+          effect::effect_row_to_text(boundary.observed_effects));
+      result_.effect_summaries.push_back(
+          effect::make_effect_summary(owner, kind, boundary.declared_effects,
+                                      boundary.observed_effects, true));
+      if (!effect::effects_subset_of(boundary.observed_effects,
+                                     boundary.declared_effects)) {
+        result_.diagnostics.push_back(effect_diagnostic(
+            "FX0003",
+            "observed effects " +
+                effect::effect_row_to_text(boundary.observed_effects) +
+                " exceed declared row " +
+                effect::effect_row_to_text(boundary.declared_effects),
+            item.span));
+      }
+    }
+
     const bool has_boundary = exported || !boundary.return_type.empty() ||
-                              !boundary.type_hooks.empty();
+                              !boundary.type_hooks.empty() ||
+                              boundary.has_effect_row;
     if (has_boundary) {
       result_.boundaries.push_back(std::move(boundary));
     }
@@ -737,6 +793,146 @@ private:
     return false;
   }
 
+  void collect_body_effects(const ast::ListField *body, EffectSet &effects) {
+    if (body == nullptr) {
+      return;
+    }
+    for (const std::unique_ptr<ast::Expr> &stmt : body->values) {
+      if (stmt != nullptr) {
+        collect_expr_effects(*stmt, effects);
+      }
+    }
+  }
+
+  void collect_list_effects(const ast::ListField &list, EffectSet &effects) {
+    for (const std::unique_ptr<ast::Expr> &item : list.values) {
+      if (item != nullptr) {
+        collect_expr_effects(*item, effects);
+      }
+    }
+  }
+
+  std::string host_effect_for_name(const std::string &name) const {
+    const std::string lower = lower_ascii(name);
+    if (lower == "file" || lower == "fs" || lower == "filesystem") {
+      return "fs";
+    }
+    if (lower == "http" || lower == "net" || lower == "socket") {
+      return "net";
+    }
+    if (lower == "env" || lower == "environment") {
+      return "env";
+    }
+    if (lower == "clock" || lower == "time") {
+      return "time";
+    }
+    if (lower == "random" || lower == "rng") {
+      return "random";
+    }
+    if (lower == "ffi" || lower == "native") {
+      return "ffi";
+    }
+    if (lower == "db" || lower == "database") {
+      return "db";
+    }
+    if (lower == "gpu" || lower == "accelerator") {
+      return "gpu";
+    }
+    if (lower == "trace" || lower == "telemetry") {
+      return "trace";
+    }
+    if (lower == "workflow") {
+      return "workflow";
+    }
+    if (lower == "task" || lower == "await" || lower == "awaitable" ||
+        lower == "spawn_task") {
+      return "async";
+    }
+    if (lower == "strand" || lower == "channel" || lower == "mutex" ||
+        lower == "atomic") {
+      return "strand";
+    }
+    return "";
+  }
+
+  void collect_postfix_effects(const ast::Expr &expr, EffectSet &effects) {
+    const ast::Expr *base = node_field(expr, "base");
+    const ast::ListField *tails = list_field(expr, "tails");
+    if (base == nullptr || tails == nullptr) {
+      return;
+    }
+    std::string base_name;
+    if (base->kind == "AstName") {
+      base_name = string_field(*base, "name");
+    }
+    std::string first_member;
+    bool has_call = false;
+    for (const std::unique_ptr<ast::Expr> &tail : tails->values) {
+      if (tail == nullptr) {
+        continue;
+      }
+      if ((tail->kind == "AstTailDotMember" ||
+           tail->kind == "AstTailSafeMember") &&
+          first_member.empty()) {
+        first_member = string_field(*tail, "name");
+      }
+      if (tail->kind == "AstTailCall" || tail->kind == "AstTailSafeCall") {
+        has_call = true;
+      }
+    }
+    if (!has_call) {
+      return;
+    }
+    const auto declared = declared_effects_by_owner_.find(base_name);
+    if (declared != declared_effects_by_owner_.end()) {
+      effects.insert(declared->second.begin(), declared->second.end());
+    }
+    const std::string base_effect = host_effect_for_name(base_name);
+    if (!base_effect.empty()) {
+      effects.insert(base_effect);
+    }
+    const std::string member_effect = host_effect_for_name(first_member);
+    if (!member_effect.empty()) {
+      effects.insert(member_effect);
+    }
+    if (base_name == "send") {
+      effects.insert("reflect");
+      bool literal_selector = false;
+      for (const std::unique_ptr<ast::Expr> &tail : tails->values) {
+        if (tail == nullptr || tail->kind != "AstTailCall") {
+          continue;
+        }
+        const ast::ListField *args = list_field(*tail, "args");
+        if (args != nullptr && args->values.size() >= 2U &&
+            args->values[1] != nullptr &&
+            args->values[1]->kind == "AstLiteral" &&
+            string_field(*args->values[1], "token") == "STRING") {
+          literal_selector = true;
+        }
+      }
+      if (!literal_selector) {
+        effects.insert("unsafe");
+      }
+    }
+  }
+
+  void collect_expr_effects(const ast::Expr &expr, EffectSet &effects) {
+    if (expr.kind == "AstAssign" || expr.kind == "AstPatternAssign") {
+      effects.insert("mut");
+    } else if (expr.kind == "AstPostfixChain") {
+      collect_postfix_effects(expr, effects);
+    }
+
+    for (const ast::NodeField &field : expr.node_fields) {
+      if (field.value != nullptr) {
+        collect_expr_effects(*field.value, effects);
+      }
+    }
+    for (const ast::ListField &field : expr.list_fields) {
+      collect_list_effects(field, effects);
+    }
+  }
+
   void append_diagnostics(const std::vector<lexer::Diagnostic> &diagnostics) {
     result_.diagnostics.insert(result_.diagnostics.end(), diagnostics.begin(),
                                diagnostics.end());
@@ -752,6 +948,7 @@ private:
   const binder::BindGraph &graph_;
   std::map<std::string, const binder::Binding *> bindings_by_id_;
   std::multimap<std::string, const binder::Signature *> signatures_by_owner_;
+  std::map<std::string, std::vector<std::string>> declared_effects_by_owner_;
   std::set<std::string> exported_names_;
   CheckResult result_;
 };
@@ -871,7 +1068,23 @@ std::string check_result_to_json(const CheckResult &result,
       }
       out << "\"" << json_escape(boundary.type_hooks[hook_i]) << "\"";
     }
-    out << "]}";
+    out << "]";
+    if (boundary.has_effect_row) {
+      out << ",\"effect_row\":\""
+          << json_escape(effect::effect_row_to_text(boundary.declared_effects))
+          << "\",\"observed_effects\":\""
+          << json_escape(effect::effect_row_to_text(boundary.observed_effects))
+          << "\",\"effect_hooks\":[";
+      for (std::size_t hook_i = 0; hook_i < boundary.effect_hooks.size();
+           ++hook_i) {
+        if (hook_i != 0U) {
+          out << ", ";
+        }
+        out << "\"" << json_escape(boundary.effect_hooks[hook_i]) << "\"";
+      }
+      out << "]";
+    }
+    out << "}";
     if (i + 1U < result.boundaries.size()) {
       out << ",";
     }
@@ -879,6 +1092,59 @@ std::string check_result_to_json(const CheckResult &result,
   }
   out << "  ],\n";
   out << "  \"diagnostic_count\": " << result.diagnostics.size() << "\n";
+  out << "}\n";
+  return out.str();
+}
+
+std::string effects_result_to_json(const CheckResult &result,
+                                   const std::string &module_name) {
+  bool effects_ok = true;
+  for (const lexer::Diagnostic &diagnostic : result.diagnostics) {
+    if (diagnostic.phase == "effects") {
+      effects_ok = false;
+      break;
+    }
+  }
+
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"schema\": \"amber.effects.v1\",\n";
+  out << "  \"status\": \"" << (effects_ok ? "ok" : "error") << "\",\n";
+  out << "  \"module\": \"" << json_escape(module_name) << "\",\n";
+  out << "  \"summaries\": [";
+  for (std::size_t i = 0; i < result.effect_summaries.size(); ++i) {
+    const effect::EffectSummary &summary = result.effect_summaries[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "\n    {\"owner\":\"" << json_escape(summary.owner)
+        << "\",\"kind\":\"" << json_escape(summary.kind) << "\",\"declared\":\""
+        << json_escape(effect::effect_row_to_text(summary.declared_effects))
+        << "\",\"observed\":\""
+        << json_escape(effect::effect_row_to_text(summary.observed_effects))
+        << "\",\"flags\":" << summary.flags << "}";
+  }
+  out << "\n  ],\n";
+  out << "  \"diagnostics\": [";
+  bool first = true;
+  std::size_t diagnostic_count = 0;
+  for (const lexer::Diagnostic &diagnostic : result.diagnostics) {
+    if (diagnostic.phase != "effects") {
+      continue;
+    }
+    ++diagnostic_count;
+    if (!first) {
+      out << ",";
+    }
+    first = false;
+    out << "\n    {\"code\":\"" << json_escape(diagnostic.code)
+        << "\",\"message\":\"" << json_escape(diagnostic.message)
+        << "\",\"span\":{\"file\":\"" << json_escape(diagnostic.span.file)
+        << "\",\"line\":" << diagnostic.span.start.line
+        << ",\"col\":" << diagnostic.span.start.col << "}}";
+  }
+  out << "\n  ],\n";
+  out << "  \"diagnostic_count\": " << diagnostic_count << "\n";
   out << "}\n";
   return out.str();
 }

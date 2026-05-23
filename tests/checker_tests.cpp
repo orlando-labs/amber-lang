@@ -137,6 +137,28 @@ void test_case_bang_exhaustiveness() {
   expect(has_diagnostic(result, "T0006"), "non-exhaustive case diagnostic");
 }
 
+void test_effect_rows_and_call_validation() {
+  amber::checker::CheckResult result =
+      check_source("def clocky() -> Int !{time}:\n"
+                   "  clock.now()\n"
+                   "def caller() -> Int !{time}:\n"
+                   "  clocky()\n");
+  expect(result.ok(), "matching effect rows should pass");
+  expect(result.effect_summaries.size() == 2, "effect summaries recorded");
+  expect(result.effect_summaries[0].declared_effects.size() == 1,
+         "declared effects canonicalized");
+
+  result = check_source("def bad() -> Int !{}:\n"
+                        "  clock.now()\n");
+  expect(!result.ok(), "pure effect row should reject clock access");
+  expect(has_diagnostic(result, "FX0003"), "effect mismatch diagnostic");
+
+  result = check_source("def mutate(x as Int) -> Int !{}:\n"
+                        "  y = x\n");
+  expect(!result.ok(), "pure effect row should reject mutation");
+  expect(has_diagnostic(result, "FX0003"), "mutation effect diagnostic");
+}
+
 } // namespace
 
 int main() {
@@ -145,5 +167,6 @@ int main() {
   test_missing_export_annotations();
   test_boundary_mismatches();
   test_case_bang_exhaustiveness();
+  test_effect_rows_and_call_validation();
   return 0;
 }

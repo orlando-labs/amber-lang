@@ -136,6 +136,15 @@ void test_pattern_punctuation() {
                 TokenKind::Question, TokenKind::Newline, TokenKind::Eof});
 }
 
+void test_effect_row_punctuation() {
+  expect_kinds("effect row punctuation", "def f() -> Int !{time, fs}:\n",
+               {TokenKind::KeywordDef, TokenKind::Identifier, TokenKind::LParen,
+                TokenKind::RParen, TokenKind::Arrow, TokenKind::Identifier,
+                TokenKind::Bang, TokenKind::LBrace, TokenKind::Identifier,
+                TokenKind::Comma, TokenKind::Identifier, TokenKind::RBrace,
+                TokenKind::Colon, TokenKind::Newline, TokenKind::Eof});
+}
+
 void test_unicode_identifier_forms() {
   expect_kinds("unicode identifiers",
                "масса = α + β2\n"
@@ -159,6 +168,7 @@ int main() {
   test_identifier_forms();
   test_contextual_keywords_remain_identifiers();
   test_pattern_punctuation();
+  test_effect_row_punctuation();
   test_unicode_identifier_forms();
   std::cout << "lexer_tests: ok\n";
   return 0;

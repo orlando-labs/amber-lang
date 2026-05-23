@@ -8693,30 +8693,53 @@ ExecutionResult execute_code(const bytecode::BcModule &module,
 
 struct RuntimeWorld::Impl {
   explicit Impl(const bytecode::BcModule &module_ref)
-      : Impl(bytecode::BcModule(module_ref), std::nullopt) {}
+      : Impl(bytecode::BcModule(module_ref), std::nullopt,
+             RuntimeWorldOptions{}) {}
 
   Impl(bytecode::BcModule module_value,
-       std::optional<RuntimePackageImage> package_image)
+       std::optional<RuntimePackageImage> package_image,
+       RuntimeWorldOptions world_options = {})
       : owned_module(
             std::make_shared<bytecode::BcModule>(std::move(module_value))),
         module(owned_module.get()), state(std::make_shared<RuntimeState>()),
-        package(std::move(package_image)) {
+        package(std::move(package_image)), options(std::move(world_options)) {
     state->initialize_for_module(*module);
+    capabilities = capability::resolve_capabilities(module->capabilities,
+                                                    options.capability_grants);
+    effects = effect::validate_effect_summaries(
+        module->effects, options.allowed_effects, options.enforce_effects);
   }
 
   std::shared_ptr<bytecode::BcModule> owned_module;
   const bytecode::BcModule *module = nullptr;
   std::shared_ptr<RuntimeState> state;
   std::optional<RuntimePackageImage> package;
+  RuntimeWorldOptions options;
+  RuntimeCapabilityResolution capabilities;
+  RuntimeEffectValidation effects;
 };
 
 RuntimeWorld::RuntimeWorld(const bytecode::BcModule &module)
     : impl_(std::make_shared<Impl>(module)) {}
 
+RuntimeWorld::RuntimeWorld(const bytecode::BcModule &module,
+                           RuntimeWorldOptions options)
+    : impl_(std::make_shared<Impl>(bytecode::BcModule(module), std::nullopt,
+                                   std::move(options))) {}
+
 RuntimeWorld::RuntimeWorld(const pkg::PackageArtifact &artifact) {
   std::optional<RuntimePackageImage> image;
   bytecode::BcModule root = root_module_or_empty_for_package(artifact, &image);
-  impl_ = std::make_shared<Impl>(std::move(root), std::move(image));
+  impl_ = std::make_shared<Impl>(std::move(root), std::move(image),
+                                 RuntimeWorldOptions{});
+}
+
+RuntimeWorld::RuntimeWorld(const pkg::PackageArtifact &artifact,
+                           RuntimeWorldOptions options) {
+  std::optional<RuntimePackageImage> image;
+  bytecode::BcModule root = root_module_or_empty_for_package(artifact, &image);
+  impl_ = std::make_shared<Impl>(std::move(root), std::move(image),
+                                 std::move(options));
 }
 
 RuntimeWorld::~RuntimeWorld() = default;
@@ -9364,6 +9387,25 @@ RuntimePackageMirror package_mirror_for(const bytecode::BcModule &module) {
               return left.value < right.value;
             });
 
+  mirror.capabilities = module.capabilities;
+  std::sort(mirror.capabilities.begin(), mirror.capabilities.end(),
+            [](const RuntimeCapabilityGrant &left,
+               const RuntimeCapabilityGrant &right) {
+              if (left.name != right.name) {
+                return left.name < right.name;
+              }
+              return left.target < right.target;
+            });
+  mirror.effects = module.effects;
+  std::sort(
+      mirror.effects.begin(), mirror.effects.end(),
+      [](const RuntimeEffectSummary &left, const RuntimeEffectSummary &right) {
+        if (left.owner != right.owner) {
+          return left.owner < right.owner;
+        }
+        return left.kind < right.kind;
+      });
+
   return mirror;
 }
 
@@ -9386,6 +9428,34 @@ std::string module_contract_signature(const bytecode::BcModule &module) {
       << "\nlanguage=" << version_signature(module.language_version)
       << "\nprofile=" << module.profile_flags << "\nfile=" << module.file_flags
       << "\nabi=" << bytes_hex_signature(module.abi_hash) << "\n";
+  std::vector<RuntimeCapabilityGrant> capabilities = module.capabilities;
+  std::sort(capabilities.begin(), capabilities.end(),
+            [](const RuntimeCapabilityGrant &left,
+               const RuntimeCapabilityGrant &right) {
+              if (left.name != right.name) {
+                return left.name < right.name;
+              }
+              return left.target < right.target;
+            });
+  for (const RuntimeCapabilityGrant &capability : capabilities) {
+    out << "capability=" << capability.name << "|" << capability.target << "|"
+        << capability.flags << "\n";
+  }
+  std::vector<RuntimeEffectSummary> effects = module.effects;
+  std::sort(
+      effects.begin(), effects.end(),
+      [](const RuntimeEffectSummary &left, const RuntimeEffectSummary &right) {
+        if (left.owner != right.owner) {
+          return left.owner < right.owner;
+        }
+        return left.kind < right.kind;
+      });
+  for (const RuntimeEffectSummary &summary : effects) {
+    out << "effect=" << summary.owner << "|" << summary.kind << "|"
+        << effect::effect_row_to_text(summary.declared_effects) << "|"
+        << effect::effect_row_to_text(summary.observed_effects) << "|"
+        << summary.flags << "\n";
+  }
   return out.str();
 }
 
@@ -9537,6 +9607,10 @@ manifest_identity_signature(const pkg::PackageManifest &manifest) {
   for (const pkg::PackageDependency &dependency : manifest.dependencies) {
     out.push_back("dependency=" + dependency.name + "|" + dependency.version +
                   "|" + dependency.source + "|" + dependency.checksum);
+  }
+  for (const RuntimeCapabilityGrant &capability : manifest.capabilities) {
+    out.push_back("capability=" + capability.name + "|" + capability.target +
+                  "|" + std::to_string(capability.flags));
   }
   std::sort(out.begin(), out.end());
   return out;
@@ -9787,6 +9861,11 @@ RuntimeWorld::reload_package_artifact(const pkg::PackageArtifact &artifact) {
   impl_->owned_module = std::move(next_module);
   impl_->module = impl_->owned_module.get();
   impl_->package = std::move(decoded.image);
+  impl_->capabilities = capability::resolve_capabilities(
+      impl_->module->capabilities, impl_->options.capability_grants);
+  impl_->effects = effect::validate_effect_summaries(
+      impl_->module->effects, impl_->options.allowed_effects,
+      impl_->options.enforce_effects);
 
   result.ok = true;
   result.swapped = true;
@@ -9798,6 +9877,78 @@ RuntimeWorld::reload_package_artifact(const pkg::PackageArtifact &artifact) {
   result.root_module = impl_->package->manifest.root_module;
   result.new_world_epoch = impl_->state->world_epoch;
   return result;
+}
+
+RuntimeCapabilityCheckResult
+RuntimeWorld::check_capability(const std::string &capability_name,
+                               const std::string &target) const {
+  RuntimeCapabilityCheckResult result;
+  result.capability = capability_name;
+  result.target = target;
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  if (capability::capability_set_allows(impl_->capabilities.effective,
+                                        capability_name, target)) {
+    result.ok = true;
+    return result;
+  }
+  result.error_name = "CapabilityError";
+  result.message = "capability is not granted: " + capability_name;
+  if (!target.empty()) {
+    result.message += "=" + target;
+  }
+  return result;
+}
+
+RuntimeCapabilityResolution RuntimeWorld::capability_resolution() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->capabilities;
+}
+
+RuntimeEffectCheckResult
+RuntimeWorld::check_effects(const std::vector<std::string> &requested) const {
+  RuntimeEffectCheckResult result;
+  result.effects = effect::normalize_effects(
+      std::vector<std::string>(requested.begin(), requested.end()));
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    result.error_name = "VMError";
+    result.message = "runtime world is not bound";
+    return result;
+  }
+  if (!impl_->effects.ok && !impl_->effects.diagnostics.empty()) {
+    result.error_name = "EffectViolationError";
+    result.message = impl_->effects.diagnostics.front().message;
+    return result;
+  }
+  for (const std::string &label : result.effects) {
+    if (!effect::valid_effect_name(label)) {
+      result.error_name = "EffectViolationError";
+      result.message = "invalid effect label: " + label;
+      return result;
+    }
+  }
+  if (impl_->options.enforce_effects &&
+      !effect::effects_subset_of(result.effects,
+                                 impl_->options.allowed_effects)) {
+    result.error_name = "EffectViolationError";
+    result.message =
+        "effect is not allowed: " + effect::effect_row_to_text(result.effects);
+    return result;
+  }
+  result.ok = true;
+  return result;
+}
+
+RuntimeEffectValidation RuntimeWorld::effect_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->effects;
 }
 
 std::uint64_t RuntimeWorld::world_epoch() const {

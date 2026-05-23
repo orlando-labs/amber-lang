@@ -44,6 +44,7 @@ enum class TokenKind {
   RBrace,
   Pipe,
   Caret,
+  Bang,
   Question,
 
   Plus,

@@ -204,6 +204,38 @@ void test_clause_def_forms() {
          "guard expression preserved");
 }
 
+void test_effect_row_signature() {
+  const std::string source = "def fetch(id as UserId) -> User !{net, async}:\n"
+                             "  id\n"
+                             "def pure(id) !{}:\n"
+                             "  id\n";
+
+  amber::lexer::Lexer lexer(source, "<test>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    std::exit(1);
+  }
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult result = parser.parse_module_unit();
+  if (!result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
+    std::exit(1);
+  }
+
+  expect(result.items.size() == 2, "effect row item count");
+  const Expr &fetch_signature = node_field(*result.items[0], "signature");
+  expect(string_field(fetch_signature, "return_type_expr") == "User",
+         "return type stops before effect row");
+  expect(bool_field(fetch_signature, "has_effect_row"), "effect row flag");
+  expect(string_field(fetch_signature, "effect_row_expr") == "!{net, async}",
+         "effect row text preserved");
+  const Expr &pure_signature = node_field(*result.items[1], "signature");
+  expect(bool_field(pure_signature, "has_effect_row"), "pure effect row flag");
+  expect(string_field(pure_signature, "effect_row_expr") == "!{}",
+         "pure effect row preserved");
+}
+
 void test_pattern_assignment_and_block_param_patterns() {
   const std::string source = "def transform(xs):\n"
                              "  xs.map |[head, *tail], {scale: σ}|: head\n"
@@ -387,6 +419,7 @@ int main() {
   test_inline_block_chain_boundary();
   test_unicode_names();
   test_clause_def_forms();
+  test_effect_row_signature();
   test_pattern_assignment_and_block_param_patterns();
   test_module_forms();
   test_control_flow_forms();

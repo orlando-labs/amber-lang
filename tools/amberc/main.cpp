@@ -37,6 +37,7 @@ void usage(std::ostream &out) {
   out << "  amberc parse-expr <file>\n";
   out << "  amberc bind <file>\n";
   out << "  amberc typed <file>\n";
+  out << "  amberc effects-check <file>\n";
   out << "  amberc hir <file>\n";
   out << "  amberc mir <file>\n";
   out << "  amberc mir-dump <file>\n";
@@ -59,6 +60,8 @@ void usage(std::ostream &out) {
          "[--sign-key <key>]\n";
   out << "  amberc package-publish <file.amberpkg> <registry-dir> "
          "[--sign-key <key>]\n";
+  out << "  amberc capabilities-check <amber.toml> [--grant "
+         "<cap[=target]>...]\n";
   out << "  amberc image-build <amber.toml> <out.amberimg> "
          "[--sign-key <key>] [--key-id <id>]\n";
   out << "  amberc image-inspect <file.amberimg>\n";
@@ -133,14 +136,26 @@ std::string frozen_diagnostics_to_string(
   return out.str();
 }
 
+std::vector<amber::lexer::Diagnostic>
+effect_diagnostics_only(const amber::checker::CheckResult &result) {
+  std::vector<amber::lexer::Diagnostic> diagnostics;
+  for (const amber::lexer::Diagnostic &diagnostic : result.diagnostics) {
+    if (diagnostic.phase == "effects") {
+      diagnostics.push_back(diagnostic);
+    }
+  }
+  return diagnostics;
+}
+
 struct CompiledModuleArtifact {
   std::vector<std::uint8_t> bytes;
   amber::native::NativeModule native_module;
 };
 
-CompiledModuleArtifact
-compile_source_to_module_artifact(const std::string &path,
-                                  const std::string &expected_module_name) {
+CompiledModuleArtifact compile_source_to_module_artifact(
+    const std::string &path, const std::string &expected_module_name,
+    const std::vector<amber::capability::CapabilityRequest> &capabilities =
+        {}) {
   const std::string source = read_file(path);
   amber::lexer::LexResult lex_result = lex_source(source, path);
   if (!lex_result.ok()) {
@@ -167,6 +182,14 @@ compile_source_to_module_artifact(const std::string &path,
     throw std::runtime_error(
         amber::lexer::diagnostics_to_json(bind_result.diagnostics));
   }
+  amber::checker::CheckResult check_result = amber::checker::check_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  const std::vector<amber::lexer::Diagnostic> effect_diagnostics =
+      effect_diagnostics_only(check_result);
+  if (!effect_diagnostics.empty()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(effect_diagnostics));
+  }
 
   amber::hir::Program program = amber::hir::lower_module(
       parse_result.items, parse_result.module_name, bind_result.graph);
@@ -185,6 +208,8 @@ compile_source_to_module_artifact(const std::string &path,
     throw std::runtime_error(
         amber::lexer::diagnostics_to_json(emit_result.diagnostics));
   }
+  emit_result.module.capabilities = capabilities;
+  emit_result.module.effects = check_result.effect_summaries;
   const std::vector<std::uint8_t> bytes =
       amber::bytecode::serialize_module(emit_result.module);
   amber::bytecode::DecodeResult decode_result =
@@ -206,9 +231,10 @@ compile_source_to_module_artifact(const std::string &path,
   return {bytes, std::move(native_module)};
 }
 
-std::vector<std::uint8_t>
-compile_source_to_bytecode(const std::string &path,
-                           const std::string &expected_module_name) {
+std::vector<std::uint8_t> compile_source_to_bytecode(
+    const std::string &path, const std::string &expected_module_name,
+    const std::vector<amber::capability::CapabilityRequest> &capabilities =
+        {}) {
   const std::string source = read_file(path);
   amber::lexer::LexResult lex_result = lex_source(source, path);
   if (!lex_result.ok()) {
@@ -235,6 +261,14 @@ compile_source_to_bytecode(const std::string &path,
     throw std::runtime_error(
         amber::lexer::diagnostics_to_json(bind_result.diagnostics));
   }
+  amber::checker::CheckResult check_result = amber::checker::check_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  const std::vector<amber::lexer::Diagnostic> effect_diagnostics =
+      effect_diagnostics_only(check_result);
+  if (!effect_diagnostics.empty()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(effect_diagnostics));
+  }
 
   amber::hir::Program program = amber::hir::lower_module(
       parse_result.items, parse_result.module_name, bind_result.graph);
@@ -244,6 +278,8 @@ compile_source_to_bytecode(const std::string &path,
     throw std::runtime_error(
         amber::lexer::diagnostics_to_json(emit_result.diagnostics));
   }
+  emit_result.module.capabilities = capabilities;
+  emit_result.module.effects = check_result.effect_summaries;
   const std::vector<std::uint8_t> bytes =
       amber::bytecode::serialize_module(emit_result.module);
   amber::bytecode::DecodeResult decode_result =
@@ -323,7 +359,8 @@ int run_package_command(int argc, char **argv) {
       blob.name = module.name;
       blob.path = module.path;
       blob.bytes = compile_source_to_bytecode(join_path(root_dir, module.path),
-                                              module.name);
+                                              module.name,
+                                              manifest.manifest.capabilities);
       modules.push_back(std::move(blob));
     }
     const amber::pkg::PackageBuildResult built =
@@ -376,6 +413,45 @@ int run_package_command(int argc, char **argv) {
   return 2;
 }
 
+int run_capabilities_command(int argc, char **argv) {
+  if (argc < 3 || std::string(argv[1]) != "capabilities-check") {
+    usage(std::cerr);
+    return 2;
+  }
+  const std::string manifest_source = read_file(argv[2]);
+  const amber::pkg::PackageManifestResult manifest =
+      amber::pkg::parse_manifest_toml(manifest_source, argv[2]);
+  if (!manifest.ok()) {
+    std::cerr << package_diagnostics_to_string(manifest.diagnostics);
+    return 1;
+  }
+
+  std::vector<amber::capability::CapabilityRequest> grants;
+  std::vector<amber::capability::CapabilityDiagnostic> diagnostics;
+  for (int i = 3; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg != "--grant" || i + 1 >= argc) {
+      throw std::runtime_error("unknown capabilities option: " + arg);
+    }
+    amber::capability::CapabilityRequest grant;
+    amber::capability::CapabilityDiagnostic diagnostic;
+    if (!amber::capability::parse_cli_grant(argv[++i], &grant, &diagnostic)) {
+      diagnostics.push_back(std::move(diagnostic));
+      continue;
+    }
+    grants.push_back(std::move(grant));
+  }
+
+  amber::capability::CapabilityResolutionResult resolved =
+      amber::capability::resolve_capabilities(manifest.manifest.capabilities,
+                                              grants);
+  resolved.diagnostics.insert(resolved.diagnostics.begin(), diagnostics.begin(),
+                              diagnostics.end());
+  resolved.ok = resolved.ok && diagnostics.empty();
+  std::cout << amber::capability::resolution_to_json(resolved);
+  return resolved.ok ? 0 : 1;
+}
+
 int run_image_command(int argc, char **argv) {
   const std::string command = argv[1];
   if (command == "image-build" && argc >= 4) {
@@ -396,7 +472,8 @@ int run_image_command(int argc, char **argv) {
     const std::string root_dir = dirname(manifest_path);
     for (const amber::pkg::PackageModule &module : manifest.manifest.modules) {
       CompiledModuleArtifact compiled = compile_source_to_module_artifact(
-          join_path(root_dir, module.path), module.name);
+          join_path(root_dir, module.path), module.name,
+          manifest.manifest.capabilities);
       amber::pkg::PackageModuleBlob blob;
       blob.name = module.name;
       blob.path = module.path;
@@ -462,12 +539,16 @@ int main(int argc, char **argv) {
     if (argc >= 2 && std::string(argv[1]).find("package-") == 0U) {
       return run_package_command(argc, argv);
     }
+    if (argc >= 2 && std::string(argv[1]).find("capabilities-") == 0U) {
+      return run_capabilities_command(argc, argv);
+    }
     if (argc >= 2 && std::string(argv[1]).find("image-") == 0U) {
       return run_image_command(argc, argv);
     }
     if (argc != 3 ||
         (std::string(argv[1]) != "lex" && std::string(argv[1]) != "parse" &&
          std::string(argv[1]) != "bind" && std::string(argv[1]) != "typed" &&
+         std::string(argv[1]) != "effects-check" &&
          std::string(argv[1]) != "hir" && std::string(argv[1]) != "mir" &&
          std::string(argv[1]) != "mir-dump" &&
          std::string(argv[1]) != "mir-verify" && std::string(argv[1]) != "bc" &&
@@ -526,10 +607,11 @@ int main(int argc, char **argv) {
 
     amber::parser::Parser parser(lex_result.tokens);
     if (command == "parse" || command == "bind" || command == "typed" ||
-        command == "hir" || command == "mir" || command == "mir-dump" ||
-        command == "mir-verify" || command == "native" ||
-        command == "native-dump" || command == "native-verify" ||
-        command == "bc" || command == "bc-disasm") {
+        command == "effects-check" || command == "hir" || command == "mir" ||
+        command == "mir-dump" || command == "mir-verify" ||
+        command == "native" || command == "native-dump" ||
+        command == "native-verify" || command == "bc" ||
+        command == "bc-disasm") {
       amber::parser::ParseModuleResult parse_result =
           parser.parse_module_unit();
       if (!parse_result.ok()) {
@@ -537,11 +619,12 @@ int main(int argc, char **argv) {
             parse_result.diagnostics);
         return 1;
       }
-      if (command == "bind" || command == "typed" || command == "hir" ||
-          command == "mir" || command == "mir-dump" ||
-          command == "mir-verify" || command == "native" ||
-          command == "native-dump" || command == "native-verify" ||
-          command == "bc" || command == "bc-disasm") {
+      if (command == "bind" || command == "typed" ||
+          command == "effects-check" || command == "hir" || command == "mir" ||
+          command == "mir-dump" || command == "mir-verify" ||
+          command == "native" || command == "native-dump" ||
+          command == "native-verify" || command == "bc" ||
+          command == "bc-disasm") {
         amber::binder::BindResult bind_result = amber::binder::bind_module(
             parse_result.items, parse_result.module_name);
         if (!bind_result.diagnostics.empty()) {
@@ -570,6 +653,23 @@ int main(int argc, char **argv) {
           std::cout << amber::checker::check_result_to_json(
               check_result, parse_result.module_name);
           return 0;
+        }
+        if (command == "effects-check") {
+          amber::checker::CheckResult check_result =
+              amber::checker::check_module(parse_result.items,
+                                           parse_result.module_name,
+                                           bind_result.graph);
+          std::cout << amber::checker::effects_result_to_json(
+              check_result, parse_result.module_name);
+          return effect_diagnostics_only(check_result).empty() ? 0 : 1;
+        }
+        amber::checker::CheckResult check_result = amber::checker::check_module(
+            parse_result.items, parse_result.module_name, bind_result.graph);
+        const std::vector<amber::lexer::Diagnostic> effect_diagnostics =
+            effect_diagnostics_only(check_result);
+        if (!effect_diagnostics.empty()) {
+          std::cerr << amber::lexer::diagnostics_to_json(effect_diagnostics);
+          return 1;
         }
         amber::hir::Program program = amber::hir::lower_module(
             parse_result.items, parse_result.module_name, bind_result.graph);
@@ -605,6 +705,7 @@ int main(int argc, char **argv) {
                   emit_result.diagnostics);
               return 1;
             }
+            emit_result.module.effects = check_result.effect_summaries;
             const std::vector<std::uint8_t> bytes =
                 amber::bytecode::serialize_module(emit_result.module);
             amber::bytecode::DecodeResult decode_result =
@@ -650,6 +751,7 @@ int main(int argc, char **argv) {
                 emit_result.diagnostics);
             return 1;
           }
+          emit_result.module.effects = check_result.effect_summaries;
           const std::vector<std::uint8_t> bytes =
               amber::bytecode::serialize_module(emit_result.module);
           amber::bytecode::DecodeResult decode_result =

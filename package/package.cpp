@@ -105,6 +105,91 @@ bool unquote_toml_string(const std::string &raw, std::string *out) {
   return true;
 }
 
+bool parse_toml_bool(const std::string &raw, bool *out) {
+  const std::string value = trim(raw);
+  if (value == "true") {
+    *out = true;
+    return true;
+  }
+  if (value == "false") {
+    *out = false;
+    return true;
+  }
+  return false;
+}
+
+bool parse_toml_string_array(const std::string &raw,
+                             std::vector<std::string> *out) {
+  const std::string value = trim(raw);
+  if (value.size() < 2U || value.front() != '[' || value.back() != ']') {
+    return false;
+  }
+  std::vector<std::string> items;
+  std::string current;
+  bool in_string = false;
+  bool escaped = false;
+  bool expecting_item = true;
+  for (std::size_t i = 1; i + 1U < value.size(); ++i) {
+    const char c = value[i];
+    if (in_string) {
+      if (escaped) {
+        switch (c) {
+        case '"':
+        case '\\':
+          current.push_back(c);
+          break;
+        case 'n':
+          current.push_back('\n');
+          break;
+        case 'r':
+          current.push_back('\r');
+          break;
+        case 't':
+          current.push_back('\t');
+          break;
+        default:
+          return false;
+        }
+        escaped = false;
+        continue;
+      }
+      if (c == '\\') {
+        escaped = true;
+        continue;
+      }
+      if (c == '"') {
+        in_string = false;
+        items.push_back(current);
+        current.clear();
+        expecting_item = false;
+        continue;
+      }
+      current.push_back(c);
+      continue;
+    }
+    if (std::isspace(static_cast<unsigned char>(c)) != 0) {
+      continue;
+    }
+    if (c == ',') {
+      if (expecting_item) {
+        return false;
+      }
+      expecting_item = true;
+      continue;
+    }
+    if (c == '"' && expecting_item) {
+      in_string = true;
+      continue;
+    }
+    return false;
+  }
+  if (in_string || escaped || (expecting_item && !items.empty())) {
+    return false;
+  }
+  *out = std::move(items);
+  return true;
+}
+
 std::string json_escape(const std::string &value) {
   std::ostringstream out;
   for (const char c : value) {
@@ -260,6 +345,22 @@ sorted_module_blobs(std::vector<PackageModuleBlob> modules) {
   return modules;
 }
 
+std::vector<capability::CapabilityRequest>
+sorted_capabilities(std::vector<capability::CapabilityRequest> capabilities) {
+  std::sort(capabilities.begin(), capabilities.end(),
+            [](const capability::CapabilityRequest &left,
+               const capability::CapabilityRequest &right) {
+              if (left.name != right.name) {
+                return left.name < right.name;
+              }
+              if (left.target != right.target) {
+                return left.target < right.target;
+              }
+              return left.reason < right.reason;
+            });
+  return capabilities;
+}
+
 std::string canonical_manifest_text(const PackageManifest &manifest) {
   std::ostringstream out;
   out << "name=" << line_escape(manifest.name) << "\n";
@@ -281,6 +382,18 @@ std::string canonical_manifest_text(const PackageManifest &manifest) {
         << ".version=" << line_escape(dependencies[i].version) << "\n";
     out << "dependency." << i
         << ".source=" << line_escape(dependencies[i].source) << "\n";
+  }
+  const std::vector<capability::CapabilityRequest> capabilities =
+      sorted_capabilities(manifest.capabilities);
+  out << "capability.count=" << capabilities.size() << "\n";
+  for (std::size_t i = 0; i < capabilities.size(); ++i) {
+    out << "capability." << i << ".name=" << line_escape(capabilities[i].name)
+        << "\n";
+    out << "capability." << i
+        << ".target=" << line_escape(capabilities[i].target) << "\n";
+    out << "capability." << i
+        << ".reason=" << line_escape(capabilities[i].reason) << "\n";
+    out << "capability." << i << ".flags=" << capabilities[i].flags << "\n";
   }
   return out.str();
 }
@@ -322,6 +435,19 @@ std::string serialize_unsigned_package(const PackageArtifact &artifact) {
         << ".source=" << line_escape(dependencies[i].source) << "\n";
     out << "dependency." << i
         << ".checksum=" << line_escape(dependencies[i].checksum) << "\n";
+  }
+
+  const std::vector<capability::CapabilityRequest> capabilities =
+      sorted_capabilities(artifact.manifest.capabilities);
+  out << "capability.count=" << capabilities.size() << "\n";
+  for (std::size_t i = 0; i < capabilities.size(); ++i) {
+    out << "capability." << i << ".name=" << line_escape(capabilities[i].name)
+        << "\n";
+    out << "capability." << i
+        << ".target=" << line_escape(capabilities[i].target) << "\n";
+    out << "capability." << i
+        << ".reason=" << line_escape(capabilities[i].reason) << "\n";
+    out << "capability." << i << ".flags=" << capabilities[i].flags << "\n";
   }
 
   const std::vector<PackageModuleBlob> modules =
@@ -488,7 +614,7 @@ PackageRegistryResult registry_write(const std::string &serialized,
 
 PackageManifestResult parse_manifest_toml(const std::string &source,
                                           const std::string &path) {
-  enum class Section { None, Package, Modules, Dependencies };
+  enum class Section { None, Package, Modules, Dependencies, Capabilities };
 
   PackageManifestResult result;
   Section section = Section::None;
@@ -510,6 +636,11 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
     }
     if (line == "[dependencies]") {
       section = Section::Dependencies;
+      current_module = nullptr;
+      continue;
+    }
+    if (line == "[capabilities]") {
+      section = Section::Capabilities;
       current_module = nullptr;
       continue;
     }
@@ -575,6 +706,54 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
       dependency.version = value;
       dependency.source = "registry";
       result.manifest.dependencies.push_back(std::move(dependency));
+      break;
+    }
+    case Section::Capabilities: {
+      const std::vector<std::string> names =
+          capability::canonical_names_for_manifest_key(key);
+      if (names.empty()) {
+        result.diagnostics.push_back(
+            diagnostic("PackageManifestError",
+                       "unsupported capability key: " + key, path));
+        break;
+      }
+      bool bool_value = false;
+      if (parse_toml_bool(value, &bool_value)) {
+        if (bool_value) {
+          for (const std::string &name : names) {
+            result.manifest.capabilities.push_back(capability::make_capability(
+                name, "*", "manifest boolean request",
+                capability::kCapabilityFlagWildcardTarget));
+          }
+        }
+        break;
+      }
+      std::vector<std::string> targets;
+      if (parse_toml_string_array(value, &targets)) {
+        for (const std::string &target : targets) {
+          for (const std::string &name : names) {
+            result.manifest.capabilities.push_back(
+                capability::make_capability(name, target));
+          }
+        }
+        break;
+      }
+      std::string string_value;
+      const std::string raw_value = trim(line.substr(equals + 1U));
+      if (!raw_value.empty() && raw_value.front() == '"' &&
+          unquote_toml_string(raw_value, &string_value)) {
+        for (const std::string &name : names) {
+          result.manifest.capabilities.push_back(
+              capability::make_capability(name, string_value));
+        }
+        break;
+      }
+      result.diagnostics.push_back(
+          diagnostic("PackageManifestError",
+                     "capability values must be boolean, string, or string "
+                     "array at line " +
+                         std::to_string(line_no),
+                     path));
       break;
     }
     case Section::None:
@@ -644,6 +823,8 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
   result.manifest.modules = sorted_modules(result.manifest.modules);
   result.manifest.dependencies =
       sorted_dependencies(result.manifest.dependencies);
+  result.manifest.capabilities =
+      sorted_capabilities(result.manifest.capabilities);
   return result;
 }
 
@@ -676,6 +857,19 @@ std::string manifest_to_json(const PackageManifest &manifest) {
         << "\",\"version\":\"" << json_escape(dependencies[i].version)
         << "\",\"source\":\"" << json_escape(dependencies[i].source) << "\"}";
   }
+  out << "\n  ],\n";
+  out << "  \"capabilities\": [";
+  const std::vector<capability::CapabilityRequest> capabilities =
+      sorted_capabilities(manifest.capabilities);
+  for (std::size_t i = 0; i < capabilities.size(); ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "\n    {\"name\":\"" << json_escape(capabilities[i].name)
+        << "\",\"target\":\"" << json_escape(capabilities[i].target)
+        << "\",\"reason\":\"" << json_escape(capabilities[i].reason)
+        << "\",\"flags\":" << capabilities[i].flags << "}";
+  }
   out << "\n  ]\n";
   out << "}\n";
   return out.str();
@@ -697,6 +891,17 @@ std::string render_lockfile(const PackageManifest &manifest) {
     out << "version = \"" << json_escape(dependency.version) << "\"\n";
     out << "source = \"" << json_escape(dependency.source) << "\"\n";
     out << "checksum = \"" << dependency_checksum(dependency) << "\"\n\n";
+  }
+  const std::vector<capability::CapabilityRequest> capabilities =
+      sorted_capabilities(manifest.capabilities);
+  if (!capabilities.empty()) {
+    for (const capability::CapabilityRequest &capability : capabilities) {
+      out << "[[capabilities]]\n";
+      out << "name = \"" << json_escape(capability.name) << "\"\n";
+      out << "target = \"" << json_escape(capability.target) << "\"\n";
+      out << "reason = \"" << json_escape(capability.reason) << "\"\n";
+      out << "flags = " << capability.flags << "\n\n";
+    }
   }
   return out.str();
 }
@@ -733,6 +938,12 @@ build_package_artifact(const PackageManifest &manifest,
           "PackageBuildError", "missing bytecode for module: " + module.name));
     }
   }
+  for (const capability::CapabilityRequest &request : manifest.capabilities) {
+    if (!capability::valid_capability_name(request.name)) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageBuildError", "invalid capability request: " + request.name));
+    }
+  }
   if (!result.diagnostics.empty()) {
     return result;
   }
@@ -748,6 +959,8 @@ build_package_artifact(const PackageManifest &manifest,
       sorted_modules(result.artifact.manifest.modules);
   result.artifact.manifest.dependencies =
       sorted_dependencies(result.artifact.manifest.dependencies);
+  result.artifact.manifest.capabilities =
+      sorted_capabilities(result.artifact.manifest.capabilities);
   result.artifact.manifest_digest =
       sha256_prefixed(canonical_manifest_text(result.artifact.manifest));
   result.artifact.lockfile = render_lockfile(result.artifact.manifest);
@@ -843,6 +1056,10 @@ PackageParseResult parse_package_artifact(const std::string &serialized,
       parse_count(values, "dependency.count", &count_ok);
   const std::uint64_t module_count =
       parse_count(values, "module.count", &count_ok);
+  std::uint64_t capability_count = 0;
+  if (values.find("capability.count") != values.end()) {
+    capability_count = parse_count(values, "capability.count", &count_ok);
+  }
   if (!count_ok) {
     result.diagnostics.push_back(
         diagnostic("PackageParseError",
@@ -863,6 +1080,28 @@ PackageParseResult parse_package_artifact(const std::string &serialized,
       return result;
     }
     result.artifact.manifest.dependencies.push_back(std::move(dependency));
+  }
+
+  for (std::uint64_t i = 0; i < capability_count; ++i) {
+    capability::CapabilityRequest request;
+    const std::string prefix = "capability." + std::to_string(i) + ".";
+    if (!get_escaped_value(values, prefix + "name", &request.name) ||
+        !get_escaped_value(values, prefix + "target", &request.target) ||
+        !get_escaped_value(values, prefix + "reason", &request.reason)) {
+      result.diagnostics.push_back(
+          diagnostic("PackageParseError",
+                     "package artifact capability is incomplete", path));
+      return result;
+    }
+    bool flags_ok = true;
+    request.flags = static_cast<std::uint32_t>(
+        parse_count(values, prefix + "flags", &flags_ok));
+    if (!flags_ok || !capability::valid_capability_name(request.name)) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageParseError", "package artifact capability is invalid", path));
+      return result;
+    }
+    result.artifact.manifest.capabilities.push_back(std::move(request));
   }
 
   for (std::uint64_t i = 0; i < module_count; ++i) {
@@ -898,6 +1137,8 @@ PackageParseResult parse_package_artifact(const std::string &serialized,
       sorted_modules(result.artifact.manifest.modules);
   result.artifact.manifest.dependencies =
       sorted_dependencies(result.artifact.manifest.dependencies);
+  result.artifact.manifest.capabilities =
+      sorted_capabilities(result.artifact.manifest.capabilities);
   result.artifact.modules = sorted_module_blobs(result.artifact.modules);
   return result;
 }
@@ -1031,6 +1272,19 @@ std::string artifact_to_json(const PackageArtifact &artifact) {
         << "\",\"source\":\"" << json_escape(dependencies[i].source)
         << "\",\"checksum\":\"" << json_escape(dependencies[i].checksum)
         << "\"}";
+  }
+  out << "\n  ],\n";
+  out << "  \"capabilities\": [";
+  const std::vector<capability::CapabilityRequest> capabilities =
+      sorted_capabilities(artifact.manifest.capabilities);
+  for (std::size_t i = 0; i < capabilities.size(); ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "\n    {\"name\":\"" << json_escape(capabilities[i].name)
+        << "\",\"target\":\"" << json_escape(capabilities[i].target)
+        << "\",\"reason\":\"" << json_escape(capabilities[i].reason)
+        << "\",\"flags\":" << capabilities[i].flags << "}";
   }
   out << "\n  ],\n";
   out << "  \"signature\": {\"present\":"
