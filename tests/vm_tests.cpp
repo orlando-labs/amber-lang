@@ -151,6 +151,62 @@ void test_runtime_effect_checks() {
          "runtime effect validation should catch row mismatch");
 }
 
+void test_runtime_replay_trace_recording_and_divergence() {
+  amber::bytecode::BcModule module;
+  module.capabilities.push_back(
+      amber::capability::make_capability("fs.read", "./data"));
+
+  amber::runtime::RuntimeWorldOptions options;
+  options.record_replay_trace = true;
+  options.trace_id = "trace-test";
+  options.virtual_time_start = 10;
+  options.capability_grants.push_back(
+      amber::capability::make_capability("fs.read", "./data"));
+  amber::runtime::RuntimeWorld world(module, options);
+
+  expect(world.check_capability("fs.read", "./data/orders.csv").ok,
+         "replay trace setup capability should pass");
+  expect(world.check_effects({"time"}).ok,
+         "replay trace setup effect check should pass");
+  expect(world.freeze_world().ok(), "replay trace setup freeze should pass");
+
+  const amber::runtime::RuntimeReplayTrace trace = world.replay_trace();
+  expect(trace.events.size() == 4, "runtime trace should record four events");
+  expect(trace.events[0].name == "loader.module.load" &&
+             trace.events[1].name == "capability.check" &&
+             trace.events[2].name == "effect.boundary" &&
+             trace.events[3].name == "world.freeze",
+         "runtime trace event order should be deterministic");
+  expect(trace.events[0].timestamp_or_virtual_time == 10 &&
+             trace.events[3].timestamp_or_virtual_time == 13,
+         "runtime trace should use deterministic virtual time");
+
+  const std::string serialized = amber::replay::serialize_trace(trace);
+  const amber::replay::ReplayTraceParseResult parsed =
+      amber::replay::parse_trace(serialized);
+  expect(parsed.ok(), "serialized runtime replay trace should parse");
+  expect(amber::replay::compare_traces(trace, parsed.trace).ok,
+         "parsed runtime trace should match original");
+
+  amber::runtime::RuntimeWorldOptions replay_options = options;
+  replay_options.enforce_replay = true;
+  replay_options.expected_replay = trace;
+  amber::runtime::RuntimeWorld replay_world(module, replay_options);
+  replay_world.check_capability("fs.read", "./data/orders.csv");
+  replay_world.check_effects({"time"});
+  replay_world.freeze_world();
+  expect(replay_world.replay_validation().ok,
+         "matching runtime replay should validate");
+
+  amber::runtime::RuntimeWorld diverged_world(module, replay_options);
+  diverged_world.check_effects({"time"});
+  const amber::runtime::RuntimeReplayValidation diverged =
+      diverged_world.replay_validation();
+  expect(!diverged.ok && !diverged.diagnostics.empty() &&
+             diverged.diagnostics[0].error_name == "ReplayDivergenceError",
+         "divergent runtime replay should report ReplayDivergenceError");
+}
+
 void test_branching_and_last_result() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def flag(x):\n"
                                                           "  if x:\n"
@@ -5034,6 +5090,7 @@ int main() {
   test_execute_emitted_clause_method_dispatch();
   test_runtime_capability_checks();
   test_runtime_effect_checks();
+  test_runtime_replay_trace_recording_and_divergence();
   test_manual_make_map();
   test_runtime_sequence_collections_contract();
   test_runtime_map_collections_contract();

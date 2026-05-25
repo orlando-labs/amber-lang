@@ -8708,6 +8708,80 @@ struct RuntimeWorld::Impl {
                                                     options.capability_grants);
     effects = effect::validate_effect_summaries(
         module->effects, options.allowed_effects, options.enforce_effects);
+    trace.schema = "amber.replay.v1";
+    trace.capability_grants = options.capability_grants;
+    trace.schema_versions.push_back("amber.replay.v1");
+    if (options.record_replay_trace || options.enforce_replay) {
+      replay_validation.ok = true;
+      record_event(replay::make_event(
+          "loader.module.load",
+          {{"module",
+            package.has_value() ? package->manifest.root_module : "module"}}));
+    }
+  }
+
+  replay::TraceEvent record_event(replay::TraceEvent event) {
+    if (!options.record_replay_trace && !options.enforce_replay) {
+      return event;
+    }
+    if (event.event_id == 0) {
+      event.event_id = static_cast<std::uint64_t>(trace.events.size()) + 1U;
+    }
+    if (event.timestamp_or_virtual_time == 0) {
+      event.timestamp_or_virtual_time =
+          options.virtual_time_start +
+          (event.event_id - 1U) * options.virtual_time_step;
+    }
+    if (event.trace_id.empty()) {
+      event.trace_id = options.trace_id.empty() ? "runtime" : options.trace_id;
+    }
+    if (event.module_id.empty() && package.has_value()) {
+      event.module_id = package->manifest.root_module;
+    }
+    if (event.world_epoch == 0 && state != nullptr) {
+      event.world_epoch = state->world_epoch;
+    }
+    event = replay::normalize_event(std::move(event));
+    trace.events.push_back(event);
+
+    if (options.enforce_replay) {
+      const replay::ReplayTrace expected =
+          replay::normalize_trace(options.expected_replay);
+      if (replay_cursor >= expected.events.size()) {
+        replay_validation.diagnostics.push_back(replay::ReplayDiagnostic{
+            "ReplayDivergenceError", "replay produced an extra event", 0,
+            event.event_id, event.name});
+      } else {
+        const replay::TraceEvent expected_event =
+            replay::normalize_event(expected.events[replay_cursor]);
+        if (replay::event_signature(expected_event) !=
+            replay::event_signature(event)) {
+          replay_validation.diagnostics.push_back(replay::ReplayDiagnostic{
+              "ReplayDivergenceError",
+              "replay event diverged at index " + std::to_string(replay_cursor),
+              expected_event.event_id, event.event_id, event.name});
+        }
+      }
+      ++replay_cursor;
+      replay_validation.consumed_events = replay_cursor;
+      replay_validation.ok = replay_validation.diagnostics.empty();
+    }
+    return event;
+  }
+
+  RuntimeReplayValidation current_replay_validation() const {
+    RuntimeReplayValidation result = replay_validation;
+    if (options.enforce_replay && result.diagnostics.empty() &&
+        replay_cursor < options.expected_replay.events.size()) {
+      result.diagnostics.push_back(replay::ReplayDiagnostic{
+          "ReplayDivergenceError",
+          "replay ended before consuming expected events",
+          options.expected_replay.events[replay_cursor].event_id, 0,
+          options.expected_replay.events[replay_cursor].name});
+    }
+    result.consumed_events = replay_cursor;
+    result.ok = result.diagnostics.empty();
+    return result;
   }
 
   std::shared_ptr<bytecode::BcModule> owned_module;
@@ -8717,6 +8791,9 @@ struct RuntimeWorld::Impl {
   RuntimeWorldOptions options;
   RuntimeCapabilityResolution capabilities;
   RuntimeEffectValidation effects;
+  RuntimeReplayTrace trace;
+  RuntimeReplayValidation replay_validation;
+  std::size_t replay_cursor = 0;
 };
 
 RuntimeWorld::RuntimeWorld(const bytecode::BcModule &module)
@@ -8752,8 +8829,20 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
             Fault{"VMError", "runtime world is not bound", 0, 0}};
   }
   impl_->state->initialize_for_module(*impl_->module);
+  impl_->record_event(replay::make_event(
+      "task.started", {{"code_id", std::to_string(code_id)}}));
   Vm vm(*impl_->module, impl_->state);
-  return vm.execute(code_id, args, std::move(self), std::move(block));
+  ExecutionResult result =
+      vm.execute(code_id, args, std::move(self), std::move(block));
+  if (result.ok()) {
+    impl_->record_event(replay::make_event(
+        "task.completed", {{"code_id", std::to_string(code_id)}}));
+  } else {
+    impl_->record_event(replay::make_event(
+        "task.failed", {{"code_id", std::to_string(code_id)},
+                        {"error_name", result.fault->error_name}}));
+  }
+  return result;
 }
 
 namespace {
@@ -9405,6 +9494,14 @@ RuntimePackageMirror package_mirror_for(const bytecode::BcModule &module) {
         }
         return left.kind < right.kind;
       });
+  mirror.observability_sites = module.observability_sites;
+  std::sort(mirror.observability_sites.begin(),
+            mirror.observability_sites.end(),
+            [](const RuntimeObservabilitySite &left,
+               const RuntimeObservabilitySite &right) {
+              return left.site_id < right.site_id;
+            });
+  mirror.replay_metadata = replay::normalize_metadata(module.replay_metadata);
 
   return mirror;
 }
@@ -9455,6 +9552,27 @@ std::string module_contract_signature(const bytecode::BcModule &module) {
         << effect::effect_row_to_text(summary.declared_effects) << "|"
         << effect::effect_row_to_text(summary.observed_effects) << "|"
         << summary.flags << "\n";
+  }
+  std::vector<RuntimeObservabilitySite> sites = module.observability_sites;
+  std::sort(sites.begin(), sites.end(),
+            [](const RuntimeObservabilitySite &left,
+               const RuntimeObservabilitySite &right) {
+              return left.site_id < right.site_id;
+            });
+  for (const RuntimeObservabilitySite &site : sites) {
+    out << "observability=" << site.site_id << "|" << site.event_name << "|"
+        << site.kind << "|" << site.owner << "|" << site.source.file << "|"
+        << site.source.line << "|" << site.source.column << "|" << site.flags
+        << "\n";
+  }
+  const RuntimeReplayMetadata replay_metadata =
+      replay::normalize_metadata(module.replay_metadata);
+  out << "replay.flags=" << replay_metadata.flags << "\n";
+  for (const std::string &event_name : replay_metadata.required_event_names) {
+    out << "replay.required_event=" << event_name << "\n";
+  }
+  for (const std::string &source : replay_metadata.deterministic_sources) {
+    out << "replay.deterministic_source=" << source << "\n";
   }
   return out.str();
 }
@@ -9785,6 +9903,8 @@ RuntimeWorld::commit_transaction(const RuntimeWorldTransaction &tx) {
 
   if (changed) {
     state.invalidate_dispatch_owner(tx.target_index);
+    impl_->record_event(replay::make_event(
+        "world.mutation", {{"target_index", std::to_string(tx.target_index)}}));
   }
   return {Value::null(), std::nullopt};
 }
@@ -9798,6 +9918,7 @@ ExecutionResult RuntimeWorld::freeze_world() {
   if (!impl_->state->world_frozen) {
     impl_->state->world_frozen = true;
     ++impl_->state->world_epoch;
+    impl_->record_event(replay::make_event("world.freeze"));
   }
   return {Value::null(), std::nullopt};
 }
@@ -9876,6 +9997,11 @@ RuntimeWorld::reload_package_artifact(const pkg::PackageArtifact &artifact) {
   result.new_version = impl_->package->manifest.version;
   result.root_module = impl_->package->manifest.root_module;
   result.new_world_epoch = impl_->state->world_epoch;
+  impl_->record_event(replay::make_event("loader.module.load",
+                                         {{"module", result.root_module}}));
+  impl_->record_event(
+      replay::make_event("world.mutation", {{"package", result.package_name},
+                                            {"version", result.new_version}}));
   return result;
 }
 
@@ -9890,6 +10016,9 @@ RuntimeWorld::check_capability(const std::string &capability_name,
     result.message = "runtime world is not bound";
     return result;
   }
+  impl_->record_event(
+      replay::make_event("capability.check", {{"capability", capability_name},
+                                              {"target", target}}));
   if (capability::capability_set_allows(impl_->capabilities.effective,
                                         capability_name, target)) {
     result.ok = true;
@@ -9900,6 +10029,9 @@ RuntimeWorld::check_capability(const std::string &capability_name,
   if (!target.empty()) {
     result.message += "=" + target;
   }
+  impl_->record_event(
+      replay::make_event("capability.denied", {{"capability", capability_name},
+                                               {"target", target}}));
   return result;
 }
 
@@ -9920,6 +10052,9 @@ RuntimeWorld::check_effects(const std::vector<std::string> &requested) const {
     result.message = "runtime world is not bound";
     return result;
   }
+  impl_->record_event(replay::make_event(
+      "effect.boundary",
+      {{"effects", effect::effect_row_to_text(result.effects)}}));
   if (!impl_->effects.ok && !impl_->effects.diagnostics.empty()) {
     result.error_name = "EffectViolationError";
     result.message = impl_->effects.diagnostics.front().message;
@@ -9949,6 +10084,27 @@ RuntimeEffectValidation RuntimeWorld::effect_validation() const {
     return {};
   }
   return impl_->effects;
+}
+
+RuntimeTraceEvent RuntimeWorld::record_trace_event(RuntimeTraceEvent event) {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return event;
+  }
+  return impl_->record_event(std::move(event));
+}
+
+RuntimeReplayTrace RuntimeWorld::replay_trace() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return replay::normalize_trace(impl_->trace);
+}
+
+RuntimeReplayValidation RuntimeWorld::replay_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->current_replay_validation();
 }
 
 std::uint64_t RuntimeWorld::world_epoch() const {

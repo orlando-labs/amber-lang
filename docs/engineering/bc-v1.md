@@ -77,7 +77,7 @@ Current `CODE` encoding stores:
 - locals as `lN`
 - captures as `uN`
 - instructions as zero-padded `pc opcode operands...`
-- optional profile metadata as `.caps` and `.efct`
+- optional profile metadata as `.caps`, `.efct`, `.obsv`, and `.rply`
 
 `CLAS` currently stores class-like runtime descriptors:
 

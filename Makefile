@@ -20,7 +20,7 @@ HIR_SRCS := frontend/hir/hir.cpp
 MIR_SRCS := optimizer/mir.cpp
 NATIVE_SRCS := optimizer/native.cpp
 FROZEN_SRCS := frozen/image.cpp
-PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp
+PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 RUNTIME_SRCS := runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
@@ -68,6 +68,8 @@ FORMAT_FILES := \
 	profile/capabilities.h \
 	profile/effects.cpp \
 	profile/effects.h \
+	profile/replay.cpp \
+	profile/replay.h \
 	frozen/image.cpp \
 	frozen/image.h \
 	bytecode/format.cpp \

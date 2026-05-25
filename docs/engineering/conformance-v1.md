@@ -14,7 +14,9 @@ load, and reload-barrier behavior are covered by focused image tests. `W11.1`
 capability manifest parsing, bytecode metadata, policy resolution, and runtime
 checks are covered by focused package/bytecode/VM tests. `W11.2` effect rows,
 checker summaries, `EFCT` metadata, and runtime allowance checks are covered by
-focused lexer/parser/checker/bytecode/VM tests.
+focused lexer/parser/checker/bytecode/VM tests. `W11.3` replay metadata,
+`.ambertrace` serialization, runtime event recording, and replay divergence
+checks are covered by focused bytecode/VM tests.
 
 `ambertest run <path>` is the canonical corpus entrypoint. It discovers
 `meta.json` fixtures deterministically, dispatches by fixture phase, compares
@@ -77,12 +79,16 @@ Current limits:
   corpus profile fixtures are not wired yet;
 - `effects-check` is available through `amberc` and focused unit tests; corpus
   profile fixtures are not wired yet;
+- `replay-check` / `trace-inspect` are available through `amberc` and focused
+  unit tests; corpus profile fixtures are not wired yet;
 - W9.2 transaction/freeze, W9.3 reflection mirror, W9.4 package artifact,
   W9.5 package hot-reload, W10.1 advanced concurrency, W10.2 awaitable, and
   W10.3 MIR/SSA, W10.4 native/JIT metadata, W10.5 frozen-image, W11.1
-  capability, and W11.2 effect checks are focused API/tooling tests today;
+  capability, W11.2 effect, and W11.3 replay checks are focused API/tooling
+  tests today;
 - multi-source package/build-graph corpus can now target W9.4 package artifacts
   and W9.5 reload fixtures when the corpus runner grows package phases;
 - W10.1-W10.5 `move`/`select`/supervisor/awaitable/MIR/native/image` and
-  W11.1 capability / W11.2 effects language-surface fixtures can be added once
-  those forms are exposed above the runtime API and corpus runner phases.
+  W11.1 capability / W11.2 effects / W11.3 replay language-surface fixtures can
+  be added once those forms are exposed above the runtime API and corpus runner
+  phases.

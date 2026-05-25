@@ -3,6 +3,7 @@
 #include "frontend/lexer/token.h"
 #include "profile/capabilities.h"
 #include "profile/effects.h"
+#include "profile/replay.h"
 
 #include <array>
 #include <cstdint>
@@ -33,6 +34,8 @@ enum class SectionKind {
   Attr,
   Caps,
   Efct,
+  Obsv,
+  Rply,
   Hash
 };
 
@@ -312,6 +315,8 @@ struct BcModule {
   std::vector<AttrEntry> attrs;
   std::vector<capability::CapabilityRequest> capabilities;
   std::vector<effect::EffectSummary> effects;
+  std::vector<replay::ObservabilitySite> observability_sites;
+  replay::ReplayMetadata replay_metadata;
   std::vector<HashEntry> hashes;
 };
 

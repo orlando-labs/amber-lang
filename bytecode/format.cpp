@@ -327,6 +327,10 @@ const char *section_tag(SectionKind kind) {
     return "CAPS";
   case SectionKind::Efct:
     return "EFCT";
+  case SectionKind::Obsv:
+    return "OBSV";
+  case SectionKind::Rply:
+    return "RPLY";
   case SectionKind::Hash:
     return "HASH";
   }
@@ -399,6 +403,14 @@ bool decode_section_kind(const std::array<char, 4> &tag, SectionKind &kind) {
     kind = SectionKind::Efct;
     return true;
   }
+  if (value == "OBSV") {
+    kind = SectionKind::Obsv;
+    return true;
+  }
+  if (value == "RPLY") {
+    kind = SectionKind::Rply;
+    return true;
+  }
   if (value == "HASH") {
     kind = SectionKind::Hash;
     return true;
@@ -433,6 +445,12 @@ bool optional_section_present(const BcModule &module, SectionKind kind) {
     return !module.capabilities.empty();
   case SectionKind::Efct:
     return !module.effects.empty();
+  case SectionKind::Obsv:
+    return !module.observability_sites.empty();
+  case SectionKind::Rply:
+    return !module.replay_metadata.required_event_names.empty() ||
+           !module.replay_metadata.deterministic_sources.empty() ||
+           module.replay_metadata.flags != 0U;
   case SectionKind::Hash:
     return !module.hashes.empty();
   default:
@@ -783,6 +801,42 @@ serialize_effects(const std::vector<effect::EffectSummary> &effects) {
   return out;
 }
 
+std::vector<std::uint8_t> serialize_observability_sites(
+    const std::vector<replay::ObservabilitySite> &sites) {
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(sites.size()));
+  for (const replay::ObservabilitySite &entry : sites) {
+    append_u32(out, entry.site_id);
+    append_string(out, entry.event_name);
+    append_string(out, entry.kind);
+    append_string(out, entry.owner);
+    append_string(out, entry.source.file);
+    append_u32(out, entry.source.line);
+    append_u32(out, entry.source.column);
+    append_u32(out, entry.flags);
+  }
+  return out;
+}
+
+std::vector<std::uint8_t>
+serialize_replay_metadata(const replay::ReplayMetadata &metadata) {
+  const replay::ReplayMetadata normalized =
+      replay::normalize_metadata(metadata);
+  std::vector<std::uint8_t> out;
+  append_u32(out, normalized.flags);
+  append_u32(
+      out, static_cast<std::uint32_t>(normalized.required_event_names.size()));
+  for (const std::string &event_name : normalized.required_event_names) {
+    append_string(out, event_name);
+  }
+  append_u32(
+      out, static_cast<std::uint32_t>(normalized.deterministic_sources.size()));
+  for (const std::string &source : normalized.deterministic_sources) {
+    append_string(out, source);
+  }
+  return out;
+}
+
 std::vector<std::uint8_t>
 serialize_hashes(const std::vector<HashEntry> &hashes) {
   std::vector<std::uint8_t> out;
@@ -843,6 +897,16 @@ std::vector<SectionPayload> build_sections(const BcModule &module) {
   if (optional_section_present(module, SectionKind::Efct)) {
     sections.push_back(
         {SectionKind::Efct, serialize_effects(module.effects), 1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Obsv)) {
+    sections.push_back(
+        {SectionKind::Obsv,
+         serialize_observability_sites(module.observability_sites), 1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Rply)) {
+    sections.push_back({SectionKind::Rply,
+                        serialize_replay_metadata(module.replay_metadata), 1,
+                        0});
   }
   if (optional_section_present(module, SectionKind::Hash)) {
     sections.push_back(
@@ -1697,6 +1761,63 @@ bool parse_effects(Reader &reader, std::vector<effect::EffectSummary> &out) {
   return true;
 }
 
+bool parse_observability_sites(Reader &reader,
+                               std::vector<replay::ObservabilitySite> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  out.clear();
+  out.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    replay::ObservabilitySite entry;
+    if (!reader.read_u32(entry.site_id) ||
+        !reader.read_string(entry.event_name) ||
+        !reader.read_string(entry.kind) || !reader.read_string(entry.owner) ||
+        !reader.read_string(entry.source.file) ||
+        !reader.read_u32(entry.source.line) ||
+        !reader.read_u32(entry.source.column) ||
+        !reader.read_u32(entry.flags)) {
+      return false;
+    }
+    out.push_back(replay::normalize_site(std::move(entry)));
+  }
+  return true;
+}
+
+bool parse_replay_metadata(Reader &reader, replay::ReplayMetadata &out) {
+  replay::ReplayMetadata metadata;
+  if (!reader.read_u32(metadata.flags)) {
+    return false;
+  }
+  std::uint32_t required_count = 0;
+  if (!reader.read_u32(required_count)) {
+    return false;
+  }
+  metadata.required_event_names.reserve(required_count);
+  for (std::uint32_t i = 0; i < required_count; ++i) {
+    std::string event_name;
+    if (!reader.read_string(event_name)) {
+      return false;
+    }
+    metadata.required_event_names.push_back(std::move(event_name));
+  }
+  std::uint32_t source_count = 0;
+  if (!reader.read_u32(source_count)) {
+    return false;
+  }
+  metadata.deterministic_sources.reserve(source_count);
+  for (std::uint32_t i = 0; i < source_count; ++i) {
+    std::string source;
+    if (!reader.read_string(source)) {
+      return false;
+    }
+    metadata.deterministic_sources.push_back(std::move(source));
+  }
+  out = replay::normalize_metadata(std::move(metadata));
+  return true;
+}
+
 bool parse_hashes(Reader &reader, std::vector<HashEntry> &out) {
   std::uint32_t count = 0;
   if (!reader.read_u32(count)) {
@@ -2177,6 +2298,15 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
     }
   }
 
+  const replay::ReplayValidationResult replay_validation =
+      replay::validate_metadata(module.replay_metadata,
+                                module.observability_sites);
+  for (const replay::ReplayDiagnostic &diagnostic :
+       replay_validation.diagnostics) {
+    add_verify_error(errors, "BC1405", diagnostic.message, SectionKind::Rply,
+                     0);
+  }
+
   for (const HashEntry &entry : module.hashes) {
     if (entry.digest.size() != 32U) {
       add_verify_error(errors, "BC1306", "hash digest must be 32 bytes",
@@ -2540,6 +2670,16 @@ DecodeResult deserialize_module(const std::vector<std::uint8_t> &bytes) {
   if (by_kind.find(SectionKind::Efct) != by_kind.end()) {
     parse_section(SectionKind::Efct, "EFCT",
                   [&](Reader &r) { parse_effects(r, result.module.effects); });
+  }
+  if (by_kind.find(SectionKind::Obsv) != by_kind.end()) {
+    parse_section(SectionKind::Obsv, "OBSV", [&](Reader &r) {
+      parse_observability_sites(r, result.module.observability_sites);
+    });
+  }
+  if (by_kind.find(SectionKind::Rply) != by_kind.end()) {
+    parse_section(SectionKind::Rply, "RPLY", [&](Reader &r) {
+      parse_replay_metadata(r, result.module.replay_metadata);
+    });
   }
   if (by_kind.find(SectionKind::Hash) != by_kind.end()) {
     parse_section(SectionKind::Hash, "HASH",
@@ -3033,6 +3173,41 @@ std::string module_to_json(const BcModule &module,
         << "\",\"flags\":" << entry.flags << "}";
   }
   out << "],\n";
+  out << "  \"observability_sites\": [";
+  for (std::size_t i = 0; i < module.observability_sites.size(); ++i) {
+    const replay::ObservabilitySite &entry = module.observability_sites[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"site_id\":" << entry.site_id << ",\"event_name\":\""
+        << json_escape(entry.event_name) << "\",\"kind\":\""
+        << json_escape(entry.kind) << "\",\"owner\":\""
+        << json_escape(entry.owner) << "\",\"source\":{\"file\":\""
+        << json_escape(entry.source.file) << "\",\"line\":" << entry.source.line
+        << ",\"column\":" << entry.source.column
+        << "},\"flags\":" << entry.flags << "}";
+  }
+  out << "],\n";
+  out << "  \"replay_metadata\": {\"required_events\":[";
+  const replay::ReplayMetadata replay_metadata =
+      replay::normalize_metadata(module.replay_metadata);
+  for (std::size_t i = 0; i < replay_metadata.required_event_names.size();
+       ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "\"" << json_escape(replay_metadata.required_event_names[i]) << "\"";
+  }
+  out << "],\"deterministic_sources\":[";
+  for (std::size_t i = 0; i < replay_metadata.deterministic_sources.size();
+       ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "\"" << json_escape(replay_metadata.deterministic_sources[i])
+        << "\"";
+  }
+  out << "],\"flags\":" << replay_metadata.flags << "},\n";
   out << "  \"hashes\": [";
   for (std::size_t i = 0; i < module.hashes.size(); ++i) {
     const HashEntry &entry = module.hashes[i];
@@ -3339,6 +3514,30 @@ std::string module_to_disasm(const BcModule &module,
           << "\" observed=\""
           << json_escape(effect::effect_row_to_text(entry.observed_effects))
           << "\" flags=" << entry.flags << "\n";
+    }
+  }
+  if (!module.observability_sites.empty()) {
+    out << ".obsv\n";
+    for (const replay::ObservabilitySite &entry : module.observability_sites) {
+      out << "  site=" << entry.site_id << " event=\""
+          << json_escape(entry.event_name) << "\" kind=\""
+          << json_escape(entry.kind) << "\" owner=\""
+          << json_escape(entry.owner) << "\" source=\""
+          << json_escape(entry.source.file) << ":" << entry.source.line << ":"
+          << entry.source.column << "\" flags=" << entry.flags << "\n";
+    }
+  }
+  const replay::ReplayMetadata replay_metadata =
+      replay::normalize_metadata(module.replay_metadata);
+  if (!replay_metadata.required_event_names.empty() ||
+      !replay_metadata.deterministic_sources.empty() ||
+      replay_metadata.flags != 0U) {
+    out << ".rply flags=" << replay_metadata.flags << "\n";
+    for (const std::string &event_name : replay_metadata.required_event_names) {
+      out << "  required_event=\"" << json_escape(event_name) << "\"\n";
+    }
+    for (const std::string &source : replay_metadata.deterministic_sources) {
+      out << "  deterministic_source=\"" << json_escape(source) << "\"\n";
     }
   }
   if (!module.hashes.empty()) {

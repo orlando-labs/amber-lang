@@ -22,3 +22,5 @@ errors:
   - MovedValueError
   - CapabilityError
   - EffectViolationError
+  - DeterminismError
+  - ReplayDivergenceError

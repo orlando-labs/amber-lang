@@ -10,6 +10,7 @@
 #include "optimizer/mir.h"
 #include "optimizer/native.h"
 #include "package/package.h"
+#include "profile/replay.h"
 
 #include <fstream>
 #include <iostream>
@@ -62,6 +63,8 @@ void usage(std::ostream &out) {
          "[--sign-key <key>]\n";
   out << "  amberc capabilities-check <amber.toml> [--grant "
          "<cap[=target]>...]\n";
+  out << "  amberc replay-check <file.ambertrace>\n";
+  out << "  amberc trace-inspect <file.ambertrace>\n";
   out << "  amberc image-build <amber.toml> <out.amberimg> "
          "[--sign-key <key>] [--key-id <id>]\n";
   out << "  amberc image-inspect <file.amberimg>\n";
@@ -452,6 +455,36 @@ int run_capabilities_command(int argc, char **argv) {
   return resolved.ok ? 0 : 1;
 }
 
+int run_replay_command(int argc, char **argv) {
+  if (argc != 3) {
+    usage(std::cerr);
+    return 2;
+  }
+  const std::string command = argv[1];
+  const std::string trace_source = read_file(argv[2]);
+  amber::replay::ReplayTraceParseResult parsed =
+      amber::replay::parse_trace(trace_source);
+  if (!parsed.ok()) {
+    amber::replay::ReplayValidationResult result;
+    result.ok = false;
+    result.diagnostics = parsed.diagnostics;
+    std::cout << amber::replay::validation_to_json(result);
+    return 1;
+  }
+  if (command == "trace-inspect") {
+    std::cout << amber::replay::trace_to_json(parsed.trace);
+    return 0;
+  }
+  if (command == "replay-check") {
+    const amber::replay::ReplayValidationResult result =
+        amber::replay::validate_trace(parsed.trace);
+    std::cout << amber::replay::validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  usage(std::cerr);
+  return 2;
+}
+
 int run_image_command(int argc, char **argv) {
   const std::string command = argv[1];
   if (command == "image-build" && argc >= 4) {
@@ -541,6 +574,10 @@ int main(int argc, char **argv) {
     }
     if (argc >= 2 && std::string(argv[1]).find("capabilities-") == 0U) {
       return run_capabilities_command(argc, argv);
+    }
+    if (argc >= 2 && (std::string(argv[1]) == "replay-check" ||
+                      std::string(argv[1]) == "trace-inspect")) {
+      return run_replay_command(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]).find("image-") == 0U) {
       return run_image_command(argc, argv);

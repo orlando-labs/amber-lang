@@ -50,6 +50,12 @@ sections:
   - tag: EFCT
     required: false
     meaning: effect summaries per callable/site
+  - tag: OBSV
+    required: false
+    meaning: observability event site metadata
+  - tag: RPLY
+    required: false
+    meaning: replay/determinism metadata
   - tag: HASH
     required: false
     meaning: section digests

@@ -46,5 +46,7 @@
   "attrs": [],
   "capabilities": [],
   "effects": [],
+  "observability_sites": [],
+  "replay_metadata": {"required_events":[],"deterministic_sources":[],"flags":0},
   "hashes": []
 }

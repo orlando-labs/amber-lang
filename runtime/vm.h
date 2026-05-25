@@ -895,6 +895,11 @@ using RuntimeCapabilityGrant = capability::CapabilityRequest;
 using RuntimeCapabilityResolution = capability::CapabilityResolutionResult;
 using RuntimeEffectSummary = effect::EffectSummary;
 using RuntimeEffectValidation = effect::EffectValidationResult;
+using RuntimeObservabilitySite = replay::ObservabilitySite;
+using RuntimeReplayMetadata = replay::ReplayMetadata;
+using RuntimeTraceEvent = replay::TraceEvent;
+using RuntimeReplayTrace = replay::ReplayTrace;
+using RuntimeReplayValidation = replay::ReplayValidationResult;
 
 struct RuntimePackageMirror {
   bool read_only = true;
@@ -910,6 +915,8 @@ struct RuntimePackageMirror {
   std::vector<RuntimePackageAttrMirror> attrs;
   std::vector<RuntimeCapabilityGrant> capabilities;
   std::vector<RuntimeEffectSummary> effects;
+  std::vector<RuntimeObservabilitySite> observability_sites;
+  RuntimeReplayMetadata replay_metadata;
 };
 
 struct RuntimeOwnerMirror {
@@ -976,6 +983,12 @@ struct RuntimeWorldOptions {
   std::vector<RuntimeCapabilityGrant> capability_grants;
   std::vector<std::string> allowed_effects;
   bool enforce_effects = false;
+  bool record_replay_trace = false;
+  bool enforce_replay = false;
+  std::string trace_id;
+  std::uint64_t virtual_time_start = 1;
+  std::uint64_t virtual_time_step = 1;
+  RuntimeReplayTrace expected_replay;
 };
 
 struct TraceFrame {
@@ -1041,6 +1054,9 @@ public:
   RuntimeEffectCheckResult
   check_effects(const std::vector<std::string> &effects) const;
   RuntimeEffectValidation effect_validation() const;
+  RuntimeTraceEvent record_trace_event(RuntimeTraceEvent event);
+  RuntimeReplayTrace replay_trace() const;
+  RuntimeReplayValidation replay_validation() const;
 
   std::uint64_t world_epoch() const;
   RuntimeWorldState world_state() const;

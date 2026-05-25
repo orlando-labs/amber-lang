@@ -108,6 +108,18 @@ amber::bytecode::BcModule sample_module() {
       amber::capability::make_capability("fs.read", "./data"));
   module.effects.push_back(amber::effect::make_effect_summary(
       "compute", "function", {"fs"}, {"fs"}, true));
+  module.observability_sites.push_back(
+      {1,
+       "task.started",
+       "runtime",
+       "compute",
+       {"sample.am", 1, 1},
+       amber::replay::kObservabilitySiteFlagRequired});
+  module.replay_metadata.required_event_names = {"task.started",
+                                                 "task.completed"};
+  module.replay_metadata.deterministic_sources = {"time", "random"};
+  module.replay_metadata.flags =
+      amber::replay::kReplayMetadataFlagDeterministic;
   module.hashes.push_back(
       {SectionKind::Code, std::vector<std::uint8_t>(32, 0xAB)});
   return module;
@@ -141,7 +153,7 @@ void test_round_trip_and_dump() {
   const std::string dump2 = amber::bytecode::module_to_json(
       decoded2.module, decoded2.sections, bytes_hash(bytes2));
   expect(dump1 == dump2, "JSON dump changed across round-trip");
-  expect(decoded.sections.size() == 17,
+  expect(decoded.sections.size() == 19,
          "expected required and optional sections");
 }
 
@@ -170,6 +182,13 @@ void test_disasm_is_stable() {
   expect(disasm.find(".efct\n  compute kind=\"function\" declared=\"!{fs}\"") !=
              std::string::npos,
          "missing effect section in disasm");
+  expect(disasm.find(".obsv\n  site=1 event=\"task.started\"") !=
+             std::string::npos,
+         "missing observability section in disasm");
+  expect(disasm.find(".rply flags=1") != std::string::npos &&
+             disasm.find("deterministic_source=\"random\"") !=
+                 std::string::npos,
+         "missing replay section in disasm");
 }
 
 void test_bad_magic_rejected() {
