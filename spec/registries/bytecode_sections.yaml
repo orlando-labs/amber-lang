@@ -62,6 +62,12 @@ sections:
   - tag: TABL
     required: false
     meaning: table/query-plan metadata
+  - tag: WASM
+    required: false
+    meaning: Wasm component import/export mapping metadata
+  - tag: ACCL
+    required: false
+    meaning: accelerator kernel descriptor metadata
   - tag: HASH
     required: false
     meaning: section digests

@@ -8711,6 +8711,10 @@ struct RuntimeWorld::Impl {
     schemas =
         data::validate_schemas(module->schemas, module->schema_migrations);
     table_plans = data::validate_table_plans(module->table_plans);
+    wasm_components =
+        wasm_accel::validate_wasm_components(module->wasm_components);
+    accelerator_kernels =
+        wasm_accel::validate_accelerator_kernels(module->accelerator_kernels);
     trace.schema = "amber.replay.v1";
     trace.capability_grants = options.capability_grants;
     trace.schema_versions.push_back("amber.replay.v1");
@@ -8799,6 +8803,8 @@ struct RuntimeWorld::Impl {
   RuntimeEffectValidation effects;
   RuntimeSchemaValidation schemas;
   RuntimeTablePlanValidation table_plans;
+  RuntimeWasmValidation wasm_components;
+  RuntimeAcceleratorValidation accelerator_kernels;
   RuntimeReplayTrace trace;
   RuntimeReplayValidation replay_validation;
   std::size_t replay_cursor = 0;
@@ -9515,6 +9521,11 @@ RuntimePackageMirror package_mirror_for(const bytecode::BcModule &module) {
   mirror.schemas = schema_validation.schemas;
   mirror.schema_migrations = schema_validation.migrations;
   mirror.table_plans = data::validate_table_plans(module.table_plans).plans;
+  mirror.wasm_components =
+      wasm_accel::validate_wasm_components(module.wasm_components).components;
+  mirror.accelerator_kernels =
+      wasm_accel::validate_accelerator_kernels(module.accelerator_kernels)
+          .kernels;
 
   return mirror;
 }
@@ -9609,6 +9620,50 @@ std::string module_contract_signature(const bytecode::BcModule &module) {
   for (const RuntimeTablePlan &plan : table_validation.plans) {
     out << "table.plan=" << plan.plan_id << "|"
         << data::table_plan_fingerprint(plan) << "|" << plan.flags << "\n";
+  }
+  const RuntimeWasmValidation wasm_validation =
+      wasm_accel::validate_wasm_components(module.wasm_components);
+  for (const RuntimeWasmComponent &component : wasm_validation.components) {
+    out << "wasm.component=" << component.name << "|" << component.world << "|"
+        << component.flags << "\n";
+    for (const wasm_accel::WasmInterfaceEntry &entry : component.imports) {
+      out << "wasm.import=" << component.name << "|" << entry.name << "|"
+          << entry.kind << "|" << entry.type_signature << "|"
+          << entry.schema_name << "|"
+          << capability::request_to_text(entry.capability) << "|"
+          << effect::effect_row_to_text(entry.effect_row) << "|" << entry.flags
+          << "\n";
+    }
+    for (const wasm_accel::WasmInterfaceEntry &entry : component.exports) {
+      out << "wasm.export=" << component.name << "|" << entry.name << "|"
+          << entry.kind << "|" << entry.type_signature << "|"
+          << entry.schema_name << "|"
+          << effect::effect_row_to_text(entry.effect_row) << "|" << entry.flags
+          << "\n";
+    }
+  }
+  const RuntimeAcceleratorValidation accelerator_validation =
+      wasm_accel::validate_accelerator_kernels(module.accelerator_kernels);
+  for (const RuntimeAcceleratorKernel &kernel :
+       accelerator_validation.kernels) {
+    out << "accelerator.kernel=" << kernel.kernel_id << "|" << kernel.entry
+        << "|" << kernel.target << "|"
+        << effect::effect_row_to_text(kernel.effect_row) << "|" << kernel.flags
+        << "\n";
+    for (const wasm_accel::AcceleratorValue &value : kernel.params) {
+      out << "accelerator.param=" << kernel.kernel_id << "|" << value.name
+          << "|" << value.type << "|" << value.address_space << "|"
+          << value.flags << "\n";
+    }
+    for (const wasm_accel::AcceleratorValue &value : kernel.captures) {
+      out << "accelerator.capture=" << kernel.kernel_id << "|" << value.name
+          << "|" << value.type << "|" << value.address_space << "|"
+          << value.flags << "\n";
+    }
+    for (const std::string &feature : kernel.forbidden_features) {
+      out << "accelerator.forbidden=" << kernel.kernel_id << "|" << feature
+          << "\n";
+    }
   }
   return out.str();
 }
@@ -10023,6 +10078,13 @@ RuntimeWorld::reload_package_artifact(const pkg::PackageArtifact &artifact) {
   impl_->effects = effect::validate_effect_summaries(
       impl_->module->effects, impl_->options.allowed_effects,
       impl_->options.enforce_effects);
+  impl_->schemas = data::validate_schemas(impl_->module->schemas,
+                                          impl_->module->schema_migrations);
+  impl_->table_plans = data::validate_table_plans(impl_->module->table_plans);
+  impl_->wasm_components =
+      wasm_accel::validate_wasm_components(impl_->module->wasm_components);
+  impl_->accelerator_kernels = wasm_accel::validate_accelerator_kernels(
+      impl_->module->accelerator_kernels);
 
   result.ok = true;
   result.swapped = true;
@@ -10134,6 +10196,20 @@ RuntimeTablePlanValidation RuntimeWorld::table_plan_validation() const {
     return {};
   }
   return impl_->table_plans;
+}
+
+RuntimeWasmValidation RuntimeWorld::wasm_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->wasm_components;
+}
+
+RuntimeAcceleratorValidation RuntimeWorld::accelerator_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->accelerator_kernels;
 }
 
 RuntimeTraceEvent RuntimeWorld::record_trace_event(RuntimeTraceEvent event) {

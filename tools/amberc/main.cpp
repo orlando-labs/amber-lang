@@ -12,6 +12,7 @@
 #include "package/package.h"
 #include "profile/data.h"
 #include "profile/replay.h"
+#include "profile/wasm_accel.h"
 
 #include <fstream>
 #include <iostream>
@@ -68,6 +69,8 @@ void usage(std::ostream &out) {
   out << "  amberc trace-inspect <file.ambertrace>\n";
   out << "  amberc schema-check <file.amberschema>\n";
   out << "  amberc table-explain <file.ambertable>\n";
+  out << "  amberc wasm-build <file.amberwasm>\n";
+  out << "  amberc accel-check <file.amberaccel>\n";
   out << "  amberc image-build <amber.toml> <out.amberimg> "
          "[--sign-key <key>] [--key-id <id>]\n";
   out << "  amberc image-inspect <file.amberimg>\n";
@@ -531,6 +534,40 @@ int run_data_command(int argc, char **argv) {
   return 2;
 }
 
+int run_wasm_accel_command(int argc, char **argv) {
+  if (argc != 3) {
+    usage(std::cerr);
+    return 2;
+  }
+  const std::string command = argv[1];
+  const std::string source = read_file(argv[2]);
+  const amber::wasm_accel::WasmAccelDocumentParseResult parsed =
+      amber::wasm_accel::parse_wasm_accel_document(source);
+  if (command == "wasm-build") {
+    amber::wasm_accel::WasmComponentValidationResult result =
+        amber::wasm_accel::validate_wasm_components(parsed.document.components);
+    result.diagnostics.insert(result.diagnostics.begin(),
+                              parsed.diagnostics.begin(),
+                              parsed.diagnostics.end());
+    result.ok = result.ok && parsed.ok();
+    std::cout << amber::wasm_accel::wasm_component_validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  if (command == "accel-check") {
+    amber::wasm_accel::AcceleratorValidationResult result =
+        amber::wasm_accel::validate_accelerator_kernels(
+            parsed.document.kernels);
+    result.diagnostics.insert(result.diagnostics.begin(),
+                              parsed.diagnostics.begin(),
+                              parsed.diagnostics.end());
+    result.ok = result.ok && parsed.ok();
+    std::cout << amber::wasm_accel::accelerator_validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  usage(std::cerr);
+  return 2;
+}
+
 int run_image_command(int argc, char **argv) {
   const std::string command = argv[1];
   if (command == "image-build" && argc >= 4) {
@@ -628,6 +665,10 @@ int main(int argc, char **argv) {
     if (argc >= 2 && (std::string(argv[1]) == "schema-check" ||
                       std::string(argv[1]) == "table-explain")) {
       return run_data_command(argc, argv);
+    }
+    if (argc >= 2 && (std::string(argv[1]) == "wasm-build" ||
+                      std::string(argv[1]) == "accel-check")) {
+      return run_wasm_accel_command(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]).find("image-") == 0U) {
       return run_image_command(argc, argv);

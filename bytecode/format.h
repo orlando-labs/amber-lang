@@ -5,6 +5,7 @@
 #include "profile/data.h"
 #include "profile/effects.h"
 #include "profile/replay.h"
+#include "profile/wasm_accel.h"
 
 #include <array>
 #include <cstdint>
@@ -39,6 +40,8 @@ enum class SectionKind {
   Rply,
   Scma,
   Tabl,
+  Wasm,
+  Accl,
   Hash
 };
 
@@ -323,6 +326,8 @@ struct BcModule {
   std::vector<data::SchemaDefinition> schemas;
   std::vector<data::SchemaMigration> schema_migrations;
   std::vector<data::TablePlan> table_plans;
+  std::vector<wasm_accel::WasmComponent> wasm_components;
+  std::vector<wasm_accel::AcceleratorKernel> accelerator_kernels;
   std::vector<HashEntry> hashes;
 };
 

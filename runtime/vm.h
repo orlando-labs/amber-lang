@@ -905,6 +905,10 @@ using RuntimeSchemaMigration = data::SchemaMigration;
 using RuntimeTablePlan = data::TablePlan;
 using RuntimeSchemaValidation = data::SchemaValidationResult;
 using RuntimeTablePlanValidation = data::TablePlanValidationResult;
+using RuntimeWasmComponent = wasm_accel::WasmComponent;
+using RuntimeAcceleratorKernel = wasm_accel::AcceleratorKernel;
+using RuntimeWasmValidation = wasm_accel::WasmComponentValidationResult;
+using RuntimeAcceleratorValidation = wasm_accel::AcceleratorValidationResult;
 
 struct RuntimePackageMirror {
   bool read_only = true;
@@ -925,6 +929,8 @@ struct RuntimePackageMirror {
   std::vector<RuntimeSchemaDefinition> schemas;
   std::vector<RuntimeSchemaMigration> schema_migrations;
   std::vector<RuntimeTablePlan> table_plans;
+  std::vector<RuntimeWasmComponent> wasm_components;
+  std::vector<RuntimeAcceleratorKernel> accelerator_kernels;
 };
 
 struct RuntimeOwnerMirror {
@@ -1064,6 +1070,8 @@ public:
   RuntimeEffectValidation effect_validation() const;
   RuntimeSchemaValidation schema_validation() const;
   RuntimeTablePlanValidation table_plan_validation() const;
+  RuntimeWasmValidation wasm_validation() const;
+  RuntimeAcceleratorValidation accelerator_validation() const;
   RuntimeTraceEvent record_trace_event(RuntimeTraceEvent event);
   RuntimeReplayTrace replay_trace() const;
   RuntimeReplayValidation replay_validation() const;

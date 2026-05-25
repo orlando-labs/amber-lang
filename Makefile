@@ -20,7 +20,7 @@ HIR_SRCS := frontend/hir/hir.cpp
 MIR_SRCS := optimizer/mir.cpp
 NATIVE_SRCS := optimizer/native.cpp
 FROZEN_SRCS := frozen/image.cpp
-PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp profile/data.cpp
+PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp profile/data.cpp profile/wasm_accel.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 RUNTIME_SRCS := runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
@@ -33,6 +33,7 @@ LEXER_TEST_SRCS := tests/lexer_tests.cpp $(LEXER_SRCS)
 PARSER_TEST_SRCS := tests/parser_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
 BINDER_TEST_SRCS := tests/binder_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
 CHECKER_TEST_SRCS := tests/checker_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
+WASM_ACCEL_TEST_SRCS := tests/wasm_accel_tests.cpp $(PROFILE_SRCS) $(LEXER_SRCS)
 HIR_TEST_SRCS := tests/hir_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
 MIR_TEST_SRCS := tests/mir_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS) $(MIR_SRCS)
 NATIVE_TEST_SRCS := tests/native_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
@@ -72,6 +73,8 @@ FORMAT_FILES := \
 	profile/replay.h \
 	profile/data.cpp \
 	profile/data.h \
+	profile/wasm_accel.cpp \
+	profile/wasm_accel.h \
 	frozen/image.cpp \
 	frozen/image.h \
 	bytecode/format.cpp \
@@ -94,6 +97,7 @@ FORMAT_FILES := \
 	tests/parser_tests.cpp \
 	tests/binder_tests.cpp \
 	tests/checker_tests.cpp \
+	tests/wasm_accel_tests.cpp \
 	tests/hir_tests.cpp \
 	tests/mir_tests.cpp \
 	tests/native_tests.cpp \
@@ -108,7 +112,7 @@ FORMAT_FILES := \
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -131,6 +135,9 @@ $(BUILD_DIR)/binder_tests: $(BINDER_TEST_SRCS) | $(BUILD_DIR)/.dir
 
 $(BUILD_DIR)/checker_tests: $(CHECKER_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(CHECKER_TEST_SRCS) $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/wasm_accel_tests: $(WASM_ACCEL_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(WASM_ACCEL_TEST_SRCS) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/hir_tests: $(HIR_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(HIR_TEST_SRCS) $(LDFLAGS) -o $@
@@ -164,6 +171,7 @@ test: build
 	$(BUILD_DIR)/parser_tests
 	$(BUILD_DIR)/binder_tests
 	$(BUILD_DIR)/checker_tests
+	$(BUILD_DIR)/wasm_accel_tests
 	$(BUILD_DIR)/hir_tests
 	$(BUILD_DIR)/mir_tests
 	$(BUILD_DIR)/native_tests

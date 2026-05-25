@@ -36,6 +36,8 @@ build/amberc bc-disasm corpus/bc/disasm/basic/source.am
 build/amberc amberbc-dump /path/to/module.amberbc
 build/amberc amberbc-verify /path/to/module.amberbc
 build/amberc amberbc-disasm /path/to/module.amberbc
+build/amberc wasm-build /path/to/plugin.amberwasm
+build/amberc accel-check /path/to/kernels.amberaccel
 build/ambertest run corpus
 build/ambertest run corpus --bundle M5
 ```
@@ -79,6 +81,7 @@ Current matrix status:
 | `W11.2` | done | `amber.effects.v1` callable effect rows with `!{...}` parser/binder/HIR preservation, typed/effects summaries and subset diagnostics, `EFCT` bytecode metadata, package/image/reload propagation, `EffectViolationError` runtime checks, and `effects-check` CLI |
 | `W11.3` | done | `amber.replay.v1` observability/replay baseline with canonical event families, `OBSV`/`RPLY` bytecode metadata, deterministic `.ambertrace` serialization, runtime trace recording and replay divergence checks, plus `replay-check` / `trace-inspect` CLI |
 | `W11.4` | done | `amber.data/schema.v1` metadata-first schema/dataframe baseline with schema definitions, compatible migration validation, record codec checks, table/query-plan fingerprints, column dependency metadata, `SCMA`/`TABL` bytecode sections, runtime mirror/validation hooks, plus `schema-check` / `table-explain` CLI |
+| `W11.5` | done | `amber.wasm/accelerator.v1` metadata-first Wasm component and accelerator baseline with frozen-world component interface validation, capability/effect boundary metadata, restricted accelerator kernel descriptors, `WASM`/`ACCL` bytecode sections, runtime mirror/validation hooks, plus `wasm-build` / `accel-check` CLI |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -137,6 +140,10 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   `amberc table-explain <file.ambertable>` for `amber.data/schema.v1` W11.4
   schema/migration validation, record codec checks, and table query-plan
   fingerprints;
+- `amberc wasm-build <file.amberwasm>` and
+  `amberc accel-check <file.amberaccel>` for `amber.wasm/accelerator.v1`
+  W11.5 frozen component boundary validation, capability/effect metadata, and
+  restricted accelerator kernel checks;
 - binder diagnostics for exports/import writes/duplicates, wildcard misuse,
   placeholder misuse, structural pattern validation including bare matcher
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,
@@ -183,6 +190,10 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   schema/dataframe baseline with schema definition and migration validation,
   record codec checks, stable query-plan fingerprints, column dependencies,
   and runtime mirror/validation exposure;
+- `profile/wasm_accel`, `.amberbc` `WASM`/`ACCL`, and `runtime/vm` W11.5
+  Wasm/accelerator baseline with frozen component interface validation,
+  capability/effect boundary metadata, restricted kernel descriptors, and
+  runtime mirror/validation exposure;
 - `runtime/vm` W8.3 collections contract with closure-block execution for eager sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, deterministic `EmptyCollectionError` for empty `reduce` without init, and ordered `Map#keys/#values/#entries/#map/#select/#reject/#transform_values/#each`;
 - `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
 - `package/package` W9.4 package tooling with restricted `amber.toml` parsing,

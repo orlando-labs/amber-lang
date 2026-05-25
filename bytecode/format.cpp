@@ -335,6 +335,10 @@ const char *section_tag(SectionKind kind) {
     return "SCMA";
   case SectionKind::Tabl:
     return "TABL";
+  case SectionKind::Wasm:
+    return "WASM";
+  case SectionKind::Accl:
+    return "ACCL";
   case SectionKind::Hash:
     return "HASH";
   }
@@ -423,6 +427,14 @@ bool decode_section_kind(const std::array<char, 4> &tag, SectionKind &kind) {
     kind = SectionKind::Tabl;
     return true;
   }
+  if (value == "WASM") {
+    kind = SectionKind::Wasm;
+    return true;
+  }
+  if (value == "ACCL") {
+    kind = SectionKind::Accl;
+    return true;
+  }
   if (value == "HASH") {
     kind = SectionKind::Hash;
     return true;
@@ -467,6 +479,10 @@ bool optional_section_present(const BcModule &module, SectionKind kind) {
     return !module.schemas.empty() || !module.schema_migrations.empty();
   case SectionKind::Tabl:
     return !module.table_plans.empty();
+  case SectionKind::Wasm:
+    return !module.wasm_components.empty();
+  case SectionKind::Accl:
+    return !module.accelerator_kernels.empty();
   case SectionKind::Hash:
     return !module.hashes.empty();
   default:
@@ -917,6 +933,116 @@ serialize_table_plans(const std::vector<data::TablePlan> &plans) {
   return out;
 }
 
+std::vector<std::uint8_t> serialize_wasm_components(
+    const std::vector<wasm_accel::WasmComponent> &components) {
+  std::vector<wasm_accel::WasmComponent> normalized;
+  normalized.reserve(components.size());
+  for (wasm_accel::WasmComponent component : components) {
+    normalized.push_back(
+        wasm_accel::normalize_wasm_component(std::move(component)));
+  }
+  std::sort(normalized.begin(), normalized.end(),
+            [](const wasm_accel::WasmComponent &left,
+               const wasm_accel::WasmComponent &right) {
+              return left.name < right.name;
+            });
+
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(normalized.size()));
+  for (const wasm_accel::WasmComponent &component : normalized) {
+    append_string(out, component.name);
+    append_string(out, component.world);
+    append_u32(out, component.flags);
+
+    append_u32(out, static_cast<std::uint32_t>(component.imports.size()));
+    for (const wasm_accel::WasmInterfaceEntry &entry : component.imports) {
+      append_string(out, entry.name);
+      append_string(out, entry.kind);
+      append_string(out, entry.type_signature);
+      append_string(out, entry.schema_name);
+      append_string(out, entry.capability.name);
+      append_string(out, entry.capability.target);
+      append_string(out, entry.capability.reason);
+      append_u32(out, entry.capability.flags);
+      append_u32(out, static_cast<std::uint32_t>(entry.effect_row.size()));
+      for (const std::string &label : entry.effect_row) {
+        append_string(out, label);
+      }
+      append_u32(out, entry.flags);
+    }
+
+    append_u32(out, static_cast<std::uint32_t>(component.exports.size()));
+    for (const wasm_accel::WasmInterfaceEntry &entry : component.exports) {
+      append_string(out, entry.name);
+      append_string(out, entry.kind);
+      append_string(out, entry.type_signature);
+      append_string(out, entry.schema_name);
+      append_string(out, entry.capability.name);
+      append_string(out, entry.capability.target);
+      append_string(out, entry.capability.reason);
+      append_u32(out, entry.capability.flags);
+      append_u32(out, static_cast<std::uint32_t>(entry.effect_row.size()));
+      for (const std::string &label : entry.effect_row) {
+        append_string(out, label);
+      }
+      append_u32(out, entry.flags);
+    }
+  }
+  return out;
+}
+
+std::vector<std::uint8_t> serialize_accelerator_kernels(
+    const std::vector<wasm_accel::AcceleratorKernel> &kernels) {
+  std::vector<wasm_accel::AcceleratorKernel> normalized;
+  normalized.reserve(kernels.size());
+  for (wasm_accel::AcceleratorKernel kernel : kernels) {
+    normalized.push_back(
+        wasm_accel::normalize_accelerator_kernel(std::move(kernel)));
+  }
+  std::sort(normalized.begin(), normalized.end(),
+            [](const wasm_accel::AcceleratorKernel &left,
+               const wasm_accel::AcceleratorKernel &right) {
+              return left.kernel_id < right.kernel_id;
+            });
+
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(normalized.size()));
+  for (const wasm_accel::AcceleratorKernel &kernel : normalized) {
+    append_string(out, kernel.kernel_id);
+    append_string(out, kernel.entry);
+    append_string(out, kernel.target);
+    append_u32(out, kernel.flags);
+
+    append_u32(out, static_cast<std::uint32_t>(kernel.params.size()));
+    for (const wasm_accel::AcceleratorValue &value : kernel.params) {
+      append_string(out, value.name);
+      append_string(out, value.type);
+      append_string(out, value.address_space);
+      append_u32(out, value.flags);
+    }
+
+    append_u32(out, static_cast<std::uint32_t>(kernel.captures.size()));
+    for (const wasm_accel::AcceleratorValue &value : kernel.captures) {
+      append_string(out, value.name);
+      append_string(out, value.type);
+      append_string(out, value.address_space);
+      append_u32(out, value.flags);
+    }
+
+    append_u32(out, static_cast<std::uint32_t>(kernel.effect_row.size()));
+    for (const std::string &label : kernel.effect_row) {
+      append_string(out, label);
+    }
+
+    append_u32(out,
+               static_cast<std::uint32_t>(kernel.forbidden_features.size()));
+    for (const std::string &feature : kernel.forbidden_features) {
+      append_string(out, feature);
+    }
+  }
+  return out;
+}
+
 std::vector<std::uint8_t>
 serialize_hashes(const std::vector<HashEntry> &hashes) {
   std::vector<std::uint8_t> out;
@@ -997,6 +1123,16 @@ std::vector<SectionPayload> build_sections(const BcModule &module) {
   if (optional_section_present(module, SectionKind::Tabl)) {
     sections.push_back(
         {SectionKind::Tabl, serialize_table_plans(module.table_plans), 1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Wasm)) {
+    sections.push_back({SectionKind::Wasm,
+                        serialize_wasm_components(module.wasm_components), 1,
+                        0});
+  }
+  if (optional_section_present(module, SectionKind::Accl)) {
+    sections.push_back(
+        {SectionKind::Accl,
+         serialize_accelerator_kernels(module.accelerator_kernels), 1, 0});
   }
   if (optional_section_present(module, SectionKind::Hash)) {
     sections.push_back(
@@ -2039,6 +2175,141 @@ bool parse_table_plans(Reader &reader, std::vector<data::TablePlan> &out) {
   return true;
 }
 
+bool parse_wasm_interface_entries(
+    Reader &reader, std::vector<wasm_accel::WasmInterfaceEntry> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  out.clear();
+  out.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    wasm_accel::WasmInterfaceEntry entry;
+    if (!reader.read_string(entry.name) || !reader.read_string(entry.kind) ||
+        !reader.read_string(entry.type_signature) ||
+        !reader.read_string(entry.schema_name) ||
+        !reader.read_string(entry.capability.name) ||
+        !reader.read_string(entry.capability.target) ||
+        !reader.read_string(entry.capability.reason) ||
+        !reader.read_u32(entry.capability.flags)) {
+      return false;
+    }
+    std::uint32_t effect_count = 0;
+    if (!reader.read_u32(effect_count)) {
+      return false;
+    }
+    entry.effect_row.reserve(effect_count);
+    for (std::uint32_t j = 0; j < effect_count; ++j) {
+      std::string effect_label;
+      if (!reader.read_string(effect_label)) {
+        return false;
+      }
+      entry.effect_row.push_back(std::move(effect_label));
+    }
+    if (!reader.read_u32(entry.flags)) {
+      return false;
+    }
+    out.push_back(wasm_accel::normalize_wasm_interface_entry(std::move(entry)));
+  }
+  return true;
+}
+
+bool parse_wasm_components(Reader &reader,
+                           std::vector<wasm_accel::WasmComponent> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  std::vector<wasm_accel::WasmComponent> components;
+  components.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    wasm_accel::WasmComponent component;
+    if (!reader.read_string(component.name) ||
+        !reader.read_string(component.world) ||
+        !reader.read_u32(component.flags)) {
+      return false;
+    }
+    if (!parse_wasm_interface_entries(reader, component.imports) ||
+        !parse_wasm_interface_entries(reader, component.exports)) {
+      return false;
+    }
+    components.push_back(
+        wasm_accel::normalize_wasm_component(std::move(component)));
+  }
+  out = wasm_accel::validate_wasm_components(components).components;
+  return true;
+}
+
+bool parse_accelerator_values(Reader &reader,
+                              std::vector<wasm_accel::AcceleratorValue> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  out.clear();
+  out.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    wasm_accel::AcceleratorValue value;
+    if (!reader.read_string(value.name) || !reader.read_string(value.type) ||
+        !reader.read_string(value.address_space) ||
+        !reader.read_u32(value.flags)) {
+      return false;
+    }
+    out.push_back(wasm_accel::normalize_accelerator_value(std::move(value)));
+  }
+  return true;
+}
+
+bool parse_accelerator_kernels(
+    Reader &reader, std::vector<wasm_accel::AcceleratorKernel> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  std::vector<wasm_accel::AcceleratorKernel> kernels;
+  kernels.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    wasm_accel::AcceleratorKernel kernel;
+    if (!reader.read_string(kernel.kernel_id) ||
+        !reader.read_string(kernel.entry) ||
+        !reader.read_string(kernel.target) || !reader.read_u32(kernel.flags)) {
+      return false;
+    }
+    if (!parse_accelerator_values(reader, kernel.params) ||
+        !parse_accelerator_values(reader, kernel.captures)) {
+      return false;
+    }
+    std::uint32_t effect_count = 0;
+    if (!reader.read_u32(effect_count)) {
+      return false;
+    }
+    kernel.effect_row.reserve(effect_count);
+    for (std::uint32_t j = 0; j < effect_count; ++j) {
+      std::string label;
+      if (!reader.read_string(label)) {
+        return false;
+      }
+      kernel.effect_row.push_back(std::move(label));
+    }
+    std::uint32_t forbidden_count = 0;
+    if (!reader.read_u32(forbidden_count)) {
+      return false;
+    }
+    kernel.forbidden_features.reserve(forbidden_count);
+    for (std::uint32_t j = 0; j < forbidden_count; ++j) {
+      std::string feature;
+      if (!reader.read_string(feature)) {
+        return false;
+      }
+      kernel.forbidden_features.push_back(std::move(feature));
+    }
+    kernels.push_back(
+        wasm_accel::normalize_accelerator_kernel(std::move(kernel)));
+  }
+  out = wasm_accel::validate_accelerator_kernels(kernels).kernels;
+  return true;
+}
+
 bool parse_hashes(Reader &reader, std::vector<HashEntry> &out) {
   std::uint32_t count = 0;
   if (!reader.read_u32(count)) {
@@ -2542,6 +2813,22 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
                      0);
   }
 
+  const wasm_accel::WasmComponentValidationResult wasm_validation =
+      wasm_accel::validate_wasm_components(module.wasm_components);
+  for (const wasm_accel::WasmAccelDiagnostic &diagnostic :
+       wasm_validation.diagnostics) {
+    add_verify_error(errors, "BC1408", diagnostic.message, SectionKind::Wasm,
+                     0);
+  }
+
+  const wasm_accel::AcceleratorValidationResult accelerator_validation =
+      wasm_accel::validate_accelerator_kernels(module.accelerator_kernels);
+  for (const wasm_accel::WasmAccelDiagnostic &diagnostic :
+       accelerator_validation.diagnostics) {
+    add_verify_error(errors, "BC1409", diagnostic.message, SectionKind::Accl,
+                     0);
+  }
+
   for (const HashEntry &entry : module.hashes) {
     if (entry.digest.size() != 32U) {
       add_verify_error(errors, "BC1306", "hash digest must be 32 bytes",
@@ -2925,6 +3212,16 @@ DecodeResult deserialize_module(const std::vector<std::uint8_t> &bytes) {
   if (by_kind.find(SectionKind::Tabl) != by_kind.end()) {
     parse_section(SectionKind::Tabl, "TABL", [&](Reader &r) {
       parse_table_plans(r, result.module.table_plans);
+    });
+  }
+  if (by_kind.find(SectionKind::Wasm) != by_kind.end()) {
+    parse_section(SectionKind::Wasm, "WASM", [&](Reader &r) {
+      parse_wasm_components(r, result.module.wasm_components);
+    });
+  }
+  if (by_kind.find(SectionKind::Accl) != by_kind.end()) {
+    parse_section(SectionKind::Accl, "ACCL", [&](Reader &r) {
+      parse_accelerator_kernels(r, result.module.accelerator_kernels);
     });
   }
   if (by_kind.find(SectionKind::Hash) != by_kind.end()) {
@@ -3531,6 +3828,92 @@ std::string module_to_json(const BcModule &module,
         << "\",\"flags\":" << plan.flags << "}";
   }
   out << "],\n";
+  const wasm_accel::WasmComponentValidationResult wasm_metadata =
+      wasm_accel::validate_wasm_components(module.wasm_components);
+  out << "  \"wasm_components\": [";
+  for (std::size_t i = 0; i < wasm_metadata.components.size(); ++i) {
+    const wasm_accel::WasmComponent &component = wasm_metadata.components[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"name\":\"" << json_escape(component.name) << "\",\"world\":\""
+        << json_escape(component.world) << "\",\"flags\":" << component.flags
+        << ",\"imports\":[";
+    for (std::size_t j = 0; j < component.imports.size(); ++j) {
+      const wasm_accel::WasmInterfaceEntry &entry = component.imports[j];
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(entry.name) << "\",\"kind\":\""
+          << json_escape(entry.kind) << "\",\"type\":\""
+          << json_escape(entry.type_signature) << "\",\"schema\":\""
+          << json_escape(entry.schema_name) << "\",\"capability\":\""
+          << json_escape(capability::request_to_text(entry.capability))
+          << "\",\"effects\":\""
+          << json_escape(effect::effect_row_to_text(entry.effect_row))
+          << "\",\"flags\":" << entry.flags << "}";
+    }
+    out << "],\"exports\":[";
+    for (std::size_t j = 0; j < component.exports.size(); ++j) {
+      const wasm_accel::WasmInterfaceEntry &entry = component.exports[j];
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(entry.name) << "\",\"kind\":\""
+          << json_escape(entry.kind) << "\",\"type\":\""
+          << json_escape(entry.type_signature) << "\",\"schema\":\""
+          << json_escape(entry.schema_name) << "\",\"effects\":\""
+          << json_escape(effect::effect_row_to_text(entry.effect_row))
+          << "\",\"flags\":" << entry.flags << "}";
+    }
+    out << "]}";
+  }
+  out << "],\n";
+  const wasm_accel::AcceleratorValidationResult accelerator_metadata =
+      wasm_accel::validate_accelerator_kernels(module.accelerator_kernels);
+  out << "  \"accelerator_kernels\": [";
+  for (std::size_t i = 0; i < accelerator_metadata.kernels.size(); ++i) {
+    const wasm_accel::AcceleratorKernel &kernel =
+        accelerator_metadata.kernels[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"id\":\"" << json_escape(kernel.kernel_id) << "\",\"entry\":\""
+        << json_escape(kernel.entry) << "\",\"target\":\""
+        << json_escape(kernel.target) << "\",\"effects\":\""
+        << json_escape(effect::effect_row_to_text(kernel.effect_row))
+        << "\",\"flags\":" << kernel.flags << ",\"params\":[";
+    for (std::size_t j = 0; j < kernel.params.size(); ++j) {
+      const wasm_accel::AcceleratorValue &value = kernel.params[j];
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(value.name) << "\",\"type\":\""
+          << json_escape(value.type) << "\",\"space\":\""
+          << json_escape(value.address_space) << "\",\"flags\":" << value.flags
+          << "}";
+    }
+    out << "],\"captures\":[";
+    for (std::size_t j = 0; j < kernel.captures.size(); ++j) {
+      const wasm_accel::AcceleratorValue &value = kernel.captures[j];
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(value.name) << "\",\"type\":\""
+          << json_escape(value.type) << "\",\"space\":\""
+          << json_escape(value.address_space) << "\",\"flags\":" << value.flags
+          << "}";
+    }
+    out << "],\"forbidden_features\":[";
+    for (std::size_t j = 0; j < kernel.forbidden_features.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "\"" << json_escape(kernel.forbidden_features[j]) << "\"";
+    }
+    out << "]}";
+  }
+  out << "],\n";
   out << "  \"hashes\": [";
   for (std::size_t i = 0; i < module.hashes.size(); ++i) {
     const HashEntry &entry = module.hashes[i];
@@ -3908,6 +4291,72 @@ std::string module_to_disasm(const BcModule &module,
       }
       out << "    effect_row=\""
           << json_escape(effect::effect_row_to_text(plan.effect_row)) << "\"\n";
+    }
+  }
+  const wasm_accel::WasmComponentValidationResult wasm_metadata =
+      wasm_accel::validate_wasm_components(module.wasm_components);
+  if (!wasm_metadata.components.empty()) {
+    out << ".wasm\n";
+    for (const wasm_accel::WasmComponent &component :
+         wasm_metadata.components) {
+      out << "  component " << component.name << " world=\""
+          << json_escape(component.world) << "\" flags=" << component.flags
+          << "\n";
+      for (const wasm_accel::WasmInterfaceEntry &entry : component.imports) {
+        out << "    import " << entry.name << " kind=\""
+            << json_escape(entry.kind) << "\" type=\""
+            << json_escape(entry.type_signature) << "\"";
+        if (!entry.schema_name.empty()) {
+          out << " schema=\"" << json_escape(entry.schema_name) << "\"";
+        }
+        if (!entry.capability.name.empty()) {
+          out << " capability=\""
+              << json_escape(capability::request_to_text(entry.capability))
+              << "\"";
+        }
+        out << " effects=\""
+            << json_escape(effect::effect_row_to_text(entry.effect_row))
+            << "\" flags=" << entry.flags << "\n";
+      }
+      for (const wasm_accel::WasmInterfaceEntry &entry : component.exports) {
+        out << "    export " << entry.name << " kind=\""
+            << json_escape(entry.kind) << "\" type=\""
+            << json_escape(entry.type_signature) << "\"";
+        if (!entry.schema_name.empty()) {
+          out << " schema=\"" << json_escape(entry.schema_name) << "\"";
+        }
+        out << " effects=\""
+            << json_escape(effect::effect_row_to_text(entry.effect_row))
+            << "\" flags=" << entry.flags << "\n";
+      }
+    }
+  }
+  const wasm_accel::AcceleratorValidationResult accelerator_metadata =
+      wasm_accel::validate_accelerator_kernels(module.accelerator_kernels);
+  if (!accelerator_metadata.kernels.empty()) {
+    out << ".accl\n";
+    for (const wasm_accel::AcceleratorKernel &kernel :
+         accelerator_metadata.kernels) {
+      out << "  kernel " << kernel.kernel_id << " entry=\""
+          << json_escape(kernel.entry) << "\" target=\""
+          << json_escape(kernel.target) << "\" effects=\""
+          << json_escape(effect::effect_row_to_text(kernel.effect_row))
+          << "\" flags=" << kernel.flags << "\n";
+      for (const wasm_accel::AcceleratorValue &value : kernel.params) {
+        out << "    param " << value.name << " type=\""
+            << json_escape(value.type) << "\" space=\""
+            << json_escape(value.address_space) << "\" flags=" << value.flags
+            << "\n";
+      }
+      for (const wasm_accel::AcceleratorValue &value : kernel.captures) {
+        out << "    capture " << value.name << " type=\""
+            << json_escape(value.type) << "\" space=\""
+            << json_escape(value.address_space) << "\" flags=" << value.flags
+            << "\n";
+      }
+      for (const std::string &feature : kernel.forbidden_features) {
+        out << "    forbidden=\"" << json_escape(feature) << "\"\n";
+      }
     }
   }
   if (!module.hashes.empty()) {

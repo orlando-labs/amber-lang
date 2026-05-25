@@ -146,6 +146,35 @@ amber::bytecode::BcModule sample_module() {
   high_value.effect_row = {};
   high_value.flags = amber::data::kTablePlanFlagLazy;
   module.table_plans.push_back(high_value);
+  amber::wasm_accel::WasmInterfaceEntry import_entry;
+  import_entry.name = "fs.read";
+  import_entry.kind = "resource";
+  import_entry.type_signature = "resource";
+  import_entry.capability =
+      amber::capability::make_capability("fs.read", "./data");
+  amber::wasm_accel::WasmInterfaceEntry export_entry;
+  export_entry.name = "normalize";
+  export_entry.kind = "func";
+  export_entry.type_signature = "(Order) -> Order";
+  export_entry.schema_name = "Order";
+  amber::wasm_accel::WasmComponent component;
+  component.name = "analytics.plugin";
+  component.world = "analytics-plugin";
+  component.flags = amber::wasm_accel::kWasmComponentFlagFrozenWorld |
+                    amber::wasm_accel::kWasmComponentFlagRawFfiDenied |
+                    amber::wasm_accel::kWasmComponentFlagWorldMutationDenied;
+  component.imports.push_back(import_entry);
+  component.exports.push_back(export_entry);
+  module.wasm_components.push_back(component);
+  amber::wasm_accel::AcceleratorKernel kernel;
+  kernel.kernel_id = "scale.f32";
+  kernel.entry = "scale";
+  kernel.target = "gpu";
+  kernel.effect_row = {"gpu"};
+  kernel.params.push_back({"xs", "Tensor[F32]", "device", 0});
+  kernel.params.push_back({"factor", "F32", "scalar", 0});
+  kernel.flags = amber::wasm_accel::kAcceleratorKernelFlagPureHelpersOnly;
+  module.accelerator_kernels.push_back(kernel);
   module.hashes.push_back(
       {SectionKind::Code, std::vector<std::uint8_t>(32, 0xAB)});
   return module;
@@ -179,7 +208,7 @@ void test_round_trip_and_dump() {
   const std::string dump2 = amber::bytecode::module_to_json(
       decoded2.module, decoded2.sections, bytes_hash(bytes2));
   expect(dump1 == dump2, "JSON dump changed across round-trip");
-  expect(decoded.sections.size() == 21,
+  expect(decoded.sections.size() == 23,
          "expected required and optional sections");
 }
 
@@ -223,6 +252,14 @@ void test_disasm_is_stable() {
                  std::string::npos &&
              disasm.find("dep=\"orders.amount\"") != std::string::npos,
          "missing table section in disasm");
+  expect(disasm.find(".wasm\n  component analytics.plugin") !=
+                 std::string::npos &&
+             disasm.find("export normalize kind=\"func\"") != std::string::npos,
+         "missing wasm section in disasm");
+  expect(disasm.find(".accl\n  kernel scale.f32 entry=\"scale\"") !=
+                 std::string::npos &&
+             disasm.find("param xs type=\"Tensor[F32]\"") != std::string::npos,
+         "missing accelerator section in disasm");
 }
 
 void test_bad_magic_rejected() {
@@ -394,6 +431,30 @@ void test_invalid_table_plan_metadata_rejected() {
          "expected BC1407 for invalid table metadata");
 }
 
+void test_invalid_wasm_metadata_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.wasm_components[0].flags &=
+      ~amber::wasm_accel::kWasmComponentFlagWorldMutationDenied;
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "invalid wasm metadata unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1408"),
+         "expected BC1408 for invalid wasm metadata");
+}
+
+void test_invalid_accelerator_metadata_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.accelerator_kernels[0].forbidden_features.push_back(
+      "dynamic_dispatch");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "invalid accelerator metadata unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1409"),
+         "expected BC1409 for invalid accelerator metadata");
+}
+
 } // namespace
 
 int main() {
@@ -407,6 +468,8 @@ int main() {
   test_invalid_class_path_ref_rejected();
   test_invalid_schema_metadata_rejected();
   test_invalid_table_plan_metadata_rejected();
+  test_invalid_wasm_metadata_rejected();
+  test_invalid_accelerator_metadata_rejected();
   std::cout << "bytecode_tests: ok\n";
   return 0;
 }

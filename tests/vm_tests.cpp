@@ -260,6 +260,59 @@ void test_runtime_schema_and_table_metadata() {
          "runtime schema validation should reject incompatible migration");
 }
 
+void test_runtime_wasm_and_accelerator_metadata() {
+  amber::bytecode::BcModule module;
+
+  amber::wasm_accel::WasmInterfaceEntry import_entry;
+  import_entry.name = "fs.read";
+  import_entry.kind = "resource";
+  import_entry.type_signature = "resource";
+  import_entry.capability =
+      amber::capability::make_capability("fs.read", "./data");
+
+  amber::wasm_accel::WasmInterfaceEntry export_entry;
+  export_entry.name = "normalize";
+  export_entry.kind = "func";
+  export_entry.type_signature = "(Order) -> Order";
+  export_entry.schema_name = "Order";
+
+  amber::wasm_accel::WasmComponent component;
+  component.name = "analytics.plugin";
+  component.world = "analytics-plugin";
+  component.flags = amber::wasm_accel::kWasmComponentFlagFrozenWorld |
+                    amber::wasm_accel::kWasmComponentFlagRawFfiDenied |
+                    amber::wasm_accel::kWasmComponentFlagWorldMutationDenied;
+  component.imports.push_back(import_entry);
+  component.exports.push_back(export_entry);
+  module.wasm_components.push_back(component);
+
+  amber::wasm_accel::AcceleratorKernel kernel;
+  kernel.kernel_id = "scale.f32";
+  kernel.entry = "scale";
+  kernel.target = "gpu";
+  kernel.effect_row = {"gpu"};
+  kernel.params.push_back({"xs", "Tensor[F32]", "device", 0});
+  kernel.params.push_back({"factor", "F32", "scalar", 0});
+  module.accelerator_kernels.push_back(kernel);
+
+  amber::runtime::RuntimeWorld world(module);
+  expect(world.wasm_validation().ok, "runtime wasm metadata should validate");
+  expect(world.accelerator_validation().ok,
+         "runtime accelerator metadata should validate");
+
+  const amber::runtime::RuntimePackageMirror mirror = world.package_mirror();
+  expect(mirror.wasm_components.size() == 1 &&
+             mirror.accelerator_kernels.size() == 1,
+         "runtime mirror should expose W11.5 metadata");
+
+  amber::bytecode::BcModule invalid = module;
+  invalid.accelerator_kernels[0].forbidden_features.push_back(
+      "dynamic_dispatch");
+  amber::runtime::RuntimeWorld invalid_world(invalid);
+  expect(!invalid_world.accelerator_validation().ok,
+         "runtime accelerator validation should reject dynamic dispatch");
+}
+
 void test_branching_and_last_result() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def flag(x):\n"
                                                           "  if x:\n"
@@ -5145,6 +5198,7 @@ int main() {
   test_runtime_effect_checks();
   test_runtime_replay_trace_recording_and_divergence();
   test_runtime_schema_and_table_metadata();
+  test_runtime_wasm_and_accelerator_metadata();
   test_manual_make_map();
   test_runtime_sequence_collections_contract();
   test_runtime_map_collections_contract();

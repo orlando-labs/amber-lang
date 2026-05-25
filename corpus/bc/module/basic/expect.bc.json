@@ -44,5 +44,7 @@
   "schemas": [],
   "schema_migrations": [],
   "table_plans": [],
+  "wasm_components": [],
+  "accelerator_kernels": [],
   "hashes": []
 }
