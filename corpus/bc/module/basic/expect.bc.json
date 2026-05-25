@@ -46,5 +46,15 @@
   "table_plans": [],
   "wasm_components": [],
   "accelerator_kernels": [],
+  "agent_symbols": [],
+  "agent_patches": [],
+  "provenance_records": [],
+  "contracts": [],
+  "properties": [],
+  "privacy_labels": [],
+  "privacy_policies": [],
+  "lineage_nodes": [],
+  "workflow_steps": [],
+  "workflow_history": [],
   "hashes": []
 }

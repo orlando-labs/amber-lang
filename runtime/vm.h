@@ -909,6 +909,14 @@ using RuntimeWasmComponent = wasm_accel::WasmComponent;
 using RuntimeAcceleratorKernel = wasm_accel::AcceleratorKernel;
 using RuntimeWasmValidation = wasm_accel::WasmComponentValidationResult;
 using RuntimeAcceleratorValidation = wasm_accel::AcceleratorValidationResult;
+using RuntimeAgentSymbol = modern::AgentSymbol;
+using RuntimeAgentValidation = modern::AgentValidationResult;
+using RuntimeContractSpec = modern::ContractSpec;
+using RuntimeContractValidation = modern::ContractValidationResult;
+using RuntimePrivacyLabel = modern::PrivacyLabel;
+using RuntimePrivacyValidation = modern::PrivacyValidationResult;
+using RuntimeWorkflowStep = modern::WorkflowStep;
+using RuntimeWorkflowValidation = modern::WorkflowValidationResult;
 
 struct RuntimePackageMirror {
   bool read_only = true;
@@ -931,6 +939,10 @@ struct RuntimePackageMirror {
   std::vector<RuntimeTablePlan> table_plans;
   std::vector<RuntimeWasmComponent> wasm_components;
   std::vector<RuntimeAcceleratorKernel> accelerator_kernels;
+  std::vector<RuntimeAgentSymbol> agent_symbols;
+  std::vector<RuntimeContractSpec> contracts;
+  std::vector<RuntimePrivacyLabel> privacy_labels;
+  std::vector<RuntimeWorkflowStep> workflow_steps;
 };
 
 struct RuntimeOwnerMirror {
@@ -1072,6 +1084,10 @@ public:
   RuntimeTablePlanValidation table_plan_validation() const;
   RuntimeWasmValidation wasm_validation() const;
   RuntimeAcceleratorValidation accelerator_validation() const;
+  RuntimeAgentValidation agent_validation() const;
+  RuntimeContractValidation contract_validation() const;
+  RuntimePrivacyValidation privacy_validation() const;
+  RuntimeWorkflowValidation workflow_validation() const;
   RuntimeTraceEvent record_trace_event(RuntimeTraceEvent event);
   RuntimeReplayTrace replay_trace() const;
   RuntimeReplayValidation replay_validation() const;

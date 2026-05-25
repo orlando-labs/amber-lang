@@ -20,7 +20,10 @@ checks are covered by focused bytecode/VM tests. `W11.4` schema/table metadata,
 `SCMA`/`TABL` round-trips, query-plan fingerprints, and runtime mirror hooks are
 covered by focused bytecode/VM tests. `W11.5` Wasm/accelerator metadata,
 `WASM`/`ACCL` round-trips, component/kernel validation, and runtime mirror hooks
-are covered by focused profile/bytecode/VM tests.
+are covered by focused profile/bytecode/VM tests. `W11.6` AI-agent tooling,
+contracts/property, privacy/lineage, and workflow metadata, `AGNT`/`CNTR`/
+`PRIV`/`WFLW` round-trips, profile validation, CLI surfaces, and runtime mirror
+hooks are covered by focused profile/bytecode/VM tests.
 
 `ambertest run <path>` is the canonical corpus entrypoint. It discovers
 `meta.json` fixtures deterministically, dispatches by fixture phase, compares
@@ -89,16 +92,19 @@ Current limits:
   unit tests; corpus profile fixtures are not wired yet;
 - `wasm-build` / `accel-check` are available through `amberc` and focused unit
   tests; corpus profile fixtures are not wired yet;
+- `symbols` / `explain` / `patch-check` / `provenance-audit` /
+  `contract-check` / `privacy-check` / `workflow-check` are available through
+  `amberc` and focused unit tests; corpus profile fixtures are not wired yet;
 - W9.2 transaction/freeze, W9.3 reflection mirror, W9.4 package artifact,
   W9.5 package hot-reload, W10.1 advanced concurrency, W10.2 awaitable, and
   W10.3 MIR/SSA, W10.4 native/JIT metadata, W10.5 frozen-image, W11.1
-  capability, W11.2 effect, W11.3 replay, W11.4 schema/table, and W11.5
-  Wasm/accelerator checks are focused API/tooling
+  capability, W11.2 effect, W11.3 replay, W11.4 schema/table, W11.5
+  Wasm/accelerator, and W11.6 modern-profile checks are focused API/tooling
   tests today;
 - multi-source package/build-graph corpus can now target W9.4 package artifacts
   and W9.5 reload fixtures when the corpus runner grows package phases;
 - W10.1-W10.5 `move`/`select`/supervisor/awaitable/MIR/native/image` and
   W11.1 capability / W11.2 effects / W11.3 replay / W11.4 schema-table /
-  W11.5 Wasm-accelerator
+  W11.5 Wasm-accelerator / W11.6 modern-profile
   language-surface fixtures can be added once those forms are exposed above the
   runtime API and corpus runner phases.

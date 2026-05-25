@@ -313,6 +313,62 @@ void test_runtime_wasm_and_accelerator_metadata() {
          "runtime accelerator validation should reject dynamic dispatch");
 }
 
+void test_runtime_modern_profile_metadata() {
+  amber::bytecode::BcModule module;
+
+  amber::modern::AgentSymbol symbol;
+  symbol.symbol_id = "main::compute";
+  symbol.name = "compute";
+  symbol.kind = "function";
+  symbol.module = "main";
+  symbol.visibility = "public";
+  module.agent_symbols.push_back(symbol);
+
+  amber::modern::ContractSpec contract;
+  contract.owner = "Account.withdraw";
+  contract.kind = "require";
+  contract.expression = "amount > 0";
+  module.contracts.push_back(contract);
+
+  module.privacy_labels.push_back({"pii", "pii", 0});
+  module.privacy_policies.push_back(
+      {"PrivateAudit", "redact", "pii", {}, 0, 0});
+  amber::modern::LineageNode lineage;
+  lineage.node_id = "transform.users";
+  lineage.kind = "transform";
+  lineage.output = "users.redacted";
+  lineage.labels = {"pii"};
+  module.lineage_nodes.push_back(lineage);
+
+  amber::modern::WorkflowStep step;
+  step.workflow = "ImportOrders";
+  step.name = "commit";
+  step.effect_row = {"db"};
+  step.idempotency_key = "batch-1";
+  module.workflow_steps.push_back(step);
+
+  amber::runtime::RuntimeWorld world(module);
+  expect(world.agent_validation().ok, "runtime agent metadata should validate");
+  expect(world.contract_validation().ok,
+         "runtime contract metadata should validate");
+  expect(world.privacy_validation().ok,
+         "runtime privacy metadata should validate");
+  expect(world.workflow_validation().ok,
+         "runtime workflow metadata should validate");
+
+  const amber::runtime::RuntimePackageMirror mirror = world.package_mirror();
+  expect(mirror.agent_symbols.size() == 1 && mirror.contracts.size() == 1 &&
+             mirror.privacy_labels.size() == 1 &&
+             mirror.workflow_steps.size() == 1,
+         "runtime mirror should expose W11.6 metadata");
+
+  amber::bytecode::BcModule invalid = module;
+  invalid.workflow_steps[0].name = "";
+  amber::runtime::RuntimeWorld invalid_world(invalid);
+  expect(!invalid_world.workflow_validation().ok,
+         "runtime workflow validation should reject malformed steps");
+}
+
 void test_branching_and_last_result() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def flag(x):\n"
                                                           "  if x:\n"
@@ -5199,6 +5255,7 @@ int main() {
   test_runtime_replay_trace_recording_and_divergence();
   test_runtime_schema_and_table_metadata();
   test_runtime_wasm_and_accelerator_metadata();
+  test_runtime_modern_profile_metadata();
   test_manual_make_map();
   test_runtime_sequence_collections_contract();
   test_runtime_map_collections_contract();

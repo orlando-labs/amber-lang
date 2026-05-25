@@ -11,6 +11,7 @@
 #include "optimizer/native.h"
 #include "package/package.h"
 #include "profile/data.h"
+#include "profile/modern.h"
 #include "profile/replay.h"
 #include "profile/wasm_accel.h"
 
@@ -71,6 +72,13 @@ void usage(std::ostream &out) {
   out << "  amberc table-explain <file.ambertable>\n";
   out << "  amberc wasm-build <file.amberwasm>\n";
   out << "  amberc accel-check <file.amberaccel>\n";
+  out << "  amberc symbols <file>\n";
+  out << "  amberc explain <file> --span <line>:<column>\n";
+  out << "  amberc patch-check <file.ambermodern>\n";
+  out << "  amberc provenance-audit <file.ambermodern>\n";
+  out << "  amberc contract-check <file.ambermodern>\n";
+  out << "  amberc privacy-check <file.ambermodern>\n";
+  out << "  amberc workflow-check <file.ambermodern>\n";
   out << "  amberc image-build <amber.toml> <out.amberimg> "
          "[--sign-key <key>] [--key-id <id>]\n";
   out << "  amberc image-inspect <file.amberimg>\n";
@@ -154,6 +162,115 @@ effect_diagnostics_only(const amber::checker::CheckResult &result) {
     }
   }
   return diagnostics;
+}
+
+amber::modern::SourceLocation
+parse_cli_source_location(const std::string &path, const std::string &raw) {
+  const std::size_t colon = raw.find(':');
+  if (colon == std::string::npos) {
+    throw std::runtime_error("span must be <line>:<column>");
+  }
+  amber::modern::SourceLocation source;
+  source.file = path;
+  source.line =
+      static_cast<std::uint32_t>(std::stoul(raw.substr(0, colon), nullptr, 10));
+  source.column = static_cast<std::uint32_t>(
+      std::stoul(raw.substr(colon + 1U), nullptr, 10));
+  return source;
+}
+
+std::vector<amber::modern::AgentSymbol>
+agent_symbols_from_bind_graph(const amber::binder::BindGraph &graph,
+                              const std::string &module_name) {
+  std::vector<amber::modern::AgentSymbol> symbols;
+  symbols.reserve(graph.bindings.size());
+  for (const amber::binder::Binding &binding : graph.bindings) {
+    amber::modern::AgentSymbol symbol;
+    symbol.symbol_id = binding.id;
+    symbol.name = binding.name;
+    symbol.kind = binding.role == "param" ? "param" : binding.kind;
+    if (symbol.kind == "import") {
+      symbol.kind = "module";
+    }
+    symbol.module = module_name.empty() ? "module" : module_name;
+    symbol.visibility = "internal";
+    symbol.source = amber::modern::source_from_span(binding.span);
+    symbol.defined_in = binding.span.file;
+    symbol.doc_summary = binding.source;
+    for (const amber::binder::Export &export_record : graph.exports) {
+      if (export_record.binding_id == binding.id) {
+        symbol.visibility = "public";
+        break;
+      }
+    }
+    for (const amber::binder::Reference &reference : graph.references) {
+      if (reference.binding_id == binding.id) {
+        symbol.references.push_back(
+            amber::modern::source_from_span(reference.span));
+      }
+    }
+    symbols.push_back(amber::modern::normalize_agent_symbol(std::move(symbol)));
+  }
+  return symbols;
+}
+
+int run_modern_document_command(int argc, char **argv) {
+  if (argc != 3) {
+    usage(std::cerr);
+    return 2;
+  }
+  const std::string command = argv[1];
+  const std::string source = read_file(argv[2]);
+  const amber::modern::ModernDocumentParseResult parsed =
+      amber::modern::parse_modern_document(source);
+  if (command == "patch-check" || command == "provenance-audit") {
+    amber::modern::AgentValidationResult result =
+        amber::modern::validate_agent_metadata(parsed.document.symbols,
+                                               parsed.document.patches,
+                                               parsed.document.provenance);
+    result.diagnostics.insert(result.diagnostics.begin(),
+                              parsed.diagnostics.begin(),
+                              parsed.diagnostics.end());
+    result.ok = result.ok && parsed.ok();
+    std::cout << amber::modern::agent_validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  if (command == "contract-check") {
+    amber::modern::ContractValidationResult result =
+        amber::modern::validate_contract_metadata(parsed.document.contracts,
+                                                  parsed.document.properties);
+    result.diagnostics.insert(result.diagnostics.begin(),
+                              parsed.diagnostics.begin(),
+                              parsed.diagnostics.end());
+    result.ok = result.ok && parsed.ok();
+    std::cout << amber::modern::contract_validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  if (command == "privacy-check") {
+    amber::modern::PrivacyValidationResult result =
+        amber::modern::validate_privacy_metadata(
+            parsed.document.privacy_labels, parsed.document.privacy_policies,
+            parsed.document.lineage);
+    result.diagnostics.insert(result.diagnostics.begin(),
+                              parsed.diagnostics.begin(),
+                              parsed.diagnostics.end());
+    result.ok = result.ok && parsed.ok();
+    std::cout << amber::modern::privacy_validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  if (command == "workflow-check") {
+    amber::modern::WorkflowValidationResult result =
+        amber::modern::validate_workflow_metadata(
+            parsed.document.workflow_steps, parsed.document.workflow_history);
+    result.diagnostics.insert(result.diagnostics.begin(),
+                              parsed.diagnostics.begin(),
+                              parsed.diagnostics.end());
+    result.ok = result.ok && parsed.ok();
+    std::cout << amber::modern::workflow_validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  usage(std::cerr);
+  return 2;
 }
 
 struct CompiledModuleArtifact {
@@ -670,8 +787,50 @@ int main(int argc, char **argv) {
                       std::string(argv[1]) == "accel-check")) {
       return run_wasm_accel_command(argc, argv);
     }
+    if (argc >= 2 && (std::string(argv[1]) == "patch-check" ||
+                      std::string(argv[1]) == "provenance-audit" ||
+                      std::string(argv[1]) == "contract-check" ||
+                      std::string(argv[1]) == "privacy-check" ||
+                      std::string(argv[1]) == "workflow-check")) {
+      return run_modern_document_command(argc, argv);
+    }
     if (argc >= 2 && std::string(argv[1]).find("image-") == 0U) {
       return run_image_command(argc, argv);
+    }
+    if (argc >= 2 && std::string(argv[1]) == "explain") {
+      if (argc != 5 || std::string(argv[3]) != "--span") {
+        usage(std::cerr);
+        return 2;
+      }
+      const std::string path = argv[2];
+      const std::string source = read_file(path);
+      amber::lexer::LexResult lex_result = lex_source(source, path);
+      if (!lex_result.ok()) {
+        std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+        return 1;
+      }
+      amber::parser::Parser parser(lex_result.tokens);
+      amber::parser::ParseModuleResult parse_result =
+          parser.parse_module_unit();
+      if (!parse_result.ok()) {
+        std::cerr << amber::lexer::diagnostics_to_json(
+            parse_result.diagnostics);
+        return 1;
+      }
+      amber::binder::BindResult bind_result = amber::binder::bind_module(
+          parse_result.items, parse_result.module_name);
+      if (!bind_result.ok()) {
+        std::cerr << amber::lexer::diagnostics_to_json(bind_result.diagnostics);
+        return 1;
+      }
+      const std::vector<amber::modern::AgentSymbol> symbols =
+          agent_symbols_from_bind_graph(bind_result.graph,
+                                        parse_result.module_name);
+      const amber::modern::AgentValidationResult validated =
+          amber::modern::validate_agent_metadata(symbols);
+      std::cout << amber::modern::explain_result_to_json(
+          validated, parse_cli_source_location(path, argv[4]));
+      return validated.ok ? 0 : 1;
     }
     if (argc != 3 ||
         (std::string(argv[1]) != "lex" && std::string(argv[1]) != "parse" &&
@@ -685,6 +844,7 @@ int main(int argc, char **argv) {
          std::string(argv[1]) != "native-verify" &&
          std::string(argv[1]) != "bc-disasm" &&
          std::string(argv[1]) != "parse-expr" &&
+         std::string(argv[1]) != "symbols" &&
          std::string(argv[1]) != "amberbc-dump" &&
          std::string(argv[1]) != "amberbc-verify" &&
          std::string(argv[1]) != "amberbc-disasm")) {
@@ -739,7 +899,7 @@ int main(int argc, char **argv) {
         command == "mir-dump" || command == "mir-verify" ||
         command == "native" || command == "native-dump" ||
         command == "native-verify" || command == "bc" ||
-        command == "bc-disasm") {
+        command == "bc-disasm" || command == "symbols") {
       amber::parser::ParseModuleResult parse_result =
           parser.parse_module_unit();
       if (!parse_result.ok()) {
@@ -752,7 +912,7 @@ int main(int argc, char **argv) {
           command == "mir-dump" || command == "mir-verify" ||
           command == "native" || command == "native-dump" ||
           command == "native-verify" || command == "bc" ||
-          command == "bc-disasm") {
+          command == "bc-disasm" || command == "symbols") {
         amber::binder::BindResult bind_result = amber::binder::bind_module(
             parse_result.items, parse_result.module_name);
         if (!bind_result.diagnostics.empty()) {
@@ -767,6 +927,15 @@ int main(int argc, char **argv) {
               bind_result.graph, parse_result.module_name,
               amber::lexer::sha256_hex(source));
           return 0;
+        }
+        if (command == "symbols") {
+          const std::vector<amber::modern::AgentSymbol> symbols =
+              agent_symbols_from_bind_graph(bind_result.graph,
+                                            parse_result.module_name);
+          const amber::modern::AgentValidationResult validated =
+              amber::modern::validate_agent_metadata(symbols);
+          std::cout << amber::modern::agent_validation_to_json(validated);
+          return validated.ok ? 0 : 1;
         }
         if (command == "typed") {
           amber::checker::CheckResult check_result =

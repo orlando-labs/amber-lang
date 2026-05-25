@@ -4,6 +4,7 @@
 #include "profile/capabilities.h"
 #include "profile/data.h"
 #include "profile/effects.h"
+#include "profile/modern.h"
 #include "profile/replay.h"
 #include "profile/wasm_accel.h"
 
@@ -42,6 +43,10 @@ enum class SectionKind {
   Tabl,
   Wasm,
   Accl,
+  Agnt,
+  Cntr,
+  Priv,
+  Wflw,
   Hash
 };
 
@@ -328,6 +333,16 @@ struct BcModule {
   std::vector<data::TablePlan> table_plans;
   std::vector<wasm_accel::WasmComponent> wasm_components;
   std::vector<wasm_accel::AcceleratorKernel> accelerator_kernels;
+  std::vector<modern::AgentSymbol> agent_symbols;
+  std::vector<modern::AgentPatch> agent_patches;
+  std::vector<modern::ProvenanceRecord> provenance_records;
+  std::vector<modern::ContractSpec> contracts;
+  std::vector<modern::PropertySpec> properties;
+  std::vector<modern::PrivacyLabel> privacy_labels;
+  std::vector<modern::PrivacyPolicyRule> privacy_policies;
+  std::vector<modern::LineageNode> lineage_nodes;
+  std::vector<modern::WorkflowStep> workflow_steps;
+  std::vector<modern::WorkflowHistoryEvent> workflow_history;
   std::vector<HashEntry> hashes;
 };
 

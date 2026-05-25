@@ -175,6 +175,69 @@ amber::bytecode::BcModule sample_module() {
   kernel.params.push_back({"factor", "F32", "scalar", 0});
   kernel.flags = amber::wasm_accel::kAcceleratorKernelFlagPureHelpersOnly;
   module.accelerator_kernels.push_back(kernel);
+  amber::modern::AgentSymbol symbol;
+  symbol.symbol_id = "main::compute";
+  symbol.name = "compute";
+  symbol.kind = "function";
+  symbol.module = "main";
+  symbol.visibility = "public";
+  symbol.source = {"sample.am", 1, 1};
+  symbol.defined_in = "sample.am";
+  symbol.effect_summary = "!{fs}";
+  module.agent_symbols.push_back(symbol);
+  amber::modern::AgentPatch patch;
+  patch.patch_id = "patch.rename_compute";
+  patch.intent = "rename_symbol";
+  patch.tool = "agent";
+  patch.request_digest = "abc123";
+  patch.capabilities = {"refactor"};
+  patch.operations.push_back({"rename", "main::compute", "calculate", 0});
+  module.agent_patches.push_back(patch);
+  amber::modern::ProvenanceRecord provenance;
+  provenance.patch_id = "patch.rename_compute";
+  provenance.tool = "agent";
+  provenance.request_digest = "abc123";
+  provenance.files_changed = {"sample.am"};
+  provenance.symbols_changed = {"main::compute"};
+  provenance.checks_run = {"bind", "typed"};
+  module.provenance_records.push_back(provenance);
+  amber::modern::ContractSpec contract;
+  contract.owner = "Account.withdraw";
+  contract.kind = "ensure";
+  contract.expression = "result.balance >= 0";
+  contract.effect_row = {"mut"};
+  module.contracts.push_back(contract);
+  amber::modern::PropertySpec property;
+  property.name = "reverse_twice";
+  property.owner = "Array";
+  property.seed = 42;
+  property.generator = "Array[Int]";
+  property.profile_set = {"contracts", "replay"};
+  module.properties.push_back(property);
+  module.privacy_labels.push_back({"pii", "pii", 0});
+  module.privacy_policies.push_back(
+      {"PrivateAudit", "redact", "pii", {}, 0, 0});
+  amber::modern::LineageNode lineage;
+  lineage.node_id = "transform.users";
+  lineage.kind = "transform";
+  lineage.output = "users.redacted";
+  lineage.labels = {"pii"};
+  module.lineage_nodes.push_back(lineage);
+  amber::modern::WorkflowStep step;
+  step.workflow = "ImportOrders";
+  step.name = "commit";
+  step.effect_row = {"db"};
+  step.idempotency_key = "batch-1";
+  module.workflow_steps.push_back(step);
+  amber::modern::WorkflowHistoryEvent event;
+  event.workflow_id = "ImportOrders/1";
+  event.workflow_version = 1;
+  event.step = "commit";
+  event.event = "commit";
+  event.input_digest = "in-a";
+  event.output_digest = "out-a";
+  event.idempotency_key = "batch-1";
+  module.workflow_history.push_back(event);
   module.hashes.push_back(
       {SectionKind::Code, std::vector<std::uint8_t>(32, 0xAB)});
   return module;
@@ -208,7 +271,7 @@ void test_round_trip_and_dump() {
   const std::string dump2 = amber::bytecode::module_to_json(
       decoded2.module, decoded2.sections, bytes_hash(bytes2));
   expect(dump1 == dump2, "JSON dump changed across round-trip");
-  expect(decoded.sections.size() == 23,
+  expect(decoded.sections.size() == 27,
          "expected required and optional sections");
 }
 
@@ -260,6 +323,16 @@ void test_disasm_is_stable() {
                  std::string::npos &&
              disasm.find("param xs type=\"Tensor[F32]\"") != std::string::npos,
          "missing accelerator section in disasm");
+  expect(disasm.find(".agnt\n  symbol main::compute") != std::string::npos &&
+             disasm.find("patch patch.rename_compute") != std::string::npos,
+         "missing agent tooling section in disasm");
+  expect(disasm.find(".cntr\n  contract Account.withdraw") != std::string::npos,
+         "missing contract section in disasm");
+  expect(disasm.find(".priv\n  label pii") != std::string::npos &&
+             disasm.find("lineage transform.users") != std::string::npos,
+         "missing privacy section in disasm");
+  expect(disasm.find(".wflw\n  step ImportOrders.commit") != std::string::npos,
+         "missing workflow section in disasm");
 }
 
 void test_bad_magic_rejected() {
@@ -455,6 +528,54 @@ void test_invalid_accelerator_metadata_rejected() {
          "expected BC1409 for invalid accelerator metadata");
 }
 
+void test_invalid_agent_metadata_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.agent_patches[0].operations[0].symbol_id = "main::stale";
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "invalid agent metadata unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1410"),
+         "expected BC1410 for invalid agent metadata");
+}
+
+void test_invalid_contract_metadata_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.properties[0].seed = 0;
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "invalid contract metadata unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1411"),
+         "expected BC1411 for invalid contract metadata");
+}
+
+void test_invalid_privacy_metadata_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.lineage_nodes[0].kind = "export";
+  module.privacy_policies[0].action = "deny";
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "invalid privacy metadata unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1412"),
+         "expected BC1412 for invalid privacy metadata");
+}
+
+void test_invalid_workflow_metadata_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  amber::modern::WorkflowHistoryEvent conflict = module.workflow_history[0];
+  conflict.input_digest = "in-b";
+  conflict.output_digest = "out-b";
+  module.workflow_history.push_back(conflict);
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "invalid workflow metadata unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1413"),
+         "expected BC1413 for invalid workflow metadata");
+}
+
 } // namespace
 
 int main() {
@@ -470,6 +591,10 @@ int main() {
   test_invalid_table_plan_metadata_rejected();
   test_invalid_wasm_metadata_rejected();
   test_invalid_accelerator_metadata_rejected();
+  test_invalid_agent_metadata_rejected();
+  test_invalid_contract_metadata_rejected();
+  test_invalid_privacy_metadata_rejected();
+  test_invalid_workflow_metadata_rejected();
   std::cout << "bytecode_tests: ok\n";
   return 0;
 }

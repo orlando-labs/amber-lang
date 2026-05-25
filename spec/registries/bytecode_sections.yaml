@@ -68,6 +68,18 @@ sections:
   - tag: ACCL
     required: false
     meaning: accelerator kernel descriptor metadata
+  - tag: AGNT
+    required: false
+    meaning: AI-agent symbol graph, patch, and provenance metadata
+  - tag: CNTR
+    required: false
+    meaning: contract and property-test metadata
+  - tag: PRIV
+    required: false
+    meaning: privacy label, policy, and lineage metadata
+  - tag: WFLW
+    required: false
+    meaning: durable workflow step and history metadata
   - tag: HASH
     required: false
     meaning: section digests

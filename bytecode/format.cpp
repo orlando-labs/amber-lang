@@ -339,6 +339,14 @@ const char *section_tag(SectionKind kind) {
     return "WASM";
   case SectionKind::Accl:
     return "ACCL";
+  case SectionKind::Agnt:
+    return "AGNT";
+  case SectionKind::Cntr:
+    return "CNTR";
+  case SectionKind::Priv:
+    return "PRIV";
+  case SectionKind::Wflw:
+    return "WFLW";
   case SectionKind::Hash:
     return "HASH";
   }
@@ -435,6 +443,22 @@ bool decode_section_kind(const std::array<char, 4> &tag, SectionKind &kind) {
     kind = SectionKind::Accl;
     return true;
   }
+  if (value == "AGNT") {
+    kind = SectionKind::Agnt;
+    return true;
+  }
+  if (value == "CNTR") {
+    kind = SectionKind::Cntr;
+    return true;
+  }
+  if (value == "PRIV") {
+    kind = SectionKind::Priv;
+    return true;
+  }
+  if (value == "WFLW") {
+    kind = SectionKind::Wflw;
+    return true;
+  }
   if (value == "HASH") {
     kind = SectionKind::Hash;
     return true;
@@ -483,6 +507,16 @@ bool optional_section_present(const BcModule &module, SectionKind kind) {
     return !module.wasm_components.empty();
   case SectionKind::Accl:
     return !module.accelerator_kernels.empty();
+  case SectionKind::Agnt:
+    return !module.agent_symbols.empty() || !module.agent_patches.empty() ||
+           !module.provenance_records.empty();
+  case SectionKind::Cntr:
+    return !module.contracts.empty() || !module.properties.empty();
+  case SectionKind::Priv:
+    return !module.privacy_labels.empty() || !module.privacy_policies.empty() ||
+           !module.lineage_nodes.empty();
+  case SectionKind::Wflw:
+    return !module.workflow_steps.empty() || !module.workflow_history.empty();
   case SectionKind::Hash:
     return !module.hashes.empty();
   default:
@@ -1043,6 +1077,181 @@ std::vector<std::uint8_t> serialize_accelerator_kernels(
   return out;
 }
 
+void append_source_location(std::vector<std::uint8_t> &out,
+                            const modern::SourceLocation &source) {
+  append_string(out, source.file);
+  append_u32(out, source.line);
+  append_u32(out, source.column);
+}
+
+void append_string_vector(std::vector<std::uint8_t> &out,
+                          const std::vector<std::string> &values) {
+  append_u32(out, static_cast<std::uint32_t>(values.size()));
+  for (const std::string &value : values) {
+    append_string(out, value);
+  }
+}
+
+std::vector<std::uint8_t> serialize_agent_metadata(
+    const std::vector<modern::AgentSymbol> &symbols,
+    const std::vector<modern::AgentPatch> &patches,
+    const std::vector<modern::ProvenanceRecord> &provenance) {
+  const modern::AgentValidationResult validated =
+      modern::validate_agent_metadata(symbols, patches, provenance);
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(validated.symbols.size()));
+  for (const modern::AgentSymbol &symbol : validated.symbols) {
+    append_string(out, symbol.symbol_id);
+    append_string(out, symbol.name);
+    append_string(out, symbol.kind);
+    append_string(out, symbol.module);
+    append_string(out, symbol.visibility);
+    append_source_location(out, symbol.source);
+    append_string(out, symbol.defined_in);
+    append_u32(out, static_cast<std::uint32_t>(symbol.references.size()));
+    for (const modern::SourceLocation &reference : symbol.references) {
+      append_source_location(out, reference);
+    }
+    append_string(out, symbol.type_summary);
+    append_string(out, symbol.effect_summary);
+    append_string(out, symbol.schema_summary);
+    append_string(out, symbol.doc_summary);
+    append_u32(out, symbol.flags);
+  }
+  append_u32(out, static_cast<std::uint32_t>(validated.patches.size()));
+  for (const modern::AgentPatch &patch : validated.patches) {
+    append_string(out, patch.patch_id);
+    append_string(out, patch.intent);
+    append_string(out, patch.tool);
+    append_string(out, patch.request_digest);
+    append_string_vector(out, patch.capabilities);
+    append_u32(out, static_cast<std::uint32_t>(patch.operations.size()));
+    for (const modern::AgentPatchOperation &operation : patch.operations) {
+      append_string(out, operation.op);
+      append_string(out, operation.symbol_id);
+      append_string(out, operation.new_name);
+      append_u32(out, operation.flags);
+    }
+    append_u32(out, patch.flags);
+  }
+  append_u32(out, static_cast<std::uint32_t>(validated.provenance.size()));
+  for (const modern::ProvenanceRecord &record : validated.provenance) {
+    append_string(out, record.patch_id);
+    append_string(out, record.tool);
+    append_string(out, record.request_digest);
+    append_string_vector(out, record.files_changed);
+    append_string_vector(out, record.symbols_changed);
+    append_string_vector(out, record.diagnostics_before);
+    append_string_vector(out, record.diagnostics_after);
+    append_string_vector(out, record.checks_run);
+    append_string_vector(out, record.artifact_digests);
+    append_string(out, record.human_approval);
+    append_u32(out, record.flags);
+  }
+  return out;
+}
+
+std::vector<std::uint8_t> serialize_contract_metadata(
+    const std::vector<modern::ContractSpec> &contracts,
+    const std::vector<modern::PropertySpec> &properties) {
+  const modern::ContractValidationResult validated =
+      modern::validate_contract_metadata(contracts, properties);
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(validated.contracts.size()));
+  for (const modern::ContractSpec &contract : validated.contracts) {
+    append_string(out, contract.owner);
+    append_string(out, contract.kind);
+    append_string(out, contract.expression);
+    append_string_vector(out, contract.effect_row);
+    append_source_location(out, contract.source);
+    append_u32(out, contract.flags);
+  }
+  append_u32(out, static_cast<std::uint32_t>(validated.properties.size()));
+  for (const modern::PropertySpec &property : validated.properties) {
+    append_string(out, property.name);
+    append_string(out, property.owner);
+    append_u64(out, property.seed);
+    append_string(out, property.generator);
+    append_string(out, property.shrinker_path);
+    append_string(out, property.counterexample);
+    append_string_vector(out, property.profile_set);
+    append_string_vector(out, property.dependency_fingerprints);
+    append_u32(out, property.flags);
+  }
+  return out;
+}
+
+std::vector<std::uint8_t> serialize_privacy_metadata(
+    const std::vector<modern::PrivacyLabel> &labels,
+    const std::vector<modern::PrivacyPolicyRule> &policies,
+    const std::vector<modern::LineageNode> &lineage) {
+  const modern::PrivacyValidationResult validated =
+      modern::validate_privacy_metadata(labels, policies, lineage);
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(validated.labels.size()));
+  for (const modern::PrivacyLabel &label : validated.labels) {
+    append_string(out, label.name);
+    append_string(out, label.kind);
+    append_u32(out, label.flags);
+  }
+  append_u32(out, static_cast<std::uint32_t>(validated.policies.size()));
+  for (const modern::PrivacyPolicyRule &rule : validated.policies) {
+    append_string(out, rule.policy);
+    append_string(out, rule.action);
+    append_string(out, rule.label);
+    append_string(out, rule.aggregate);
+    append_u32(out, rule.min_group);
+    append_u32(out, rule.flags);
+  }
+  append_u32(out, static_cast<std::uint32_t>(validated.lineage.size()));
+  for (const modern::LineageNode &node : validated.lineage) {
+    append_string(out, node.node_id);
+    append_string(out, node.kind);
+    append_string_vector(out, node.inputs);
+    append_string(out, node.output);
+    append_string(out, node.schema_fingerprint);
+    append_string_vector(out, node.labels);
+    append_source_location(out, node.source);
+    append_string(out, node.trace_span);
+    append_u32(out, node.flags);
+  }
+  return out;
+}
+
+std::vector<std::uint8_t> serialize_workflow_metadata(
+    const std::vector<modern::WorkflowStep> &steps,
+    const std::vector<modern::WorkflowHistoryEvent> &history) {
+  const modern::WorkflowValidationResult validated =
+      modern::validate_workflow_metadata(steps, history);
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(validated.steps.size()));
+  for (const modern::WorkflowStep &step : validated.steps) {
+    append_string(out, step.workflow);
+    append_string(out, step.name);
+    append_string_vector(out, step.effect_row);
+    append_string_vector(out, step.depends_on);
+    append_string(out, step.retry_policy);
+    append_string(out, step.idempotency_key);
+    append_u32(out, step.timeout_ms);
+    append_u32(out, step.flags);
+  }
+  append_u32(out, static_cast<std::uint32_t>(validated.history.size()));
+  for (const modern::WorkflowHistoryEvent &event : validated.history) {
+    append_string(out, event.workflow_id);
+    append_u32(out, event.workflow_version);
+    append_string(out, event.step);
+    append_string(out, event.event);
+    append_string(out, event.input_digest);
+    append_string(out, event.output_digest);
+    append_string(out, event.schema_version);
+    append_string_vector(out, event.effect_grants);
+    append_string(out, event.idempotency_key);
+    append_string(out, event.trace_id);
+    append_u32(out, event.flags);
+  }
+  return out;
+}
+
 std::vector<std::uint8_t>
 serialize_hashes(const std::vector<HashEntry> &hashes) {
   std::vector<std::uint8_t> out;
@@ -1133,6 +1342,32 @@ std::vector<SectionPayload> build_sections(const BcModule &module) {
     sections.push_back(
         {SectionKind::Accl,
          serialize_accelerator_kernels(module.accelerator_kernels), 1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Agnt)) {
+    sections.push_back(
+        {SectionKind::Agnt,
+         serialize_agent_metadata(module.agent_symbols, module.agent_patches,
+                                  module.provenance_records),
+         1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Cntr)) {
+    sections.push_back(
+        {SectionKind::Cntr,
+         serialize_contract_metadata(module.contracts, module.properties), 1,
+         0});
+  }
+  if (optional_section_present(module, SectionKind::Priv)) {
+    sections.push_back({SectionKind::Priv,
+                        serialize_privacy_metadata(module.privacy_labels,
+                                                   module.privacy_policies,
+                                                   module.lineage_nodes),
+                        1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Wflw)) {
+    sections.push_back({SectionKind::Wflw,
+                        serialize_workflow_metadata(module.workflow_steps,
+                                                    module.workflow_history),
+                        1, 0});
   }
   if (optional_section_present(module, SectionKind::Hash)) {
     sections.push_back(
@@ -2310,6 +2545,298 @@ bool parse_accelerator_kernels(
   return true;
 }
 
+bool parse_source_location(Reader &reader, modern::SourceLocation &out) {
+  return reader.read_string(out.file) && reader.read_u32(out.line) &&
+         reader.read_u32(out.column);
+}
+
+bool parse_string_vector(Reader &reader, std::vector<std::string> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  out.clear();
+  out.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    std::string value;
+    if (!reader.read_string(value)) {
+      return false;
+    }
+    out.push_back(std::move(value));
+  }
+  return true;
+}
+
+bool parse_agent_metadata(Reader &reader,
+                          std::vector<modern::AgentSymbol> &symbols_out,
+                          std::vector<modern::AgentPatch> &patches_out,
+                          std::vector<modern::ProvenanceRecord> &prov_out) {
+  std::uint32_t symbol_count = 0;
+  if (!reader.read_u32(symbol_count)) {
+    return false;
+  }
+  std::vector<modern::AgentSymbol> symbols;
+  symbols.reserve(symbol_count);
+  for (std::uint32_t i = 0; i < symbol_count; ++i) {
+    modern::AgentSymbol symbol;
+    if (!reader.read_string(symbol.symbol_id) ||
+        !reader.read_string(symbol.name) || !reader.read_string(symbol.kind) ||
+        !reader.read_string(symbol.module) ||
+        !reader.read_string(symbol.visibility) ||
+        !parse_source_location(reader, symbol.source) ||
+        !reader.read_string(symbol.defined_in)) {
+      return false;
+    }
+    std::uint32_t reference_count = 0;
+    if (!reader.read_u32(reference_count)) {
+      return false;
+    }
+    symbol.references.reserve(reference_count);
+    for (std::uint32_t j = 0; j < reference_count; ++j) {
+      modern::SourceLocation reference;
+      if (!parse_source_location(reader, reference)) {
+        return false;
+      }
+      symbol.references.push_back(std::move(reference));
+    }
+    if (!reader.read_string(symbol.type_summary) ||
+        !reader.read_string(symbol.effect_summary) ||
+        !reader.read_string(symbol.schema_summary) ||
+        !reader.read_string(symbol.doc_summary) ||
+        !reader.read_u32(symbol.flags)) {
+      return false;
+    }
+    symbols.push_back(modern::normalize_agent_symbol(std::move(symbol)));
+  }
+
+  std::uint32_t patch_count = 0;
+  if (!reader.read_u32(patch_count)) {
+    return false;
+  }
+  std::vector<modern::AgentPatch> patches;
+  patches.reserve(patch_count);
+  for (std::uint32_t i = 0; i < patch_count; ++i) {
+    modern::AgentPatch patch;
+    if (!reader.read_string(patch.patch_id) ||
+        !reader.read_string(patch.intent) || !reader.read_string(patch.tool) ||
+        !reader.read_string(patch.request_digest) ||
+        !parse_string_vector(reader, patch.capabilities)) {
+      return false;
+    }
+    std::uint32_t operation_count = 0;
+    if (!reader.read_u32(operation_count)) {
+      return false;
+    }
+    patch.operations.reserve(operation_count);
+    for (std::uint32_t j = 0; j < operation_count; ++j) {
+      modern::AgentPatchOperation operation;
+      if (!reader.read_string(operation.op) ||
+          !reader.read_string(operation.symbol_id) ||
+          !reader.read_string(operation.new_name) ||
+          !reader.read_u32(operation.flags)) {
+        return false;
+      }
+      patch.operations.push_back(std::move(operation));
+    }
+    if (!reader.read_u32(patch.flags)) {
+      return false;
+    }
+    patches.push_back(modern::normalize_agent_patch(std::move(patch)));
+  }
+
+  std::uint32_t provenance_count = 0;
+  if (!reader.read_u32(provenance_count)) {
+    return false;
+  }
+  std::vector<modern::ProvenanceRecord> provenance;
+  provenance.reserve(provenance_count);
+  for (std::uint32_t i = 0; i < provenance_count; ++i) {
+    modern::ProvenanceRecord record;
+    if (!reader.read_string(record.patch_id) ||
+        !reader.read_string(record.tool) ||
+        !reader.read_string(record.request_digest) ||
+        !parse_string_vector(reader, record.files_changed) ||
+        !parse_string_vector(reader, record.symbols_changed) ||
+        !parse_string_vector(reader, record.diagnostics_before) ||
+        !parse_string_vector(reader, record.diagnostics_after) ||
+        !parse_string_vector(reader, record.checks_run) ||
+        !parse_string_vector(reader, record.artifact_digests) ||
+        !reader.read_string(record.human_approval) ||
+        !reader.read_u32(record.flags)) {
+      return false;
+    }
+    provenance.push_back(
+        modern::normalize_provenance_record(std::move(record)));
+  }
+
+  const modern::AgentValidationResult validated =
+      modern::validate_agent_metadata(symbols, patches, provenance);
+  symbols_out = validated.symbols;
+  patches_out = validated.patches;
+  prov_out = validated.provenance;
+  return true;
+}
+
+bool parse_contract_metadata(
+    Reader &reader, std::vector<modern::ContractSpec> &contracts_out,
+    std::vector<modern::PropertySpec> &properties_out) {
+  std::uint32_t contract_count = 0;
+  if (!reader.read_u32(contract_count)) {
+    return false;
+  }
+  std::vector<modern::ContractSpec> contracts;
+  contracts.reserve(contract_count);
+  for (std::uint32_t i = 0; i < contract_count; ++i) {
+    modern::ContractSpec contract;
+    if (!reader.read_string(contract.owner) ||
+        !reader.read_string(contract.kind) ||
+        !reader.read_string(contract.expression) ||
+        !parse_string_vector(reader, contract.effect_row) ||
+        !parse_source_location(reader, contract.source) ||
+        !reader.read_u32(contract.flags)) {
+      return false;
+    }
+    contracts.push_back(modern::normalize_contract_spec(std::move(contract)));
+  }
+  std::uint32_t property_count = 0;
+  if (!reader.read_u32(property_count)) {
+    return false;
+  }
+  std::vector<modern::PropertySpec> properties;
+  properties.reserve(property_count);
+  for (std::uint32_t i = 0; i < property_count; ++i) {
+    modern::PropertySpec property;
+    if (!reader.read_string(property.name) ||
+        !reader.read_string(property.owner) ||
+        !reader.read_u64(property.seed) ||
+        !reader.read_string(property.generator) ||
+        !reader.read_string(property.shrinker_path) ||
+        !reader.read_string(property.counterexample) ||
+        !parse_string_vector(reader, property.profile_set) ||
+        !parse_string_vector(reader, property.dependency_fingerprints) ||
+        !reader.read_u32(property.flags)) {
+      return false;
+    }
+    properties.push_back(modern::normalize_property_spec(std::move(property)));
+  }
+  const modern::ContractValidationResult validated =
+      modern::validate_contract_metadata(contracts, properties);
+  contracts_out = validated.contracts;
+  properties_out = validated.properties;
+  return true;
+}
+
+bool parse_privacy_metadata(
+    Reader &reader, std::vector<modern::PrivacyLabel> &labels_out,
+    std::vector<modern::PrivacyPolicyRule> &policies_out,
+    std::vector<modern::LineageNode> &lineage_out) {
+  std::uint32_t label_count = 0;
+  if (!reader.read_u32(label_count)) {
+    return false;
+  }
+  std::vector<modern::PrivacyLabel> labels;
+  labels.reserve(label_count);
+  for (std::uint32_t i = 0; i < label_count; ++i) {
+    modern::PrivacyLabel label;
+    if (!reader.read_string(label.name) || !reader.read_string(label.kind) ||
+        !reader.read_u32(label.flags)) {
+      return false;
+    }
+    labels.push_back(modern::normalize_privacy_label(std::move(label)));
+  }
+  std::uint32_t policy_count = 0;
+  if (!reader.read_u32(policy_count)) {
+    return false;
+  }
+  std::vector<modern::PrivacyPolicyRule> policies;
+  policies.reserve(policy_count);
+  for (std::uint32_t i = 0; i < policy_count; ++i) {
+    modern::PrivacyPolicyRule rule;
+    if (!reader.read_string(rule.policy) || !reader.read_string(rule.action) ||
+        !reader.read_string(rule.label) ||
+        !reader.read_string(rule.aggregate) ||
+        !reader.read_u32(rule.min_group) || !reader.read_u32(rule.flags)) {
+      return false;
+    }
+    policies.push_back(modern::normalize_privacy_policy_rule(std::move(rule)));
+  }
+  std::uint32_t lineage_count = 0;
+  if (!reader.read_u32(lineage_count)) {
+    return false;
+  }
+  std::vector<modern::LineageNode> lineage;
+  lineage.reserve(lineage_count);
+  for (std::uint32_t i = 0; i < lineage_count; ++i) {
+    modern::LineageNode node;
+    if (!reader.read_string(node.node_id) || !reader.read_string(node.kind) ||
+        !parse_string_vector(reader, node.inputs) ||
+        !reader.read_string(node.output) ||
+        !reader.read_string(node.schema_fingerprint) ||
+        !parse_string_vector(reader, node.labels) ||
+        !parse_source_location(reader, node.source) ||
+        !reader.read_string(node.trace_span) || !reader.read_u32(node.flags)) {
+      return false;
+    }
+    lineage.push_back(modern::normalize_lineage_node(std::move(node)));
+  }
+  const modern::PrivacyValidationResult validated =
+      modern::validate_privacy_metadata(labels, policies, lineage);
+  labels_out = validated.labels;
+  policies_out = validated.policies;
+  lineage_out = validated.lineage;
+  return true;
+}
+
+bool parse_workflow_metadata(
+    Reader &reader, std::vector<modern::WorkflowStep> &steps_out,
+    std::vector<modern::WorkflowHistoryEvent> &history_out) {
+  std::uint32_t step_count = 0;
+  if (!reader.read_u32(step_count)) {
+    return false;
+  }
+  std::vector<modern::WorkflowStep> steps;
+  steps.reserve(step_count);
+  for (std::uint32_t i = 0; i < step_count; ++i) {
+    modern::WorkflowStep step;
+    if (!reader.read_string(step.workflow) || !reader.read_string(step.name) ||
+        !parse_string_vector(reader, step.effect_row) ||
+        !parse_string_vector(reader, step.depends_on) ||
+        !reader.read_string(step.retry_policy) ||
+        !reader.read_string(step.idempotency_key) ||
+        !reader.read_u32(step.timeout_ms) || !reader.read_u32(step.flags)) {
+      return false;
+    }
+    steps.push_back(modern::normalize_workflow_step(std::move(step)));
+  }
+  std::uint32_t history_count = 0;
+  if (!reader.read_u32(history_count)) {
+    return false;
+  }
+  std::vector<modern::WorkflowHistoryEvent> history;
+  history.reserve(history_count);
+  for (std::uint32_t i = 0; i < history_count; ++i) {
+    modern::WorkflowHistoryEvent event;
+    if (!reader.read_string(event.workflow_id) ||
+        !reader.read_u32(event.workflow_version) ||
+        !reader.read_string(event.step) || !reader.read_string(event.event) ||
+        !reader.read_string(event.input_digest) ||
+        !reader.read_string(event.output_digest) ||
+        !reader.read_string(event.schema_version) ||
+        !parse_string_vector(reader, event.effect_grants) ||
+        !reader.read_string(event.idempotency_key) ||
+        !reader.read_string(event.trace_id) || !reader.read_u32(event.flags)) {
+      return false;
+    }
+    history.push_back(
+        modern::normalize_workflow_history_event(std::move(event)));
+  }
+  const modern::WorkflowValidationResult validated =
+      modern::validate_workflow_metadata(steps, history);
+  steps_out = validated.steps;
+  history_out = validated.history;
+  return true;
+}
+
 bool parse_hashes(Reader &reader, std::vector<HashEntry> &out) {
   std::uint32_t count = 0;
   if (!reader.read_u32(count)) {
@@ -2829,6 +3356,42 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
                      0);
   }
 
+  const modern::AgentValidationResult agent_validation =
+      modern::validate_agent_metadata(module.agent_symbols,
+                                      module.agent_patches,
+                                      module.provenance_records);
+  for (const modern::ModernDiagnostic &diagnostic :
+       agent_validation.diagnostics) {
+    add_verify_error(errors, "BC1410", diagnostic.message, SectionKind::Agnt,
+                     0);
+  }
+
+  const modern::ContractValidationResult contract_validation =
+      modern::validate_contract_metadata(module.contracts, module.properties);
+  for (const modern::ModernDiagnostic &diagnostic :
+       contract_validation.diagnostics) {
+    add_verify_error(errors, "BC1411", diagnostic.message, SectionKind::Cntr,
+                     0);
+  }
+
+  const modern::PrivacyValidationResult privacy_validation =
+      modern::validate_privacy_metadata(
+          module.privacy_labels, module.privacy_policies, module.lineage_nodes);
+  for (const modern::ModernDiagnostic &diagnostic :
+       privacy_validation.diagnostics) {
+    add_verify_error(errors, "BC1412", diagnostic.message, SectionKind::Priv,
+                     0);
+  }
+
+  const modern::WorkflowValidationResult workflow_validation =
+      modern::validate_workflow_metadata(module.workflow_steps,
+                                         module.workflow_history);
+  for (const modern::ModernDiagnostic &diagnostic :
+       workflow_validation.diagnostics) {
+    add_verify_error(errors, "BC1413", diagnostic.message, SectionKind::Wflw,
+                     0);
+  }
+
   for (const HashEntry &entry : module.hashes) {
     if (entry.digest.size() != 32U) {
       add_verify_error(errors, "BC1306", "hash digest must be 32 bytes",
@@ -3222,6 +3785,32 @@ DecodeResult deserialize_module(const std::vector<std::uint8_t> &bytes) {
   if (by_kind.find(SectionKind::Accl) != by_kind.end()) {
     parse_section(SectionKind::Accl, "ACCL", [&](Reader &r) {
       parse_accelerator_kernels(r, result.module.accelerator_kernels);
+    });
+  }
+  if (by_kind.find(SectionKind::Agnt) != by_kind.end()) {
+    parse_section(SectionKind::Agnt, "AGNT", [&](Reader &r) {
+      parse_agent_metadata(r, result.module.agent_symbols,
+                           result.module.agent_patches,
+                           result.module.provenance_records);
+    });
+  }
+  if (by_kind.find(SectionKind::Cntr) != by_kind.end()) {
+    parse_section(SectionKind::Cntr, "CNTR", [&](Reader &r) {
+      parse_contract_metadata(r, result.module.contracts,
+                              result.module.properties);
+    });
+  }
+  if (by_kind.find(SectionKind::Priv) != by_kind.end()) {
+    parse_section(SectionKind::Priv, "PRIV", [&](Reader &r) {
+      parse_privacy_metadata(r, result.module.privacy_labels,
+                             result.module.privacy_policies,
+                             result.module.lineage_nodes);
+    });
+  }
+  if (by_kind.find(SectionKind::Wflw) != by_kind.end()) {
+    parse_section(SectionKind::Wflw, "WFLW", [&](Reader &r) {
+      parse_workflow_metadata(r, result.module.workflow_steps,
+                              result.module.workflow_history);
     });
   }
   if (by_kind.find(SectionKind::Hash) != by_kind.end()) {
@@ -3914,6 +4503,132 @@ std::string module_to_json(const BcModule &module,
     out << "]}";
   }
   out << "],\n";
+  const modern::AgentValidationResult agent_metadata =
+      modern::validate_agent_metadata(module.agent_symbols,
+                                      module.agent_patches,
+                                      module.provenance_records);
+  out << "  \"agent_symbols\": [";
+  for (std::size_t i = 0; i < agent_metadata.symbols.size(); ++i) {
+    const modern::AgentSymbol &symbol = agent_metadata.symbols[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"id\":\"" << json_escape(symbol.symbol_id) << "\",\"name\":\""
+        << json_escape(symbol.name) << "\",\"kind\":\""
+        << json_escape(symbol.kind) << "\",\"module\":\""
+        << json_escape(symbol.module) << "\",\"visibility\":\""
+        << json_escape(symbol.visibility) << "\"}";
+  }
+  out << "],\n";
+  out << "  \"agent_patches\": [";
+  for (std::size_t i = 0; i < agent_metadata.patches.size(); ++i) {
+    const modern::AgentPatch &patch = agent_metadata.patches[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"id\":\"" << json_escape(patch.patch_id) << "\",\"intent\":\""
+        << json_escape(patch.intent)
+        << "\",\"operations\":" << patch.operations.size()
+        << ",\"flags\":" << patch.flags << "}";
+  }
+  out << "],\n";
+  out << "  \"provenance_records\": [";
+  for (std::size_t i = 0; i < agent_metadata.provenance.size(); ++i) {
+    const modern::ProvenanceRecord &record = agent_metadata.provenance[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"patch_id\":\"" << json_escape(record.patch_id)
+        << "\",\"tool\":\"" << json_escape(record.tool)
+        << "\",\"checks\":" << record.checks_run.size() << "}";
+  }
+  out << "],\n";
+  const modern::ContractValidationResult contract_metadata =
+      modern::validate_contract_metadata(module.contracts, module.properties);
+  out << "  \"contracts\": [";
+  for (std::size_t i = 0; i < contract_metadata.contracts.size(); ++i) {
+    const modern::ContractSpec &contract = contract_metadata.contracts[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"owner\":\"" << json_escape(contract.owner) << "\",\"kind\":\""
+        << json_escape(contract.kind) << "\",\"expr\":\""
+        << json_escape(contract.expression) << "\",\"effects\":\""
+        << json_escape(effect::effect_row_to_text(contract.effect_row))
+        << "\"}";
+  }
+  out << "],\n";
+  out << "  \"properties\": [";
+  for (std::size_t i = 0; i < contract_metadata.properties.size(); ++i) {
+    const modern::PropertySpec &property = contract_metadata.properties[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"name\":\"" << json_escape(property.name)
+        << "\",\"seed\":" << property.seed << ",\"generator\":\""
+        << json_escape(property.generator) << "\"}";
+  }
+  out << "],\n";
+  const modern::PrivacyValidationResult privacy_metadata =
+      modern::validate_privacy_metadata(
+          module.privacy_labels, module.privacy_policies, module.lineage_nodes);
+  out << "  \"privacy_labels\": [";
+  for (std::size_t i = 0; i < privacy_metadata.labels.size(); ++i) {
+    const modern::PrivacyLabel &label = privacy_metadata.labels[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"name\":\"" << json_escape(label.name) << "\",\"kind\":\""
+        << json_escape(label.kind) << "\",\"flags\":" << label.flags << "}";
+  }
+  out << "],\n";
+  out << "  \"privacy_policies\": [";
+  for (std::size_t i = 0; i < privacy_metadata.policies.size(); ++i) {
+    const modern::PrivacyPolicyRule &rule = privacy_metadata.policies[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"policy\":\"" << json_escape(rule.policy) << "\",\"action\":\""
+        << json_escape(rule.action) << "\",\"label\":\""
+        << json_escape(rule.label) << "\"}";
+  }
+  out << "],\n";
+  out << "  \"lineage_nodes\": [";
+  for (std::size_t i = 0; i < privacy_metadata.lineage.size(); ++i) {
+    const modern::LineageNode &node = privacy_metadata.lineage[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"id\":\"" << json_escape(node.node_id) << "\",\"kind\":\""
+        << json_escape(node.kind) << "\",\"output\":\""
+        << json_escape(node.output) << "\"}";
+  }
+  out << "],\n";
+  const modern::WorkflowValidationResult workflow_metadata =
+      modern::validate_workflow_metadata(module.workflow_steps,
+                                         module.workflow_history);
+  out << "  \"workflow_steps\": [";
+  for (std::size_t i = 0; i < workflow_metadata.steps.size(); ++i) {
+    const modern::WorkflowStep &step = workflow_metadata.steps[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"workflow\":\"" << json_escape(step.workflow) << "\",\"name\":\""
+        << json_escape(step.name) << "\",\"effects\":\""
+        << json_escape(effect::effect_row_to_text(step.effect_row)) << "\"}";
+  }
+  out << "],\n";
+  out << "  \"workflow_history\": [";
+  for (std::size_t i = 0; i < workflow_metadata.history.size(); ++i) {
+    const modern::WorkflowHistoryEvent &event = workflow_metadata.history[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"workflow_id\":\"" << json_escape(event.workflow_id)
+        << "\",\"step\":\"" << json_escape(event.step) << "\",\"event\":\""
+        << json_escape(event.event) << "\"}";
+  }
+  out << "],\n";
   out << "  \"hashes\": [";
   for (std::size_t i = 0; i < module.hashes.size(); ++i) {
     const HashEntry &entry = module.hashes[i];
@@ -4357,6 +5072,94 @@ std::string module_to_disasm(const BcModule &module,
       for (const std::string &feature : kernel.forbidden_features) {
         out << "    forbidden=\"" << json_escape(feature) << "\"\n";
       }
+    }
+  }
+  const modern::AgentValidationResult agent_metadata =
+      modern::validate_agent_metadata(module.agent_symbols,
+                                      module.agent_patches,
+                                      module.provenance_records);
+  if (!agent_metadata.symbols.empty() || !agent_metadata.patches.empty() ||
+      !agent_metadata.provenance.empty()) {
+    out << ".agnt\n";
+    for (const modern::AgentSymbol &symbol : agent_metadata.symbols) {
+      out << "  symbol " << symbol.symbol_id << " name=\""
+          << json_escape(symbol.name) << "\" kind=\""
+          << json_escape(symbol.kind) << "\" module=\""
+          << json_escape(symbol.module) << "\" visibility=\""
+          << json_escape(symbol.visibility) << "\"\n";
+    }
+    for (const modern::AgentPatch &patch : agent_metadata.patches) {
+      out << "  patch " << patch.patch_id << " intent=\""
+          << json_escape(patch.intent)
+          << "\" operations=" << patch.operations.size()
+          << " flags=" << patch.flags << "\n";
+    }
+    for (const modern::ProvenanceRecord &record : agent_metadata.provenance) {
+      out << "  provenance " << record.patch_id << " tool=\""
+          << json_escape(record.tool)
+          << "\" checks=" << record.checks_run.size()
+          << " flags=" << record.flags << "\n";
+    }
+  }
+  const modern::ContractValidationResult contract_metadata =
+      modern::validate_contract_metadata(module.contracts, module.properties);
+  if (!contract_metadata.contracts.empty() ||
+      !contract_metadata.properties.empty()) {
+    out << ".cntr\n";
+    for (const modern::ContractSpec &contract : contract_metadata.contracts) {
+      out << "  contract " << contract.owner << " kind=\""
+          << json_escape(contract.kind) << "\" expr=\""
+          << json_escape(contract.expression) << "\" effects=\""
+          << json_escape(effect::effect_row_to_text(contract.effect_row))
+          << "\" flags=" << contract.flags << "\n";
+    }
+    for (const modern::PropertySpec &property : contract_metadata.properties) {
+      out << "  property \"" << json_escape(property.name)
+          << "\" seed=" << property.seed << " generator=\""
+          << json_escape(property.generator) << "\" flags=" << property.flags
+          << "\n";
+    }
+  }
+  const modern::PrivacyValidationResult privacy_metadata =
+      modern::validate_privacy_metadata(
+          module.privacy_labels, module.privacy_policies, module.lineage_nodes);
+  if (!privacy_metadata.labels.empty() || !privacy_metadata.policies.empty() ||
+      !privacy_metadata.lineage.empty()) {
+    out << ".priv\n";
+    for (const modern::PrivacyLabel &label : privacy_metadata.labels) {
+      out << "  label " << label.name << " kind=\"" << json_escape(label.kind)
+          << "\" flags=" << label.flags << "\n";
+    }
+    for (const modern::PrivacyPolicyRule &rule : privacy_metadata.policies) {
+      out << "  policy " << rule.policy << " action=\""
+          << json_escape(rule.action) << "\" label=\""
+          << json_escape(rule.label) << "\" min_group=" << rule.min_group
+          << " flags=" << rule.flags << "\n";
+    }
+    for (const modern::LineageNode &node : privacy_metadata.lineage) {
+      out << "  lineage " << node.node_id << " kind=\""
+          << json_escape(node.kind) << "\" output=\""
+          << json_escape(node.output) << "\" flags=" << node.flags << "\n";
+    }
+  }
+  const modern::WorkflowValidationResult workflow_metadata =
+      modern::validate_workflow_metadata(module.workflow_steps,
+                                         module.workflow_history);
+  if (!workflow_metadata.steps.empty() || !workflow_metadata.history.empty()) {
+    out << ".wflw\n";
+    for (const modern::WorkflowStep &step : workflow_metadata.steps) {
+      out << "  step " << step.workflow << "." << step.name << " effects=\""
+          << json_escape(effect::effect_row_to_text(step.effect_row))
+          << "\" idempotency_key=\"" << json_escape(step.idempotency_key)
+          << "\" flags=" << step.flags << "\n";
+    }
+    for (const modern::WorkflowHistoryEvent &event :
+         workflow_metadata.history) {
+      out << "  history " << event.workflow_id << " step=\""
+          << json_escape(event.step) << "\" event=\""
+          << json_escape(event.event) << "\" key=\""
+          << json_escape(event.idempotency_key) << "\" flags=" << event.flags
+          << "\n";
     }
   }
   if (!module.hashes.empty()) {

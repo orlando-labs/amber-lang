@@ -8715,6 +8715,16 @@ struct RuntimeWorld::Impl {
         wasm_accel::validate_wasm_components(module->wasm_components);
     accelerator_kernels =
         wasm_accel::validate_accelerator_kernels(module->accelerator_kernels);
+    agent_metadata = modern::validate_agent_metadata(
+        module->agent_symbols, module->agent_patches,
+        module->provenance_records);
+    contract_metadata = modern::validate_contract_metadata(module->contracts,
+                                                           module->properties);
+    privacy_metadata = modern::validate_privacy_metadata(
+        module->privacy_labels, module->privacy_policies,
+        module->lineage_nodes);
+    workflow_metadata = modern::validate_workflow_metadata(
+        module->workflow_steps, module->workflow_history);
     trace.schema = "amber.replay.v1";
     trace.capability_grants = options.capability_grants;
     trace.schema_versions.push_back("amber.replay.v1");
@@ -8805,6 +8815,10 @@ struct RuntimeWorld::Impl {
   RuntimeTablePlanValidation table_plans;
   RuntimeWasmValidation wasm_components;
   RuntimeAcceleratorValidation accelerator_kernels;
+  RuntimeAgentValidation agent_metadata;
+  RuntimeContractValidation contract_metadata;
+  RuntimePrivacyValidation privacy_metadata;
+  RuntimeWorkflowValidation workflow_metadata;
   RuntimeReplayTrace trace;
   RuntimeReplayValidation replay_validation;
   std::size_t replay_cursor = 0;
@@ -9526,6 +9540,20 @@ RuntimePackageMirror package_mirror_for(const bytecode::BcModule &module) {
   mirror.accelerator_kernels =
       wasm_accel::validate_accelerator_kernels(module.accelerator_kernels)
           .kernels;
+  mirror.agent_symbols =
+      modern::validate_agent_metadata(
+          module.agent_symbols, module.agent_patches, module.provenance_records)
+          .symbols;
+  mirror.contracts =
+      modern::validate_contract_metadata(module.contracts, module.properties)
+          .contracts;
+  mirror.privacy_labels =
+      modern::validate_privacy_metadata(
+          module.privacy_labels, module.privacy_policies, module.lineage_nodes)
+          .labels;
+  mirror.workflow_steps = modern::validate_workflow_metadata(
+                              module.workflow_steps, module.workflow_history)
+                              .steps;
 
   return mirror;
 }
@@ -10085,6 +10113,16 @@ RuntimeWorld::reload_package_artifact(const pkg::PackageArtifact &artifact) {
       wasm_accel::validate_wasm_components(impl_->module->wasm_components);
   impl_->accelerator_kernels = wasm_accel::validate_accelerator_kernels(
       impl_->module->accelerator_kernels);
+  impl_->agent_metadata = modern::validate_agent_metadata(
+      impl_->module->agent_symbols, impl_->module->agent_patches,
+      impl_->module->provenance_records);
+  impl_->contract_metadata = modern::validate_contract_metadata(
+      impl_->module->contracts, impl_->module->properties);
+  impl_->privacy_metadata = modern::validate_privacy_metadata(
+      impl_->module->privacy_labels, impl_->module->privacy_policies,
+      impl_->module->lineage_nodes);
+  impl_->workflow_metadata = modern::validate_workflow_metadata(
+      impl_->module->workflow_steps, impl_->module->workflow_history);
 
   result.ok = true;
   result.swapped = true;
@@ -10210,6 +10248,34 @@ RuntimeAcceleratorValidation RuntimeWorld::accelerator_validation() const {
     return {};
   }
   return impl_->accelerator_kernels;
+}
+
+RuntimeAgentValidation RuntimeWorld::agent_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->agent_metadata;
+}
+
+RuntimeContractValidation RuntimeWorld::contract_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->contract_metadata;
+}
+
+RuntimePrivacyValidation RuntimeWorld::privacy_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->privacy_metadata;
+}
+
+RuntimeWorkflowValidation RuntimeWorld::workflow_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->workflow_metadata;
 }
 
 RuntimeTraceEvent RuntimeWorld::record_trace_event(RuntimeTraceEvent event) {
