@@ -207,6 +207,59 @@ void test_runtime_replay_trace_recording_and_divergence() {
          "divergent runtime replay should report ReplayDivergenceError");
 }
 
+void test_runtime_schema_and_table_metadata() {
+  amber::bytecode::BcModule module;
+  amber::data::SchemaDefinition order_v1;
+  order_v1.name = "Order";
+  order_v1.version = 1;
+  order_v1.fields.push_back({"id",
+                             "integer",
+                             true,
+                             false,
+                             {},
+                             amber::data::kSchemaFieldFlagPrimaryKey});
+  order_v1.fields.push_back({"amount", "float", true, false, {}, 0});
+  amber::data::SchemaDefinition order_v2 = order_v1;
+  order_v2.version = 2;
+  order_v2.fields.push_back({"status", "string", false, false, "new", 0});
+  module.schemas = {order_v1, order_v2};
+  module.schema_migrations.push_back(
+      {"Order", 1, 2, "compatible",
+       amber::data::kSchemaMigrationFlagCompatible});
+  amber::data::TablePlan plan;
+  plan.plan_id = "orders.high_value";
+  plan.op = "filter";
+  plan.input_refs = {"orders"};
+  plan.arguments = {"amount > 100"};
+  plan.column_dependencies = {{"orders", "amount"}};
+  plan.flags = amber::data::kTablePlanFlagLazy;
+  module.table_plans.push_back(plan);
+
+  amber::runtime::RuntimeWorld world(module);
+  expect(world.schema_validation().ok,
+         "runtime schema metadata should validate");
+  expect(world.table_plan_validation().ok,
+         "runtime table metadata should validate");
+  expect(world.table_plan_validation().plans.size() == 1,
+         "runtime table plan should be exposed");
+  expect(amber::data::table_plan_fingerprint(
+             world.table_plan_validation().plans[0])
+                 .size() == 64,
+         "runtime table plan fingerprint should be sha256 hex");
+
+  const amber::runtime::RuntimePackageMirror mirror = world.package_mirror();
+  expect(mirror.schemas.size() == 2 && mirror.schema_migrations.size() == 1 &&
+             mirror.table_plans.size() == 1,
+         "runtime mirror should expose W11.4 metadata");
+
+  amber::bytecode::BcModule invalid = module;
+  invalid.schemas[1].fields.back().required = true;
+  invalid.schemas[1].fields.back().default_value.clear();
+  amber::runtime::RuntimeWorld invalid_world(invalid);
+  expect(!invalid_world.schema_validation().ok,
+         "runtime schema validation should reject incompatible migration");
+}
+
 void test_branching_and_last_result() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def flag(x):\n"
                                                           "  if x:\n"
@@ -5091,6 +5144,7 @@ int main() {
   test_runtime_capability_checks();
   test_runtime_effect_checks();
   test_runtime_replay_trace_recording_and_divergence();
+  test_runtime_schema_and_table_metadata();
   test_manual_make_map();
   test_runtime_sequence_collections_contract();
   test_runtime_map_collections_contract();

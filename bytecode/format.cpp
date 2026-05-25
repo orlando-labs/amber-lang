@@ -331,6 +331,10 @@ const char *section_tag(SectionKind kind) {
     return "OBSV";
   case SectionKind::Rply:
     return "RPLY";
+  case SectionKind::Scma:
+    return "SCMA";
+  case SectionKind::Tabl:
+    return "TABL";
   case SectionKind::Hash:
     return "HASH";
   }
@@ -411,6 +415,14 @@ bool decode_section_kind(const std::array<char, 4> &tag, SectionKind &kind) {
     kind = SectionKind::Rply;
     return true;
   }
+  if (value == "SCMA") {
+    kind = SectionKind::Scma;
+    return true;
+  }
+  if (value == "TABL") {
+    kind = SectionKind::Tabl;
+    return true;
+  }
   if (value == "HASH") {
     kind = SectionKind::Hash;
     return true;
@@ -451,6 +463,10 @@ bool optional_section_present(const BcModule &module, SectionKind kind) {
     return !module.replay_metadata.required_event_names.empty() ||
            !module.replay_metadata.deterministic_sources.empty() ||
            module.replay_metadata.flags != 0U;
+  case SectionKind::Scma:
+    return !module.schemas.empty() || !module.schema_migrations.empty();
+  case SectionKind::Tabl:
+    return !module.table_plans.empty();
   case SectionKind::Hash:
     return !module.hashes.empty();
   default:
@@ -837,6 +853,70 @@ serialize_replay_metadata(const replay::ReplayMetadata &metadata) {
   return out;
 }
 
+std::vector<std::uint8_t> serialize_schema_metadata(
+    const std::vector<data::SchemaDefinition> &schemas,
+    const std::vector<data::SchemaMigration> &migrations) {
+  const data::SchemaValidationResult validated =
+      data::validate_schemas(schemas, migrations);
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(validated.schemas.size()));
+  for (const data::SchemaDefinition &schema : validated.schemas) {
+    append_string(out, schema.name);
+    append_u32(out, schema.version);
+    append_u32(out, schema.flags);
+    append_u32(out, static_cast<std::uint32_t>(schema.fields.size()));
+    for (const data::SchemaField &field : schema.fields) {
+      append_string(out, field.name);
+      append_string(out, field.type);
+      append_u8(out, field.required ? 1U : 0U);
+      append_u8(out, field.nullable ? 1U : 0U);
+      append_string(out, field.default_value);
+      append_u32(out, field.flags);
+    }
+  }
+  append_u32(out, static_cast<std::uint32_t>(validated.migrations.size()));
+  for (const data::SchemaMigration &migration : validated.migrations) {
+    append_string(out, migration.schema_name);
+    append_u32(out, migration.from_version);
+    append_u32(out, migration.to_version);
+    append_string(out, migration.kind);
+    append_u32(out, migration.flags);
+  }
+  return out;
+}
+
+std::vector<std::uint8_t>
+serialize_table_plans(const std::vector<data::TablePlan> &plans) {
+  const data::TablePlanValidationResult validated =
+      data::validate_table_plans(plans);
+  std::vector<std::uint8_t> out;
+  append_u32(out, static_cast<std::uint32_t>(validated.plans.size()));
+  for (const data::TablePlan &plan : validated.plans) {
+    append_string(out, plan.plan_id);
+    append_string(out, plan.op);
+    append_u32(out, plan.flags);
+    append_u32(out, static_cast<std::uint32_t>(plan.input_refs.size()));
+    for (const std::string &input : plan.input_refs) {
+      append_string(out, input);
+    }
+    append_u32(out, static_cast<std::uint32_t>(plan.arguments.size()));
+    for (const std::string &argument : plan.arguments) {
+      append_string(out, argument);
+    }
+    append_u32(out,
+               static_cast<std::uint32_t>(plan.column_dependencies.size()));
+    for (const data::ColumnDependency &dependency : plan.column_dependencies) {
+      append_string(out, dependency.table_ref);
+      append_string(out, dependency.column_ref);
+    }
+    append_u32(out, static_cast<std::uint32_t>(plan.effect_row.size()));
+    for (const std::string &effect_label : plan.effect_row) {
+      append_string(out, effect_label);
+    }
+  }
+  return out;
+}
+
 std::vector<std::uint8_t>
 serialize_hashes(const std::vector<HashEntry> &hashes) {
   std::vector<std::uint8_t> out;
@@ -907,6 +987,16 @@ std::vector<SectionPayload> build_sections(const BcModule &module) {
     sections.push_back({SectionKind::Rply,
                         serialize_replay_metadata(module.replay_metadata), 1,
                         0});
+  }
+  if (optional_section_present(module, SectionKind::Scma)) {
+    sections.push_back(
+        {SectionKind::Scma,
+         serialize_schema_metadata(module.schemas, module.schema_migrations), 1,
+         0});
+  }
+  if (optional_section_present(module, SectionKind::Tabl)) {
+    sections.push_back(
+        {SectionKind::Tabl, serialize_table_plans(module.table_plans), 1, 0});
   }
   if (optional_section_present(module, SectionKind::Hash)) {
     sections.push_back(
@@ -1818,6 +1908,137 @@ bool parse_replay_metadata(Reader &reader, replay::ReplayMetadata &out) {
   return true;
 }
 
+bool parse_schema_metadata(Reader &reader,
+                           std::vector<data::SchemaDefinition> &schemas,
+                           std::vector<data::SchemaMigration> &migrations) {
+  std::uint32_t schema_count = 0;
+  if (!reader.read_u32(schema_count)) {
+    return false;
+  }
+  std::vector<data::SchemaDefinition> parsed_schemas;
+  parsed_schemas.reserve(schema_count);
+  for (std::uint32_t i = 0; i < schema_count; ++i) {
+    data::SchemaDefinition schema;
+    if (!reader.read_string(schema.name) || !reader.read_u32(schema.version) ||
+        !reader.read_u32(schema.flags)) {
+      return false;
+    }
+    std::uint32_t field_count = 0;
+    if (!reader.read_u32(field_count)) {
+      return false;
+    }
+    schema.fields.reserve(field_count);
+    for (std::uint32_t j = 0; j < field_count; ++j) {
+      data::SchemaField field;
+      std::uint8_t required = 0;
+      std::uint8_t nullable = 0;
+      if (!reader.read_string(field.name) || !reader.read_string(field.type) ||
+          !reader.read_u8(required) || !reader.read_u8(nullable) ||
+          !reader.read_string(field.default_value) ||
+          !reader.read_u32(field.flags)) {
+        return false;
+      }
+      field.required = required != 0U;
+      field.nullable = nullable != 0U;
+      schema.fields.push_back(data::normalize_schema_field(std::move(field)));
+    }
+    parsed_schemas.push_back(data::normalize_schema(std::move(schema)));
+  }
+
+  std::uint32_t migration_count = 0;
+  if (!reader.read_u32(migration_count)) {
+    return false;
+  }
+  std::vector<data::SchemaMigration> parsed_migrations;
+  parsed_migrations.reserve(migration_count);
+  for (std::uint32_t i = 0; i < migration_count; ++i) {
+    data::SchemaMigration migration;
+    if (!reader.read_string(migration.schema_name) ||
+        !reader.read_u32(migration.from_version) ||
+        !reader.read_u32(migration.to_version) ||
+        !reader.read_string(migration.kind) ||
+        !reader.read_u32(migration.flags)) {
+      return false;
+    }
+    parsed_migrations.push_back(
+        data::normalize_schema_migration(std::move(migration)));
+  }
+
+  const data::SchemaValidationResult validated =
+      data::validate_schemas(parsed_schemas, parsed_migrations);
+  schemas = validated.schemas;
+  migrations = validated.migrations;
+  return true;
+}
+
+bool parse_table_plans(Reader &reader, std::vector<data::TablePlan> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  std::vector<data::TablePlan> plans;
+  plans.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    data::TablePlan plan;
+    if (!reader.read_string(plan.plan_id) || !reader.read_string(plan.op) ||
+        !reader.read_u32(plan.flags)) {
+      return false;
+    }
+    std::uint32_t input_count = 0;
+    if (!reader.read_u32(input_count)) {
+      return false;
+    }
+    plan.input_refs.reserve(input_count);
+    for (std::uint32_t j = 0; j < input_count; ++j) {
+      std::string input;
+      if (!reader.read_string(input)) {
+        return false;
+      }
+      plan.input_refs.push_back(std::move(input));
+    }
+    std::uint32_t arg_count = 0;
+    if (!reader.read_u32(arg_count)) {
+      return false;
+    }
+    plan.arguments.reserve(arg_count);
+    for (std::uint32_t j = 0; j < arg_count; ++j) {
+      std::string argument;
+      if (!reader.read_string(argument)) {
+        return false;
+      }
+      plan.arguments.push_back(std::move(argument));
+    }
+    std::uint32_t dep_count = 0;
+    if (!reader.read_u32(dep_count)) {
+      return false;
+    }
+    plan.column_dependencies.reserve(dep_count);
+    for (std::uint32_t j = 0; j < dep_count; ++j) {
+      data::ColumnDependency dependency;
+      if (!reader.read_string(dependency.table_ref) ||
+          !reader.read_string(dependency.column_ref)) {
+        return false;
+      }
+      plan.column_dependencies.push_back(std::move(dependency));
+    }
+    std::uint32_t effect_count = 0;
+    if (!reader.read_u32(effect_count)) {
+      return false;
+    }
+    plan.effect_row.reserve(effect_count);
+    for (std::uint32_t j = 0; j < effect_count; ++j) {
+      std::string effect_label;
+      if (!reader.read_string(effect_label)) {
+        return false;
+      }
+      plan.effect_row.push_back(std::move(effect_label));
+    }
+    plans.push_back(data::normalize_table_plan(std::move(plan)));
+  }
+  out = data::validate_table_plans(plans).plans;
+  return true;
+}
+
 bool parse_hashes(Reader &reader, std::vector<HashEntry> &out) {
   std::uint32_t count = 0;
   if (!reader.read_u32(count)) {
@@ -2307,6 +2528,20 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
                      0);
   }
 
+  const data::SchemaValidationResult schema_validation =
+      data::validate_schemas(module.schemas, module.schema_migrations);
+  for (const data::DataDiagnostic &diagnostic : schema_validation.diagnostics) {
+    add_verify_error(errors, "BC1406", diagnostic.message, SectionKind::Scma,
+                     0);
+  }
+
+  const data::TablePlanValidationResult table_validation =
+      data::validate_table_plans(module.table_plans);
+  for (const data::DataDiagnostic &diagnostic : table_validation.diagnostics) {
+    add_verify_error(errors, "BC1407", diagnostic.message, SectionKind::Tabl,
+                     0);
+  }
+
   for (const HashEntry &entry : module.hashes) {
     if (entry.digest.size() != 32U) {
       add_verify_error(errors, "BC1306", "hash digest must be 32 bytes",
@@ -2679,6 +2914,17 @@ DecodeResult deserialize_module(const std::vector<std::uint8_t> &bytes) {
   if (by_kind.find(SectionKind::Rply) != by_kind.end()) {
     parse_section(SectionKind::Rply, "RPLY", [&](Reader &r) {
       parse_replay_metadata(r, result.module.replay_metadata);
+    });
+  }
+  if (by_kind.find(SectionKind::Scma) != by_kind.end()) {
+    parse_section(SectionKind::Scma, "SCMA", [&](Reader &r) {
+      parse_schema_metadata(r, result.module.schemas,
+                            result.module.schema_migrations);
+    });
+  }
+  if (by_kind.find(SectionKind::Tabl) != by_kind.end()) {
+    parse_section(SectionKind::Tabl, "TABL", [&](Reader &r) {
+      parse_table_plans(r, result.module.table_plans);
     });
   }
   if (by_kind.find(SectionKind::Hash) != by_kind.end()) {
@@ -3208,6 +3454,83 @@ std::string module_to_json(const BcModule &module,
         << "\"";
   }
   out << "],\"flags\":" << replay_metadata.flags << "},\n";
+  const data::SchemaValidationResult schema_metadata =
+      data::validate_schemas(module.schemas, module.schema_migrations);
+  out << "  \"schemas\": [";
+  for (std::size_t i = 0; i < schema_metadata.schemas.size(); ++i) {
+    const data::SchemaDefinition &schema = schema_metadata.schemas[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"name\":\"" << json_escape(schema.name)
+        << "\",\"version\":" << schema.version << ",\"fields\":[";
+    for (std::size_t j = 0; j < schema.fields.size(); ++j) {
+      const data::SchemaField &field = schema.fields[j];
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(field.name) << "\",\"type\":\""
+          << json_escape(field.type)
+          << "\",\"required\":" << (field.required ? "true" : "false")
+          << ",\"nullable\":" << (field.nullable ? "true" : "false")
+          << ",\"default\":\"" << json_escape(field.default_value)
+          << "\",\"flags\":" << field.flags << "}";
+    }
+    out << "],\"flags\":" << schema.flags << "}";
+  }
+  out << "],\n";
+  out << "  \"schema_migrations\": [";
+  for (std::size_t i = 0; i < schema_metadata.migrations.size(); ++i) {
+    const data::SchemaMigration &migration = schema_metadata.migrations[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"schema\":\"" << json_escape(migration.schema_name)
+        << "\",\"from\":" << migration.from_version
+        << ",\"to\":" << migration.to_version << ",\"kind\":\""
+        << json_escape(migration.kind) << "\",\"flags\":" << migration.flags
+        << "}";
+  }
+  out << "],\n";
+  const data::TablePlanValidationResult table_metadata =
+      data::validate_table_plans(module.table_plans);
+  out << "  \"table_plans\": [";
+  for (std::size_t i = 0; i < table_metadata.plans.size(); ++i) {
+    const data::TablePlan &plan = table_metadata.plans[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "{\"plan_id\":\"" << json_escape(plan.plan_id) << "\",\"op\":\""
+        << json_escape(plan.op) << "\",\"inputs\":[";
+    for (std::size_t j = 0; j < plan.input_refs.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "\"" << json_escape(plan.input_refs[j]) << "\"";
+    }
+    out << "],\"arguments\":[";
+    for (std::size_t j = 0; j < plan.arguments.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "\"" << json_escape(plan.arguments[j]) << "\"";
+    }
+    out << "],\"column_dependencies\":[";
+    for (std::size_t j = 0; j < plan.column_dependencies.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"table\":\""
+          << json_escape(plan.column_dependencies[j].table_ref)
+          << "\",\"column\":\""
+          << json_escape(plan.column_dependencies[j].column_ref) << "\"}";
+    }
+    out << "],\"effect_row\":\""
+        << json_escape(effect::effect_row_to_text(plan.effect_row))
+        << "\",\"fingerprint\":\"" << data::table_plan_fingerprint(plan)
+        << "\",\"flags\":" << plan.flags << "}";
+  }
+  out << "],\n";
   out << "  \"hashes\": [";
   for (std::size_t i = 0; i < module.hashes.size(); ++i) {
     const HashEntry &entry = module.hashes[i];
@@ -3538,6 +3861,53 @@ std::string module_to_disasm(const BcModule &module,
     }
     for (const std::string &source : replay_metadata.deterministic_sources) {
       out << "  deterministic_source=\"" << json_escape(source) << "\"\n";
+    }
+  }
+  const data::SchemaValidationResult schema_metadata =
+      data::validate_schemas(module.schemas, module.schema_migrations);
+  if (!schema_metadata.schemas.empty() || !schema_metadata.migrations.empty()) {
+    out << ".scma\n";
+    for (const data::SchemaDefinition &schema : schema_metadata.schemas) {
+      out << "  schema " << schema.name << " version=" << schema.version
+          << " flags=" << schema.flags << "\n";
+      for (const data::SchemaField &field : schema.fields) {
+        out << "    field " << field.name << " type=\"" << field.type
+            << "\" required=" << (field.required ? 1 : 0)
+            << " nullable=" << (field.nullable ? 1 : 0);
+        if (!field.default_value.empty()) {
+          out << " default=\"" << json_escape(field.default_value) << "\"";
+        }
+        out << " flags=" << field.flags << "\n";
+      }
+    }
+    for (const data::SchemaMigration &migration : schema_metadata.migrations) {
+      out << "  migration " << migration.schema_name << " "
+          << migration.from_version << "->" << migration.to_version
+          << " kind=\"" << json_escape(migration.kind)
+          << "\" flags=" << migration.flags << "\n";
+    }
+  }
+  const data::TablePlanValidationResult table_metadata =
+      data::validate_table_plans(module.table_plans);
+  if (!table_metadata.plans.empty()) {
+    out << ".tabl\n";
+    for (const data::TablePlan &plan : table_metadata.plans) {
+      out << "  plan " << plan.plan_id << " op=\"" << json_escape(plan.op)
+          << "\" fingerprint=\"" << data::table_plan_fingerprint(plan)
+          << "\" flags=" << plan.flags << "\n";
+      for (const std::string &input : plan.input_refs) {
+        out << "    input=\"" << json_escape(input) << "\"\n";
+      }
+      for (const std::string &argument : plan.arguments) {
+        out << "    arg=\"" << json_escape(argument) << "\"\n";
+      }
+      for (const data::ColumnDependency &dependency :
+           plan.column_dependencies) {
+        out << "    dep=\"" << json_escape(dependency.table_ref) << "."
+            << json_escape(dependency.column_ref) << "\"\n";
+      }
+      out << "    effect_row=\""
+          << json_escape(effect::effect_row_to_text(plan.effect_row)) << "\"\n";
     }
   }
   if (!module.hashes.empty()) {

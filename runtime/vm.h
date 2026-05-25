@@ -900,6 +900,11 @@ using RuntimeReplayMetadata = replay::ReplayMetadata;
 using RuntimeTraceEvent = replay::TraceEvent;
 using RuntimeReplayTrace = replay::ReplayTrace;
 using RuntimeReplayValidation = replay::ReplayValidationResult;
+using RuntimeSchemaDefinition = data::SchemaDefinition;
+using RuntimeSchemaMigration = data::SchemaMigration;
+using RuntimeTablePlan = data::TablePlan;
+using RuntimeSchemaValidation = data::SchemaValidationResult;
+using RuntimeTablePlanValidation = data::TablePlanValidationResult;
 
 struct RuntimePackageMirror {
   bool read_only = true;
@@ -917,6 +922,9 @@ struct RuntimePackageMirror {
   std::vector<RuntimeEffectSummary> effects;
   std::vector<RuntimeObservabilitySite> observability_sites;
   RuntimeReplayMetadata replay_metadata;
+  std::vector<RuntimeSchemaDefinition> schemas;
+  std::vector<RuntimeSchemaMigration> schema_migrations;
+  std::vector<RuntimeTablePlan> table_plans;
 };
 
 struct RuntimeOwnerMirror {
@@ -1054,6 +1062,8 @@ public:
   RuntimeEffectCheckResult
   check_effects(const std::vector<std::string> &effects) const;
   RuntimeEffectValidation effect_validation() const;
+  RuntimeSchemaValidation schema_validation() const;
+  RuntimeTablePlanValidation table_plan_validation() const;
   RuntimeTraceEvent record_trace_event(RuntimeTraceEvent event);
   RuntimeReplayTrace replay_trace() const;
   RuntimeReplayValidation replay_validation() const;

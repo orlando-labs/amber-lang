@@ -120,6 +120,32 @@ amber::bytecode::BcModule sample_module() {
   module.replay_metadata.deterministic_sources = {"time", "random"};
   module.replay_metadata.flags =
       amber::replay::kReplayMetadataFlagDeterministic;
+  amber::data::SchemaDefinition order_v1;
+  order_v1.name = "Order";
+  order_v1.version = 1;
+  order_v1.fields.push_back({"id",
+                             "integer",
+                             true,
+                             false,
+                             {},
+                             amber::data::kSchemaFieldFlagPrimaryKey});
+  order_v1.fields.push_back({"amount", "float", true, false, {}, 0});
+  amber::data::SchemaDefinition order_v2 = order_v1;
+  order_v2.version = 2;
+  order_v2.fields.push_back({"status", "string", false, false, "new", 0});
+  module.schemas = {order_v1, order_v2};
+  module.schema_migrations.push_back(
+      {"Order", 1, 2, "compatible",
+       amber::data::kSchemaMigrationFlagCompatible});
+  amber::data::TablePlan high_value;
+  high_value.plan_id = "orders.high_value";
+  high_value.op = "filter";
+  high_value.input_refs = {"orders"};
+  high_value.arguments = {"amount > 100"};
+  high_value.column_dependencies = {{"orders", "amount"}};
+  high_value.effect_row = {};
+  high_value.flags = amber::data::kTablePlanFlagLazy;
+  module.table_plans.push_back(high_value);
   module.hashes.push_back(
       {SectionKind::Code, std::vector<std::uint8_t>(32, 0xAB)});
   return module;
@@ -153,7 +179,7 @@ void test_round_trip_and_dump() {
   const std::string dump2 = amber::bytecode::module_to_json(
       decoded2.module, decoded2.sections, bytes_hash(bytes2));
   expect(dump1 == dump2, "JSON dump changed across round-trip");
-  expect(decoded.sections.size() == 19,
+  expect(decoded.sections.size() == 21,
          "expected required and optional sections");
 }
 
@@ -189,6 +215,14 @@ void test_disasm_is_stable() {
              disasm.find("deterministic_source=\"random\"") !=
                  std::string::npos,
          "missing replay section in disasm");
+  expect(disasm.find(".scma\n  schema Order version=1") != std::string::npos &&
+             disasm.find("migration Order 1->2 kind=\"compatible\"") !=
+                 std::string::npos,
+         "missing schema section in disasm");
+  expect(disasm.find(".tabl\n  plan orders.high_value op=\"filter\"") !=
+                 std::string::npos &&
+             disasm.find("dep=\"orders.amount\"") != std::string::npos,
+         "missing table section in disasm");
 }
 
 void test_bad_magic_rejected() {
@@ -338,6 +372,28 @@ void test_invalid_class_path_ref_rejected() {
          "expected BC1206 for non-path superclass ref");
 }
 
+void test_invalid_schema_metadata_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.schemas[0].fields[0].type = "not a type";
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "invalid schema metadata unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1406"),
+         "expected BC1406 for invalid schema metadata");
+}
+
+void test_invalid_table_plan_metadata_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.table_plans[0].op = "teleport";
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "invalid table plan metadata unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1407"),
+         "expected BC1407 for invalid table metadata");
+}
+
 } // namespace
 
 int main() {
@@ -349,6 +405,8 @@ int main() {
   test_back_edge_requires_safepoint();
   test_class_descriptor_round_trip();
   test_invalid_class_path_ref_rejected();
+  test_invalid_schema_metadata_rejected();
+  test_invalid_table_plan_metadata_rejected();
   std::cout << "bytecode_tests: ok\n";
   return 0;
 }

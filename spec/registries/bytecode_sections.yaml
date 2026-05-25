@@ -56,6 +56,12 @@ sections:
   - tag: RPLY
     required: false
     meaning: replay/determinism metadata
+  - tag: SCMA
+    required: false
+    meaning: schema definitions and migration metadata
+  - tag: TABL
+    required: false
+    meaning: table/query-plan metadata
   - tag: HASH
     required: false
     meaning: section digests

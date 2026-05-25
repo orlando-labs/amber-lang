@@ -2,6 +2,7 @@
 
 #include "frontend/lexer/token.h"
 #include "profile/capabilities.h"
+#include "profile/data.h"
 #include "profile/effects.h"
 #include "profile/replay.h"
 
@@ -36,6 +37,8 @@ enum class SectionKind {
   Efct,
   Obsv,
   Rply,
+  Scma,
+  Tabl,
   Hash
 };
 
@@ -317,6 +320,9 @@ struct BcModule {
   std::vector<effect::EffectSummary> effects;
   std::vector<replay::ObservabilitySite> observability_sites;
   replay::ReplayMetadata replay_metadata;
+  std::vector<data::SchemaDefinition> schemas;
+  std::vector<data::SchemaMigration> schema_migrations;
+  std::vector<data::TablePlan> table_plans;
   std::vector<HashEntry> hashes;
 };
 

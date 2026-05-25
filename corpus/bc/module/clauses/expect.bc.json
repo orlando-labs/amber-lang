@@ -48,5 +48,8 @@
   "effects": [],
   "observability_sites": [],
   "replay_metadata": {"required_events":[],"deterministic_sources":[],"flags":0},
+  "schemas": [],
+  "schema_migrations": [],
+  "table_plans": [],
   "hashes": []
 }

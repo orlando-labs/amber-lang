@@ -10,6 +10,7 @@
 #include "optimizer/mir.h"
 #include "optimizer/native.h"
 #include "package/package.h"
+#include "profile/data.h"
 #include "profile/replay.h"
 
 #include <fstream>
@@ -65,6 +66,8 @@ void usage(std::ostream &out) {
          "<cap[=target]>...]\n";
   out << "  amberc replay-check <file.ambertrace>\n";
   out << "  amberc trace-inspect <file.ambertrace>\n";
+  out << "  amberc schema-check <file.amberschema>\n";
+  out << "  amberc table-explain <file.ambertable>\n";
   out << "  amberc image-build <amber.toml> <out.amberimg> "
          "[--sign-key <key>] [--key-id <id>]\n";
   out << "  amberc image-inspect <file.amberimg>\n";
@@ -485,6 +488,49 @@ int run_replay_command(int argc, char **argv) {
   return 2;
 }
 
+int run_data_command(int argc, char **argv) {
+  if (argc != 3) {
+    usage(std::cerr);
+    return 2;
+  }
+  const std::string command = argv[1];
+  const std::string source = read_file(argv[2]);
+  if (command == "schema-check") {
+    const amber::data::SchemaDocumentParseResult parsed =
+        amber::data::parse_schema_document(source);
+    if (!parsed.ok()) {
+      amber::data::SchemaValidationResult result;
+      result.ok = false;
+      result.diagnostics = parsed.diagnostics;
+      std::cout << amber::data::schema_validation_to_json(result);
+      return 1;
+    }
+    const amber::data::SchemaValidationResult result =
+        amber::data::validate_schemas(parsed.document.schemas,
+                                      parsed.document.migrations,
+                                      parsed.document.records);
+    std::cout << amber::data::schema_validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  if (command == "table-explain") {
+    const amber::data::TablePlanParseResult parsed =
+        amber::data::parse_table_plan_document(source);
+    if (!parsed.ok()) {
+      amber::data::TablePlanValidationResult result;
+      result.ok = false;
+      result.diagnostics = parsed.diagnostics;
+      std::cout << amber::data::table_plan_validation_to_json(result);
+      return 1;
+    }
+    const amber::data::TablePlanValidationResult result =
+        amber::data::validate_table_plans(parsed.plans);
+    std::cout << amber::data::table_plan_validation_to_json(result);
+    return result.ok ? 0 : 1;
+  }
+  usage(std::cerr);
+  return 2;
+}
+
 int run_image_command(int argc, char **argv) {
   const std::string command = argv[1];
   if (command == "image-build" && argc >= 4) {
@@ -578,6 +624,10 @@ int main(int argc, char **argv) {
     if (argc >= 2 && (std::string(argv[1]) == "replay-check" ||
                       std::string(argv[1]) == "trace-inspect")) {
       return run_replay_command(argc, argv);
+    }
+    if (argc >= 2 && (std::string(argv[1]) == "schema-check" ||
+                      std::string(argv[1]) == "table-explain")) {
+      return run_data_command(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]).find("image-") == 0U) {
       return run_image_command(argc, argv);

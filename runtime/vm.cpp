@@ -8708,9 +8708,15 @@ struct RuntimeWorld::Impl {
                                                     options.capability_grants);
     effects = effect::validate_effect_summaries(
         module->effects, options.allowed_effects, options.enforce_effects);
+    schemas =
+        data::validate_schemas(module->schemas, module->schema_migrations);
+    table_plans = data::validate_table_plans(module->table_plans);
     trace.schema = "amber.replay.v1";
     trace.capability_grants = options.capability_grants;
     trace.schema_versions.push_back("amber.replay.v1");
+    for (const data::SchemaDefinition &schema : schemas.schemas) {
+      trace.schema_versions.push_back(data::schema_version_id(schema));
+    }
     if (options.record_replay_trace || options.enforce_replay) {
       replay_validation.ok = true;
       record_event(replay::make_event(
@@ -8791,6 +8797,8 @@ struct RuntimeWorld::Impl {
   RuntimeWorldOptions options;
   RuntimeCapabilityResolution capabilities;
   RuntimeEffectValidation effects;
+  RuntimeSchemaValidation schemas;
+  RuntimeTablePlanValidation table_plans;
   RuntimeReplayTrace trace;
   RuntimeReplayValidation replay_validation;
   std::size_t replay_cursor = 0;
@@ -9502,6 +9510,11 @@ RuntimePackageMirror package_mirror_for(const bytecode::BcModule &module) {
               return left.site_id < right.site_id;
             });
   mirror.replay_metadata = replay::normalize_metadata(module.replay_metadata);
+  const RuntimeSchemaValidation schema_validation =
+      data::validate_schemas(module.schemas, module.schema_migrations);
+  mirror.schemas = schema_validation.schemas;
+  mirror.schema_migrations = schema_validation.migrations;
+  mirror.table_plans = data::validate_table_plans(module.table_plans).plans;
 
   return mirror;
 }
@@ -9573,6 +9586,29 @@ std::string module_contract_signature(const bytecode::BcModule &module) {
   }
   for (const std::string &source : replay_metadata.deterministic_sources) {
     out << "replay.deterministic_source=" << source << "\n";
+  }
+  const RuntimeSchemaValidation schema_validation =
+      data::validate_schemas(module.schemas, module.schema_migrations);
+  for (const RuntimeSchemaDefinition &schema : schema_validation.schemas) {
+    out << "schema=" << data::schema_version_id(schema) << "|" << schema.flags
+        << "\n";
+    for (const data::SchemaField &field : schema.fields) {
+      out << "schema.field=" << data::schema_version_id(schema) << "|"
+          << field.name << "|" << field.type << "|" << (field.required ? 1 : 0)
+          << "|" << (field.nullable ? 1 : 0) << "|" << field.default_value
+          << "|" << field.flags << "\n";
+    }
+  }
+  for (const RuntimeSchemaMigration &migration : schema_validation.migrations) {
+    out << "schema.migration=" << migration.schema_name << "|"
+        << migration.from_version << "|" << migration.to_version << "|"
+        << migration.kind << "|" << migration.flags << "\n";
+  }
+  const RuntimeTablePlanValidation table_validation =
+      data::validate_table_plans(module.table_plans);
+  for (const RuntimeTablePlan &plan : table_validation.plans) {
+    out << "table.plan=" << plan.plan_id << "|"
+        << data::table_plan_fingerprint(plan) << "|" << plan.flags << "\n";
   }
   return out.str();
 }
@@ -10084,6 +10120,20 @@ RuntimeEffectValidation RuntimeWorld::effect_validation() const {
     return {};
   }
   return impl_->effects;
+}
+
+RuntimeSchemaValidation RuntimeWorld::schema_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->schemas;
+}
+
+RuntimeTablePlanValidation RuntimeWorld::table_plan_validation() const {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {};
+  }
+  return impl_->table_plans;
 }
 
 RuntimeTraceEvent RuntimeWorld::record_trace_event(RuntimeTraceEvent event) {
