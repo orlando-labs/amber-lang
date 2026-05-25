@@ -1,5 +1,5 @@
 schema: amber.tokens.registry.v1
-spec_anchor: amber_spec_consolidated_v19_1.md
+spec_anchor: amber_spec_consolidated_v20_1_main.md
 tokens:
   structural:
     - EOF

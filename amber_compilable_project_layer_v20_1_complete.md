@@ -83,7 +83,7 @@ amber/
     amber_cli/
   spec/
     amber_spec_consolidated_v20_1_main.md
-    amber_compilable_project_layer_v20_1.md
+    amber_compilable_project_layer_v20_1_complete.md
   tests/
     parser/
     binder/
@@ -567,7 +567,7 @@ These ten issues close the practical bootstrap gap from document to working fron
 
 # Приложение A. Перенесённый P0 implementation package из основного файла
 
-Ниже сохранён исходный нормативно-проектный материал из `amber_spec_consolidated_v20_1.md`, перенесённый сюда, чтобы основной файл больше не дублировал длинный implementation layer.
+Ниже сохранён исходный нормативно-проектный материал из `amber_spec_consolidated_v20_1_main.md`, перенесённый сюда, чтобы основной файл больше не дублировал длинный implementation layer.
 
 # Часть II. Пакет реализации P0
 
@@ -6062,7 +6062,7 @@ Typed/distribution/native workstreams не входят в этот путь.
 
 ```text
 /spec/
-  amber_spec_consolidated_v19_2_watch_profile.md
+  amber_spec_consolidated_v20_1_main.md
   changelog/
   registries/
     tokens.yaml
@@ -8803,4 +8803,3 @@ source bytes
 ```
 
 This is the engineering definition of "Amber as a fully compilable language" for the project layer.
-

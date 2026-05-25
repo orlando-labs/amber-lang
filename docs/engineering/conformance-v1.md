@@ -23,7 +23,9 @@ covered by focused bytecode/VM tests. `W11.5` Wasm/accelerator metadata,
 are covered by focused profile/bytecode/VM tests. `W11.6` AI-agent tooling,
 contracts/property, privacy/lineage, and workflow metadata, `AGNT`/`CNTR`/
 `PRIV`/`WFLW` round-trips, profile validation, CLI surfaces, and runtime mirror
-hooks are covered by focused profile/bytecode/VM tests.
+hooks are covered by focused profile/bytecode/VM tests. `W12` documentation/spec
+sync is covered by `make spec-sync-check`, which compares the generated anchor
+map and validates local Markdown links.
 
 `ambertest run <path>` is the canonical corpus entrypoint. It discovers
 `meta.json` fixtures deterministically, dispatches by fixture phase, compares
@@ -66,6 +68,12 @@ The Makefile exposes the CI/mainline command:
 
 ```sh
 make conformance
+```
+
+The W12 documentation/spec-sync gate is:
+
+```sh
+make spec-sync-check
 ```
 
 Current limits:

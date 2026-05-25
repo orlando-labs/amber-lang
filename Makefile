@@ -112,7 +112,7 @@ FORMAT_FILES := \
 	tests/package_tests.cpp \
 	tests/vm_tests.cpp
 
-.PHONY: all build test conformance fmt clean
+.PHONY: all build test conformance spec-sync-check fmt clean
 
 all: build
 
@@ -194,6 +194,9 @@ test: build
 
 conformance: $(BUILD_DIR)/ambertest
 	$(BUILD_DIR)/ambertest run corpus --bundle M5
+
+spec-sync-check:
+	python3 tools/spec_sync.py check
 
 fmt:
 	@if command -v clang-format >/dev/null 2>&1; then \

@@ -1,5 +1,5 @@
 schema: amber.bytecode_sections.registry.v1
-spec_anchor: amber_spec_consolidated_v20_1.md
+spec_anchor: amber_spec_consolidated_v20_1_main.md
 status: implemented
 sections:
   - tag: STRS

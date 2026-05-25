@@ -1,14 +1,15 @@
 # Amber Reference Implementation
 
-This repository is the implementation workspace for `amber_spec_consolidated_v20_1.md`.
+This repository is the implementation workspace for `amber_spec_consolidated_v20_1_main.md`.
 
 Current baseline:
 
 - implementation language: C++17;
 - compiler toolchain: `clang++` by default, override with `make CXX=/path/to/clang++`;
 - supported host targets for now: Linux and macOS;
-- no Python, npm, Cargo, or external package dependency is required for the current frontend slice.
-- bytecode tooling is still pure C++17 and uses the same local `clang++` toolchain.
+- no Python, npm, Cargo, or external package dependency is required for the compiler/runtime build and conformance slice;
+- W12 documentation sync uses only the Python 3 standard library for generated anchor-map checks;
+- bytecode tooling is pure C++17 and uses the same local `clang++` toolchain.
 
 Useful commands:
 
@@ -16,6 +17,7 @@ Useful commands:
 make build
 make test
 make conformance
+make spec-sync-check
 make fmt
 make clean
 build/amberc lex corpus/parse/lexer/basic/source.am
@@ -83,6 +85,7 @@ Current matrix status:
 | `W11.4` | done | `amber.data/schema.v1` metadata-first schema/dataframe baseline with schema definitions, compatible migration validation, record codec checks, table/query-plan fingerprints, column dependency metadata, `SCMA`/`TABL` bytecode sections, runtime mirror/validation hooks, plus `schema-check` / `table-explain` CLI |
 | `W11.5` | done | `amber.wasm/accelerator.v1` metadata-first Wasm component and accelerator baseline with frozen-world component interface validation, capability/effect boundary metadata, restricted accelerator kernel descriptors, `WASM`/`ACCL` bytecode sections, runtime mirror/validation hooks, plus `wasm-build` / `accel-check` CLI |
 | `W11.6` | done | `amber.modern-profiles.v1` metadata-first AI-agent tooling/contracts/privacy/workflow baseline with semantic symbol graph and explain JSON, structured patch/provenance validation, contract/property descriptors, privacy label/policy/lineage checks, durable workflow step/history idempotency validation, `AGNT`/`CNTR`/`PRIV`/`WFLW` bytecode sections, runtime mirror/validation hooks, plus `symbols` / `explain` / `patch-check` / `provenance-audit` / `contract-check` / `privacy-check` / `workflow-check` CLI |
+| `W12` | done | documentation/spec sync baseline with generated anchor map, v20.1 changelog, migration notes, implementation status dashboard, local Markdown link checks, and `make spec-sync-check` |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -154,6 +157,11 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   W11.6 semantic symbol/explain output, structured patch and provenance
   validation, contract/property descriptors, privacy/lineage policy checks, and
   durable workflow history/idempotency checks;
+- `make spec-sync-check` for the W12 documentation/spec-sync gate, validating
+  the generated [anchor map](docs/engineering/spec-anchor-map-v1.md), local
+  Markdown links, the [v20.1 changelog](spec/changelog/v20.1.md),
+  [migration notes](docs/engineering/migration-notes-v20.1.md), and the
+  [implementation status dashboard](docs/engineering/implementation-status-v1.md);
 - binder diagnostics for exports/import writes/duplicates, wildcard misuse,
   placeholder misuse, structural pattern validation including bare matcher
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,

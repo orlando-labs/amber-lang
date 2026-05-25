@@ -7,7 +7,7 @@
 Редакторская консолидация по истории разработки  
 29 апреля 2026
 
-> **Редакторская реструктуризация v20.1-project.** Подробный проектный слой компилируемого Amber, включая bytecode/runtime blueprint, `.amberbc`/loader/verifier, репозиторную декомпозицию, backlog, milestone-gates и матрицу имплементации, вынесен в отдельный файл: [`amber_compilable_project_layer_v20_1.md`](amber_compilable_project_layer_v20_1.md). В этом основном файле сохраняется языковая спецификация и базовый reference на проектный слой; длинная инженерная декомпозиция больше не дублируется здесь.
+> **Редакторская реструктуризация v20.1-project.** Подробный проектный слой компилируемого Amber, включая bytecode/runtime blueprint, `.amberbc`/loader/verifier, репозиторную декомпозицию, backlog, milestone-gates и матрицу имплементации, вынесен в отдельный файл: [`amber_compilable_project_layer_v20_1_complete.md`](amber_compilable_project_layer_v20_1_complete.md). В этом основном файле сохраняется языковая спецификация и базовый reference на проектный слой; длинная инженерная декомпозиция больше не дублируется здесь.
 
 
 
@@ -2306,7 +2306,7 @@ Reference VM может реализовать notebook watch через:
 
 Детальная инженерная спецификация компилируемого Amber вынесена из основного документа в отдельный проектный слой:
 
-- файл: [`amber_compilable_project_layer_v20_1.md`](amber_compilable_project_layer_v20_1.md);
+- файл: [`amber_compilable_project_layer_v20_1_complete.md`](amber_compilable_project_layer_v20_1_complete.md);
 - статус: reference implementation planning / executable engineering layer;
 - покрытие: lexer/parser/AST/HIR, pattern compiler, bytecode ISA, VM/runtime ABI, object model, lifetime/GC/pinning/FFI, `.amberbc`, loader/verifier, no-GIL scheduler, stdlib/corpus/toolchain, backlog, milestone gates и implementation matrix.
 
@@ -2716,7 +2716,7 @@ Reference profile по-прежнему закрывает: `.amberbc`-арте�
 
 Бывшие разделы основного файла, посвящённые компилируемости, reference bytecode VM, lifetime/allocator, collector/pinning/FFI, `.amberbc`, minimal MOP/frozen-world implementation hooks, reference implementation blueprint, closure-профилям второй волны, детализированной матрице имплементации, backlog/milestone gating и tracking issues, перенесены в:
 
-[`amber_compilable_project_layer_v20_1.md`](amber_compilable_project_layer_v20_1.md)
+[`amber_compilable_project_layer_v20_1_complete.md`](amber_compilable_project_layer_v20_1_complete.md)
 
 В этом месте намеренно оставлен только базовый reference, чтобы основной документ оставался языковой спецификацией, а проектная декомпозиция жила отдельно и могла обновляться без шума в language-core тексте.
 
@@ -4291,4 +4291,3 @@ workflow ImportOrders:
   step commit !{db} idempotency_key: fetch.result.digest():
     db.insert_many(fetch.result)
 ```
-
