@@ -191,6 +191,27 @@ std::string replace_first(std::string value, const std::string &from,
   return value;
 }
 
+std::string replace_all(std::string value, const std::string &from,
+                        const std::string &to) {
+  std::size_t found = value.find(from);
+  expect(found != std::string::npos, "replacement target should exist");
+  while (found != std::string::npos) {
+    value.replace(found, from.size(), to);
+    found = value.find(from, found + to.size());
+  }
+  return value;
+}
+
+std::string hex_text(const std::string &value) {
+  std::string out;
+  const char *hex = "0123456789abcdef";
+  for (const unsigned char ch : value) {
+    out.push_back(hex[(ch >> 4U) & 0x0FU]);
+    out.push_back(hex[ch & 0x0FU]);
+  }
+  return out;
+}
+
 void test_frozen_image_build_is_reproducible_and_verifies() {
   const ImageFixture first = build_fixture(false);
   const ImageFixture second = build_fixture(true);
@@ -275,11 +296,33 @@ void test_frozen_image_verify_rejects_non_frozen_native_summary() {
   expect(saw_error, "verify diagnostics should explain frozen guard failure");
 }
 
+void test_frozen_image_verify_rejects_missing_native_readiness_guard() {
+  const ImageFixture fixture = build_fixture(false);
+  const std::string tampered =
+      replace_all(fixture.image.serialized, hex_text("slowpath_table"),
+                  hex_text("slowpath-table"));
+  const amber::frozen::FrozenImageVerifyResult verified =
+      amber::frozen::verify_frozen_image_artifact(tampered, "secret");
+  expect(!verified.ok,
+         "frozen image verify should reject native metadata missing W15 "
+         "readiness fields");
+  bool saw_error = false;
+  for (const amber::frozen::FrozenImageDiagnostic &diagnostic :
+       verified.diagnostics) {
+    if (diagnostic.message.find("readiness guards") != std::string::npos) {
+      saw_error = true;
+    }
+  }
+  expect(saw_error,
+         "verify diagnostics should explain readiness guard failure");
+}
+
 } // namespace
 
 int main() {
   test_frozen_image_build_is_reproducible_and_verifies();
   test_frozen_image_load_freezes_world_and_executes_bound_native();
   test_frozen_image_verify_rejects_non_frozen_native_summary();
+  test_frozen_image_verify_rejects_missing_native_readiness_guard();
   return 0;
 }

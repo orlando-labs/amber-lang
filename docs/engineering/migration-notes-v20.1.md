@@ -1,6 +1,6 @@
 # Amber v20.1 Migration Notes
 
-Status: W14 migration notes for the current reference implementation baseline.
+Status: W15 migration notes for the current reference implementation baseline.
 
 ## Runtime And Artifact Compatibility
 
@@ -8,7 +8,8 @@ W12 was documentation/spec synchronization only. W13 closes compiler/runtime
 contracts for source rules, bytecode verifier initializedness, runtime UNINIT
 guards, `CALL`, and source traces. W14 adds build/bootstrap/conformance
 metadata through `amber.build.v1`, `amberc build`, and optional `.amberbc`
-`PROF` profile metadata.
+`PROF` profile metadata. W15 hardens `amber.native.v1` metadata with explicit
+slowpaths, invalidation fallback, and exception-edge root maps.
 
 Existing artifacts produced by the W11.6 baseline remain in the same format
 families. Invalid hand-authored `.amberbc` fixtures may now fail earlier under
@@ -20,7 +21,7 @@ table/register ranges.
 | --- | --- |
 | `.amberbc` / `amber.bc.v1` | optional `PROF` section added; old artifacts without `PROF` still decode |
 | `.amberpkg` / `amber.package.v1` | none |
-| `.amberimg` / `amber.image.v1` | none |
+| `.amberimg` / `amber.image.v1` | verifier now expects embedded native JSON to advertise W15 readiness guards |
 | `.ambertrace` / `amber.replay.v1` | none |
 | `.amberschema` / `.ambertable` | none |
 | `.amberwasm` / `.amberaccel` | none |
@@ -30,7 +31,7 @@ table/register ranges.
 
 W12 added documentation synchronization artifacts. W13 also updates compiler,
 bytecode, runtime, and focused test sources. W14 adds a small build support
-module and fixtures:
+module and fixtures. W15 updates native/frozen metadata validation:
 
 | Path | Purpose |
 | --- | --- |
@@ -41,6 +42,7 @@ module and fixtures:
 | `docs/engineering/migration-notes-v20.1.md` | This migration note. |
 | `build/build.*` | `amber.build.v1` manifest parser, profile normalization, and summary JSON helpers. |
 | `docs/engineering/build-v1.md` | W14 build/bootstrap/conformance engineering note. |
+| `docs/engineering/native-v1.md` | W15 native-readiness metadata engineering note. |
 | `tests/fixtures/w14_build/` | CLI smoke fixture for `amberc build`. |
 
 ## Maintainer Checklist
@@ -48,4 +50,4 @@ module and fixtures:
 1. Run `make spec-sync-check` after documentation or heading changes.
 2. Regenerate the anchor map with `python3 tools/spec_sync.py anchor-map > docs/engineering/spec-anchor-map-v1.md` when the check reports drift.
 3. Keep implementation status, changelog, migration notes, and README matrix rows in sync with each work-package transition.
-4. Treat W15 as planned closure work, not as a retroactive format change to W0-W14 artifacts.
+4. Treat W15 as a native metadata hardening step; bytecode execution semantics remain the compatibility baseline.

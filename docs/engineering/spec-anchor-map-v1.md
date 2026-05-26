@@ -28,13 +28,13 @@ Check with `make spec-sync-check`.
 | `docs/engineering/migration-notes-v20.1.md` | 4 |
 | `docs/engineering/mir-v1.md` | 4 |
 | `docs/engineering/modern-profiles-v1.md` | 1 |
-| `docs/engineering/native-v1.md` | 4 |
+| `docs/engineering/native-v1.md` | 5 |
 | `docs/engineering/package-v1.md` | 1 |
 | `docs/engineering/replay-v1.md` | 1 |
 | `docs/engineering/runtime-v1.md` | 1 |
 | `docs/engineering/typed-v1.md` | 1 |
 | `docs/engineering/wasm-accelerator-v1.md` | 1 |
-| `spec/changelog/v20.1.md` | 7 |
+| `spec/changelog/v20.1.md` | 8 |
 
 ## Registry Inventory
 
@@ -320,8 +320,8 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/hir-v1.md`](../../docs/engineering/hir-v1.md) | 1 | 1 | [`amberhirv1`](../../docs/engineering/hir-v1.md#amberhirv1) | amber.hir.v1 |
 | [`docs/engineering/image-v1.md`](../../docs/engineering/image-v1.md) | 1 | 1 | [`amberimagev1`](../../docs/engineering/image-v1.md#amberimagev1) | amber.image.v1 |
 | [`docs/engineering/image-v1.md`](../../docs/engineering/image-v1.md) | 24 | 2 | [`artifact-layout`](../../docs/engineering/image-v1.md#artifact-layout) | Artifact Layout |
-| [`docs/engineering/image-v1.md`](../../docs/engineering/image-v1.md) | 42 | 2 | [`verification`](../../docs/engineering/image-v1.md#verification) | Verification |
-| [`docs/engineering/image-v1.md`](../../docs/engineering/image-v1.md) | 58 | 2 | [`runtime-load`](../../docs/engineering/image-v1.md#runtime-load) | Runtime Load |
+| [`docs/engineering/image-v1.md`](../../docs/engineering/image-v1.md) | 43 | 2 | [`verification`](../../docs/engineering/image-v1.md#verification) | Verification |
+| [`docs/engineering/image-v1.md`](../../docs/engineering/image-v1.md) | 60 | 2 | [`runtime-load`](../../docs/engineering/image-v1.md#runtime-load) | Runtime Load |
 | [`docs/engineering/implementation-status-v1.md`](../../docs/engineering/implementation-status-v1.md) | 1 | 1 | [`amberimplementation-statusv1`](../../docs/engineering/implementation-status-v1.md#amberimplementation-statusv1) | amber.implementation-status.v1 |
 | [`docs/engineering/implementation-status-v1.md`](../../docs/engineering/implementation-status-v1.md) | 12 | 2 | [`release-dashboard`](../../docs/engineering/implementation-status-v1.md#release-dashboard) | Release Dashboard |
 | [`docs/engineering/implementation-status-v1.md`](../../docs/engineering/implementation-status-v1.md) | 33 | 2 | [`release-gates`](../../docs/engineering/implementation-status-v1.md#release-gates) | Release Gates |
@@ -329,17 +329,18 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/loader-v1.md`](../../docs/engineering/loader-v1.md) | 1 | 1 | [`amberloaderv1`](../../docs/engineering/loader-v1.md#amberloaderv1) | amber.loader.v1 |
 | [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 1 | 1 | [`amber-v201-migration-notes`](../../docs/engineering/migration-notes-v20.1.md#amber-v201-migration-notes) | Amber v20.1 Migration Notes |
 | [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 5 | 2 | [`runtime-and-artifact-compatibility`](../../docs/engineering/migration-notes-v20.1.md#runtime-and-artifact-compatibility) | Runtime And Artifact Compatibility |
-| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 29 | 2 | [`repository-layout-changes`](../../docs/engineering/migration-notes-v20.1.md#repository-layout-changes) | Repository Layout Changes |
-| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 46 | 2 | [`maintainer-checklist`](../../docs/engineering/migration-notes-v20.1.md#maintainer-checklist) | Maintainer Checklist |
+| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 30 | 2 | [`repository-layout-changes`](../../docs/engineering/migration-notes-v20.1.md#repository-layout-changes) | Repository Layout Changes |
+| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 48 | 2 | [`maintainer-checklist`](../../docs/engineering/migration-notes-v20.1.md#maintainer-checklist) | Maintainer Checklist |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 1 | 1 | [`ambermirv1`](../../docs/engineering/mir-v1.md#ambermirv1) | amber.mir.v1 |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 24 | 2 | [`ir-shape`](../../docs/engineering/mir-v1.md#ir-shape) | IR Shape |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 57 | 2 | [`ssa-validator`](../../docs/engineering/mir-v1.md#ssa-validator) | SSA Validator |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 79 | 2 | [`pass-harness`](../../docs/engineering/mir-v1.md#pass-harness) | Pass Harness |
 | [`docs/engineering/modern-profiles-v1.md`](../../docs/engineering/modern-profiles-v1.md) | 1 | 1 | [`ambermodern-profilesv1`](../../docs/engineering/modern-profiles-v1.md#ambermodern-profilesv1) | amber.modern-profiles.v1 |
 | [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 1 | 1 | [`ambernativev1`](../../docs/engineering/native-v1.md#ambernativev1) | amber.native.v1 |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 29 | 2 | [`code-objects`](../../docs/engineering/native-v1.md#code-objects) | Code Objects |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 52 | 2 | [`runtime-bridge`](../../docs/engineering/native-v1.md#runtime-bridge) | Runtime Bridge |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 66 | 2 | [`validation`](../../docs/engineering/native-v1.md#validation) | Validation |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 30 | 2 | [`code-objects`](../../docs/engineering/native-v1.md#code-objects) | Code Objects |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 55 | 2 | [`runtime-bridge`](../../docs/engineering/native-v1.md#runtime-bridge) | Runtime Bridge |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 69 | 2 | [`validation`](../../docs/engineering/native-v1.md#validation) | Validation |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 89 | 2 | [`w15-closure`](../../docs/engineering/native-v1.md#w15-closure) | W15 Closure |
 | [`docs/engineering/package-v1.md`](../../docs/engineering/package-v1.md) | 1 | 1 | [`amberpackagev1`](../../docs/engineering/package-v1.md#amberpackagev1) | amber.package.v1 |
 | [`docs/engineering/replay-v1.md`](../../docs/engineering/replay-v1.md) | 1 | 1 | [`amberreplayv1`](../../docs/engineering/replay-v1.md#amberreplayv1) | amber.replay.v1 |
 | [`docs/engineering/runtime-v1.md`](../../docs/engineering/runtime-v1.md) | 1 | 1 | [`amberruntimev1`](../../docs/engineering/runtime-v1.md#amberruntimev1) | amber.runtime.v1 |
@@ -350,5 +351,6 @@ Check with `make spec-sync-check`.
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 17 | 2 | [`w11-modern-profile-baseline`](../../spec/changelog/v20.1.md#w11-modern-profile-baseline) | W11 Modern Profile Baseline |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 27 | 2 | [`w13-compiler-contract-closure-slice`](../../spec/changelog/v20.1.md#w13-compiler-contract-closure-slice) | W13 Compiler-Contract Closure Slice |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 51 | 2 | [`w14-buildbootstrapconformance-closure`](../../spec/changelog/v20.1.md#w14-buildbootstrapconformance-closure) | W14 Build/Bootstrap/Conformance Closure |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 67 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 80 | 2 | [`planned-closure-work`](../../spec/changelog/v20.1.md#planned-closure-work) | Planned Closure Work |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 67 | 2 | [`w15-native-readiness-metadata-closure`](../../spec/changelog/v20.1.md#w15-native-readiness-metadata-closure) | W15 Native-Readiness Metadata Closure |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 78 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 91 | 2 | [`closure-work-status`](../../spec/changelog/v20.1.md#closure-work-status) | Closure Work Status |

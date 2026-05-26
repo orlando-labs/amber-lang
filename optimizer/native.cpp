@@ -139,6 +139,25 @@ bool has_root_map_for_ip(const NativeCodeObject &code, std::uint32_t ip) {
   return false;
 }
 
+bool has_slowpath_for_stub(const NativeCodeObject &code,
+                           const NativeCallStub &stub) {
+  for (const NativeSlowPath &entry : code.slowpath_table) {
+    if (entry.source_pc == stub.source_pc && entry.helper == stub.helper) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_invalidation_slowpath(const NativeCodeObject &code) {
+  for (const NativeSlowPath &entry : code.slowpath_table) {
+    if (entry.kind == "assumption_invalidation" && entry.may_reenter_bytecode) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::vector<NativeOwnerAssumption>
 owner_assumptions_for(const bytecode::BcModule &module,
                       const NativeCompileOptions &options) {
@@ -276,6 +295,73 @@ void append_patchpoints(const bytecode::BcModule &module,
   }
 }
 
+std::string slowpath_reason_for_stub_kind(const std::string &kind) {
+  if (kind == "send") {
+    return "ordinary send dispatch uses runtime call-packet helper";
+  }
+  if (kind == "send_dyn") {
+    return "reflective send remains a runtime slow stub";
+  }
+  if (kind == "call") {
+    return "callable protocol dispatch uses runtime call-packet helper";
+  }
+  if (kind == "type_hook") {
+    return "TypeTerm hook remains a runtime slow stub";
+  }
+  if (kind == "pattern_protocol") {
+    return "dynamic pattern protocol remains a runtime slow stub";
+  }
+  if (kind == "raise") {
+    return "language raise path preserves runtime exception object";
+  }
+  return "runtime helper slow path";
+}
+
+std::string patchpoint_helper_for_kind(const std::string &kind) {
+  if (kind == "ivar_ic") {
+    return "amber_runtime_ivar_slowpath";
+  }
+  if (kind == "reflective_send_dyn") {
+    return "amber_runtime_reflective_send_dyn";
+  }
+  return "amber_runtime_patchpoint_guard_miss";
+}
+
+void append_slowpath(NativeCodeObject *out, std::uint32_t source_pc,
+                     std::string kind, std::string reason, std::string helper,
+                     bool may_reenter_bytecode,
+                     bool preserves_language_error = true) {
+  NativeSlowPath slowpath;
+  slowpath.slowpath_id = static_cast<std::uint32_t>(out->slowpath_table.size());
+  slowpath.source_pc = source_pc;
+  slowpath.kind = std::move(kind);
+  slowpath.reason = std::move(reason);
+  slowpath.helper = std::move(helper);
+  slowpath.may_reenter_bytecode = may_reenter_bytecode;
+  slowpath.preserves_language_error = preserves_language_error;
+  out->slowpath_table.push_back(std::move(slowpath));
+}
+
+void append_slowpaths(const bytecode::BcCode &code, NativeCodeObject *out) {
+  for (const NativeCallStub &stub : out->call_stub_table) {
+    append_slowpath(out, stub.source_pc, stub.kind,
+                    slowpath_reason_for_stub_kind(stub.kind), stub.helper,
+                    false, true);
+  }
+  for (const NativePatchpoint &patchpoint : out->patchpoints) {
+    append_slowpath(out, patchpoint.source_pc, patchpoint.kind + "_miss",
+                    "JIT patchpoint guard miss uses runtime helper",
+                    patchpoint_helper_for_kind(patchpoint.kind), false, true);
+  }
+  if (out->requires_frozen_world && !code.instructions.empty()) {
+    append_slowpath(
+        out, 0, "assumption_invalidation",
+        "stale frozen-world assumptions discard native code and re-enter "
+        "bytecode at a safe boundary",
+        "amber_runtime_reenter_bytecode_after_native_invalidation", true, true);
+  }
+}
+
 void append_relocations(const bytecode::BcCode &code, NativeCodeObject *out) {
   for (std::uint32_t pc = 0; pc < code.instructions.size(); ++pc) {
     const bytecode::Instruction &instruction = code.instructions[pc];
@@ -301,6 +387,12 @@ void append_safepoints_and_roots(const bytecode::BcCode &code,
   for (const bytecode::SafepointEntry &entry : code.safepoint_table) {
     append_unique_safepoint(&out->safepoint_maps, &seen, entry.pc, entry.flags,
                             "explicit");
+  }
+  for (const bytecode::HandlerEntry &entry : code.handler_table) {
+    append_unique_safepoint(&out->safepoint_maps, &seen, entry.protected_from,
+                            0, "exception_edge");
+    append_unique_safepoint(&out->safepoint_maps, &seen, entry.handler_pc, 0,
+                            "exception_handler");
   }
   for (std::uint32_t pc = 0; pc < code.instructions.size(); ++pc) {
     const bytecode::Instruction &instruction = code.instructions[pc];
@@ -408,6 +500,7 @@ NativeModule compile_native_module(const bytecode::BcModule &bytecode_module,
     if (options.emit_jit_patchpoints) {
       append_patchpoints(bytecode_module, code, &object);
     }
+    append_slowpaths(code, &object);
     append_relocations(code, &object);
     append_safepoints_and_roots(code, &object);
     append_exception_maps(code, &object);
@@ -462,12 +555,31 @@ validate_native_module(const NativeModule &module,
         append_diagnostic(&result.diagnostics, "NATIVE1008",
                           "call stub has no runtime helper", object);
       }
+      if (!has_slowpath_for_stub(object, stub)) {
+        append_diagnostic(&result.diagnostics, "NATIVE1013",
+                          "call stub has no matching slowpath", object);
+      }
     }
     for (const NativePatchpoint &patchpoint : object.patchpoints) {
       if (patchpoint.guard.empty() || patchpoint.action.empty()) {
         append_diagnostic(&result.diagnostics, "NATIVE1009",
                           "patchpoint must declare guard and action", object);
       }
+    }
+    for (const NativeSlowPath &slowpath : object.slowpath_table) {
+      if (slowpath.helper.empty()) {
+        append_diagnostic(&result.diagnostics, "NATIVE1014",
+                          "slowpath has no runtime helper", object);
+      }
+      if (!slowpath.preserves_language_error) {
+        append_diagnostic(&result.diagnostics, "NATIVE1018",
+                          "slowpath must preserve language errors", object);
+      }
+    }
+    if (object.requires_frozen_world && !has_invalidation_slowpath(object)) {
+      append_diagnostic(&result.diagnostics, "NATIVE1017",
+                        "frozen native code has no invalidation slowpath",
+                        object);
     }
     if (source_module == nullptr) {
       continue;
@@ -485,12 +597,22 @@ validate_native_module(const NativeModule &module,
                           "safepoint ip is outside source bytecode", object);
       }
     }
+    for (const NativeSlowPath &slowpath : object.slowpath_table) {
+      if (slowpath.source_pc >= source->instructions.size()) {
+        append_diagnostic(&result.diagnostics, "NATIVE1015",
+                          "slowpath ip is outside source bytecode", object);
+      }
+    }
     for (const NativeExceptionMap &entry : object.exception_maps) {
       if (entry.protected_from >= entry.protected_to ||
           entry.protected_to > source->instructions.size() ||
           entry.handler_pc >= source->instructions.size()) {
         append_diagnostic(&result.diagnostics, "NATIVE1012",
                           "exception map range is invalid", object);
+      }
+      if (!has_root_map_for_ip(object, entry.handler_pc)) {
+        append_diagnostic(&result.diagnostics, "NATIVE1016",
+                          "exception handler has no matching root map", object);
       }
     }
   }
@@ -583,6 +705,23 @@ std::string module_to_json(const NativeModule &module,
           << "\",\"cache_slot\":" << patchpoint.cache_slot
           << ",\"symbol_id\":" << patchpoint.symbol_id << ",\"symbol\":\""
           << json_escape(patchpoint.symbol) << "\"}";
+    }
+    out << "]";
+
+    out << ",\"slowpath_table\":[";
+    for (std::size_t j = 0; j < code.slowpath_table.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      const NativeSlowPath &slowpath = code.slowpath_table[j];
+      out << "{\"slowpath_id\":" << slowpath.slowpath_id
+          << ",\"source_pc\":" << slowpath.source_pc << ",\"kind\":\""
+          << json_escape(slowpath.kind) << "\",\"reason\":\""
+          << json_escape(slowpath.reason) << "\",\"helper\":\""
+          << json_escape(slowpath.helper) << "\",\"may_reenter_bytecode\":"
+          << (slowpath.may_reenter_bytecode ? "true" : "false")
+          << ",\"preserves_language_error\":"
+          << (slowpath.preserves_language_error ? "true" : "false") << "}";
     }
     out << "]";
 
@@ -687,6 +826,15 @@ std::string module_to_dump(const NativeModule &module,
         out << " symbol=:" << patchpoint.symbol;
       }
       out << "\n";
+    }
+    for (const NativeSlowPath &slowpath : code.slowpath_table) {
+      out << "  slowpath q" << slowpath.slowpath_id
+          << " pc=" << slowpath.source_pc << " kind=" << slowpath.kind
+          << " helper=" << slowpath.helper << " reenter_bytecode="
+          << (slowpath.may_reenter_bytecode ? "true" : "false")
+          << " preserves_error="
+          << (slowpath.preserves_language_error ? "true" : "false")
+          << " reason=\"" << json_escape(slowpath.reason) << "\"\n";
     }
     for (const NativeSafepointMap &safepoint : code.safepoint_maps) {
       out << "  safepoint pc=" << safepoint.ip_offset

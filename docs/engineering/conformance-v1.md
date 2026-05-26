@@ -99,7 +99,8 @@ Current limits:
 - `mir` / `mir-dump` / `mir-verify` are available through `amberc` and focused
   unit tests; corpus phases are not wired yet;
 - `native` / `native-dump` / `native-verify` are available through `amberc`
-  and focused unit tests; corpus phases are not wired yet;
+  and focused unit tests, including W15 slowpath, exception-edge root-map, and
+  invalidation-fallback metadata checks; corpus phases are not wired yet;
 - `image-build` / `image-inspect` / `image-verify` are available through
   `amberc` and focused unit tests; corpus phases are not wired yet;
 - `capabilities-check` is available through `amberc` and focused unit tests;
@@ -117,7 +118,7 @@ Current limits:
   `amberc` and focused unit tests; corpus profile fixtures are not wired yet;
 - W9.2 transaction/freeze, W9.3 reflection mirror, W9.4 package artifact,
   W9.5 package hot-reload, W10.1 advanced concurrency, W10.2 awaitable, and
-  W10.3 MIR/SSA, W10.4 native/JIT metadata, W10.5 frozen-image, W11.1
+  W10.3 MIR/SSA, W10.4/W15 native/JIT metadata, W10.5 frozen-image, W11.1
   capability, W11.2 effect, W11.3 replay, W11.4 schema/table, W11.5
   Wasm/accelerator, and W11.6 modern-profile checks are focused API/tooling
   tests today;

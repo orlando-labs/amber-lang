@@ -1,7 +1,8 @@
 # amber.native.v1
 
-Status: implemented for the `W10.4` native/JIT readiness baseline and consumed
-by the `W10.5` frozen image layer.
+Status: implemented for the `W10.4` native/JIT readiness baseline, consumed by
+the `W10.5` frozen image layer, and hardened for `W15` native-readiness
+metadata closure.
 
 The native layer follows the compile-closure convention in
 [amber_compilable_project_layer_v20_1_complete.md](/Users/slowpilot/workspace/amber/amber_compilable_project_layer_v20_1_complete.md:5515):
@@ -41,6 +42,8 @@ Each object records:
   protocol calls, and `RAISE`;
 - JIT patchpoint descriptors for call inline caches, reflective `SEND_DYN`, and
   ivar inline caches;
+- explicit slowpath descriptors for runtime helpers, reflective stubs,
+  patchpoint guard misses, and frozen-world invalidation fallback;
 - conservative root maps, exception maps, and safepoint maps;
 - frozen-world assumptions for `world_epoch` and owner `method_version`.
 
@@ -73,8 +76,28 @@ the frozen world epoch and owner method versions into every code object.
 - every safepoint has a matching root map;
 - call stubs name a runtime helper;
 - patchpoints declare guard and action;
+- call stubs have matching `slowpath_table` entries;
+- frozen code declares an invalidation slowpath that can re-enter bytecode;
+- slowpaths preserve language-level runtime errors instead of host crashes;
+- exception handlers have matching root maps;
 - optional source-bytecode validation checks source code ids, safepoint ranges,
-  and exception map ranges.
+  slowpath ranges, and exception map ranges.
 
 This keeps W10.4 compatible with the spec rule that native/JIT output must not
 drop root maps, exception maps, safepoints, or reflective slow paths.
+
+## W15 Closure
+
+W15 does not introduce executable host machine code. It closes the native
+readiness contract so a future native/JIT backend can start without changing
+bytecode or VM semantics:
+
+- `NativeCodeObject.slowpath_table` is part of `amber.native.v1` JSON/dump
+  output;
+- reflective `send`, dynamic pattern protocol, `TypeTerm` hooks, and `RAISE`
+  sites are represented as explicit slowpaths;
+- stale frozen-world assumptions declare bytecode re-entry as the no-deopt
+  invalidation path;
+- exception edges are represented as safepoints with root maps;
+- `.amberimg` verification now requires the embedded native JSON to advertise
+  these readiness guards.

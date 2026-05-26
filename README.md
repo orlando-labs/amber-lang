@@ -89,6 +89,7 @@ Current matrix status:
 | `W12` | done | documentation/spec sync baseline with generated anchor map, v20.1 changelog, migration notes, implementation status dashboard, local Markdown link checks, and `make spec-sync-check` |
 | `W13` | done | compiler-contract closure slice with W13 source/comment/numeric/range rules, prelude/runtime-error/token registry updates, top-level module-cell pre-scan, `in`/`and`/`or` lowering, bytecode verifier operand/range/dataflow checks, runtime UNINIT guards, unified `CALL` packet/object-call dispatch, structured source traces, and focused lexer/parser/binder/HIR/emitter/bytecode/VM tests |
 | `W14` | done | build/bootstrap/conformance closure with `amber.build.v1` manifests, `amberc build`, deterministic `.amberbc` output, incremental cache keys, B2 stdlib bootstrap metadata/ABI hashes, `PROF` profile feature metadata, unsupported-profile loader rejection, CLI fixture smoke, and M11 compile/load/run conformance bundle |
+| `W15` | done | native-readiness metadata closure with explicit `slowpath_table` entries for runtime/reflective stubs, invalidation-to-bytecode fallback metadata, exception-edge safepoint/root maps, hardened `native-verify` checks, and frozen-image readiness summary verification |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the

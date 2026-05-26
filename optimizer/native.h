@@ -49,6 +49,16 @@ struct NativePatchpoint {
   std::string symbol;
 };
 
+struct NativeSlowPath {
+  std::uint32_t slowpath_id = 0;
+  std::uint32_t source_pc = 0;
+  std::string kind;
+  std::string reason;
+  std::string helper;
+  bool may_reenter_bytecode = false;
+  bool preserves_language_error = true;
+};
+
 struct NativeRootMap {
   std::uint32_t ip_offset = 0;
   std::vector<std::uint32_t> local_roots;
@@ -90,6 +100,7 @@ struct NativeCodeObject {
   std::vector<NativeRelocation> relocation_table;
   std::vector<NativeCallStub> call_stub_table;
   std::vector<NativePatchpoint> patchpoints;
+  std::vector<NativeSlowPath> slowpath_table;
   std::vector<NativeRootMap> root_maps;
   std::vector<NativeExceptionMap> exception_maps;
   std::vector<NativeSafepointMap> safepoint_maps;

@@ -131,6 +131,36 @@ bool has_patchpoint_kind(const amber::native::NativeCodeObject &code,
   return false;
 }
 
+bool has_slowpath_kind(const amber::native::NativeCodeObject &code,
+                       const std::string &kind) {
+  for (const amber::native::NativeSlowPath &slowpath : code.slowpath_table) {
+    if (slowpath.kind == kind) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_root_map_for_ip(const amber::native::NativeCodeObject &code,
+                         std::uint32_t ip) {
+  for (const amber::native::NativeRootMap &root : code.root_maps) {
+    if (root.ip_offset == ip) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool has_native_diagnostic(const amber::native::NativeValidationResult &result,
+                           const std::string &code) {
+  for (const amber::native::NativeDiagnostic &diagnostic : result.diagnostics) {
+    if (diagnostic.code == code) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void test_native_metadata_preserves_call_and_root_maps() {
   const CompiledArtifacts artifacts = compile_ok("def add(x, y):\n"
                                                  "  x + y\n");
@@ -146,6 +176,18 @@ void test_native_metadata_preserves_call_and_root_maps() {
   expect(has_stub_kind(*code, "send", false), "SEND lowers to call stub");
   expect(has_patchpoint_kind(*code, "call_ic"),
          "SEND gets JIT call-IC patchpoint");
+  expect(has_slowpath_kind(*code, "send"),
+         "SEND records an explicit runtime slowpath");
+  expect(has_slowpath_kind(*code, "assumption_invalidation"),
+         "frozen native code records bytecode fallback invalidation slowpath");
+  const std::string json =
+      amber::native::module_to_json(artifacts.native_module, "test-hash");
+  expect(json.find("\"slowpath_table\"") != std::string::npos,
+         "native JSON exposes slowpath_table");
+  const std::string dump =
+      amber::native::module_to_dump(artifacts.native_module, "test-hash");
+  expect(dump.find("slowpath q") != std::string::npos,
+         "native dump exposes slowpath entries");
 }
 
 void test_reflective_send_dyn_uses_slow_stub_metadata() {
@@ -162,6 +204,56 @@ void test_reflective_send_dyn_uses_slow_stub_metadata() {
          "SEND_DYN uses reflective slow stub");
   expect(has_patchpoint_kind(*code, "reflective_send_dyn"),
          "SEND_DYN gets reflective patchpoint");
+  expect(has_slowpath_kind(*code, "send_dyn"),
+         "SEND_DYN records reflective slowpath metadata");
+}
+
+void test_exception_edges_have_native_root_and_slowpath_metadata() {
+  amber::bytecode::BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+
+  amber::bytecode::BcCode code;
+  code.code_id = 1;
+  code.kind = amber::bytecode::CodeKind::Method;
+  code.reg_count = 1;
+  code.instructions.push_back({amber::bytecode::Opcode::Raise, {{0, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::GetLast, {{0, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::Return, {{0, false}}});
+  code.handler_table.push_back({0, 1, 1, 1, 0});
+  module.code_objects.push_back(code);
+
+  amber::mir::Module mir_module;
+  mir_module.module_name = "native.manual";
+  amber::native::NativeModule native_module =
+      amber::native::compile_native_module(module, mir_module);
+  const amber::native::NativeValidationResult validation =
+      amber::native::validate_native_module(native_module, &module);
+  expect(validation.ok(),
+         amber::native::diagnostics_to_json(validation.diagnostics));
+
+  const amber::native::NativeCodeObject *native_code =
+      native_code_for_bc(native_module, 1);
+  expect(native_code != nullptr, "manual native code object exists");
+  expect(has_stub_kind(*native_code, "raise", false),
+         "RAISE records runtime raise stub");
+  expect(has_slowpath_kind(*native_code, "raise"),
+         "RAISE records language-error preserving slowpath");
+  expect(has_root_map_for_ip(*native_code, 1),
+         "exception handler pc has a native root map");
+}
+
+void test_native_validation_rejects_missing_slowpath_metadata() {
+  const CompiledArtifacts artifacts = compile_ok("def add(x, y):\n"
+                                                 "  x + y\n");
+  amber::native::NativeModule broken = artifacts.native_module;
+  broken.code_objects[0].slowpath_table.clear();
+  const amber::native::NativeValidationResult validation =
+      amber::native::validate_native_module(broken, &artifacts.bytecode_module);
+  expect(!validation.ok(), "missing slowpath metadata should be rejected");
+  expect(has_native_diagnostic(validation, "NATIVE1017") ||
+             has_native_diagnostic(validation, "NATIVE1013"),
+         "native validation should report missing W15 slowpath metadata");
 }
 
 void test_native_trampoline_requires_frozen_world_and_executes() {
@@ -238,6 +330,8 @@ void test_stale_native_assumption_can_fall_back_to_bytecode() {
 int main() {
   test_native_metadata_preserves_call_and_root_maps();
   test_reflective_send_dyn_uses_slow_stub_metadata();
+  test_exception_edges_have_native_root_and_slowpath_metadata();
+  test_native_validation_rejects_missing_slowpath_metadata();
   test_native_trampoline_requires_frozen_world_and_executes();
   test_stale_native_assumption_can_fall_back_to_bytecode();
   return 0;

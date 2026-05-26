@@ -293,11 +293,20 @@ void append_native_diagnostics(
   }
 }
 
-bool metadata_declares_native_frozen(const std::string &metadata_json) {
+bool metadata_declares_native_readiness(const std::string &metadata_json) {
   return metadata_json.find("\"format\": \"amber.native.v1\"") !=
              std::string::npos &&
          metadata_json.find("\"requires_frozen_world\": true") !=
-             std::string::npos;
+             std::string::npos &&
+         metadata_json.find("\"slowpath_table\"") != std::string::npos &&
+         metadata_json.find("\"assumption_invalidation\"") !=
+             std::string::npos &&
+         metadata_json.find("\"may_reenter_bytecode\":true") !=
+             std::string::npos &&
+         metadata_json.find("\"root_maps\"") != std::string::npos &&
+         metadata_json.find("\"exception_maps\"") != std::string::npos &&
+         metadata_json.find("\"safepoint_maps\"") != std::string::npos &&
+         metadata_json.find("\"world_epoch_assumptions\"") != std::string::npos;
 }
 
 } // namespace
@@ -718,10 +727,10 @@ verify_frozen_image_artifact(const std::string &serialized,
           module.module_name));
     }
     if (module.metadata_json.empty() ||
-        !metadata_declares_native_frozen(module.metadata_json)) {
+        !metadata_declares_native_readiness(module.metadata_json)) {
       result.diagnostics.push_back(diagnostic(
           "FrozenImageVerifyError",
-          "native metadata does not declare amber.native.v1 frozen guards",
+          "native metadata does not declare amber.native.v1 readiness guards",
           module.module_name));
     }
     const auto code_count = code_count_by_module.find(module.module_name);

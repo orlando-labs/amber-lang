@@ -36,8 +36,9 @@ The serialized `.amberimg` starts with `amber.image.v1` and stores:
 Native metadata is embedded as deterministic `amber.native.v1` JSON bytes with
 its own digest. The verifier treats that metadata as an immutable native
 readiness payload: every package module must have matching native metadata,
-the metadata must declare `amber.native.v1`, and it must require a frozen
-runtime world.
+the metadata must declare `amber.native.v1`, require a frozen runtime world,
+include slowpath/root/exception/safepoint map fields, and advertise
+invalidation fallback to bytecode.
 
 ## Verification
 
@@ -49,7 +50,8 @@ runtime world.
 - package module bytecode decode/verification;
 - root module presence;
 - native metadata presence for every module;
-- native metadata digest, format, code-object count, and frozen-world summary.
+- native metadata digest, format, code-object count, frozen-world summary, and
+  W15 readiness guards.
 
 The build path also validates native modules against decoded bytecode before
 serializing the image, so malformed root maps, safepoints, stubs, patchpoints,
