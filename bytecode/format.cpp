@@ -324,6 +324,8 @@ const char *section_tag(SectionKind kind) {
     return "LOCS";
   case SectionKind::Attr:
     return "ATTR";
+  case SectionKind::Prof:
+    return "PROF";
   case SectionKind::Caps:
     return "CAPS";
   case SectionKind::Efct:
@@ -412,6 +414,10 @@ bool decode_section_kind(const std::array<char, 4> &tag, SectionKind &kind) {
     kind = SectionKind::Attr;
     return true;
   }
+  if (value == "PROF") {
+    kind = SectionKind::Prof;
+    return true;
+  }
   if (value == "CAPS") {
     kind = SectionKind::Caps;
     return true;
@@ -490,6 +496,10 @@ bool optional_section_present(const BcModule &module, SectionKind kind) {
     return !module.local_debug.empty();
   case SectionKind::Attr:
     return !module.attrs.empty();
+  case SectionKind::Prof:
+    return !module.required_features.empty() ||
+           !module.optional_features.empty() ||
+           !module.forbidden_features.empty();
   case SectionKind::Caps:
     return !module.capabilities.empty();
   case SectionKind::Efct:
@@ -828,6 +838,25 @@ std::vector<std::uint8_t> serialize_attrs(const std::vector<AttrEntry> &attrs) {
     append_u32(out, entry.key_str_id);
     append_u32(out, entry.value_str_id);
   }
+  return out;
+}
+
+void append_profile_vector(std::vector<std::uint8_t> &out,
+                           const std::vector<std::string> &values) {
+  append_u32(out, static_cast<std::uint32_t>(values.size()));
+  for (const std::string &value : values) {
+    append_string(out, value);
+  }
+}
+
+std::vector<std::uint8_t>
+serialize_profile_metadata(const std::vector<std::string> &required,
+                           const std::vector<std::string> &optional,
+                           const std::vector<std::string> &forbidden) {
+  std::vector<std::uint8_t> out;
+  append_profile_vector(out, required);
+  append_profile_vector(out, optional);
+  append_profile_vector(out, forbidden);
   return out;
 }
 
@@ -1305,6 +1334,13 @@ std::vector<SectionPayload> build_sections(const BcModule &module) {
   if (optional_section_present(module, SectionKind::Attr)) {
     sections.push_back(
         {SectionKind::Attr, serialize_attrs(module.attrs), 1, 0});
+  }
+  if (optional_section_present(module, SectionKind::Prof)) {
+    sections.push_back({SectionKind::Prof,
+                        serialize_profile_metadata(module.required_features,
+                                                   module.optional_features,
+                                                   module.forbidden_features),
+                        1, 0});
   }
   if (optional_section_present(module, SectionKind::Caps)) {
     sections.push_back(
@@ -2158,6 +2194,29 @@ bool parse_attrs(Reader &reader, std::vector<AttrEntry> &out) {
     out.push_back(entry);
   }
   return true;
+}
+
+bool parse_profile_vector(Reader &reader, std::vector<std::string> &out) {
+  std::uint32_t count = 0;
+  if (!reader.read_u32(count)) {
+    return false;
+  }
+  out.clear();
+  out.reserve(count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    std::string value;
+    if (!reader.read_string(value)) {
+      return false;
+    }
+    out.push_back(std::move(value));
+  }
+  return true;
+}
+
+bool parse_profile_metadata(Reader &reader, BcModule &module) {
+  return parse_profile_vector(reader, module.required_features) &&
+         parse_profile_vector(reader, module.optional_features) &&
+         parse_profile_vector(reader, module.forbidden_features);
 }
 
 bool parse_capabilities(Reader &reader,
@@ -4042,6 +4101,36 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
     }
   }
 
+  auto verify_feature_vector = [&](const std::vector<std::string> &features,
+                                   const char *label) {
+    std::vector<std::string> seen;
+    for (const std::string &feature : features) {
+      if (feature.empty()) {
+        add_verify_error(errors, "BC1414",
+                         std::string(label) + " profile feature is empty",
+                         SectionKind::Prof, 0);
+      }
+      if (std::find(seen.begin(), seen.end(), feature) != seen.end()) {
+        add_verify_error(errors, "BC1414",
+                         std::string(label) + " profile feature is duplicate",
+                         SectionKind::Prof, 0);
+      }
+      seen.push_back(feature);
+    }
+  };
+  verify_feature_vector(module.required_features, "required");
+  verify_feature_vector(module.optional_features, "optional");
+  verify_feature_vector(module.forbidden_features, "forbidden");
+  for (const std::string &feature : module.required_features) {
+    if (std::find(module.forbidden_features.begin(),
+                  module.forbidden_features.end(),
+                  feature) != module.forbidden_features.end()) {
+      add_verify_error(errors, "BC1414",
+                       "profile feature is both required and forbidden",
+                       SectionKind::Prof, 0);
+    }
+  }
+
   for (const capability::CapabilityRequest &entry : module.capabilities) {
     if (!capability::valid_capability_name(entry.name)) {
       add_verify_error(errors, "BC1401", "invalid capability name",
@@ -4504,6 +4593,10 @@ DecodeResult deserialize_module(const std::vector<std::uint8_t> &bytes) {
   if (by_kind.find(SectionKind::Attr) != by_kind.end()) {
     parse_section(SectionKind::Attr, "ATTR",
                   [&](Reader &r) { parse_attrs(r, result.module.attrs); });
+  }
+  if (by_kind.find(SectionKind::Prof) != by_kind.end()) {
+    parse_section(SectionKind::Prof, "PROF",
+                  [&](Reader &r) { parse_profile_metadata(r, result.module); });
   }
   if (by_kind.find(SectionKind::Caps) != by_kind.end()) {
     parse_section(SectionKind::Caps, "CAPS", [&](Reader &r) {
@@ -5038,6 +5131,12 @@ std::string module_to_json(const BcModule &module,
         << ",\"value_str_id\":" << entry.value_str_id << "}";
   }
   out << "],\n";
+  emit_string_array(out, "required_features", module.required_features);
+  out << ",\n";
+  emit_string_array(out, "optional_features", module.optional_features);
+  out << ",\n";
+  emit_string_array(out, "forbidden_features", module.forbidden_features);
+  out << ",\n";
   out << "  \"capabilities\": [";
   for (std::size_t i = 0; i < module.capabilities.size(); ++i) {
     const capability::CapabilityRequest &entry = module.capabilities[i];
@@ -5609,6 +5708,9 @@ std::string module_to_disasm(const BcModule &module,
       out << " language<=" << entry.max_language_version.major << "."
           << entry.max_language_version.minor;
     }
+    if (entry.has_abi_requirement) {
+      out << " abi=" << bytes_to_hex(entry.abi_requirement);
+    }
     out << " flags=" << entry.flags << "\n";
   }
   out << ".exports\n";
@@ -5669,6 +5771,19 @@ std::string module_to_disasm(const BcModule &module,
           << json_escape(
                  string_or_placeholder(module.strings, entry.value_str_id))
           << ")\n";
+    }
+  }
+  if (!module.required_features.empty() || !module.optional_features.empty() ||
+      !module.forbidden_features.empty()) {
+    out << ".prof\n";
+    for (const std::string &feature : module.required_features) {
+      out << "  required=\"" << json_escape(feature) << "\"\n";
+    }
+    for (const std::string &feature : module.optional_features) {
+      out << "  optional=\"" << json_escape(feature) << "\"\n";
+    }
+    for (const std::string &feature : module.forbidden_features) {
+      out << "  forbidden=\"" << json_escape(feature) << "\"\n";
     }
   }
   if (!module.capabilities.empty()) {

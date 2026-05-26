@@ -21,12 +21,13 @@ MIR_SRCS := optimizer/mir.cpp
 NATIVE_SRCS := optimizer/native.cpp
 FROZEN_SRCS := frozen/image.cpp
 PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp profile/data.cpp profile/wasm_accel.cpp profile/modern.cpp
+BUILD_SRCS := build/build.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 RUNTIME_SRCS := runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(CHECKER_SRCS) $(HIR_SRCS)
-CORE_SRCS := $(PROFILE_SRCS) $(FRONTEND_SRCS) $(MIR_SRCS) $(NATIVE_SRCS) $(BYTECODE_SRCS)
+CORE_SRCS := $(PROFILE_SRCS) $(BUILD_SRCS) $(FRONTEND_SRCS) $(MIR_SRCS) $(NATIVE_SRCS) $(BYTECODE_SRCS)
 AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS) $(PACKAGE_SRCS) $(FROZEN_SRCS)
 AMBERTEST_SRCS := tools/ambertest/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
 LEXER_TEST_SRCS := tests/lexer_tests.cpp $(LEXER_SRCS)
@@ -35,6 +36,7 @@ BINDER_TEST_SRCS := tests/binder_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
 CHECKER_TEST_SRCS := tests/checker_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
 WASM_ACCEL_TEST_SRCS := tests/wasm_accel_tests.cpp $(PROFILE_SRCS) $(LEXER_SRCS)
 MODERN_PROFILE_TEST_SRCS := tests/modern_profile_tests.cpp $(PROFILE_SRCS) $(LEXER_SRCS)
+BUILD_TEST_SRCS := tests/build_tests.cpp $(BUILD_SRCS)
 HIR_TEST_SRCS := tests/hir_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
 MIR_TEST_SRCS := tests/mir_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS) $(MIR_SRCS)
 NATIVE_TEST_SRCS := tests/native_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
@@ -42,7 +44,7 @@ FROZEN_IMAGE_TEST_SRCS := tests/frozen_image_tests.cpp $(CORE_SRCS) $(PACKAGE_SR
 BYTECODE_TEST_SRCS := tests/bytecode_tests.cpp $(PROFILE_SRCS) $(BYTECODE_SRCS) $(LEXER_SRCS) $(AST_SRCS)
 EMITTER_TEST_SRCS := tests/emitter_tests.cpp $(CORE_SRCS)
 VM_TEST_SRCS := tests/vm_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
-MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
+MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BUILD_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
 PACKAGE_TEST_SRCS := tests/package_tests.cpp $(PROFILE_SRCS) $(PACKAGE_SRCS) $(LEXER_SRCS)
 
 FORMAT_FILES := \
@@ -78,6 +80,8 @@ FORMAT_FILES := \
 	profile/wasm_accel.h \
 	profile/modern.cpp \
 	profile/modern.h \
+	build/build.cpp \
+	build/build.h \
 	frozen/image.cpp \
 	frozen/image.h \
 	bytecode/format.cpp \
@@ -102,6 +106,7 @@ FORMAT_FILES := \
 	tests/checker_tests.cpp \
 	tests/wasm_accel_tests.cpp \
 	tests/modern_profile_tests.cpp \
+	tests/build_tests.cpp \
 	tests/hir_tests.cpp \
 	tests/mir_tests.cpp \
 	tests/native_tests.cpp \
@@ -116,7 +121,7 @@ FORMAT_FILES := \
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -145,6 +150,9 @@ $(BUILD_DIR)/wasm_accel_tests: $(WASM_ACCEL_TEST_SRCS) | $(BUILD_DIR)/.dir
 
 $(BUILD_DIR)/modern_profile_tests: $(MODERN_PROFILE_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODERN_PROFILE_TEST_SRCS) $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/build_tests: $(BUILD_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(BUILD_TEST_SRCS) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/hir_tests: $(HIR_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(HIR_TEST_SRCS) $(LDFLAGS) -o $@
@@ -180,6 +188,7 @@ test: build
 	$(BUILD_DIR)/checker_tests
 	$(BUILD_DIR)/wasm_accel_tests
 	$(BUILD_DIR)/modern_profile_tests
+	$(BUILD_DIR)/build_tests
 	$(BUILD_DIR)/hir_tests
 	$(BUILD_DIR)/mir_tests
 	$(BUILD_DIR)/native_tests
@@ -190,10 +199,14 @@ test: build
 	$(BUILD_DIR)/module_loader_tests
 	$(BUILD_DIR)/package_tests
 	$(BUILD_DIR)/amberc lex corpus/parse/lexer/basic/source.am > $(BUILD_DIR)/lexer-basic.tokens.json
+	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-first.json
+	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-second.json
+	$(BUILD_DIR)/amberc amberbc-verify $(BUILD_DIR)/w14_build/out/demo.main.amberbc > $(BUILD_DIR)/w14-main.verify.json
+	$(BUILD_DIR)/amberc amberbc-disasm $(BUILD_DIR)/w14_build/out/demo.main.amberbc > $(BUILD_DIR)/w14-main.disasm.txt
 	$(BUILD_DIR)/ambertest run corpus
 
 conformance: $(BUILD_DIR)/ambertest
-	$(BUILD_DIR)/ambertest run corpus --bundle M5
+	$(BUILD_DIR)/ambertest run corpus --bundle M11
 
 spec-sync-check:
 	python3 tools/spec_sync.py check

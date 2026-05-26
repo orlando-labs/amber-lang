@@ -1,0 +1,16 @@
+{
+  "schema": "amber.build.v1",
+  "name": "w14.demo",
+  "root": "demo.main",
+  "profiles": {
+    "required": ["core.v1"],
+    "optional": ["typed.v1"],
+    "forbidden": ["ffi.v1"]
+  },
+  "stdlib": [
+    {"name": "amber.core", "path": "stdlib/core.am", "bootstrap": "B2"}
+  ],
+  "modules": [
+    {"name": "demo.main", "path": "src/main.am"}
+  ]
+}

@@ -326,6 +326,20 @@ void test_loader_reports_version_and_abi_mismatch() {
          "ABI mismatch should include ABI context");
 }
 
+void test_loader_rejects_unsupported_required_profile() {
+  amber::runtime::RuntimeModuleLoader loader;
+  amber::bytecode::BcModule module = make_module({}, 1);
+  module.required_features = {"ffi.v1"};
+  add_ok(loader, "profile.bad", module);
+
+  const amber::runtime::RuntimeModuleLoadResult linked = loader.link();
+  expect(!linked.ok, "link should fail for unsupported required profile");
+  expect(linked.error_name == "UnsupportedProfileError",
+         "unsupported profile should report UnsupportedProfileError");
+  expect(linked.message.find("ffi.v1") != std::string::npos,
+         "unsupported profile message should name feature");
+}
+
 void test_loader_resolves_reexport_chain() {
   amber::runtime::RuntimeModuleLoader loader;
   amber::bytecode::BcModule leaf = make_module({}, 1);
@@ -394,6 +408,7 @@ int main() {
   test_loader_materializes_exports_and_import_aliases();
   test_loader_reports_missing_export();
   test_loader_reports_version_and_abi_mismatch();
+  test_loader_rejects_unsupported_required_profile();
   test_loader_resolves_reexport_chain();
   test_loader_reports_source_mapped_init_failure();
   return 0;

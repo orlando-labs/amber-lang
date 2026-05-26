@@ -35,6 +35,7 @@ enum class SectionKind {
   Line,
   Locs,
   Attr,
+  Prof,
   Caps,
   Efct,
   Obsv,
@@ -324,6 +325,9 @@ struct BcModule {
   std::vector<LineEntry> line_table;
   std::vector<LocalDebugEntry> local_debug;
   std::vector<AttrEntry> attrs;
+  std::vector<std::string> required_features;
+  std::vector<std::string> optional_features;
+  std::vector<std::string> forbidden_features;
   std::vector<capability::CapabilityRequest> capabilities;
   std::vector<effect::EffectSummary> effects;
   std::vector<replay::ObservabilitySite> observability_sites;

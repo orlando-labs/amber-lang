@@ -25,7 +25,10 @@ contracts/property, privacy/lineage, and workflow metadata, `AGNT`/`CNTR`/
 `PRIV`/`WFLW` round-trips, profile validation, CLI surfaces, and runtime mirror
 hooks are covered by focused profile/bytecode/VM tests. `W12` documentation/spec
 sync is covered by `make spec-sync-check`, which compares the generated anchor
-map and validates local Markdown links.
+map and validates local Markdown links. `W14` build/bootstrap/conformance
+closure is covered by `amberc build` fixture smoke in `make test`, bytecode
+profile/ABI metadata checks, runtime unsupported-profile rejection, and the
+cumulative `M11` compile/load/run bundle.
 
 `ambertest run <path>` is the canonical corpus entrypoint. It discovers
 `meta.json` fixtures deterministically, dispatches by fixture phase, compares
@@ -45,6 +48,11 @@ Supported positive phases:
 - `run`
 - `load`
 
+The W14 `M11` bundle also performs a compile-all postpass over `bc`,
+`bc-disasm`, `run`, and `load` fixtures. Each candidate is compiled to
+`.amberbc`, verified, disassembled, and then run or loaded where the fixture
+phase requires it.
+
 Supported negative phases:
 
 - `bind-diag`
@@ -54,6 +62,7 @@ Milestone bundles are selected with:
 
 ```sh
 ambertest run corpus --bundle M5
+ambertest run corpus --bundle M11
 ```
 
 Bundle levels are cumulative:
@@ -63,12 +72,15 @@ Bundle levels are cumulative:
 - `M3` and `M4`: `M2` plus VM run corpus;
 - `M5`: full dynamic corpus, including loader load fixtures;
 - `M6`: `M5` plus optional Amber/Typed checker fixtures.
+- `M11`: `M6` plus W14 compile-all verification for compile/load/run fixtures.
 
 The Makefile exposes the CI/mainline command:
 
 ```sh
 make conformance
 ```
+
+`make conformance` now runs the `M11` bundle.
 
 The W12 documentation/spec-sync gate is:
 
@@ -116,3 +128,7 @@ Current limits:
   W11.5 Wasm-accelerator / W11.6 modern-profile
   language-surface fixtures can be added once those forms are exposed above the
   runtime API and corpus runner phases.
+- `amberc build` has a focused fixture smoke under
+  [tests/fixtures/w14_build](../../tests/fixtures/w14_build/amber.build.json);
+  broader package/build-graph corpus phases can still be added when the source
+  language exposes more stdlib surface.

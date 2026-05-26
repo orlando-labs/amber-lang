@@ -11,9 +11,10 @@ Implemented surface:
 - CLI inspection in [tools/amberc/main.cpp](/Users/slowpilot/workspace/amber/tools/amberc/main.cpp:1):
   - `amberc bc <file>`
   - `amberc bc-disasm <file>`
-  - `amberc amberbc-dump <file>`
-  - `amberc amberbc-verify <file>`
-  - `amberc amberbc-disasm <file>`
+- `amberc amberbc-dump <file>`
+- `amberc amberbc-verify <file>`
+- `amberc amberbc-disasm <file>`
+- `amberc build <amber.build.json>`
 - HIR-to-bytecode emission in [bytecode/emitter.cpp](/Users/slowpilot/workspace/amber/bytecode/emitter.cpp:1)
 
 ## Container
@@ -39,7 +40,7 @@ Section directory entries are:
 Current canonical section tags:
 
 - required: `STRS`, `SYMS`, `KONS`, `CODE`, `METH`, `CLAS`, `DEPS`, `EXPT`, `INIT`
-- optional: `PATS`, `SPAN`, `LINE`, `LOCS`, `ATTR`, `HASH`
+- optional: `PATS`, `SPAN`, `LINE`, `LOCS`, `ATTR`, `PROF`, `HASH`
 
 Writer policy is deterministic:
 
@@ -70,6 +71,15 @@ Current `CODE` encoding stores:
 
 `module_to_json(...)` dumps the fully decoded module as `amber.bc.v1`.
 
+`PROF` stores W14 build/profile feature metadata:
+
+- `required_features[]`
+- `optional_features[]`
+- `forbidden_features[]`
+
+The runtime loader rejects unsupported required features with
+`UnsupportedProfileError` before module initialization.
+
 `module_to_disasm(...)` prints deterministic text form:
 
 - sections in stable order
@@ -77,7 +87,7 @@ Current `CODE` encoding stores:
 - locals as `lN`
 - captures as `uN`
 - instructions as zero-padded `pc opcode operands...`
-- optional profile metadata as `.caps`, `.efct`, `.obsv`, and `.rply`
+- optional profile metadata as `.prof`, `.caps`, `.efct`, `.obsv`, and `.rply`
 
 `CLAS` currently stores class-like runtime descriptors:
 
@@ -127,6 +137,7 @@ Current verifier is intentionally structural, not semantic/runtime-complete. It 
 - back-edge safepoint presence
 - per-code CFG initializedness with the W13 `UNINIT < INIT_VALUE` lattice
 - local debug ranges
+- W14 profile feature metadata duplicate/conflict checks
 - fixed 32-byte `HASH` digests
 
 Representative current verifier codes:

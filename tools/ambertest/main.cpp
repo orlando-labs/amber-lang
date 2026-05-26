@@ -235,6 +235,9 @@ int bundle_level(const std::string &bundle) {
   if (bundle == "M6") {
     return 6;
   }
+  if (bundle == "M11") {
+    return 11;
+  }
   if (bundle == "M1") {
     return 1;
   }
@@ -980,8 +983,48 @@ bool run_bind_diag_case(const TestCase &test_case) {
   return true;
 }
 
+bool compile_all_candidate(const TestCase &test_case) {
+  const std::string phase = canonical_phase(test_case.phase);
+  return phase == "bc" || phase == "bc-disasm" || phase == "run" ||
+         phase == "load";
+}
+
+bool run_compile_all_bundle(const std::vector<TestCase> &cases) {
+  for (const TestCase &test_case : cases) {
+    if (!compile_all_candidate(test_case)) {
+      continue;
+    }
+    amber::bytecode::BcModule module;
+    std::string module_name;
+    if (!compile_case_to_module(test_case, &module, &module_name)) {
+      return false;
+    }
+    const std::vector<std::uint8_t> bytes =
+        amber::bytecode::serialize_module(module);
+    amber::bytecode::DecodeResult decoded =
+        amber::bytecode::deserialize_module(bytes);
+    if (!decoded.ok()) {
+      std::cerr << test_case.directory
+                << ": compile-all verifier diagnostics:\n"
+                << amber::bytecode::verify_errors_to_json(decoded.errors);
+      return false;
+    }
+    (void)amber::bytecode::module_to_disasm(
+        decoded.module, decoded.sections,
+        amber::lexer::sha256_hex(std::string(bytes.begin(), bytes.end())));
+    const std::string phase = canonical_phase(test_case.phase);
+    if (phase == "run" && !run_vm_case(test_case)) {
+      return false;
+    }
+    if (phase == "load" && !run_load_case(test_case)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void usage(std::ostream &out) {
-  out << "usage: ambertest run <path> [--bundle M1|M2|M3|M4|M5|M6]\n";
+  out << "usage: ambertest run <path> [--bundle M1|M2|M3|M4|M5|M6|M11]\n";
 }
 
 } // namespace
@@ -1108,6 +1151,14 @@ int main(int argc, char **argv) {
       } else {
         std::cerr << test_case.directory << ": unsupported phase '"
                   << test_case.phase << "'\n";
+        ++failed;
+      }
+    }
+
+    if (bundle == "M11") {
+      if (run_compile_all_bundle(cases)) {
+        ++passed;
+      } else {
         ++failed;
       }
     }

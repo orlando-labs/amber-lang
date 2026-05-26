@@ -15,6 +15,7 @@ Check with `make spec-sync-check`.
 | `docs/engineering/ast-v1.md` | 3 |
 | `docs/engineering/bc-v1.md` | 4 |
 | `docs/engineering/bind-v1.md` | 1 |
+| `docs/engineering/build-v1.md` | 4 |
 | `docs/engineering/capabilities-v1.md` | 1 |
 | `docs/engineering/conformance-v1.md` | 1 |
 | `docs/engineering/data-schema-v1.md` | 1 |
@@ -33,17 +34,17 @@ Check with `make spec-sync-check`.
 | `docs/engineering/runtime-v1.md` | 1 |
 | `docs/engineering/typed-v1.md` | 1 |
 | `docs/engineering/wasm-accelerator-v1.md` | 1 |
-| `spec/changelog/v20.1.md` | 6 |
+| `spec/changelog/v20.1.md` | 7 |
 
 ## Registry Inventory
 
 | Registry | Lines | SHA-256 |
 | --- | ---: | --- |
-| `spec/registries/bytecode_sections.yaml` | 85 | `9c51c65477c8021281a9299050bab7352b7fe597f5842bb165a0dcae7ae5d7d9` |
+| `spec/registries/bytecode_sections.yaml` | 88 | `beb53d82556008ef1c60bfa9955722b05b2b87b9c2df74110484a93224dec7e9` |
 | `spec/registries/diagnostics.yaml` | 51 | `ff58436de34c754d07d80aa8b78672bedc162146657561168bec72c27b6c0de8` |
 | `spec/registries/opcodes.yaml` | 100 | `809f8a89a1da015b0aef01890ed2e8f8f2be7139eac314f14c714208cafe2431` |
 | `spec/registries/prelude.yaml` | 239 | `d1fc19408d070c1cacc9de2d0c7bc66cd305b3b9aef49337fb5fc5c8b2b0e254` |
-| `spec/registries/runtime_errors.yaml` | 32 | `579600a8165311720c36f1ec088712f9f40205287f1320380de31d6d485720ee` |
+| `spec/registries/runtime_errors.yaml` | 33 | `66a45177057ccf8ebc699d6fa5b25a8ecbf506ab4ce59157cbe6a1811ab9705d` |
 | `spec/registries/tokens.yaml` | 100 | `12f01f8e80b121de58c88fed8b99870735e5b3db4a2313255bc1cec8be4ec885` |
 
 ## Anchor Map
@@ -303,10 +304,14 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/ast-v1.md`](../../docs/engineering/ast-v1.md) | 14 | 2 | [`postfix-chains`](../../docs/engineering/ast-v1.md#postfix-chains) | Postfix chains |
 | [`docs/engineering/ast-v1.md`](../../docs/engineering/ast-v1.md) | 29 | 2 | [`clause-defs`](../../docs/engineering/ast-v1.md#clause-defs) | Clause defs |
 | [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 1 | 1 | [`amberbcv1`](../../docs/engineering/bc-v1.md#amberbcv1) | amber.bc.v1 |
-| [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 19 | 2 | [`container`](../../docs/engineering/bc-v1.md#container) | Container |
-| [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 52 | 2 | [`record-encoding`](../../docs/engineering/bc-v1.md#record-encoding) | Record Encoding |
-| [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 114 | 2 | [`verifier-skeleton`](../../docs/engineering/bc-v1.md#verifier-skeleton) | Verifier Skeleton |
+| [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 20 | 2 | [`container`](../../docs/engineering/bc-v1.md#container) | Container |
+| [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 53 | 2 | [`record-encoding`](../../docs/engineering/bc-v1.md#record-encoding) | Record Encoding |
+| [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 124 | 2 | [`verifier-skeleton`](../../docs/engineering/bc-v1.md#verifier-skeleton) | Verifier Skeleton |
 | [`docs/engineering/bind-v1.md`](../../docs/engineering/bind-v1.md) | 1 | 1 | [`amberbindv1`](../../docs/engineering/bind-v1.md#amberbindv1) | amber.bind.v1 |
+| [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 1 | 1 | [`amberbuildv1`](../../docs/engineering/build-v1.md#amberbuildv1) | amber.build.v1 |
+| [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 19 | 2 | [`manifest-shape`](../../docs/engineering/build-v1.md#manifest-shape) | Manifest Shape |
+| [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 47 | 2 | [`cli`](../../docs/engineering/build-v1.md#cli) | CLI |
+| [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 58 | 2 | [`conformance`](../../docs/engineering/build-v1.md#conformance) | Conformance |
 | [`docs/engineering/capabilities-v1.md`](../../docs/engineering/capabilities-v1.md) | 1 | 1 | [`ambercapabilitiesv1`](../../docs/engineering/capabilities-v1.md#ambercapabilitiesv1) | amber.capabilities.v1 |
 | [`docs/engineering/conformance-v1.md`](../../docs/engineering/conformance-v1.md) | 1 | 1 | [`amberconformancev1`](../../docs/engineering/conformance-v1.md#amberconformancev1) | amber.conformance.v1 |
 | [`docs/engineering/data-schema-v1.md`](../../docs/engineering/data-schema-v1.md) | 1 | 1 | [`amberdataschemav1`](../../docs/engineering/data-schema-v1.md#amberdataschemav1) | amber.data/schema.v1 |
@@ -320,12 +325,12 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/implementation-status-v1.md`](../../docs/engineering/implementation-status-v1.md) | 1 | 1 | [`amberimplementation-statusv1`](../../docs/engineering/implementation-status-v1.md#amberimplementation-statusv1) | amber.implementation-status.v1 |
 | [`docs/engineering/implementation-status-v1.md`](../../docs/engineering/implementation-status-v1.md) | 12 | 2 | [`release-dashboard`](../../docs/engineering/implementation-status-v1.md#release-dashboard) | Release Dashboard |
 | [`docs/engineering/implementation-status-v1.md`](../../docs/engineering/implementation-status-v1.md) | 33 | 2 | [`release-gates`](../../docs/engineering/implementation-status-v1.md#release-gates) | Release Gates |
-| [`docs/engineering/implementation-status-v1.md`](../../docs/engineering/implementation-status-v1.md) | 44 | 2 | [`sync-policy`](../../docs/engineering/implementation-status-v1.md#sync-policy) | Sync Policy |
+| [`docs/engineering/implementation-status-v1.md`](../../docs/engineering/implementation-status-v1.md) | 45 | 2 | [`sync-policy`](../../docs/engineering/implementation-status-v1.md#sync-policy) | Sync Policy |
 | [`docs/engineering/loader-v1.md`](../../docs/engineering/loader-v1.md) | 1 | 1 | [`amberloaderv1`](../../docs/engineering/loader-v1.md#amberloaderv1) | amber.loader.v1 |
 | [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 1 | 1 | [`amber-v201-migration-notes`](../../docs/engineering/migration-notes-v20.1.md#amber-v201-migration-notes) | Amber v20.1 Migration Notes |
 | [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 5 | 2 | [`runtime-and-artifact-compatibility`](../../docs/engineering/migration-notes-v20.1.md#runtime-and-artifact-compatibility) | Runtime And Artifact Compatibility |
-| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 28 | 2 | [`repository-layout-changes`](../../docs/engineering/migration-notes-v20.1.md#repository-layout-changes) | Repository Layout Changes |
-| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 42 | 2 | [`maintainer-checklist`](../../docs/engineering/migration-notes-v20.1.md#maintainer-checklist) | Maintainer Checklist |
+| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 29 | 2 | [`repository-layout-changes`](../../docs/engineering/migration-notes-v20.1.md#repository-layout-changes) | Repository Layout Changes |
+| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 46 | 2 | [`maintainer-checklist`](../../docs/engineering/migration-notes-v20.1.md#maintainer-checklist) | Maintainer Checklist |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 1 | 1 | [`ambermirv1`](../../docs/engineering/mir-v1.md#ambermirv1) | amber.mir.v1 |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 24 | 2 | [`ir-shape`](../../docs/engineering/mir-v1.md#ir-shape) | IR Shape |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 57 | 2 | [`ssa-validator`](../../docs/engineering/mir-v1.md#ssa-validator) | SSA Validator |
@@ -344,5 +349,6 @@ Check with `make spec-sync-check`.
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 5 | 2 | [`w12-documentationspec-sync`](../../spec/changelog/v20.1.md#w12-documentationspec-sync) | W12 Documentation/Spec Sync |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 17 | 2 | [`w11-modern-profile-baseline`](../../spec/changelog/v20.1.md#w11-modern-profile-baseline) | W11 Modern Profile Baseline |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 27 | 2 | [`w13-compiler-contract-closure-slice`](../../spec/changelog/v20.1.md#w13-compiler-contract-closure-slice) | W13 Compiler-Contract Closure Slice |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 51 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 64 | 2 | [`planned-closure-work`](../../spec/changelog/v20.1.md#planned-closure-work) | Planned Closure Work |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 51 | 2 | [`w14-buildbootstrapconformance-closure`](../../spec/changelog/v20.1.md#w14-buildbootstrapconformance-closure) | W14 Build/Bootstrap/Conformance Closure |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 67 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 80 | 2 | [`planned-closure-work`](../../spec/changelog/v20.1.md#planned-closure-work) | Planned Closure Work |

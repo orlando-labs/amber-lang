@@ -35,13 +35,14 @@ build/amberc native-dump corpus/bc/module/basic/source.am
 build/amberc native-verify corpus/bc/module/basic/source.am
 build/amberc bc corpus/bc/module/basic/source.am
 build/amberc bc-disasm corpus/bc/disasm/basic/source.am
+build/amberc build tests/fixtures/w14_build/amber.build.json --out-dir build/w14_build/out --cache-dir build/w14_build/cache
 build/amberc amberbc-dump /path/to/module.amberbc
 build/amberc amberbc-verify /path/to/module.amberbc
 build/amberc amberbc-disasm /path/to/module.amberbc
 build/amberc wasm-build /path/to/plugin.amberwasm
 build/amberc accel-check /path/to/kernels.amberaccel
 build/ambertest run corpus
-build/ambertest run corpus --bundle M5
+build/ambertest run corpus --bundle M11
 ```
 
 Current matrix status:
@@ -87,6 +88,7 @@ Current matrix status:
 | `W11.6` | done | `amber.modern-profiles.v1` metadata-first AI-agent tooling/contracts/privacy/workflow baseline with semantic symbol graph and explain JSON, structured patch/provenance validation, contract/property descriptors, privacy label/policy/lineage checks, durable workflow step/history idempotency validation, `AGNT`/`CNTR`/`PRIV`/`WFLW` bytecode sections, runtime mirror/validation hooks, plus `symbols` / `explain` / `patch-check` / `provenance-audit` / `contract-check` / `privacy-check` / `workflow-check` CLI |
 | `W12` | done | documentation/spec sync baseline with generated anchor map, v20.1 changelog, migration notes, implementation status dashboard, local Markdown link checks, and `make spec-sync-check` |
 | `W13` | done | compiler-contract closure slice with W13 source/comment/numeric/range rules, prelude/runtime-error/token registry updates, top-level module-cell pre-scan, `in`/`and`/`or` lowering, bytecode verifier operand/range/dataflow checks, runtime UNINIT guards, unified `CALL` packet/object-call dispatch, structured source traces, and focused lexer/parser/binder/HIR/emitter/bytecode/VM tests |
+| `W14` | done | build/bootstrap/conformance closure with `amber.build.v1` manifests, `amberc build`, deterministic `.amberbc` output, incremental cache keys, B2 stdlib bootstrap metadata/ABI hashes, `PROF` profile feature metadata, unsupported-profile loader rejection, CLI fixture smoke, and M11 compile/load/run conformance bundle |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -158,6 +160,10 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   W11.6 semantic symbol/explain output, structured patch and provenance
   validation, contract/property descriptors, privacy/lineage policy checks, and
   durable workflow history/idempotency checks;
+- `amberc build <amber.build.json>` for W14 multi-module build manifests,
+  deterministic `.amberbc` emission into an output directory, cache-keyed
+  incremental rebuilds, B2 stdlib bootstrap metadata, stdlib ABI dependency
+  pinning, and required/optional/forbidden profile feature metadata in `PROF`;
 - `make spec-sync-check` for the W12 documentation/spec-sync gate, validating
   the generated [anchor map](docs/engineering/spec-anchor-map-v1.md), local
   Markdown links, the [v20.1 changelog](spec/changelog/v20.1.md),
@@ -168,7 +174,7 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   misuse, forbidden dynamic-pattern contexts, dynamic matcher self-reference,
   and default-expression preflight;
 - shape-only `frontend/binder` helpers for extracting parsed call-site shape and for ordinary signature call preflight, explicit positional/keyword bind with `MISSING` slots, default-order planning, and delayed auto-assign buffers;
-- `ambertest run <path>` corpus runner for lex, expression-parse, module-parse, bind/check, optional typed checks, HIR/lower, bytecode compile/disasm, VM run, loader load, diagnostic fixtures, deterministic discovery, focused mismatch rendering, and `--bundle M1..M6` milestone gates;
+- `ambertest run <path>` corpus runner for lex, expression-parse, module-parse, bind/check, optional typed checks, HIR/lower, bytecode compile/disasm, VM run, loader load, diagnostic fixtures, deterministic discovery, focused mismatch rendering, and `--bundle M1..M6/M11` milestone gates;
 - `amber.bc.v1` typed schema, canonical `.amberbc` serializer/deserializer, structural verifier skeleton, JSON dump, and deterministic text disassembly for the current bytecode subset;
 - `amberc bc <file>` and `amberc bc-disasm <file>` HIR-to-bytecode emitter path for current supported methods/classes/control-flow subset, including clause-method metadata in `BcMethod.clause_table` with dedicated emitted clause pattern probe code, `default_thunk_ids[]`, `type_hook_ids[]` metadata for annotated parameter/return boundaries, `PATS` binding descriptors, matcher-expression and dynamic-matcher bridge lowering for `case`, static pattern-opcode lowering for block-param prologues and pattern assignment, and path-based `CLAS` descriptors for class/mixin owners with preserved superclass/include/extend metadata;
 - `runtime/vm` execution baseline for verified `BcCode` in unit tests: frame stack, register file, `last_result`, branches, direct entry, closure capture materialization, closure `CALL`, constructor `CALL`, eager clause-table method dispatch, scalar and collection `SEND` / `SEND_DYN`, `RAISE` / handler-table unwinding, inline matcher execution without AST-walk fallback, slot-backed instance shapes, stable runtime method tables, W6.1 heap allocation boundary for objects/arrays/closures, W6.2 lifecycle tombstones, W6.3 non-moving GC boundary, W6.4 pinning/native-handle boundary, W9.2 atomic open-world transactions/freeze guards, W9.3 immutable reflection mirror snapshots, W9.5 atomic package hot-reload swaps, W10.1 advanced concurrency primitives, and W10.2 awaitable readiness bridge;
@@ -219,6 +225,9 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   and runtime mirror/validation exposure;
 - `runtime/vm` W8.3 collections contract with closure-block execution for eager sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, deterministic `EmptyCollectionError` for empty `reduce` without init, and ordered `Map#keys/#values/#entries/#map/#select/#reject/#transform_values/#each`;
 - `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
+- `runtime/module_loader` W14 profile gate for `PROF` required/optional/forbidden
+  features, rejecting unsupported required host profiles before module init with
+  `UnsupportedProfileError`;
 - `package/package` W9.4 package tooling with restricted `amber.toml` parsing,
   deterministic `amber.lock` rendering, reproducible signed `.amberpkg`
   artifacts, artifact verify/inspect JSON, and filesystem registry

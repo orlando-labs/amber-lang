@@ -104,6 +104,9 @@ amber::bytecode::BcModule sample_module() {
   module.line_table.push_back({7, 2, 2});
   module.local_debug.push_back({7, 0, 0, 0, 3});
   module.attrs.push_back({5, 6});
+  module.required_features = {"core.v1"};
+  module.optional_features = {"typed.v1"};
+  module.forbidden_features = {"ffi.v1"};
   module.capabilities.push_back(
       amber::capability::make_capability("fs.read", "./data"));
   module.effects.push_back(amber::effect::make_effect_summary(
@@ -271,7 +274,7 @@ void test_round_trip_and_dump() {
   const std::string dump2 = amber::bytecode::module_to_json(
       decoded2.module, decoded2.sections, bytes_hash(bytes2));
   expect(dump1 == dump2, "JSON dump changed across round-trip");
-  expect(decoded.sections.size() == 27,
+  expect(decoded.sections.size() == 28,
          "expected required and optional sections");
 }
 
@@ -295,6 +298,9 @@ void test_disasm_is_stable() {
       "missing export line in disasm");
   expect(disasm.find(".hash\n  CODE sha256=") != std::string::npos,
          "missing hash section in disasm");
+  expect(disasm.find(".prof\n  required=\"core.v1\"") != std::string::npos &&
+             disasm.find("optional=\"typed.v1\"") != std::string::npos,
+         "missing profile section in disasm");
   expect(disasm.find(".caps\n  fs.read target=\"./data\"") != std::string::npos,
          "missing capability section in disasm");
   expect(disasm.find(".efct\n  compute kind=\"function\" declared=\"!{fs}\"") !=

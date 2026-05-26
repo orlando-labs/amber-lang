@@ -1,5 +1,6 @@
 #include "runtime/module_loader.h"
 
+#include "build/build.h"
 #include "runtime/vm.h"
 
 #include <algorithm>
@@ -419,6 +420,29 @@ struct RuntimeModuleLoader::Impl {
   }
 
   std::optional<RuntimeLoaderDiagnostic>
+  check_profile_compatibility(const RuntimeModuleRecord &record) const {
+    for (const std::string &feature : record.module.required_features) {
+      if (!build::runtime_supports_feature(feature)) {
+        std::ostringstream message;
+        message << "module '" << record.name
+                << "' requires unsupported profile feature '" << feature << "'";
+        return make_diagnostic("UnsupportedProfileError", message.str(),
+                               record.name);
+      }
+    }
+    for (const std::string &feature : record.module.forbidden_features) {
+      if (build::runtime_supports_feature(feature)) {
+        std::ostringstream message;
+        message << "module '" << record.name
+                << "' forbids host profile feature '" << feature << "'";
+        return make_diagnostic("UnsupportedProfileError", message.str(),
+                               record.name);
+      }
+    }
+    return std::nullopt;
+  }
+
+  std::optional<RuntimeLoaderDiagnostic>
   check_dependency_compatibility(const RuntimeModuleRecord &record,
                                  const bytecode::DepEntry &dependency,
                                  const RuntimeModuleRecord &dep_record) const {
@@ -543,6 +567,10 @@ struct RuntimeModuleLoader::Impl {
     materialize_all_exports();
 
     for (auto &[name, record] : modules) {
+      if (std::optional<RuntimeLoaderDiagnostic> diagnostic =
+              check_profile_compatibility(record)) {
+        return error_result(*diagnostic);
+      }
       for (const bytecode::DepEntry &dependency : record.module.dependencies) {
         const std::string dep_name = dependency_name(record.module, dependency);
         const auto dep_it = modules.find(dep_name);

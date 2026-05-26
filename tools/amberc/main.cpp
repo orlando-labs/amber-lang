@@ -1,3 +1,4 @@
+#include "build/build.h"
 #include "bytecode/emitter.h"
 #include "bytecode/format.h"
 #include "frontend/ast/expr.h"
@@ -15,8 +16,13 @@
 #include "profile/replay.h"
 #include "profile/wasm_accel.h"
 
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -51,6 +57,8 @@ void usage(std::ostream &out) {
   out << "  amberc native-verify <file>\n";
   out << "  amberc bc <file>\n";
   out << "  amberc bc-disasm <file>\n";
+  out << "  amberc build <amber.build.json> [--out-dir <dir>] "
+         "[--cache-dir <dir>] [--no-cache]\n";
   out << "  amberc amberbc-dump <file>\n";
   out << "  amberc amberbc-verify <file>\n";
   out << "  amberc amberbc-disasm <file>\n";
@@ -125,6 +133,109 @@ void write_file(const std::string &path, const std::string &contents) {
   if (!output) {
     throw std::runtime_error("failed to write output file: " + path);
   }
+}
+
+void write_bytes(const std::string &path,
+                 const std::vector<std::uint8_t> &bytes) {
+  std::ofstream output(path, std::ios::binary);
+  if (!output) {
+    throw std::runtime_error("failed to open output file: " + path);
+  }
+  output.write(reinterpret_cast<const char *>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  if (!output) {
+    throw std::runtime_error("failed to write output file: " + path);
+  }
+}
+
+std::vector<std::uint8_t> read_bytes(const std::string &path) {
+  const std::string data = read_file(path);
+  return std::vector<std::uint8_t>(data.begin(), data.end());
+}
+
+std::string bytes_to_string(const std::vector<std::uint8_t> &bytes) {
+  return std::string(bytes.begin(), bytes.end());
+}
+
+std::string bytes_to_hex(const std::array<std::uint8_t, 32> &bytes) {
+  std::ostringstream out;
+  const char *hex = "0123456789abcdef";
+  for (const std::uint8_t byte : bytes) {
+    out << hex[(byte >> 4U) & 0x0FU] << hex[byte & 0x0FU];
+  }
+  return out.str();
+}
+
+int from_hex_digit(char c) {
+  if (c >= '0' && c <= '9') {
+    return c - '0';
+  }
+  if (c >= 'a' && c <= 'f') {
+    return 10 + c - 'a';
+  }
+  if (c >= 'A' && c <= 'F') {
+    return 10 + c - 'A';
+  }
+  return -1;
+}
+
+std::array<std::uint8_t, 32> sha256_array(const std::string &value) {
+  const std::string hex = amber::lexer::sha256_hex(value);
+  std::array<std::uint8_t, 32> out{};
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    const int hi = from_hex_digit(hex[i * 2U]);
+    const int lo = from_hex_digit(hex[i * 2U + 1U]);
+    if (hi < 0 || lo < 0) {
+      throw std::runtime_error("internal sha256 hex conversion failed");
+    }
+    out[i] = static_cast<std::uint8_t>((hi << 4U) | lo);
+  }
+  return out;
+}
+
+std::array<std::uint8_t, 32> array_from_hex32(const std::string &hex) {
+  if (hex.size() != 64U) {
+    throw std::runtime_error("expected 32-byte hex digest");
+  }
+  std::array<std::uint8_t, 32> out{};
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    const int hi = from_hex_digit(hex[i * 2U]);
+    const int lo = from_hex_digit(hex[i * 2U + 1U]);
+    if (hi < 0 || lo < 0) {
+      throw std::runtime_error("invalid 32-byte hex digest");
+    }
+    out[i] = static_cast<std::uint8_t>((hi << 4U) | lo);
+  }
+  return out;
+}
+
+std::uint32_t ensure_string_id(amber::bytecode::BcModule *module,
+                               const std::string &value) {
+  for (std::size_t i = 0; i < module->strings.size(); ++i) {
+    if (module->strings[i] == value) {
+      return static_cast<std::uint32_t>(i);
+    }
+  }
+  module->strings.push_back(value);
+  return static_cast<std::uint32_t>(module->strings.size() - 1U);
+}
+
+void add_module_attr(amber::bytecode::BcModule *module, const std::string &key,
+                     const std::string &value) {
+  module->attrs.push_back(
+      {ensure_string_id(module, key), ensure_string_id(module, value)});
+}
+
+std::string safe_artifact_name(const std::string &module_name) {
+  std::string out;
+  for (const unsigned char c : module_name) {
+    if (std::isalnum(c) != 0 || c == '.' || c == '_' || c == '-') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('_');
+    }
+  }
+  return out.empty() ? "module" : out;
 }
 
 std::string package_diagnostics_to_string(
@@ -357,12 +468,12 @@ CompiledModuleArtifact compile_source_to_module_artifact(
   return {bytes, std::move(native_module)};
 }
 
-std::vector<std::uint8_t> compile_source_to_bytecode(
-    const std::string &path, const std::string &expected_module_name,
+amber::bytecode::BcModule compile_source_text_to_module(
+    const std::string &source, const std::string &source_path,
+    const std::string &expected_module_name,
     const std::vector<amber::capability::CapabilityRequest> &capabilities =
         {}) {
-  const std::string source = read_file(path);
-  amber::lexer::LexResult lex_result = lex_source(source, path);
+  amber::lexer::LexResult lex_result = lex_source(source, source_path);
   if (!lex_result.ok()) {
     throw std::runtime_error(
         amber::lexer::diagnostics_to_json(lex_result.diagnostics));
@@ -378,7 +489,7 @@ std::vector<std::uint8_t> compile_source_to_bytecode(
       parse_result.module_name != expected_module_name) {
     throw std::runtime_error("manifest module '" + expected_module_name +
                              "' does not match source package '" +
-                             parse_result.module_name + "' in " + path);
+                             parse_result.module_name + "' in " + source_path);
   }
 
   amber::binder::BindResult bind_result =
@@ -406,8 +517,18 @@ std::vector<std::uint8_t> compile_source_to_bytecode(
   }
   emit_result.module.capabilities = capabilities;
   emit_result.module.effects = check_result.effect_summaries;
+  return std::move(emit_result.module);
+}
+
+std::vector<std::uint8_t> compile_source_to_bytecode(
+    const std::string &path, const std::string &expected_module_name,
+    const std::vector<amber::capability::CapabilityRequest> &capabilities =
+        {}) {
+  const std::string source = read_file(path);
+  amber::bytecode::BcModule module = compile_source_text_to_module(
+      source, path, expected_module_name, capabilities);
   const std::vector<std::uint8_t> bytes =
-      amber::bytecode::serialize_module(emit_result.module);
+      amber::bytecode::serialize_module(module);
   amber::bytecode::DecodeResult decode_result =
       amber::bytecode::deserialize_module(bytes);
   if (!decode_result.ok()) {
@@ -537,6 +658,228 @@ int run_package_command(int argc, char **argv) {
 
   usage(std::cerr);
   return 2;
+}
+
+struct BuildCliOptions {
+  std::string out_dir;
+  std::string cache_dir;
+  bool cache_enabled = true;
+};
+
+BuildCliOptions parse_build_options(int argc, char **argv, int start_index) {
+  BuildCliOptions options;
+  for (int i = start_index; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if (arg == "--out-dir" && i + 1 < argc) {
+      options.out_dir = argv[++i];
+    } else if (arg == "--cache-dir" && i + 1 < argc) {
+      options.cache_dir = argv[++i];
+    } else if (arg == "--no-cache") {
+      options.cache_enabled = false;
+    } else {
+      throw std::runtime_error("unknown build option: " + arg);
+    }
+  }
+  return options;
+}
+
+std::string profile_material(const amber::build::BuildProfileSet &profiles) {
+  std::ostringstream out;
+  for (const std::string &feature : profiles.required_features) {
+    out << "required=" << feature << "\n";
+  }
+  for (const std::string &feature : profiles.optional_features) {
+    out << "optional=" << feature << "\n";
+  }
+  for (const std::string &feature : profiles.forbidden_features) {
+    out << "forbidden=" << feature << "\n";
+  }
+  return out.str();
+}
+
+struct BuiltStdlibAbi {
+  std::string name;
+  std::array<std::uint8_t, 32> abi_hash{};
+};
+
+bool dependency_exists(const amber::bytecode::BcModule &module,
+                       const std::string &name) {
+  for (const amber::bytecode::DepEntry &dependency : module.dependencies) {
+    if (dependency.module_name_str_id < module.strings.size() &&
+        module.strings[dependency.module_name_str_id] == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void add_stdlib_dependencies(amber::bytecode::BcModule *module,
+                             const std::vector<BuiltStdlibAbi> &stdlib_abis) {
+  for (const BuiltStdlibAbi &stdlib_abi : stdlib_abis) {
+    if (dependency_exists(*module, stdlib_abi.name)) {
+      continue;
+    }
+    amber::bytecode::DepEntry dependency;
+    dependency.module_name_str_id = ensure_string_id(module, stdlib_abi.name);
+    dependency.required_format = {1, 0};
+    dependency.min_language_version = {1, 0};
+    dependency.has_abi_requirement = true;
+    dependency.abi_requirement = stdlib_abi.abi_hash;
+    module->dependencies.push_back(dependency);
+  }
+}
+
+std::string
+stdlib_abi_material(const std::vector<BuiltStdlibAbi> &stdlib_abis) {
+  std::ostringstream out;
+  for (const BuiltStdlibAbi &stdlib_abi : stdlib_abis) {
+    out << stdlib_abi.name << "=" << bytes_to_hex(stdlib_abi.abi_hash) << "\n";
+  }
+  return out.str();
+}
+
+std::array<std::uint8_t, 32>
+module_abi_hash(const amber::build::BuildModule &module,
+                const amber::build::BuildProfileSet &profiles,
+                const std::string &source_hash) {
+  return sha256_array("amber.abi.v1\n" + module.name + "\n" + module.path +
+                      "\n" + source_hash + "\n" + profile_material(profiles));
+}
+
+amber::build::BuildArtifactRecord build_one_module(
+    const amber::build::BuildModule &module,
+    const std::filesystem::path &root_dir, const std::filesystem::path &out_dir,
+    const std::filesystem::path &cache_dir,
+    const amber::build::BuildProfileSet &profiles,
+    const std::vector<BuiltStdlibAbi> &stdlib_abis, bool cache_enabled) {
+  const std::filesystem::path source_path = root_dir / module.path;
+  const std::string source = read_file(source_path.string());
+  const std::string source_hash = amber::lexer::sha256_hex(source);
+  const std::string cache_key = amber::lexer::sha256_hex(
+      "amber.build.cache.v1\n" + module.name + "\n" + module.path + "\n" +
+      source_hash + "\n" + profile_material(profiles) +
+      stdlib_abi_material(stdlib_abis));
+  const std::filesystem::path output_path =
+      out_dir / (safe_artifact_name(module.name) + ".amberbc");
+  const std::filesystem::path cache_path =
+      cache_dir /
+      (safe_artifact_name(module.name) + "-" + cache_key + ".amberbc");
+
+  amber::build::BuildArtifactRecord record;
+  record.name = module.name;
+  record.path = module.path;
+  record.output_path = output_path.string();
+  record.cache_path = cache_path.string();
+  record.cache_key = cache_key;
+  record.source_hash = source_hash;
+  record.stdlib = module.stdlib;
+  record.bootstrap_layer = module.bootstrap_layer;
+
+  std::vector<std::uint8_t> bytes;
+  if (cache_enabled && std::filesystem::exists(cache_path)) {
+    bytes = read_bytes(cache_path.string());
+    record.cached = true;
+  } else {
+    amber::bytecode::BcModule bc_module =
+        compile_source_text_to_module(source, module.path, module.name);
+    bc_module.required_features = profiles.required_features;
+    bc_module.optional_features = profiles.optional_features;
+    bc_module.forbidden_features = profiles.forbidden_features;
+    bc_module.profile_flags = amber::build::profile_flags_for(profiles);
+    if (!module.stdlib) {
+      add_stdlib_dependencies(&bc_module, stdlib_abis);
+    }
+    add_module_attr(&bc_module, "amber.build.module", module.name);
+    add_module_attr(&bc_module, "amber.build.source_hash", source_hash);
+    add_module_attr(&bc_module, "amber.build.cache_key", cache_key);
+    if (module.stdlib) {
+      add_module_attr(&bc_module, "amber.bootstrap.layer",
+                      module.bootstrap_layer.empty() ? "B2"
+                                                     : module.bootstrap_layer);
+    }
+    bc_module.abi_hash = module_abi_hash(module, profiles, source_hash);
+    bytes = amber::bytecode::serialize_module(bc_module);
+    if (cache_enabled) {
+      std::filesystem::create_directories(cache_dir);
+      write_bytes(cache_path.string(), bytes);
+    }
+  }
+
+  amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(bytes);
+  if (!decoded.ok()) {
+    throw std::runtime_error(
+        amber::bytecode::verify_errors_to_json(decoded.errors));
+  }
+  record.abi_hash = bytes_to_hex(decoded.module.abi_hash);
+  record.artifact_hash = amber::lexer::sha256_hex(bytes_to_string(bytes));
+  record.byte_size = static_cast<std::uint64_t>(bytes.size());
+  std::filesystem::create_directories(out_dir);
+  write_bytes(output_path.string(), bytes);
+  return record;
+}
+
+int run_build_command(int argc, char **argv) {
+  if (argc < 3 || std::string(argv[1]) != "build") {
+    usage(std::cerr);
+    return 2;
+  }
+
+  const std::string manifest_path = argv[2];
+  const BuildCliOptions options = parse_build_options(argc, argv, 3);
+  const std::filesystem::path manifest_dir =
+      std::filesystem::path(dirname(manifest_path));
+  const std::filesystem::path out_dir =
+      options.out_dir.empty() ? (manifest_dir / "build" / "amber")
+                              : std::filesystem::path(options.out_dir);
+  const std::filesystem::path cache_dir =
+      options.cache_dir.empty() ? (out_dir / ".cache")
+                                : std::filesystem::path(options.cache_dir);
+
+  amber::build::BuildSummary summary;
+  summary.out_dir = out_dir.string();
+  summary.cache_dir = cache_dir.string();
+
+  const amber::build::BuildManifestResult parsed =
+      amber::build::parse_build_manifest_json(read_file(manifest_path),
+                                              manifest_path);
+  if (!parsed.ok()) {
+    summary.diagnostics = parsed.diagnostics;
+    std::cout << amber::build::summary_to_json(summary);
+    return 1;
+  }
+
+  summary.name = parsed.manifest.name;
+  summary.root_module = parsed.manifest.root_module;
+  summary.profiles = parsed.manifest.profiles;
+
+  try {
+    std::vector<BuiltStdlibAbi> stdlib_abis;
+    for (const amber::build::BuildModule &module :
+         parsed.manifest.stdlib_modules) {
+      amber::build::BuildArtifactRecord artifact =
+          build_one_module(module, manifest_dir, out_dir, cache_dir,
+                           parsed.manifest.profiles, {}, options.cache_enabled);
+      BuiltStdlibAbi abi;
+      abi.name = module.name;
+      abi.abi_hash = array_from_hex32(artifact.abi_hash);
+      stdlib_abis.push_back(std::move(abi));
+      summary.artifacts.push_back(std::move(artifact));
+    }
+    for (const amber::build::BuildModule &module : parsed.manifest.modules) {
+      summary.artifacts.push_back(build_one_module(
+          module, manifest_dir, out_dir, cache_dir, parsed.manifest.profiles,
+          stdlib_abis, options.cache_enabled));
+    }
+    summary.ok = true;
+    std::cout << amber::build::summary_to_json(summary);
+    return 0;
+  } catch (const std::exception &error) {
+    summary.ok = false;
+    summary.diagnostics.push_back({"BuildError", error.what(), manifest_path});
+    std::cout << amber::build::summary_to_json(summary);
+    return 1;
+  }
 }
 
 int run_capabilities_command(int argc, char **argv) {
@@ -768,6 +1111,9 @@ int main(int argc, char **argv) {
     if (argc == 2 && std::string(argv[1]) == "--version") {
       std::cout << "amberc 0.1.0-dev\n";
       return 0;
+    }
+    if (argc >= 2 && std::string(argv[1]) == "build") {
+      return run_build_command(argc, argv);
     }
     if (argc >= 2 && std::string(argv[1]).find("package-") == 0U) {
       return run_package_command(argc, argv);

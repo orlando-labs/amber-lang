@@ -44,6 +44,9 @@ sections:
   - tag: ATTR
     required: false
     meaning: compiler/build attributes
+  - tag: PROF
+    required: false
+    meaning: required, optional, and forbidden profile feature metadata
   - tag: CAPS
     required: false
     meaning: capability profile requests metadata

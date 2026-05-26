@@ -27,6 +27,7 @@ errors:
   - MoveError
   - MovedValueError
   - CapabilityError
+  - UnsupportedProfileError
   - EffectViolationError
   - DeterminismError
   - ReplayDivergenceError
