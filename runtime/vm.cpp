@@ -4145,6 +4145,9 @@ struct CallCacheEntry {
   std::uint32_t receiver_class_index = 0;
   std::uint32_t dispatch_flags = 0;
   std::uint32_t selector_symbol_id = 0;
+  std::uint32_t positional_count = 0;
+  std::vector<std::uint32_t> keyword_shape;
+  bool has_block = false;
   std::uint64_t method_version = 0;
   std::uint64_t world_epoch = 0;
   bytecode::BcMethod method;
@@ -4163,6 +4166,7 @@ struct Frame {
   const BcCode *code = nullptr;
   std::size_t pc = 0;
   std::vector<Value> regs;
+  std::vector<std::uint8_t> initialized;
   std::vector<Value> captures;
   Value self = Value::null();
   Value block = Value::null();
@@ -4462,9 +4466,19 @@ struct BoundMethodArg {
   Value value = Value::null();
 };
 
+struct CallPacket {
+  std::uint32_t dst = 0;
+  Value callee = Value::null();
+  std::vector<Value> pos_args;
+  std::vector<std::pair<std::uint32_t, Value>> kw_args;
+  Value block = Value::null();
+  std::optional<std::uint32_t> site_id;
+};
+
 struct NestedExecution {
   Value value = Value::null();
   std::vector<Value> regs;
+  std::vector<std::uint8_t> initialized;
   std::optional<Fault> fault;
 
   bool ok() const { return !fault.has_value(); }
@@ -4473,10 +4487,12 @@ struct NestedExecution {
 class Vm {
 public:
   explicit Vm(const BcModule &module,
-              std::shared_ptr<RuntimeState> state = nullptr)
+              std::shared_ptr<RuntimeState> state = nullptr,
+              std::string module_id = {})
       : module_(module),
         state_(state == nullptr ? std::make_shared<RuntimeState>()
-                                : std::move(state)) {
+                                : std::move(state)),
+        module_id_(std::move(module_id)) {
     state_->initialize_for_module(module_);
   }
 
@@ -4802,7 +4818,7 @@ private:
       return std::nullopt;
     }
 
-    Vm nested(module_, state_);
+    Vm nested(module_, state_, module_id_);
     nested.push_frame(*code, args, closure->captures, closure->self,
                       Value::null(), std::nullopt);
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
@@ -4833,8 +4849,10 @@ private:
   }
 
   void append_frame_roots(std::vector<Value> *roots, const Frame &frame) const {
-    for (const Value &value : frame.regs) {
-      append_value_root(roots, value);
+    for (std::size_t index = 0; index < frame.regs.size(); ++index) {
+      if (index < frame.initialized.size() && frame.initialized[index] != 0U) {
+        append_value_root(roots, frame.regs[index]);
+      }
     }
     for (const Value &value : frame.captures) {
       append_value_root(roots, value);
@@ -4868,8 +4886,11 @@ private:
     for (const Frame &frame : frames_) {
       append_frame_roots(&roots, frame);
     }
-    for (const Value &value : last_completed_regs_) {
-      append_value_root(&roots, value);
+    for (std::size_t index = 0; index < last_completed_regs_.size(); ++index) {
+      if (index < last_completed_initialized_.size() &&
+          last_completed_initialized_[index] != 0U) {
+        append_value_root(&roots, last_completed_regs_[index]);
+      }
     }
     append_value_root(&roots, final_value_);
     for (const ClassRuntimeState &klass : state_->classes) {
@@ -4893,6 +4914,7 @@ private:
 
   TraceFrame trace_frame_for(const Frame &frame, std::uint32_t pc) const {
     TraceFrame out;
+    out.module_id = module_id_;
     out.code_id = frame.code == nullptr ? 0U : frame.code->code_id;
     out.pc = pc;
     if (frame.code == nullptr) {
@@ -4902,8 +4924,13 @@ private:
     for (const bytecode::SourceSpanEntry &entry : frame.code->source_spans) {
       if (entry.pc_from <= pc && pc < entry.pc_to) {
         out.file = entry.span.file;
+        out.byte_start = static_cast<std::uint32_t>(entry.span.start.offset);
+        out.byte_end = static_cast<std::uint32_t>(entry.span.end.offset);
         out.line = static_cast<std::uint32_t>(entry.span.start.line);
         out.column = static_cast<std::uint32_t>(entry.span.start.col);
+        out.line_end = static_cast<std::uint32_t>(entry.span.end.line);
+        out.column_end = static_cast<std::uint32_t>(entry.span.end.col);
+        out.generated_kind = "direct";
         return out;
       }
     }
@@ -4914,6 +4941,8 @@ private:
           (out.line == 0U || entry.pc >= best_pc)) {
         best_pc = entry.pc;
         out.line = entry.line;
+        out.line_end = entry.line;
+        out.generated_kind = "line";
       }
     }
     return out;
@@ -4973,8 +5002,10 @@ private:
     Frame frame;
     frame.code = &code;
     frame.regs.assign(code.reg_count, Value::null());
+    frame.initialized.assign(code.reg_count, 0U);
     for (std::size_t i = 0; i < args.size() && i < frame.regs.size(); ++i) {
       frame.regs[i] = args[i];
+      frame.initialized[i] = 1U;
     }
     frame.captures = std::move(captures);
     frame.self = std::move(self);
@@ -5019,6 +5050,67 @@ private:
       return std::nullopt;
     }
     return value;
+  }
+
+  bool read_call_packet(Frame &frame, const Instruction &insn,
+                        CallPacket *out) {
+    std::uint32_t callee_reg = 0;
+    std::uint32_t pos_count = 0;
+    if (!operand_u32(frame, insn, 0, &out->dst) ||
+        !operand_u32(frame, insn, 1, &callee_reg) ||
+        !operand_u32(frame, insn, 2, &pos_count)) {
+      return false;
+    }
+
+    std::size_t operand_index = 3;
+    out->pos_args.clear();
+    out->pos_args.reserve(pos_count);
+    for (std::uint32_t i = 0; i < pos_count; ++i) {
+      std::uint32_t reg = 0;
+      if (!operand_u32(frame, insn, operand_index++, &reg)) {
+        return false;
+      }
+      out->pos_args.push_back(read_reg(frame, reg));
+      if (fault_.has_value()) {
+        return false;
+      }
+    }
+
+    std::uint32_t kw_count = 0;
+    if (!operand_u32(frame, insn, operand_index++, &kw_count)) {
+      return false;
+    }
+    out->kw_args.clear();
+    out->kw_args.reserve(kw_count);
+    for (std::uint32_t i = 0; i < kw_count; ++i) {
+      std::uint32_t name_symbol_id = 0;
+      std::uint32_t reg = 0;
+      if (!operand_u32(frame, insn, operand_index++, &name_symbol_id) ||
+          !operand_u32(frame, insn, operand_index++, &reg)) {
+        return false;
+      }
+      out->kw_args.push_back({name_symbol_id, read_reg(frame, reg)});
+      if (fault_.has_value()) {
+        return false;
+      }
+    }
+
+    std::int64_t block_reg = -1;
+    if (!operand_i64(frame, insn, operand_index++, &block_reg)) {
+      return false;
+    }
+    out->site_id = optional_operand_u32(frame, insn, operand_index++);
+    if (fault_.has_value()) {
+      return false;
+    }
+    out->callee = read_reg(frame, callee_reg);
+    if (fault_.has_value()) {
+      return false;
+    }
+    out->block = has_optional_reg(block_reg)
+                     ? read_reg(frame, static_cast<std::uint32_t>(block_reg))
+                     : Value::null();
+    return !fault_.has_value();
   }
 
   Value load_constant(const Frame &frame, std::uint32_t const_id) {
@@ -5160,6 +5252,10 @@ private:
       set_fault(frame, "VMError", "register out of range");
       return Value::null();
     }
+    if (reg >= frame.initialized.size() || frame.initialized[reg] == 0U) {
+      set_fault(frame, "NameError", "read of uninitialized local/module cell");
+      return Value::null();
+    }
     return frame.regs[reg];
   }
 
@@ -5168,7 +5264,11 @@ private:
       set_fault(frame, "VMError", "register out of range");
       return false;
     }
+    if (frame.initialized.size() < frame.regs.size()) {
+      frame.initialized.resize(frame.regs.size(), 0U);
+    }
     frame.regs[reg] = std::move(value);
+    frame.initialized[reg] = 1U;
     frame.prepared_seq_regs.erase(reg);
     frame.prepared_map_regs.erase(reg);
     frame.pending_pattern_bindings.erase(reg);
@@ -5419,11 +5519,24 @@ private:
     return (code_id << 32U) | site_id;
   }
 
-  const bytecode::BcMethod *probe_call_cache(const Frame &frame,
-                                             std::uint32_t site_id,
-                                             std::uint32_t receiver_class_index,
-                                             std::uint32_t dispatch_flags,
-                                             std::uint32_t selector_symbol_id) {
+  std::vector<std::uint32_t> canonical_keyword_shape(
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args) const {
+    std::vector<std::uint32_t> shape;
+    shape.reserve(kw_args.size());
+    for (const auto &[symbol_id, value] : kw_args) {
+      (void)value;
+      shape.push_back(symbol_id);
+    }
+    std::sort(shape.begin(), shape.end());
+    return shape;
+  }
+
+  const bytecode::BcMethod *probe_call_cache(
+      const Frame &frame, std::uint32_t site_id,
+      std::uint32_t receiver_class_index, std::uint32_t dispatch_flags,
+      std::uint32_t selector_symbol_id, std::uint32_t positional_count,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const Value &block) {
     const auto found =
         state_->call_caches.find(inline_cache_key(frame, site_id));
     if (found == state_->call_caches.end()) {
@@ -5433,6 +5546,9 @@ private:
     if (!entry.valid || entry.receiver_class_index != receiver_class_index ||
         entry.dispatch_flags != dispatch_flags ||
         entry.selector_symbol_id != selector_symbol_id ||
+        entry.positional_count != positional_count ||
+        entry.keyword_shape != canonical_keyword_shape(kw_args) ||
+        entry.has_block != !block.is_null() ||
         entry.world_epoch != state_->world_epoch ||
         receiver_class_index >= state_->classes.size() ||
         entry.method_version !=
@@ -5442,11 +5558,12 @@ private:
     return &entry.method;
   }
 
-  void update_call_cache(const Frame &frame, std::uint32_t site_id,
-                         std::uint32_t receiver_class_index,
-                         std::uint32_t dispatch_flags,
-                         std::uint32_t selector_symbol_id,
-                         const bytecode::BcMethod &method) {
+  void update_call_cache(
+      const Frame &frame, std::uint32_t site_id,
+      std::uint32_t receiver_class_index, std::uint32_t dispatch_flags,
+      std::uint32_t selector_symbol_id, std::uint32_t positional_count,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const Value &block, const bytecode::BcMethod &method) {
     if (receiver_class_index >= state_->classes.size()) {
       return;
     }
@@ -5455,6 +5572,9 @@ private:
     entry.receiver_class_index = receiver_class_index;
     entry.dispatch_flags = dispatch_flags;
     entry.selector_symbol_id = selector_symbol_id;
+    entry.positional_count = positional_count;
+    entry.keyword_shape = canonical_keyword_shape(kw_args);
+    entry.has_block = !block.is_null();
     entry.method_version = state_->classes[receiver_class_index].method_version;
     entry.world_epoch = state_->world_epoch;
     entry.method = method;
@@ -5850,8 +5970,11 @@ private:
         if (!expect_class_owner(frame, frame.self, &class_index)) {
           return false;
         }
-        state_->classes[class_index].cvars[target->substr(2)] =
-            frame.regs[*slot];
+        const Value value = read_reg(frame, *slot);
+        if (fault_.has_value()) {
+          return false;
+        }
+        state_->classes[class_index].cvars[target->substr(2)] = value;
         continue;
       }
       if (target->empty() || (*target)[0] != '@') {
@@ -5865,8 +5988,11 @@ private:
         have_instance = true;
       }
       const std::string ivar_name = target->substr(1);
-      if (!store_instance_ivar_slow(frame, instance, ivar_name,
-                                    frame.regs[*slot])) {
+      const Value value = read_reg(frame, *slot);
+      if (fault_.has_value()) {
+        return false;
+      }
+      if (!store_instance_ivar_slow(frame, instance, ivar_name, value)) {
         return false;
       }
     }
@@ -5957,6 +6083,10 @@ private:
     for (std::size_t slot = 0; slot < slots.size(); ++slot) {
       if (slots[slot].present) {
         frame.regs[slot] = slots[slot].value;
+        if (frame.initialized.size() < frame.regs.size()) {
+          frame.initialized.resize(frame.regs.size(), 0U);
+        }
+        frame.initialized[slot] = 1U;
       }
     }
 
@@ -5971,7 +6101,7 @@ private:
                     "missing default thunk for parameter slot");
           return false;
         }
-        Vm nested(module_, state_);
+        Vm nested(module_, state_, module_id_);
         const ExecutionResult result =
             nested.execute(method.default_thunk_ids[thunk_index], frame.regs,
                            frame.self, frame.block);
@@ -5980,15 +6110,20 @@ private:
           return false;
         }
         frame.regs[slot] = result.value;
+        if (frame.initialized.size() < frame.regs.size()) {
+          frame.initialized.resize(frame.regs.size(), 0U);
+        }
+        frame.initialized[slot] = 1U;
       }
       ++thunk_index;
     }
     return true;
   }
 
-  NestedExecution execute_nested_code(std::uint32_t code_id,
-                                      const std::vector<Value> &regs,
-                                      const Value &self, const Value &block) {
+  NestedExecution
+  execute_nested_code(std::uint32_t code_id, const std::vector<Value> &regs,
+                      const std::vector<std::uint8_t> &initialized,
+                      const Value &self, const Value &block) {
     NestedExecution out;
     const BcCode *entry = find_code(module_, code_id);
     if (entry == nullptr) {
@@ -5996,13 +6131,15 @@ private:
       return out;
     }
 
-    Vm nested(module_, state_);
+    Vm nested(module_, state_, module_id_);
     nested.push_frame(*entry, {}, {}, self, block, std::nullopt);
     Frame &nested_frame = nested.frames_.back();
     const std::size_t copy_count =
         std::min(regs.size(), nested_frame.regs.size());
     for (std::size_t i = 0; i < copy_count; ++i) {
       nested_frame.regs[i] = regs[i];
+      nested_frame.initialized[i] =
+          i < initialized.size() ? initialized[i] : 1U;
     }
 
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
@@ -6011,19 +6148,21 @@ private:
 
     out.value = nested.final_value_;
     out.regs = std::move(nested.last_completed_regs_);
+    out.initialized = std::move(nested.last_completed_initialized_);
     out.fault = nested.fault_;
     return out;
   }
 
   NestedExecution execute_prepared_frame(Frame frame) {
     NestedExecution out;
-    Vm nested(module_, state_);
+    Vm nested(module_, state_, module_id_);
     nested.frames_.push_back(std::move(frame));
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
       nested.step();
     }
     out.value = nested.final_value_;
     out.regs = std::move(nested.last_completed_regs_);
+    out.initialized = std::move(nested.last_completed_initialized_);
     out.fault = nested.fault_;
     return out;
   }
@@ -6048,6 +6187,7 @@ private:
     Frame callee;
     callee.code = code;
     callee.regs.assign(code->reg_count, Value::null());
+    callee.initialized.assign(code->reg_count, 0U);
     callee.self = self;
     callee.block = block;
     if (!materialize_defaults(callee, method, params, slots) ||
@@ -6065,9 +6205,10 @@ private:
     }
 
     const std::vector<Value> base_regs = callee.regs;
+    const std::vector<std::uint8_t> base_initialized = callee.initialized;
     for (const bytecode::ClauseEntry &entry : method.clause_table) {
-      const NestedExecution pattern =
-          execute_nested_code(entry.pattern_code_id, base_regs, self, block);
+      const NestedExecution pattern = execute_nested_code(
+          entry.pattern_code_id, base_regs, base_initialized, self, block);
       if (!pattern.ok()) {
         fault_ = pattern.fault;
         return std::nullopt;
@@ -6082,14 +6223,17 @@ private:
       }
 
       std::vector<Value> matched_regs = base_regs;
+      std::vector<std::uint8_t> matched_initialized = base_initialized;
       const std::size_t copy_count =
           std::min(matched_regs.size(), pattern.regs.size());
       for (std::size_t i = 0; i < copy_count; ++i) {
         matched_regs[i] = pattern.regs[i];
+        matched_initialized[i] =
+            i < pattern.initialized.size() ? pattern.initialized[i] : 1U;
       }
 
-      const NestedExecution guard =
-          execute_nested_code(entry.guard_code_id, matched_regs, self, block);
+      const NestedExecution guard = execute_nested_code(
+          entry.guard_code_id, matched_regs, matched_initialized, self, block);
       if (!guard.ok()) {
         fault_ = guard.fault;
         return std::nullopt;
@@ -6098,8 +6242,8 @@ private:
         continue;
       }
 
-      const NestedExecution body =
-          execute_nested_code(entry.body_code_id, matched_regs, self, block);
+      const NestedExecution body = execute_nested_code(
+          entry.body_code_id, matched_regs, matched_initialized, self, block);
       if (!body.ok()) {
         fault_ = body.fault;
         return std::nullopt;
@@ -6107,8 +6251,8 @@ private:
       return body.value;
     }
 
-    NestedExecution fallback =
-        execute_nested_code(method.entry_code_id, base_regs, self, block);
+    NestedExecution fallback = execute_nested_code(
+        method.entry_code_id, base_regs, base_initialized, self, block);
     if (!fallback.ok()) {
       fault_ = fallback.fault;
       return std::nullopt;
@@ -6269,6 +6413,7 @@ private:
     Frame callee;
     callee.code = &entry_code;
     callee.regs.assign(entry_code.reg_count, Value::null());
+    callee.initialized.assign(entry_code.reg_count, 0U);
     callee.self = self;
     callee.block = block;
 
@@ -6278,9 +6423,10 @@ private:
     }
 
     const std::vector<Value> base_regs = callee.regs;
+    const std::vector<std::uint8_t> base_initialized = callee.initialized;
     for (const bytecode::ClauseEntry &entry : method.clause_table) {
-      const NestedExecution pattern =
-          execute_nested_code(entry.pattern_code_id, base_regs, self, block);
+      const NestedExecution pattern = execute_nested_code(
+          entry.pattern_code_id, base_regs, base_initialized, self, block);
       if (!pattern.ok()) {
         fault_ = pattern.fault;
         return false;
@@ -6295,14 +6441,17 @@ private:
       }
 
       std::vector<Value> matched_regs = base_regs;
+      std::vector<std::uint8_t> matched_initialized = base_initialized;
       const std::size_t copy_count =
           std::min(matched_regs.size(), pattern.regs.size());
       for (std::size_t i = 0; i < copy_count; ++i) {
         matched_regs[i] = pattern.regs[i];
+        matched_initialized[i] =
+            i < pattern.initialized.size() ? pattern.initialized[i] : 1U;
       }
 
-      const NestedExecution guard =
-          execute_nested_code(entry.guard_code_id, matched_regs, self, block);
+      const NestedExecution guard = execute_nested_code(
+          entry.guard_code_id, matched_regs, matched_initialized, self, block);
       if (!guard.ok()) {
         fault_ = guard.fault;
         return false;
@@ -6311,8 +6460,8 @@ private:
         continue;
       }
 
-      const NestedExecution body =
-          execute_nested_code(entry.body_code_id, matched_regs, self, block);
+      const NestedExecution body = execute_nested_code(
+          entry.body_code_id, matched_regs, matched_initialized, self, block);
       if (!body.ok()) {
         fault_ = body.fault;
         return false;
@@ -6323,8 +6472,8 @@ private:
                                     std::move(value));
     }
 
-    const NestedExecution fallback =
-        execute_nested_code(method.entry_code_id, base_regs, self, block);
+    const NestedExecution fallback = execute_nested_code(
+        method.entry_code_id, base_regs, base_initialized, self, block);
     if (!fallback.ok()) {
       fault_ = fallback.fault;
       return false;
@@ -7508,9 +7657,10 @@ private:
     }
 
     if (site_id.has_value() && selector_symbol_id_for_cache.has_value()) {
-      const bytecode::BcMethod *cached =
-          probe_call_cache(frame, *site_id, class_index, dispatch_flags,
-                           *selector_symbol_id_for_cache);
+      const bytecode::BcMethod *cached = probe_call_cache(
+          frame, *site_id, class_index, dispatch_flags,
+          *selector_symbol_id_for_cache,
+          static_cast<std::uint32_t>(args.size()), kw_args, block);
       if (cached != nullptr) {
         return invoke_method(frame, *cached, args, kw_args, receiver, block,
                              dst);
@@ -7537,7 +7687,9 @@ private:
     }
     if (site_id.has_value() && selector_symbol_id_for_cache.has_value()) {
       update_call_cache(frame, *site_id, class_index, dispatch_flags,
-                        *selector_symbol_id_for_cache, *method);
+                        *selector_symbol_id_for_cache,
+                        static_cast<std::uint32_t>(args.size()), kw_args, block,
+                        *method);
     }
     return invoke_method(frame, *method, args, kw_args, receiver, block, dst);
   }
@@ -7999,74 +8151,22 @@ private:
       return;
     }
     case Opcode::Call: {
-      std::uint32_t dst = 0;
-      std::uint32_t callee_reg = 0;
-      std::uint32_t pos_count = 0;
-      if (!operand_u32(frame, insn, 0, &dst) ||
-          !operand_u32(frame, insn, 1, &callee_reg) ||
-          !operand_u32(frame, insn, 2, &pos_count)) {
-        return;
-      }
-      std::size_t operand_index = 3;
-      std::vector<Value> args;
-      args.reserve(pos_count);
-      for (std::uint32_t i = 0; i < pos_count; ++i) {
-        std::uint32_t reg = 0;
-        if (!operand_u32(frame, insn, operand_index++, &reg)) {
-          return;
-        }
-        args.push_back(read_reg(frame, reg));
-        if (fault_.has_value()) {
-          return;
-        }
-      }
-
-      std::uint32_t kw_count = 0;
-      if (!operand_u32(frame, insn, operand_index++, &kw_count)) {
-        return;
-      }
-      std::vector<std::pair<std::uint32_t, Value>> kw_args;
-      kw_args.reserve(kw_count);
-      for (std::uint32_t i = 0; i < kw_count; ++i) {
-        std::uint32_t name_symbol_id = 0;
-        std::uint32_t reg = 0;
-        if (!operand_u32(frame, insn, operand_index++, &name_symbol_id) ||
-            !operand_u32(frame, insn, operand_index++, &reg)) {
-          return;
-        }
-        kw_args.push_back({name_symbol_id, read_reg(frame, reg)});
-        if (fault_.has_value()) {
-          return;
-        }
-      }
-
-      std::int64_t block_reg = -1;
-      if (!operand_i64(frame, insn, operand_index++, &block_reg)) {
+      CallPacket packet;
+      if (!read_call_packet(frame, insn, &packet)) {
         return;
       }
 
-      Value callee = read_reg(frame, callee_reg);
-      if (fault_.has_value()) {
-        return;
-      }
-      const Value block =
-          has_optional_reg(block_reg)
-              ? read_reg(frame, static_cast<std::uint32_t>(block_reg))
-              : Value::null();
-      if (fault_.has_value()) {
-        return;
-      }
-
-      if (callee.is_closure()) {
-        if (!kw_args.empty()) {
+      if (packet.callee.is_closure()) {
+        if (!packet.kw_args.empty()) {
           set_fault(frame, "TypeError",
                     "closure CALL does not accept keyword arguments");
           return;
         }
-        if (!ensure_lifecycle_access(frame, callee)) {
+        if (!ensure_lifecycle_access(frame, packet.callee)) {
           return;
         }
-        const std::shared_ptr<ClosureValue> closure = callee.as_closure();
+        const std::shared_ptr<ClosureValue> closure =
+            packet.callee.as_closure();
         if (closure == nullptr) {
           set_fault(frame, "TypeError", "closure value is null");
           return;
@@ -8079,12 +8179,14 @@ private:
         const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
         ++frame.pc;
         frame.active_call_pc = call_pc;
-        push_frame(*code, args, closure->captures, closure->self, block, dst);
+        push_frame(*code, packet.pos_args, closure->captures, closure->self,
+                   packet.block, packet.dst);
         return;
       }
 
-      if (callee.is_class_object()) {
-        const std::uint32_t class_index = callee.as_class_object().class_index;
+      if (packet.callee.is_class_object()) {
+        const std::uint32_t class_index =
+            packet.callee.as_class_object().class_index;
         auto instance = make_instance_value(class_index);
         if (!ensure_instance_layout(frame, instance)) {
           return;
@@ -8096,38 +8198,83 @@ private:
           return;
         }
         if (init == nullptr) {
-          if (!args.empty()) {
+          if (!packet.pos_args.empty()) {
             set_fault(
                 frame, "TypeError",
                 "class call without init accepts no positional arguments");
             return;
           }
-          if (!kw_args.empty()) {
+          if (!packet.kw_args.empty()) {
             set_fault(
                 frame, "TypeError",
                 "class call without init does not accept keyword arguments");
             return;
           }
-          if (!block.is_null()) {
+          if (!packet.block.is_null()) {
             set_fault(frame, "TypeError",
                       "class call without init does not accept block");
             return;
           }
-          if (!write_reg(frame, dst, instance_value)) {
+          if (!write_reg(frame, packet.dst, instance_value)) {
             return;
           }
           ++frame.pc;
           return;
         }
-        if (!invoke_method(frame, *init, args, kw_args, instance_value, block,
-                           dst, instance_value)) {
+        if (!invoke_method(frame, *init, packet.pos_args, packet.kw_args,
+                           instance_value, packet.block, packet.dst,
+                           instance_value)) {
+          return;
+        }
+        return;
+      }
+
+      if (packet.callee.is_instance_object()) {
+        const std::shared_ptr<InstanceValue> instance =
+            packet.callee.as_instance_object();
+        if (instance == nullptr) {
+          set_fault(frame, "TypeError", "instance callee is null");
+          return;
+        }
+        const std::optional<std::uint32_t> call_symbol =
+            symbol_id_for_text("call");
+        const bytecode::BcMethod *method = find_method_for_dispatch(
+            frame, instance->class_index, "call", kMethodFlagInstance);
+        if (fault_.has_value()) {
+          return;
+        }
+        if (method == nullptr) {
+          set_fault(frame, "TypeError",
+                    "CALL expects closure, class, or object with call method");
+          return;
+        }
+        if (packet.site_id.has_value() && call_symbol.has_value()) {
+          const bytecode::BcMethod *cached = probe_call_cache(
+              frame, *packet.site_id, instance->class_index,
+              kMethodFlagInstance, *call_symbol,
+              static_cast<std::uint32_t>(packet.pos_args.size()),
+              packet.kw_args, packet.block);
+          if (cached != nullptr) {
+            if (!invoke_method(frame, *cached, packet.pos_args, packet.kw_args,
+                               packet.callee, packet.block, packet.dst)) {
+              return;
+            }
+            return;
+          }
+          update_call_cache(frame, *packet.site_id, instance->class_index,
+                            kMethodFlagInstance, *call_symbol,
+                            static_cast<std::uint32_t>(packet.pos_args.size()),
+                            packet.kw_args, packet.block, *method);
+        }
+        if (!invoke_method(frame, *method, packet.pos_args, packet.kw_args,
+                           packet.callee, packet.block, packet.dst)) {
           return;
         }
         return;
       }
 
       set_fault(frame, "TypeError",
-                "CALL expects closure or class object in current runtime");
+                "CALL expects closure, class, or object with call method");
       return;
     }
     case Opcode::Send:
@@ -8546,9 +8693,11 @@ private:
         value = *frame.return_override;
       }
       std::vector<Value> completed_regs = frame.regs;
+      std::vector<std::uint8_t> completed_initialized = frame.initialized;
       const std::optional<std::uint32_t> caller_reg = frame.caller_result_reg;
       frames_.pop_back();
       last_completed_regs_ = std::move(completed_regs);
+      last_completed_initialized_ = std::move(completed_initialized);
       if (frames_.empty()) {
         final_value_ = value;
         return;
@@ -8587,9 +8736,11 @@ private:
 
   const BcModule &module_;
   std::shared_ptr<RuntimeState> state_;
+  std::string module_id_;
   std::vector<Frame> frames_;
   std::optional<Fault> fault_;
   std::vector<Value> last_completed_regs_;
+  std::vector<std::uint8_t> last_completed_initialized_;
   Value final_value_ = Value::null();
 };
 
@@ -8859,7 +9010,9 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
   impl_->state->initialize_for_module(*impl_->module);
   impl_->record_event(replay::make_event(
       "task.started", {{"code_id", std::to_string(code_id)}}));
-  Vm vm(*impl_->module, impl_->state);
+  const std::string module_id =
+      impl_->package.has_value() ? impl_->package->manifest.root_module : "";
+  Vm vm(*impl_->module, impl_->state, module_id);
   ExecutionResult result =
       vm.execute(code_id, args, std::move(self), std::move(block));
   if (result.ok()) {

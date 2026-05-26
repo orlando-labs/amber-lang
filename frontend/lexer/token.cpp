@@ -89,6 +89,8 @@ const char *token_kind_name(TokenKind kind) {
     return "STRING";
   case TokenKind::Dot:
     return "DOT";
+  case TokenKind::DotDot:
+    return "DOT_DOT";
   case TokenKind::ChainDot:
     return "CHAIN_DOT";
   case TokenKind::SafeDot:

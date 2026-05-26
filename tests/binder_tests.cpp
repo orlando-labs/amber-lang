@@ -255,6 +255,26 @@ void test_module_class_and_unicode_bindings() {
          "method body resolves param reference");
 }
 
+void test_top_level_assignment_predeclaration() {
+  amber::binder::BindResult result = bind_ok("export value\n"
+                                             "value = 1\n"
+                                             "def read():\n"
+                                             "  value\n");
+  const amber::binder::BindGraph &graph = result.graph;
+  const amber::binder::Scope *module = scope_by_kind_owner(graph, "module", "");
+  expect(module != nullptr, "module scope exists");
+  const amber::binder::Binding *value =
+      binding_in_scope(graph, *module, "value");
+  expect(value != nullptr && value->kind == "local" &&
+             value->role == "module_cell",
+         "top-level assignment predeclares module cell");
+  expect(graph.exports.size() == 1 && graph.exports[0].resolved &&
+             graph.exports[0].binding_id == value->id,
+         "export resolves forward top-level assignment");
+  expect(has_resolved_reference(graph, "value", value->id),
+         "method body resolves module cell read");
+}
+
 void test_implicit_block_placeholders() {
   const std::string source = "def map(xs):\n"
                              "  xs.map: _1 + _2\n";
@@ -688,6 +708,7 @@ void test_bind_call_shape_diagnostics() {
 
 int main() {
   test_module_class_and_unicode_bindings();
+  test_top_level_assignment_predeclaration();
   test_implicit_block_placeholders();
   test_assignment_to_import_alias_is_error();
   test_placeholder_diagnostics();

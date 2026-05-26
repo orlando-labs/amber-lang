@@ -145,6 +145,19 @@ void test_unicode_names() {
          "unicode method name");
 }
 
+void test_range_precedence() {
+  std::unique_ptr<Expr> expr = parse_ok("a == b..c + 1\n");
+  expect(expr->kind == "AstBinary", "range comparison top binary");
+  expect(string_field(*expr, "op") == "==", "comparison remains outer op");
+  const Expr &right = node_field(*expr, "right");
+  expect(right.kind == "AstBinary", "comparison rhs is range");
+  expect(string_field(right, "op") == "..", "range op");
+  expect(node_field(right, "right").kind == "AstBinary",
+         "range rhs keeps additive expression");
+  expect(string_field(node_field(right, "right"), "op") == "+",
+         "range rhs addition op");
+}
+
 void test_clause_def_forms() {
   const std::string source = "def area(shape):\n"
                              "  when Point(x, y):\n"
@@ -418,6 +431,7 @@ int main() {
   test_safe_nav_and_index();
   test_inline_block_chain_boundary();
   test_unicode_names();
+  test_range_precedence();
   test_clause_def_forms();
   test_effect_row_signature();
   test_pattern_assignment_and_block_param_patterns();

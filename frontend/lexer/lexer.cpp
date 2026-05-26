@@ -32,7 +32,7 @@ LexResult Lexer::lex() {
       advance();
       continue;
     }
-    if (c == '#') {
+    if (c == '#' && comment_starts_here()) {
       consume_comment();
       continue;
     }
@@ -74,6 +74,11 @@ LexResult Lexer::lex() {
       const bool left_space = index_ > 0 && (source_[index_ - 1] == ' ' ||
                                              source_[index_ - 1] == '\t');
       advance();
+      if (!at_end() && current() == '.') {
+        advance();
+        emit(TokenKind::DotDot, start, "..");
+        break;
+      }
       emit(one_line_block_active_ && bracket_depth_ == 0 && left_space
                ? TokenKind::ChainDot
                : TokenKind::Dot,
@@ -262,6 +267,35 @@ bool Lexer::at_line_break() const {
   return current() == '\n' || current() == '\r';
 }
 
+bool Lexer::comment_starts_here() const {
+  if (current() != '#') {
+    return false;
+  }
+  if (index_ == 0) {
+    return true;
+  }
+
+  std::size_t cursor = index_;
+  while (cursor > 0 && source_[cursor - 1] != '\n' &&
+         source_[cursor - 1] != '\r') {
+    --cursor;
+  }
+
+  bool first_non_space = true;
+  for (std::size_t i = cursor; i < index_; ++i) {
+    if (source_[i] != ' ' && source_[i] != '\t') {
+      first_non_space = false;
+      break;
+    }
+  }
+  if (first_non_space) {
+    return true;
+  }
+
+  const char previous = source_[index_ - 1];
+  return previous == ' ' || previous == '\t';
+}
+
 bool Lexer::next_non_space_is_line_break_or_comment() const {
   std::size_t cursor = index_;
   while (cursor < source_.size() &&
@@ -411,15 +445,110 @@ void Lexer::lex_identifier_or_keyword() {
 
 void Lexer::lex_number() {
   const Position start = position();
-  while (!at_end() && is_digit(current())) {
-    advance();
+  bool is_float = false;
+
+  auto lower_ascii = [](char c) {
+    return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+  };
+  auto is_ascii_alpha = [](char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+  };
+  auto is_digit_for_base = [&](char c, int base) {
+    if (c >= '0' && c <= '9') {
+      return (c - '0') < base;
+    }
+    const char lower = lower_ascii(c);
+    return base == 16 && lower >= 'a' && lower <= 'f';
+  };
+  auto consume_digit_run = [&](int base, bool *saw_digit, bool *underscore_ok) {
+    bool previous_underscore = false;
+    while (!at_end()) {
+      const char c = current();
+      if (c == '_') {
+        if (!*saw_digit || previous_underscore) {
+          *underscore_ok = false;
+        }
+        previous_underscore = true;
+        advance();
+        continue;
+      }
+      if (!is_digit_for_base(c, base)) {
+        break;
+      }
+      *saw_digit = true;
+      previous_underscore = false;
+      advance();
+    }
+    if (previous_underscore) {
+      *underscore_ok = false;
+    }
+  };
+
+  bool saw_digit = false;
+  bool underscore_ok = true;
+  bool base_literal = false;
+  if (current() == '0') {
+    const char prefix = lower_ascii(peek());
+    int base = 10;
+    if (prefix == 'x' || prefix == 'b' || prefix == 'o') {
+      base_literal = true;
+      base = prefix == 'x' ? 16 : (prefix == 'b' ? 2 : 8);
+      advance();
+      advance();
+      consume_digit_run(base, &saw_digit, &underscore_ok);
+      if (!saw_digit) {
+        error(start, "numeric literal prefix must be followed by digits");
+      }
+      if (!underscore_ok) {
+        error(start, "numeric literal underscores must separate digits");
+      }
+      if (!at_end() && (is_digit(current()) || is_ascii_alpha(current()) ||
+                        current() == '_')) {
+        error(position(), "invalid digit in numeric literal");
+        while (!at_end() && (is_digit(current()) || is_ascii_alpha(current()) ||
+                             current() == '_')) {
+          advance();
+        }
+      }
+      const std::string text =
+          source_.substr(start.offset, position().offset - start.offset);
+      emit(TokenKind::Integer, start, text);
+      return;
+    }
   }
 
-  bool is_float = false;
-  if (!at_end() && current() == '.' && is_digit(peek())) {
+  consume_digit_run(10, &saw_digit, &underscore_ok);
+
+  if (!base_literal && !at_end() && current() == '.' && peek() != '.' &&
+      (is_digit(peek()) || peek() == '_')) {
     is_float = true;
     advance();
-    while (!at_end() && is_digit(current())) {
+    bool fraction_digit = false;
+    consume_digit_run(10, &fraction_digit, &underscore_ok);
+    if (!fraction_digit) {
+      error(start, "float literal fraction must contain digits");
+    }
+  }
+
+  if (!base_literal && !at_end() && (current() == 'e' || current() == 'E')) {
+    is_float = true;
+    advance();
+    if (!at_end() && (current() == '+' || current() == '-')) {
+      advance();
+    }
+    bool exponent_digit = false;
+    consume_digit_run(10, &exponent_digit, &underscore_ok);
+    if (!exponent_digit) {
+      error(start, "float literal exponent must contain digits");
+    }
+  }
+
+  if (!underscore_ok) {
+    error(start, "numeric literal underscores must separate digits");
+  }
+  if (!at_end() && is_identifier_start_at(index_)) {
+    error(position(), "numeric literal must be separated from identifier text");
+    while (!at_end() && is_identifier_part_at(index_)) {
       advance();
     }
   }

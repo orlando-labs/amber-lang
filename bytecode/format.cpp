@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -2896,6 +2897,776 @@ void add_verify_error(std::vector<VerifyError> &errors, const std::string &code,
   errors.push_back({code, message, section_kind_name(section), offset});
 }
 
+struct InstructionFlow {
+  std::vector<std::uint32_t> reads;
+  std::vector<std::uint32_t> writes;
+  std::vector<std::uint32_t> successors;
+};
+
+bool operand_u32_for_verify(const Instruction &instruction,
+                            std::size_t operand_index, std::uint32_t *out) {
+  if (operand_index >= instruction.operands.size()) {
+    return false;
+  }
+  const std::int64_t value = instruction.operands[operand_index].value;
+  if (value < 0) {
+    return false;
+  }
+  *out = static_cast<std::uint32_t>(value);
+  return true;
+}
+
+bool operand_count_is(const Instruction &instruction, std::size_t expected,
+                      std::vector<VerifyError> &errors) {
+  if (instruction.operands.size() == expected) {
+    return true;
+  }
+  add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                   SectionKind::Code, 0);
+  return false;
+}
+
+bool operand_count_between(const Instruction &instruction, std::size_t min,
+                           std::size_t max, std::vector<VerifyError> &errors) {
+  if (instruction.operands.size() >= min &&
+      instruction.operands.size() <= max) {
+    return true;
+  }
+  add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                   SectionKind::Code, 0);
+  return false;
+}
+
+bool read_u32_operand(const Instruction &instruction, std::size_t operand_index,
+                      const std::string &message,
+                      std::vector<VerifyError> &errors, std::uint32_t *out) {
+  if (operand_u32_for_verify(instruction, operand_index, out)) {
+    return true;
+  }
+  add_verify_error(errors, "BC1314", message, SectionKind::Code, 0);
+  return false;
+}
+
+bool register_operand(const BcCode &code, const Instruction &instruction,
+                      std::size_t operand_index, const std::string &message,
+                      std::vector<VerifyError> &errors, std::uint32_t *out) {
+  if (!read_u32_operand(instruction, operand_index, message, errors, out)) {
+    return false;
+  }
+  if (*out >= code.reg_count) {
+    add_verify_error(errors, "BC1311", "register operand is out of range",
+                     SectionKind::Code, 0);
+    return false;
+  }
+  return true;
+}
+
+void add_register_read(const BcCode &code, const Instruction &instruction,
+                       std::size_t operand_index, InstructionFlow &flow,
+                       std::vector<VerifyError> &errors) {
+  std::uint32_t reg = 0;
+  if (register_operand(code, instruction, operand_index,
+                       "register operand must be unsigned", errors, &reg)) {
+    flow.reads.push_back(reg);
+  }
+}
+
+void add_register_write(const BcCode &code, const Instruction &instruction,
+                        std::size_t operand_index, InstructionFlow &flow,
+                        std::vector<VerifyError> &errors) {
+  std::uint32_t reg = 0;
+  if (register_operand(code, instruction, operand_index,
+                       "register operand must be unsigned", errors, &reg)) {
+    flow.writes.push_back(reg);
+  }
+}
+
+void add_register_range_read(const BcCode &code, std::uint32_t first_reg,
+                             std::uint32_t count, InstructionFlow &flow,
+                             std::vector<VerifyError> &errors) {
+  if (count == 0U) {
+    return;
+  }
+  if (first_reg >= code.reg_count || count > code.reg_count - first_reg) {
+    add_verify_error(errors, "BC1311", "register range is out of range",
+                     SectionKind::Code, 0);
+    return;
+  }
+  for (std::uint32_t index = 0; index < count; ++index) {
+    flow.reads.push_back(first_reg + index);
+  }
+}
+
+bool verify_const_ref(const BcModule &module, std::uint32_t const_id,
+                      const std::string &message,
+                      std::vector<VerifyError> &errors) {
+  if (contains_index(module.const_pool, const_id)) {
+    return true;
+  }
+  add_verify_error(errors, "BC1312", message, SectionKind::Code, 0);
+  return false;
+}
+
+bool verify_symbol_ref(const BcModule &module, std::uint32_t symbol_id,
+                       const std::string &message,
+                       std::vector<VerifyError> &errors) {
+  if (contains_index(module.symbols, symbol_id)) {
+    return true;
+  }
+  add_verify_error(errors, "BC1312", message, SectionKind::Code, 0);
+  return false;
+}
+
+bool verify_code_ref(const std::unordered_map<std::uint32_t, std::size_t> &ids,
+                     std::uint32_t code_id, const std::string &message,
+                     std::vector<VerifyError> &errors) {
+  if (code_id_exists(ids, code_id)) {
+    return true;
+  }
+  add_verify_error(errors, "BC1312", message, SectionKind::Code, 0);
+  return false;
+}
+
+void add_fallthrough_successor(std::size_t pc, std::size_t insn_count,
+                               InstructionFlow &flow,
+                               std::vector<VerifyError> &errors) {
+  if (pc + 1U < insn_count) {
+    flow.successors.push_back(static_cast<std::uint32_t>(pc + 1U));
+    return;
+  }
+  add_verify_error(errors, "BC1315", "instruction falls through code end",
+                   SectionKind::Code, 0);
+}
+
+void add_jump_successor(std::uint32_t target, InstructionFlow &flow) {
+  flow.successors.push_back(target);
+}
+
+bool verify_target(std::uint32_t target, std::size_t insn_count,
+                   const std::string &message,
+                   std::vector<VerifyError> &errors) {
+  if (static_cast<std::size_t>(target) < insn_count) {
+    return true;
+  }
+  add_verify_error(errors, "BC1302", message, SectionKind::Code, 0);
+  return false;
+}
+
+bool local_layout_role_is(const BcModule &module, const SlotLayoutEntry &entry,
+                          const std::string &role) {
+  return contains_index(module.strings, entry.role_str_id) &&
+         module.strings[entry.role_str_id] == role;
+}
+
+std::vector<std::uint8_t> initial_register_state(const BcModule &module,
+                                                 const BcCode &code) {
+  std::vector<std::uint8_t> state(code.reg_count, 0U);
+  for (const SlotLayoutEntry &entry : code.local_layout) {
+    if (entry.slot >= code.reg_count) {
+      continue;
+    }
+    if (local_layout_role_is(module, entry, "param") ||
+        local_layout_role_is(module, entry, "implicit_block_param") ||
+        local_layout_role_is(module, entry, "pattern")) {
+      state[entry.slot] = 1U;
+    }
+  }
+  if ((code.kind == CodeKind::Rescue || code.kind == CodeKind::Ensure) &&
+      !state.empty()) {
+    state[0] = 1U;
+  }
+  return state;
+}
+
+void verify_initializedness(const BcModule &module, const BcCode &code,
+                            const std::vector<InstructionFlow> &flows,
+                            std::vector<VerifyError> &errors) {
+  if (code.instructions.empty()) {
+    return;
+  }
+  std::vector<std::vector<std::uint8_t>> states(
+      code.instructions.size(), std::vector<std::uint8_t>(code.reg_count, 0U));
+  std::vector<std::uint8_t> seen(code.instructions.size(), 0U);
+  std::vector<std::uint32_t> worklist;
+  states[0] = initial_register_state(module, code);
+  seen[0] = 1U;
+  worklist.push_back(0);
+
+  while (!worklist.empty()) {
+    const std::uint32_t pc = worklist.back();
+    worklist.pop_back();
+    if (pc >= flows.size()) {
+      continue;
+    }
+    std::vector<std::uint8_t> out = states[pc];
+    for (std::uint32_t reg : flows[pc].reads) {
+      if (reg < out.size() && out[reg] == 0U) {
+        add_verify_error(errors, "BC1313",
+                         "register read before definite initialization",
+                         SectionKind::Code, 0);
+      }
+    }
+    for (std::uint32_t reg : flows[pc].writes) {
+      if (reg < out.size()) {
+        out[reg] = 1U;
+      }
+    }
+    for (std::uint32_t successor : flows[pc].successors) {
+      if (successor >= states.size()) {
+        continue;
+      }
+      if (seen[successor] == 0U) {
+        states[successor] = out;
+        seen[successor] = 1U;
+        worklist.push_back(successor);
+        continue;
+      }
+      bool changed = false;
+      for (std::size_t reg = 0; reg < out.size(); ++reg) {
+        const std::uint8_t merged = states[successor][reg] & out[reg];
+        if (merged != states[successor][reg]) {
+          states[successor][reg] = merged;
+          changed = true;
+        }
+      }
+      if (changed) {
+        worklist.push_back(successor);
+      }
+    }
+  }
+}
+
+InstructionFlow verify_instruction_flow(
+    const BcModule &module,
+    const std::unordered_map<std::uint32_t, std::size_t> &code_ids,
+    const BcCode &code, std::size_t pc, std::vector<VerifyError> &errors) {
+  const Instruction &instruction = code.instructions[pc];
+  const std::size_t insn_count = code.instructions.size();
+  InstructionFlow flow;
+  bool falls_through = true;
+
+  auto read_target = [&](std::size_t operand_index,
+                         std::uint32_t *target) -> bool {
+    if (!read_u32_operand(instruction, operand_index,
+                          "jump target must be unsigned", errors, target)) {
+      return false;
+    }
+    return verify_target(*target, insn_count, "jump target is out of range",
+                         errors);
+  };
+
+  switch (instruction.opcode) {
+  case Opcode::LoadK: {
+    if (operand_count_is(instruction, 2, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::uint32_t const_id = 0;
+      if (read_u32_operand(instruction, 1, "constant ref must be unsigned",
+                           errors, &const_id)) {
+        verify_const_ref(module, const_id, "constant ref is out of range",
+                         errors);
+      }
+    }
+    break;
+  }
+  case Opcode::LoadNull:
+  case Opcode::LoadSelf:
+  case Opcode::GetLast: {
+    if (operand_count_is(instruction, 1, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+    }
+    break;
+  }
+  case Opcode::LoadBool: {
+    if (operand_count_is(instruction, 2, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+    }
+    break;
+  }
+  case Opcode::Move:
+  case Opcode::Freeze:
+  case Opcode::ObjDestroy:
+  case Opcode::ObjDealloc:
+  case Opcode::TripleEq:
+  case Opcode::InOp: {
+    const std::size_t expected = (instruction.opcode == Opcode::TripleEq ||
+                                  instruction.opcode == Opcode::InOp)
+                                     ? 3U
+                                     : 2U;
+    if (operand_count_is(instruction, expected, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      for (std::size_t index = 1; index < expected; ++index) {
+        add_register_read(code, instruction, index, flow, errors);
+      }
+    }
+    break;
+  }
+  case Opcode::SetLast:
+  case Opcode::Raise: {
+    if (operand_count_is(instruction, 1, errors)) {
+      add_register_read(code, instruction, 0, flow, errors);
+    }
+    if (instruction.opcode == Opcode::Raise) {
+      falls_through = false;
+    }
+    break;
+  }
+  case Opcode::Return: {
+    if (operand_count_is(instruction, 1, errors)) {
+      add_register_read(code, instruction, 0, flow, errors);
+    }
+    falls_through = false;
+    break;
+  }
+  case Opcode::MakeList:
+  case Opcode::MakeTuple: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::uint32_t first_reg = 0;
+      std::uint32_t count = 0;
+      if (read_u32_operand(instruction, 1, "register operand must be unsigned",
+                           errors, &first_reg) &&
+          read_u32_operand(instruction, 2, "count operand must be unsigned",
+                           errors, &count)) {
+        add_register_range_read(code, first_reg, count, flow, errors);
+      }
+    }
+    break;
+  }
+  case Opcode::MakeMap: {
+    std::uint32_t count = 0;
+    if (instruction.operands.size() >= 2U &&
+        read_u32_operand(instruction, 1, "map count must be unsigned", errors,
+                         &count) &&
+        operand_count_is(instruction, 2U + static_cast<std::size_t>(count) * 2U,
+                         errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::size_t operand_index = 2;
+      for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t symbol_id = 0;
+        if (read_u32_operand(instruction, operand_index++,
+                             "symbol ref must be unsigned", errors,
+                             &symbol_id)) {
+          verify_symbol_ref(module, symbol_id, "map key symbol ref is invalid",
+                            errors);
+        }
+        add_register_read(code, instruction, operand_index++, flow, errors);
+      }
+    } else if (instruction.operands.size() < 2U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+    }
+    break;
+  }
+  case Opcode::LoadUpval: {
+    if (operand_count_is(instruction, 2, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::uint32_t slot = 0;
+      if (read_u32_operand(instruction, 1, "capture slot must be unsigned",
+                           errors, &slot) &&
+          slot >= code.capture_layout.size()) {
+        add_verify_error(errors, "BC1312", "capture slot is out of range",
+                         SectionKind::Code, 0);
+      }
+    }
+    break;
+  }
+  case Opcode::StoreUpval: {
+    if (operand_count_is(instruction, 2, errors)) {
+      std::uint32_t slot = 0;
+      if (read_u32_operand(instruction, 0, "capture slot must be unsigned",
+                           errors, &slot) &&
+          slot >= code.capture_layout.size()) {
+        add_verify_error(errors, "BC1312", "capture slot is out of range",
+                         SectionKind::Code, 0);
+      }
+      add_register_read(code, instruction, 1, flow, errors);
+    }
+    break;
+  }
+  case Opcode::LoadIvar: {
+    if (operand_count_is(instruction, 4, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      add_register_read(code, instruction, 1, flow, errors);
+      std::uint32_t symbol_id = 0;
+      if (read_u32_operand(instruction, 2, "symbol ref must be unsigned",
+                           errors, &symbol_id)) {
+        verify_symbol_ref(module, symbol_id, "ivar symbol ref is invalid",
+                          errors);
+      }
+    }
+    break;
+  }
+  case Opcode::StoreIvar: {
+    if (operand_count_is(instruction, 4, errors)) {
+      add_register_read(code, instruction, 0, flow, errors);
+      std::uint32_t symbol_id = 0;
+      if (read_u32_operand(instruction, 1, "symbol ref must be unsigned",
+                           errors, &symbol_id)) {
+        verify_symbol_ref(module, symbol_id, "ivar symbol ref is invalid",
+                          errors);
+      }
+      add_register_read(code, instruction, 2, flow, errors);
+    }
+    break;
+  }
+  case Opcode::LoadCvar: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      add_register_read(code, instruction, 1, flow, errors);
+      std::uint32_t symbol_id = 0;
+      if (read_u32_operand(instruction, 2, "symbol ref must be unsigned",
+                           errors, &symbol_id)) {
+        verify_symbol_ref(module, symbol_id, "cvar symbol ref is invalid",
+                          errors);
+      }
+    }
+    break;
+  }
+  case Opcode::StoreCvar: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_read(code, instruction, 0, flow, errors);
+      std::uint32_t symbol_id = 0;
+      if (read_u32_operand(instruction, 1, "symbol ref must be unsigned",
+                           errors, &symbol_id)) {
+        verify_symbol_ref(module, symbol_id, "cvar symbol ref is invalid",
+                          errors);
+      }
+      add_register_read(code, instruction, 2, flow, errors);
+    }
+    break;
+  }
+  case Opcode::LookupConst: {
+    if (operand_count_is(instruction, 2, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::uint32_t const_id = 0;
+      if (read_u32_operand(instruction, 1, "constant ref must be unsigned",
+                           errors, &const_id)) {
+        verify_const_ref(module, const_id, "constant ref is out of range",
+                         errors);
+      }
+    }
+    break;
+  }
+  case Opcode::MakeClosure: {
+    std::uint32_t capture_count = 0;
+    if (instruction.operands.size() >= 3U &&
+        read_u32_operand(instruction, 2, "capture count must be unsigned",
+                         errors, &capture_count) &&
+        operand_count_is(instruction,
+                         3U + static_cast<std::size_t>(capture_count) * 2U,
+                         errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::uint32_t closure_code_id = 0;
+      if (read_u32_operand(instruction, 1, "code ref must be unsigned", errors,
+                           &closure_code_id)) {
+        verify_code_ref(code_ids, closure_code_id, "closure code id is unknown",
+                        errors);
+      }
+      std::size_t operand_index = 3;
+      for (std::uint32_t index = 0; index < capture_count; ++index) {
+        std::uint32_t kind = 0;
+        std::uint32_t slot = 0;
+        const bool has_kind =
+            read_u32_operand(instruction, operand_index++,
+                             "capture kind must be unsigned", errors, &kind);
+        const bool has_slot =
+            read_u32_operand(instruction, operand_index++,
+                             "capture slot must be unsigned", errors, &slot);
+        if (!has_kind || !has_slot) {
+          continue;
+        }
+        if (kind == 0U) {
+          if (slot >= code.reg_count) {
+            add_verify_error(errors, "BC1311",
+                             "closure capture register is out of range",
+                             SectionKind::Code, 0);
+          } else {
+            flow.reads.push_back(slot);
+          }
+        } else if (kind == 1U) {
+          if (slot >= code.capture_layout.size()) {
+            add_verify_error(errors, "BC1312",
+                             "closure capture slot is out of range",
+                             SectionKind::Code, 0);
+          }
+        } else {
+          add_verify_error(errors, "BC1314", "invalid closure capture kind",
+                           SectionKind::Code, 0);
+        }
+      }
+    } else if (instruction.operands.size() < 3U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+    }
+    break;
+  }
+  case Opcode::CloseUpvalues: {
+    if (operand_count_is(instruction, 1, errors)) {
+      std::uint32_t from_slot = 0;
+      if (read_u32_operand(instruction, 0, "slot operand must be unsigned",
+                           errors, &from_slot) &&
+          from_slot > code.reg_count) {
+        add_verify_error(errors, "BC1311",
+                         "close-upvalues slot is out of range",
+                         SectionKind::Code, 0);
+      }
+    }
+    break;
+  }
+  case Opcode::Send:
+  case Opcode::SendDyn:
+  case Opcode::Call: {
+    const bool is_call = instruction.opcode == Opcode::Call;
+    const bool is_dynamic = instruction.opcode == Opcode::SendDyn;
+    std::size_t operand_index = 0;
+    const std::size_t fixed_prefix = is_call ? 2U : 3U;
+    if (instruction.operands.size() < fixed_prefix + 3U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+      break;
+    }
+    add_register_write(code, instruction, operand_index++, flow, errors);
+    add_register_read(code, instruction, operand_index++, flow, errors);
+    if (!is_call) {
+      if (is_dynamic) {
+        add_register_read(code, instruction, operand_index++, flow, errors);
+      } else {
+        std::uint32_t selector_id = 0;
+        if (read_u32_operand(instruction, operand_index++,
+                             "selector ref must be unsigned", errors,
+                             &selector_id)) {
+          verify_symbol_ref(module, selector_id,
+                            "selector symbol ref is invalid", errors);
+        }
+      }
+    }
+    std::uint32_t pos_count = 0;
+    if (!read_u32_operand(instruction, operand_index++,
+                          "positional count must be unsigned", errors,
+                          &pos_count)) {
+      break;
+    }
+    if (instruction.operands.size() < operand_index + pos_count + 2U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+      break;
+    }
+    for (std::uint32_t index = 0; index < pos_count; ++index) {
+      add_register_read(code, instruction, operand_index++, flow, errors);
+    }
+    std::uint32_t kw_count = 0;
+    if (!read_u32_operand(instruction, operand_index++,
+                          "keyword count must be unsigned", errors,
+                          &kw_count)) {
+      break;
+    }
+    if (instruction.operands.size() < operand_index + kw_count * 2U + 1U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+      break;
+    }
+    for (std::uint32_t index = 0; index < kw_count; ++index) {
+      std::uint32_t symbol_id = 0;
+      if (read_u32_operand(instruction, operand_index++,
+                           "keyword symbol ref must be unsigned", errors,
+                           &symbol_id)) {
+        verify_symbol_ref(module, symbol_id, "keyword symbol ref is invalid",
+                          errors);
+      }
+      add_register_read(code, instruction, operand_index++, flow, errors);
+    }
+    const std::int64_t block_reg = instruction.operands[operand_index++].value;
+    if (block_reg >= 0 &&
+        block_reg != static_cast<std::int64_t>(
+                         std::numeric_limits<std::uint32_t>::max())) {
+      if (static_cast<std::uint64_t>(block_reg) >= code.reg_count) {
+        add_verify_error(errors, "BC1311", "block register is out of range",
+                         SectionKind::Code, 0);
+      } else {
+        flow.reads.push_back(static_cast<std::uint32_t>(block_reg));
+      }
+    }
+    if (!operand_count_between(instruction, operand_index, operand_index + 1U,
+                               errors)) {
+      break;
+    }
+    if (instruction.operands.size() == operand_index + 1U) {
+      std::uint32_t site_id = 0;
+      if (read_u32_operand(instruction, operand_index,
+                           "call-site id must be unsigned", errors, &site_id) &&
+          site_id >= code.call_site_table.size()) {
+        add_verify_error(errors, "BC1312", "call-site id is out of range",
+                         SectionKind::Code, 0);
+      }
+    }
+    break;
+  }
+  case Opcode::TypeCheck: {
+    if (operand_count_is(instruction, 2, errors)) {
+      add_register_read(code, instruction, 0, flow, errors);
+      std::uint32_t const_id = 0;
+      if (read_u32_operand(instruction, 1, "type hook ref must be unsigned",
+                           errors, &const_id)) {
+        verify_const_ref(module, const_id, "type hook ref is out of range",
+                         errors);
+      }
+    }
+    break;
+  }
+  case Opcode::Jump: {
+    if (operand_count_is(instruction, 1, errors)) {
+      std::uint32_t target = 0;
+      if (read_target(0, &target)) {
+        add_jump_successor(target, flow);
+      }
+    }
+    falls_through = false;
+    break;
+  }
+  case Opcode::JumpIfTrue:
+  case Opcode::JumpIfFalse:
+  case Opcode::JumpIfNull: {
+    if (operand_count_is(instruction, 2, errors)) {
+      add_register_read(code, instruction, 0, flow, errors);
+      std::uint32_t target = 0;
+      if (read_target(1, &target)) {
+        add_jump_successor(target, flow);
+      }
+    }
+    break;
+  }
+  case Opcode::Safepoint: {
+    operand_count_is(instruction, 0, errors);
+    break;
+  }
+  case Opcode::PPrepSeq: {
+    if (operand_count_is(instruction, 4, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      add_register_read(code, instruction, 1, flow, errors);
+      std::uint32_t target = 0;
+      if (read_target(3, &target)) {
+        add_jump_successor(target, flow);
+      }
+    }
+    break;
+  }
+  case Opcode::PPrepMap: {
+    if (operand_count_is(instruction, 5, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      add_register_read(code, instruction, 1, flow, errors);
+      std::uint32_t keyset_id = 0;
+      if (read_u32_operand(instruction, 2, "keyset ref must be unsigned",
+                           errors, &keyset_id)) {
+        verify_const_ref(module, keyset_id, "keyset ref is out of range",
+                         errors);
+      }
+      std::uint32_t target = 0;
+      if (read_target(4, &target)) {
+        add_jump_successor(target, flow);
+      }
+    }
+    break;
+  }
+  case Opcode::PCheckEq:
+  case Opcode::PCheckPin:
+  case Opcode::PCheckLenEq:
+  case Opcode::PCheckLenGte:
+  case Opcode::PHasKey:
+  case Opcode::PTripleEq: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_read(code, instruction, 0, flow, errors);
+      if (instruction.opcode == Opcode::PCheckPin ||
+          instruction.opcode == Opcode::PTripleEq) {
+        add_register_read(code, instruction, 1, flow, errors);
+      } else if (instruction.opcode == Opcode::PCheckEq) {
+        std::uint32_t const_id = 0;
+        if (read_u32_operand(instruction, 1, "constant ref must be unsigned",
+                             errors, &const_id)) {
+          verify_const_ref(module, const_id, "constant ref is out of range",
+                           errors);
+        }
+      } else if (instruction.opcode == Opcode::PHasKey) {
+        std::uint32_t symbol_id = 0;
+        if (read_u32_operand(instruction, 1, "symbol ref must be unsigned",
+                             errors, &symbol_id)) {
+          verify_symbol_ref(module, symbol_id, "map key symbol ref is invalid",
+                            errors);
+        }
+      }
+      std::uint32_t target = 0;
+      if (read_target(2, &target)) {
+        add_jump_successor(target, flow);
+      }
+    }
+    break;
+  }
+  case Opcode::PGetIndex:
+  case Opcode::PGetKey: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      add_register_read(code, instruction, 1, flow, errors);
+      if (instruction.opcode == Opcode::PGetKey) {
+        std::uint32_t symbol_id = 0;
+        if (read_u32_operand(instruction, 2, "symbol ref must be unsigned",
+                             errors, &symbol_id)) {
+          verify_symbol_ref(module, symbol_id, "map key symbol ref is invalid",
+                            errors);
+        }
+      }
+    }
+    break;
+  }
+  case Opcode::PBind: {
+    if (operand_count_is(instruction, 2, errors)) {
+      std::uint32_t slot = 0;
+      if (read_u32_operand(instruction, 0, "binding slot must be unsigned",
+                           errors, &slot) &&
+          slot >= code.reg_count) {
+        add_verify_error(errors, "BC1311", "binding slot is out of range",
+                         SectionKind::Code, 0);
+      }
+      add_register_read(code, instruction, 1, flow, errors);
+    }
+    break;
+  }
+  case Opcode::PCommit: {
+    if (operand_count_is(instruction, 2, errors)) {
+      std::uint32_t base_slot = 0;
+      std::uint32_t count = 0;
+      if (read_u32_operand(instruction, 0, "binding slot must be unsigned",
+                           errors, &base_slot) &&
+          read_u32_operand(instruction, 1, "binding count must be unsigned",
+                           errors, &count)) {
+        if (count > 0U && (base_slot >= code.reg_count ||
+                           count > code.reg_count - base_slot)) {
+          add_verify_error(errors, "BC1311",
+                           "binding slot range is out of range",
+                           SectionKind::Code, 0);
+        } else {
+          for (std::uint32_t index = 0; index < count; ++index) {
+            flow.writes.push_back(base_slot + index);
+          }
+        }
+      }
+    }
+    break;
+  }
+  case Opcode::PFail: {
+    if (operand_count_is(instruction, 1, errors)) {
+      if (instruction.operands[0].value != 0) {
+        falls_through = false;
+      }
+    }
+    break;
+  }
+  }
+
+  if (falls_through) {
+    add_fallthrough_successor(pc, insn_count, flow, errors);
+  }
+  return flow;
+}
+
 void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
   const std::uint16_t kSupportedFormatMajor = 1;
   const std::uint16_t kSupportedFormatMinor = 0;
@@ -2985,6 +3756,11 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
     }
 
     for (const SlotLayoutEntry &entry : code.local_layout) {
+      if (entry.slot >= code.reg_count) {
+        add_verify_error(errors, "BC1311",
+                         "local layout slot is out of register range",
+                         SectionKind::Code, 0);
+      }
       if (!contains_index(module.strings, entry.name_str_id) ||
           !contains_index(module.strings, entry.role_str_id) ||
           !contains_index(module.strings, entry.binding_kind_str_id)) {
@@ -3041,42 +3817,24 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
                          SectionKind::Code, 0);
       }
     }
-    for (std::size_t pc = 0; pc < code.instructions.size(); ++pc) {
-      const Instruction &instruction = code.instructions[pc];
-      const bool is_unconditional_jump = instruction.opcode == Opcode::Jump;
-      const bool is_conditional_jump =
-          instruction.opcode == Opcode::JumpIfTrue ||
-          instruction.opcode == Opcode::JumpIfFalse ||
-          instruction.opcode == Opcode::JumpIfNull;
-      const std::size_t target_operand_index =
-          is_unconditional_jump ? 0U : (is_conditional_jump ? 1U : 0U);
 
-      if ((is_unconditional_jump || is_conditional_jump) &&
-          instruction.operands.size() <= target_operand_index) {
-        add_verify_error(errors, "BC1302",
-                         "jump instruction is missing target operand",
-                         SectionKind::Code, 0);
-        continue;
-      }
-      if (is_unconditional_jump || is_conditional_jump) {
-        const InstructionOperand &target_operand =
-            instruction.operands[target_operand_index];
-        if (target_operand.value < 0 ||
-            static_cast<std::size_t>(target_operand.value) >= insn_count) {
-          add_verify_error(errors, "BC1302", "jump target is out of range",
-                           SectionKind::Code, 0);
-          continue;
-        }
-        const std::size_t target =
-            static_cast<std::size_t>(target_operand.value);
-        if (target < pc && safepoints.find(static_cast<std::uint32_t>(
-                               target)) == safepoints.end()) {
+    std::vector<InstructionFlow> flows;
+    flows.reserve(code.instructions.size());
+    for (std::size_t pc = 0; pc < code.instructions.size(); ++pc) {
+      flows.push_back(
+          verify_instruction_flow(module, code_ids, code, pc, errors));
+    }
+    for (std::size_t pc = 0; pc < flows.size(); ++pc) {
+      for (std::uint32_t target : flows[pc].successors) {
+        if (static_cast<std::size_t>(target) < pc &&
+            safepoints.find(target) == safepoints.end()) {
           add_verify_error(errors, "BC1303",
                            "back-edge jump target is missing safepoint",
                            SectionKind::Code, 0);
         }
       }
     }
+    verify_initializedness(module, code, flows, errors);
   }
 
   for (const BcMethod &method : module.methods) {

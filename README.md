@@ -86,6 +86,7 @@ Current matrix status:
 | `W11.5` | done | `amber.wasm/accelerator.v1` metadata-first Wasm component and accelerator baseline with frozen-world component interface validation, capability/effect boundary metadata, restricted accelerator kernel descriptors, `WASM`/`ACCL` bytecode sections, runtime mirror/validation hooks, plus `wasm-build` / `accel-check` CLI |
 | `W11.6` | done | `amber.modern-profiles.v1` metadata-first AI-agent tooling/contracts/privacy/workflow baseline with semantic symbol graph and explain JSON, structured patch/provenance validation, contract/property descriptors, privacy label/policy/lineage checks, durable workflow step/history idempotency validation, `AGNT`/`CNTR`/`PRIV`/`WFLW` bytecode sections, runtime mirror/validation hooks, plus `symbols` / `explain` / `patch-check` / `provenance-audit` / `contract-check` / `privacy-check` / `workflow-check` CLI |
 | `W12` | done | documentation/spec sync baseline with generated anchor map, v20.1 changelog, migration notes, implementation status dashboard, local Markdown link checks, and `make spec-sync-check` |
+| `W13` | done | compiler-contract closure slice with W13 source/comment/numeric/range rules, prelude/runtime-error/token registry updates, top-level module-cell pre-scan, `in`/`and`/`or` lowering, bytecode verifier operand/range/dataflow checks, runtime UNINIT guards, unified `CALL` packet/object-call dispatch, structured source traces, and focused lexer/parser/binder/HIR/emitter/bytecode/VM tests |
 
 The current implemented frontend slices cover `W0.1`, `W0.3`, `W1.1`-`W1.4`,
 `W2.1`, `W2.2`, the pattern/frontend contract for `W3.1`-`W3.4`, and the
@@ -226,4 +227,11 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   `RuntimeWorld::reload_package_artifact`, with whole-artifact predecode,
   manifest identity and public ABI/export/arity compatibility guards,
   frozen-world rejection, failed-swap rollback, and dispatch invalidation;
-- early token, bytecode section, opcode, and diagnostic registries plus engineering notes.
+- `runtime/vm` W13 runtime closure with frame initialized-bit tracking,
+  `NameError` for uninitialized local/module-cell reads, shared `CallPacket`
+  decoding for `CALL`, closure/class/object-with-`call` dispatch, call-cache
+  shape guards over positional count, canonical keyword shape, block presence,
+  world epoch, and method version, plus structured trace frames carrying module
+  id, byte/line/column spans, and generated-span kind;
+- early token, prelude, runtime-error, bytecode section, opcode, and diagnostic
+  registries plus engineering notes.

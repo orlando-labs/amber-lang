@@ -442,6 +442,79 @@ void test_manual_closure_call_and_capture() {
          "manual closure should return captured integer");
 }
 
+void test_runtime_uninitialized_register_read_raises_name_error() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Method;
+  code.reg_count = 2;
+  code.instructions.push_back({Opcode::Move, {{1, false}, {0, false}}});
+  code.instructions.push_back({Opcode::Return, {{1, false}}});
+  module.code_objects.push_back(code);
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(module, 1);
+  expect(!exec.ok(), "uninitialized register read should fail");
+  expect(exec.fault->error_name == "NameError",
+         "uninitialized register read should surface NameError");
+}
+
+void test_manual_call_invokes_object_call_method() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"Callable", "call", "x"};
+  module.strings = {"x", "param", "local"};
+
+  BcClass callable;
+  callable.class_name_sym_id = 0;
+  callable.method_range_start = 0;
+  callable.method_range_count = 1;
+  module.classes.push_back(callable);
+
+  BcMethod method;
+  method.selector_sym_id = 1;
+  method.entry_code_id = 2;
+  method.flags = 1;
+  method.params.push_back({2, 0, 0});
+  module.methods.push_back(method);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 3;
+  caller.instructions.push_back({Opcode::Call,
+                                 {{2, false},
+                                  {0, false},
+                                  {1, false},
+                                  {1, false},
+                                  {0, false},
+                                  {-1, true},
+                                  {0, false}}});
+  caller.instructions.push_back({Opcode::Return, {{2, false}}});
+  caller.call_site_table.push_back({0, 0, 1, 0});
+
+  BcCode body;
+  body.code_id = 2;
+  body.kind = CodeKind::Method;
+  body.reg_count = 1;
+  body.local_layout.push_back({0, 0, 1, 2});
+  body.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body};
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(module, 1,
+                                   {amber::runtime::Value::instance(instance),
+                                    amber::runtime::Value::integer(7)});
+  expect(exec.ok(), "object CALL dispatch failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 7,
+         "object CALL should dispatch to call method");
+}
+
 void test_execute_emitted_send_method() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def add(x, y):\n"
                                                           "  x + y\n");
@@ -673,6 +746,8 @@ amber::bytecode::BcModule make_reload_module(std::int64_t value,
   const std::uint32_t x_symbol_id = ensure_symbol_id(&module, "x");
   const std::uint32_t class_kind_id = append_string(&module, "class");
   const std::uint32_t x_string_id = append_string(&module, "x");
+  const std::uint32_t param_role_id = append_string(&module, "param");
+  const std::uint32_t local_kind_id = append_string(&module, "local");
   const std::uint32_t empty_signature_id = append_path_const(&module, {});
   const std::uint32_t integer_id = append_integer_const(&module, value);
 
@@ -697,8 +772,10 @@ amber::bytecode::BcModule make_reload_module(std::int64_t value,
   caller.code_id = 1;
   caller.kind = CodeKind::Method;
   caller.reg_count = 2;
+  caller.local_layout.push_back({0, x_string_id, param_role_id, local_kind_id});
   caller.instructions.push_back(send_instr(1, 0, value_id, {}, -1, 0));
   caller.instructions.push_back({Opcode::Return, {{1, false}}});
+  caller.call_site_table.push_back({0, 0, value_id, 0});
 
   BcCode body;
   body.code_id = 2;
@@ -3553,6 +3630,7 @@ void test_runtime_supervisor_one_for_all_cancels_all_siblings() {
 void test_runtime_supervisor_rest_for_one_cancels_later_siblings_only() {
   amber::runtime::RuntimeScheduler scheduler(4);
   std::atomic<bool> earlier_started{false};
+  std::atomic<bool> later_started{false};
   std::atomic<bool> earlier_cancelled{false};
   std::atomic<bool> later_cancelled{false};
   std::atomic<bool> release_earlier{false};
@@ -3561,8 +3639,9 @@ void test_runtime_supervisor_rest_for_one_cancels_later_siblings_only() {
   amber::runtime::RuntimeTaskOptions options;
   options.policy = amber::runtime::RuntimeSupervisorPolicy::RestForOne;
   const std::uint64_t parent_id = scheduler.spawn_task(
-      options, [&scheduler, &earlier_started, &earlier_cancelled,
-                &later_cancelled, &release_earlier, &allow_failure]() {
+      options,
+      [&scheduler, &earlier_started, &earlier_cancelled, &later_started,
+       &later_cancelled, &release_earlier, &allow_failure]() {
         scheduler.spawn_task(
             [&earlier_started, &earlier_cancelled, &release_earlier]() {
               earlier_started = true;
@@ -3582,7 +3661,8 @@ void test_runtime_supervisor_rest_for_one_cancels_later_siblings_only() {
           throw amber::runtime::RuntimeTaskFailure("RestBoom",
                                                    "middle child failed");
         });
-        scheduler.spawn_task([&later_cancelled]() {
+        scheduler.spawn_task([&later_started, &later_cancelled]() {
+          later_started = true;
           while (!amber::runtime::current_runtime_task_cancel_requested()) {
             std::this_thread::yield();
           }
@@ -3599,6 +3679,9 @@ void test_runtime_supervisor_rest_for_one_cancels_later_siblings_only() {
              },
              std::chrono::milliseconds(1000)),
          "rest-for-one parent should start ordered children");
+  expect(wait_for_condition([&later_started]() { return later_started.load(); },
+                            std::chrono::milliseconds(1000)),
+         "rest-for-one later sibling should start before failure is released");
   allow_failure = true;
   expect(wait_for_condition(
              [&later_cancelled]() { return later_cancelled.load(); },
@@ -5211,6 +5294,12 @@ void test_manual_raise_unhandled_fault_trace() {
   expect(!exec.fault->trace.empty() && exec.fault->trace[0].code_id == 1 &&
              exec.fault->trace[0].pc == 0 && exec.fault->trace[0].line == 3,
          "unhandled RAISE should include source trace frame");
+  expect(exec.fault->trace[0].byte_start == 10 &&
+             exec.fault->trace[0].byte_end == 20 &&
+             exec.fault->trace[0].column == 5 &&
+             exec.fault->trace[0].column_end == 15 &&
+             exec.fault->trace[0].generated_kind == "direct",
+         "unhandled RAISE should include structured source-map span");
   expect(exec.fault->trace_text.find("Boom:") != std::string::npos &&
              exec.fault->trace_text.find("c1:0") != std::string::npos,
          "unhandled RAISE should include human-readable trace text");
@@ -5222,6 +5311,8 @@ int main() {
   test_execute_emitted_method();
   test_branching_and_last_result();
   test_manual_closure_call_and_capture();
+  test_runtime_uninitialized_register_read_raises_name_error();
+  test_manual_call_invokes_object_call_method();
   test_execute_emitted_send_method();
   test_execute_emitted_compare_method();
   test_execute_emitted_default_method();

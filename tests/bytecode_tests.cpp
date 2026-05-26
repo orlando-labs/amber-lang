@@ -77,9 +77,9 @@ amber::bytecode::BcModule sample_module() {
   code.kind = CodeKind::Method;
   code.reg_count = 2;
   code.local_layout.push_back({0, 0, 1, 2});
-  code.instructions.push_back({Opcode::GetLast, {}});
+  code.instructions.push_back({Opcode::GetLast, {{0, false}}});
   code.instructions.push_back({Opcode::Jump, {InstructionOperand{0, false}}});
-  code.instructions.push_back({Opcode::Return, {}});
+  code.instructions.push_back({Opcode::Return, {{0, false}}});
   code.safepoint_table.push_back({0, 0});
   code.source_spans.push_back(
       {0, 2, {"/tmp/sample.am", {1, 1, 0}, {1, 14, 13}}});
@@ -383,6 +383,59 @@ void test_back_edge_requires_safepoint() {
          "expected BC1303 for back-edge without safepoint");
 }
 
+void test_register_range_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.code_objects[0].instructions.clear();
+  module.code_objects[0].instructions.push_back(
+      {amber::bytecode::Opcode::LoadK, {{2, false}, {0, false}}});
+  module.code_objects[0].instructions.push_back(
+      {amber::bytecode::Opcode::Return, {{0, false}}});
+  module.code_objects[0].safepoint_table.clear();
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "out-of-range register unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1311"),
+         "expected BC1311 for out-of-range register");
+}
+
+void test_uninitialized_register_read_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.code_objects[0].instructions.clear();
+  module.code_objects[0].instructions.push_back(
+      {amber::bytecode::Opcode::Move, {{1, false}, {0, false}}});
+  module.code_objects[0].instructions.push_back(
+      {amber::bytecode::Opcode::Return, {{1, false}}});
+  module.code_objects[0].local_layout.clear();
+  module.code_objects[0].safepoint_table.clear();
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "uninitialized register read unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1313"),
+         "expected BC1313 for uninitialized register read");
+}
+
+void test_branch_join_initializedness_rejected() {
+  amber::bytecode::BcModule module = sample_module();
+  module.code_objects[0].instructions.clear();
+  module.code_objects[0].instructions.push_back(
+      {amber::bytecode::Opcode::JumpIfFalse, {{0, false}, {3, false}}});
+  module.code_objects[0].instructions.push_back(
+      {amber::bytecode::Opcode::LoadK, {{1, false}, {0, false}}});
+  module.code_objects[0].instructions.push_back(
+      {amber::bytecode::Opcode::Jump, {{3, false}}});
+  module.code_objects[0].instructions.push_back(
+      {amber::bytecode::Opcode::Return, {{1, false}}});
+  module.code_objects[0].safepoint_table.clear();
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(module));
+  expect(!decoded.ok(), "branch join uninitialized read unexpectedly accepted");
+  expect(has_error_code(decoded, "BC1313"),
+         "expected BC1313 for branch join initializedness");
+}
+
 void test_class_descriptor_round_trip() {
   using namespace amber::bytecode;
 
@@ -585,6 +638,9 @@ int main() {
   test_missing_required_section_rejected();
   test_invalid_code_ref_rejected();
   test_back_edge_requires_safepoint();
+  test_register_range_rejected();
+  test_uninitialized_register_read_rejected();
+  test_branch_join_initializedness_rejected();
   test_class_descriptor_round_trip();
   test_invalid_class_path_ref_rejected();
   test_invalid_schema_metadata_rejected();

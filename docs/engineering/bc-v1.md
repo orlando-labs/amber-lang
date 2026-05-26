@@ -122,8 +122,10 @@ Current verifier is intentionally structural, not semantic/runtime-complete. It 
 - string/symbol/code/class/method range references for the currently materialized descriptors
 - path-typed superclass/include/extend refs inside `CLAS`
 - handler ranges
+- instruction operand arity and register/constant/symbol/code/capture ranges
 - jump target bounds
 - back-edge safepoint presence
+- per-code CFG initializedness with the W13 `UNINIT < INIT_VALUE` lattice
 - local debug ranges
 - fixed 32-byte `HASH` digests
 
@@ -133,6 +135,8 @@ Representative current verifier codes:
 - `BC1102` missing required section
 - `BC1204` unknown code id reference
 - `BC1303` back-edge without safepoint
+- `BC1311` register operand or slot range out of bounds
+- `BC1313` register read before definite initialization
 
 Not implemented yet in this layer:
 
@@ -141,4 +145,3 @@ Not implemented yet in this layer:
 - loader-time ancestor linearization and world-mutation invalidation
 - VM/runtime execution
 - bytecode-level type or isolation proofs
-- full instruction-arity verification against final VM ISA

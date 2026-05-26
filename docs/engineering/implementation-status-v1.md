@@ -1,6 +1,6 @@
 # amber.implementation-status.v1
 
-Status: W12 implementation status dashboard for the current v20.1 reference
+Status: W13 implementation status dashboard for the current v20.1 reference
 baseline.
 
 This dashboard is the human-readable release index that ties the project-layer
@@ -26,7 +26,7 @@ work-package matrix to concrete repository artifacts. Use it with the generated
 | `W10` advanced concurrency/native/frozen | done | `optimizer/mir.*`, `optimizer/native.*`, `frozen/image.*`, `runtime/native_bridge.*`, `runtime/frozen_image.*` | MIR, native, frozen-image, awaitable, and advanced concurrency tests |
 | `W11` modern profile runtime | done | `profile/{capabilities,effects,replay,data,wasm_accel,modern}.*`, profile engineering docs | profile, bytecode, package, and VM tests |
 | `W12` documentation/spec sync | done | `tools/spec_sync.py`, `docs/engineering/spec-anchor-map-v1.md`, this dashboard, changelog, migration notes | `make spec-sync-check` |
-| `W13` compiler-contract closure | planned | source/literal rules, slot model, prelude registry, verifier dataflow registries | pending |
+| `W13` compiler-contract closure | done | source/comment/numeric/range rules, operator lowering, prelude/runtime-error/token registries, top-level pre-scan, bytecode verifier operand/range/dataflow checks, runtime UNINIT guards, unified `CALL` packet/object-call dispatch, call-cache shape guards, and structured source trace frames | `make test`, `make conformance`, `make spec-sync-check` |
 | `W14` build/bootstrap/conformance closure | planned | build graph, incremental cache, stdlib bootstrap, profile flags, conformance bundles | pending |
 | `W15` native-readiness metadata | planned | MIR/native root maps, exception maps, slow stubs, frozen assumptions | pending |
 

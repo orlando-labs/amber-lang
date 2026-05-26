@@ -6,7 +6,8 @@ open-world transaction/freeze plus `W9.3` reflection mirror behavior is covered
 in VM tests, `W9.4` package artifact tooling is covered by package tests, and
 `W9.5` package hot-reload swaps, `W10.1` advanced concurrency runtime behavior,
 `W10.2` awaitable/native-readiness behavior, `W10.4` frozen native trampoline
-behavior, and `W10.5` frozen image load barriers are covered by VM/native/image
+behavior, `W10.5` frozen image load barriers, and the `W13` runtime UNINIT,
+`CALL`, and structured source-trace closure are covered by VM/native/image
 tests.
 
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
@@ -17,6 +18,9 @@ Current implemented slice:
 
 - standalone `runtime/vm.{h,cpp}` execution core for verified `BcCode`;
 - frame-local register file and `last_result` slot;
+- frame-local initialized-bit tracking for local and module-cell values, with
+  runtime `NameError` on uninitialized reads and GC root scanning that ignores
+  values not yet proven initialized;
 - direct code entry with positional args;
 - opcode subset: `LOADK`, `LOADNULL`, `LOADBOOL`, `MOVE`, `LOADSELF`,
   `GETLAST`, `SETLAST`, `MAKE_LIST`, `MAKE_TUPLE`, `MAKE_MAP`, `FREEZE`,
@@ -57,11 +61,17 @@ Current implemented slice:
   backdoor;
 - `method_missing` fallback on class/instance dispatch without recursive
   fallback on the `method_missing` selector itself;
+- shared `CallPacket` decoding for `CALL`, covering closure invocation,
+  constructor calls on class objects, and ordinary objects exposing an
+  instance-side `call` method;
 - constructor `CALL` on class objects, allocating an instance and routing to
   instance-side `init` when present;
 - tail positional default-thunk materialization for method dispatch and
   constructor `init` dispatch;
-- runtime keyword shaping for positional/keyword method dispatch;
+- runtime keyword shaping for positional/keyword method dispatch, with
+  monomorphic call-cache keys guarded by selector, positional count, canonical
+  keyword symbol shape, block presence, receiver class, world epoch, and method
+  version;
 - forwarded block values for user-defined `SEND` / `SEND_DYN` / constructor
   `init` dispatch;
 - eager runtime execution of `BcMethod.clause_table[]` through emitted clause
@@ -175,7 +185,9 @@ Current implemented slice:
   types as `TypeError`;
 - `RAISE` execution with handler-table protected-range lookup, unwinding across
   active method and closure frames, out-of-line rescue handler code execution,
-  and unhandled fault traces backed by `SPAN` / `LINE` metadata where present;
+  and unhandled fault traces backed by structured `SPAN` / `LINE` metadata,
+  including module id, byte start/end, line/column start/end, and generated-span
+  kind where present;
 - unit coverage for emitted methods, branching/falsey semantics, and closure
   capture/call baseline, plus emitted and dynamic send scenarios, class-side
   lookup/send, constructor call, keyword shaping, block forwarding, instance
@@ -218,7 +230,9 @@ Current implemented slice:
   reflective `SEND_DYN` stubs, frozen-world execution, and stale-assumption
   bytecode fallback, plus W10.5 frozen image coverage for reproducible
   `.amberimg` build/verify, frozen runtime load, bound native execution, and
-  reload-barrier rejection.
+  reload-barrier rejection, plus W13 runtime coverage for uninitialized
+  register reads, object `call` protocol dispatch through `CALL`, and structured
+  source-span trace fields.
 
 Still intentionally missing in later layers:
 

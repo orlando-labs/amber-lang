@@ -365,6 +365,43 @@ void test_clause_method_emission() {
          "binder clause pattern emits P_COMMIT");
 }
 
+void test_w13_operator_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("def ops(x, xs, a, b):\n"
+              "  x in xs\n"
+              "  a and b\n"
+              "  a or b\n"
+              "  1_000 + 0x10\n"
+              "  1..10\n");
+  const amber::bytecode::BcCode *code = code_by_id(
+      emit_result.module, emit_result.module.methods[0].entry_code_id);
+  expect(code != nullptr, "ops code exists");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::JumpIfFalse),
+         "and emits JUMP_IF_FALSE");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::JumpIfTrue),
+         "or emits JUMP_IF_TRUE");
+  expect(contains_symbol(emit_result.module, "contains?"),
+         "in interns contains?");
+  expect(contains_symbol(emit_result.module, "Range"), "range interns Range");
+  expect(contains_symbol(emit_result.module, "new"),
+         "range interns constructor selector");
+  expect(contains_symbol(emit_result.module, "inclusive_end"),
+         "range interns inclusive_end keyword");
+
+  bool saw_1000 = false;
+  bool saw_16 = false;
+  for (const amber::bytecode::Constant &constant :
+       emit_result.module.const_pool) {
+    if (constant.kind != amber::bytecode::ConstantKind::Integer) {
+      continue;
+    }
+    saw_1000 = saw_1000 || constant.int_value == 1000;
+    saw_16 = saw_16 || constant.int_value == 16;
+  }
+  expect(saw_1000, "underscored integer canonicalized");
+  expect(saw_16, "hex integer canonicalized");
+}
+
 void test_block_param_pattern_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("def transform(xs):\n"
@@ -499,6 +536,7 @@ int main() {
   test_matcher_expr_emission();
   test_dynamic_pattern_emission();
   test_clause_method_emission();
+  test_w13_operator_emission();
   test_block_param_pattern_emission();
   test_simple_block_param_emission();
   test_object_model_emission();

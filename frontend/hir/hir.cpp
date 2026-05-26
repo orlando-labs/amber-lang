@@ -1005,6 +1005,13 @@ private:
     return node;
   }
 
+  std::unique_ptr<Node> make_bool_const(bool value, const lexer::Span &span) {
+    auto node = make_node("HConst", span);
+    node->string_field("token", value ? "KEYWORD_TRUE" : "KEYWORD_FALSE");
+    node->string_field("value", value ? "true" : "false");
+    return node;
+  }
+
   std::unique_ptr<Node> make_expr_body(std::unique_ptr<Node> expr) {
     auto body = make_node("HSeq", expr->span);
     std::vector<std::unique_ptr<Node>> items;
@@ -1092,10 +1099,49 @@ private:
       return node;
     }
     if (expr.kind == "AstBinary") {
+      const std::string op = string_value(expr, "op");
+      if (op == "and" || op == "or") {
+        auto node = make_node("HLogical", expr.span);
+        node->string_field("op", op);
+        node->node_field("left",
+                         lower_expr(*node_field_required(expr, "left")));
+        node->node_field("right",
+                         lower_expr(*node_field_required(expr, "right")));
+        return node;
+      }
+      if (op == "in") {
+        auto node = make_node("HSend", expr.span);
+        node->node_field("receiver",
+                         lower_expr(*node_field_required(expr, "right")));
+        node->string_field("selector", "contains?");
+        std::vector<std::unique_ptr<Node>> pos_args;
+        pos_args.push_back(lower_expr(*node_field_required(expr, "left")));
+        node->list_field("pos_args", std::move(pos_args));
+        node->list_field("kw_args", {});
+        return node;
+      }
+      if (op == "..") {
+        auto node = make_node("HSend", expr.span);
+        auto receiver = make_node("HLoadConst", expr.span);
+        receiver->string_field("path", "Range");
+        node->node_field("receiver", std::move(receiver));
+        node->string_field("selector", "new");
+        std::vector<std::unique_ptr<Node>> pos_args;
+        pos_args.push_back(lower_expr(*node_field_required(expr, "left")));
+        pos_args.push_back(lower_expr(*node_field_required(expr, "right")));
+        node->list_field("pos_args", std::move(pos_args));
+        std::vector<std::unique_ptr<Node>> kw_args;
+        auto inclusive = make_node("HKeywordArg", expr.span);
+        inclusive->string_field("name", "inclusive_end");
+        inclusive->node_field("value", make_bool_const(true, expr.span));
+        kw_args.push_back(std::move(inclusive));
+        node->list_field("kw_args", std::move(kw_args));
+        return node;
+      }
       auto node = make_node("HSend", expr.span);
       node->node_field("receiver",
                        lower_expr(*node_field_required(expr, "left")));
-      node->string_field("selector", string_value(expr, "op"));
+      node->string_field("selector", op);
       std::vector<std::unique_ptr<Node>> pos_args;
       pos_args.push_back(lower_expr(*node_field_required(expr, "right")));
       node->list_field("pos_args", std::move(pos_args));

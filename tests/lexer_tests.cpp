@@ -21,6 +21,11 @@ std::vector<Token> lex_ok(const std::string &source) {
   return result.tokens;
 }
 
+amber::lexer::LexResult lex_raw(const std::string &source) {
+  Lexer lexer(source, "<test>");
+  return lexer.lex();
+}
+
 void expect_kinds(const std::string &name, const std::string &source,
                   const std::vector<TokenKind> &expected) {
   const std::vector<Token> tokens = lex_ok(source);
@@ -159,6 +164,30 @@ void test_unicode_identifier_forms() {
                             {"масса", "α", "β2", "объект", "скорость!"});
 }
 
+void test_w13_comments_ranges_and_numbers() {
+  expect_kinds("w13 shebang comments ranges and numeric forms",
+               "#!/usr/bin/env amber\n"
+               "x = 1..10 # inclusive range\n"
+               "1_000 0xFF 0b1010_0101 0o755 1e9 1.2e-3\n",
+               {TokenKind::Identifier, TokenKind::Equal, TokenKind::Integer,
+                TokenKind::DotDot, TokenKind::Integer, TokenKind::Newline,
+                TokenKind::Integer, TokenKind::Integer, TokenKind::Integer,
+                TokenKind::Integer, TokenKind::Float, TokenKind::Float,
+                TokenKind::Newline, TokenKind::Eof});
+
+  amber::lexer::LexResult glued_hash = lex_raw("foo#bar\n");
+  if (glued_hash.ok()) {
+    std::cerr << "lexer test failed: glued # must not start a comment\n";
+    std::exit(1);
+  }
+
+  amber::lexer::LexResult bad_number = lex_raw("1__0\n");
+  if (bad_number.ok()) {
+    std::cerr << "lexer test failed: invalid numeric separators accepted\n";
+    std::exit(1);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -170,6 +199,7 @@ int main() {
   test_pattern_punctuation();
   test_effect_row_punctuation();
   test_unicode_identifier_forms();
+  test_w13_comments_ranges_and_numbers();
   std::cout << "lexer_tests: ok\n";
   return 0;
 }

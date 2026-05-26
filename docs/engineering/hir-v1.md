@@ -49,7 +49,9 @@ Currently lowered node families:
   `HStoreCvar`;
 - `$_` as `HLastGet` and expression statements as `HLastSet(expr)`;
 - assignments as `HStoreLocal` / `HStoreIvar` / `HStoreCvar`;
-- binary operators as `HSend(receiver, selector = op, ...)`;
+- binary operators as `HSend(receiver, selector = op, ...)`, except `and` /
+  `or` as `HLogical`, `in` as `contains?`, and `..` as `Range.new(...,
+  inclusive_end: true)`;
 - unary operators as `HSend(receiver, selector = not | u+ | u-, ...)`;
 - reflective builtin `send(recv, selector, ...)` as `HSend` for static string
   selectors or `HSendDyn(receiver, selector_expr, ...)` otherwise;

@@ -27,6 +27,7 @@ private:
   char peek(std::size_t distance = 1) const;
   bool starts_with(const char *text) const;
   bool at_line_break() const;
+  bool comment_starts_here() const;
   bool next_non_space_is_line_break_or_comment() const;
   bool has_inline_text_after_current() const;
 

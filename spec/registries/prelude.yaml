@@ -1,0 +1,239 @@
+schema: amber.prelude.registry.v1
+spec_anchor: amber_compilable_project_layer_v20_1_complete.md
+abi_hash_inputs:
+  - name
+  - kind
+  - intrinsic_id
+  - dispatch
+  - shadowing
+entries:
+  - name: Kernel
+    kind: prelude_module
+    intrinsic_id: amber.prelude.Kernel.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: memory
+    kind: prelude_module
+    intrinsic_id: amber.prelude.memory.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: send
+    kind: intrinsic_function
+    intrinsic_id: amber.prelude.send.v1
+    dispatch: reflective_send
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: define_method
+    kind: intrinsic_function
+    intrinsic_id: amber.prelude.define_method.v1
+    dispatch: world_mutation
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Array
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Array.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Tuple
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Tuple.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Map
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Map.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Set
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Set.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Range
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Range.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: LazySeq
+    kind: prelude_class
+    intrinsic_id: amber.prelude.LazySeq.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Str
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Str.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Int
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Int.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Float
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Float.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Bool
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Bool.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: "Null"
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Null.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Symbol
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Symbol.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Object
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Object.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Class
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Class.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Mixin
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Mixin.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: TaskHandle
+    kind: prelude_class
+    intrinsic_id: amber.prelude.TaskHandle.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Channel
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Channel.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Mutex
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Mutex.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Atomic
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Atomic.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: MatchError
+    kind: error_class
+    intrinsic_id: amber.error.MatchError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: TypeError
+    kind: error_class
+    intrinsic_id: amber.error.TypeError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: NameError
+    kind: error_class
+    intrinsic_id: amber.error.NameError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgumentError
+    kind: error_class
+    intrinsic_id: amber.error.ArgumentError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: NoMethodError
+    kind: error_class
+    intrinsic_id: amber.error.NoMethodError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ImportError
+    kind: error_class
+    intrinsic_id: amber.error.ImportError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ModuleInitError
+    kind: error_class
+    intrinsic_id: amber.error.ModuleInitError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: IsolationError
+    kind: error_class
+    intrinsic_id: amber.error.IsolationError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: DestroyedAccessError
+    kind: error_class
+    intrinsic_id: amber.error.DestroyedAccessError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: UseAfterFreeError
+    kind: error_class
+    intrinsic_id: amber.error.UseAfterFreeError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: LifetimeError
+    kind: error_class
+    intrinsic_id: amber.error.LifetimeError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: IncludeCycleError
+    kind: error_class
+    intrinsic_id: amber.error.IncludeCycleError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: WorldFrozenError
+    kind: error_class
+    intrinsic_id: amber.error.WorldFrozenError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: SuperclassMismatchError
+    kind: error_class
+    intrinsic_id: amber.error.SuperclassMismatchError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: TimeoutError
+    kind: error_class
+    intrinsic_id: amber.error.TimeoutError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: CancelledError
+    kind: error_class
+    intrinsic_id: amber.error.CancelledError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ChannelClosedError
+    kind: error_class
+    intrinsic_id: amber.error.ChannelClosedError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: DeadlockError
+    kind: error_class
+    intrinsic_id: amber.error.DeadlockError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: EmptyCollectionError
+    kind: error_class
+    intrinsic_id: amber.error.EmptyCollectionError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: BytecodeVerificationError
+    kind: error_class
+    intrinsic_id: amber.error.BytecodeVerificationError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: UnsupportedProfileError
+    kind: error_class
+    intrinsic_id: amber.error.UnsupportedProfileError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Kernel.watch
+    kind: intrinsic_method
+    intrinsic_id: amber.prelude.Kernel.watch.v1
+    dispatch: ordinary_send
+    shadowing: owner_method_replacement_disables_intrinsic_lowering
+  - name: memory.dealloc
+    kind: intrinsic_function
+    intrinsic_id: amber.prelude.memory.dealloc.v1
+    dispatch: capability_checked_runtime_call
+    shadowing: local_binding_disables_intrinsic_lowering

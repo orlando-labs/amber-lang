@@ -42,6 +42,11 @@ Binding kinds currently emitted:
 - `placeholder`;
 - `last_value`.
 
+At module scope, the W13 pre-scan declares simple top-level assignment targets
+as `local` bindings with role `module_cell` before export resolution and body
+visitation. This lets `export value` resolve even when `value = ...` appears
+later in the source while preserving source-order module init execution.
+
 `$_` is represented as a read-only `last_value` binding per lexical scope.
 Implicit block placeholders `_1.._N` are represented as read-only `placeholder`
 bindings in the block suffix scope. Sparse placeholder numbering and mixing

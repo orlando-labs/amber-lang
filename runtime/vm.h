@@ -1018,11 +1018,17 @@ struct RuntimeWorldOptions {
 };
 
 struct TraceFrame {
+  std::string module_id;
   std::uint32_t code_id = 0;
   std::uint32_t pc = 0;
   std::string file;
+  std::uint32_t byte_start = 0;
+  std::uint32_t byte_end = 0;
   std::uint32_t line = 0;
   std::uint32_t column = 0;
+  std::uint32_t line_end = 0;
+  std::uint32_t column_end = 0;
+  std::string generated_kind;
 };
 
 struct Fault {

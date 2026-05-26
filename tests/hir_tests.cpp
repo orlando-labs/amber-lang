@@ -276,6 +276,57 @@ void test_shadowed_send_stays_call() {
          "shadowed send does not lower to HSendDyn");
 }
 
+void test_w13_operator_lowering() {
+  const amber::hir::Program program = lower_ok("def ops(x, xs, a, b):\n"
+                                               "  x in xs\n"
+                                               "  a and b\n"
+                                               "  a or b\n"
+                                               "  1..10\n");
+  const amber::hir::Procedure *ops = procedure_by_name(program, "ops");
+  expect(ops != nullptr, "ops procedure exists");
+
+  const amber::ast::Expr *in_stmt = list_item(*ops->body, "items", 0);
+  const amber::ast::Expr *in_expr =
+      in_stmt == nullptr ? nullptr : node_field(*in_stmt, "expr");
+  expect(in_expr != nullptr && in_expr->kind == "HSend", "in lowers to send");
+  expect(string_field(*in_expr, "selector") == "contains?",
+         "in selector is contains?");
+  expect(node_field(*in_expr, "receiver") != nullptr &&
+             node_field(*in_expr, "receiver")->kind == "HLoadLocal",
+         "in receiver is rhs collection");
+
+  const amber::ast::Expr *and_stmt = list_item(*ops->body, "items", 1);
+  const amber::ast::Expr *and_expr =
+      and_stmt == nullptr ? nullptr : node_field(*and_stmt, "expr");
+  expect(and_expr != nullptr && and_expr->kind == "HLogical",
+         "and lowers to HLogical");
+  expect(string_field(*and_expr, "op") == "and", "and op preserved");
+
+  const amber::ast::Expr *or_stmt = list_item(*ops->body, "items", 2);
+  const amber::ast::Expr *or_expr =
+      or_stmt == nullptr ? nullptr : node_field(*or_stmt, "expr");
+  expect(or_expr != nullptr && or_expr->kind == "HLogical",
+         "or lowers to HLogical");
+  expect(string_field(*or_expr, "op") == "or", "or op preserved");
+
+  const amber::ast::Expr *range_stmt = list_item(*ops->body, "items", 3);
+  const amber::ast::Expr *range_expr =
+      range_stmt == nullptr ? nullptr : node_field(*range_stmt, "expr");
+  expect(range_expr != nullptr && range_expr->kind == "HSend",
+         "range lowers to constructor send");
+  expect(string_field(*range_expr, "selector") == "new",
+         "range constructor selector");
+  const amber::ast::Expr *receiver = node_field(*range_expr, "receiver");
+  expect(receiver != nullptr && receiver->kind == "HLoadConst",
+         "range receiver is Range constant");
+  expect(string_field(*receiver, "path") == "Range", "range constant path");
+  const amber::ast::Expr *inclusive = list_item(*range_expr, "kw_args", 0);
+  expect(inclusive != nullptr && inclusive->kind == "HKeywordArg",
+         "range carries inclusive_end kwarg");
+  expect(string_field(*inclusive, "name") == "inclusive_end",
+         "range kwarg name");
+}
+
 void test_clause_method_lowering() {
   const amber::hir::Program program = lower_ok("def area(shape):\n"
                                                "  when Point(x, y):\n"
@@ -946,6 +997,7 @@ int main() {
   test_safe_call_and_index_lowering();
   test_builtin_send_lowering();
   test_shadowed_send_stays_call();
+  test_w13_operator_lowering();
   test_clause_method_lowering();
   test_case_pattern_lowering();
   test_case_matcher_expr_lowering();

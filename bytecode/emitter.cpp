@@ -110,10 +110,115 @@ std::string unquote_string_literal(const std::string &value) {
   if (value.size() >= 2U) {
     const char quote = value.front();
     if ((quote == '"' || quote == '\'') && value.back() == quote) {
-      return value.substr(1, value.size() - 2U);
+      std::string out;
+      for (std::size_t i = 1; i + 1 < value.size(); ++i) {
+        if (value[i] != '\\' || i + 1 >= value.size() - 1U) {
+          out.push_back(value[i]);
+          continue;
+        }
+        const char escaped = value[++i];
+        switch (escaped) {
+        case 'n':
+          out.push_back('\n');
+          break;
+        case 'r':
+          out.push_back('\r');
+          break;
+        case 't':
+          out.push_back('\t');
+          break;
+        case '\\':
+          out.push_back('\\');
+          break;
+        case '"':
+          out.push_back('"');
+          break;
+        case '#':
+          out.push_back('#');
+          break;
+        case 'u': {
+          if (i + 1 < value.size() - 1U && value[i + 1] == '{') {
+            i += 2;
+            std::uint32_t codepoint = 0;
+            while (i < value.size() - 1U && value[i] != '}') {
+              const char c = value[i++];
+              std::uint32_t digit = 0;
+              if (c >= '0' && c <= '9') {
+                digit = static_cast<std::uint32_t>(c - '0');
+              } else if (c >= 'a' && c <= 'f') {
+                digit = static_cast<std::uint32_t>(c - 'a' + 10);
+              } else if (c >= 'A' && c <= 'F') {
+                digit = static_cast<std::uint32_t>(c - 'A' + 10);
+              } else {
+                digit = 0;
+              }
+              codepoint = (codepoint << 4U) | digit;
+            }
+            if (i < value.size() - 1U && value[i] == '}') {
+              if (codepoint <= 0x7FU) {
+                out.push_back(static_cast<char>(codepoint));
+              } else if (codepoint <= 0x7FFU) {
+                out.push_back(static_cast<char>(0xC0U | (codepoint >> 6U)));
+                out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+              } else if (codepoint <= 0xFFFFU) {
+                out.push_back(static_cast<char>(0xE0U | (codepoint >> 12U)));
+                out.push_back(
+                    static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+                out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+              } else {
+                out.push_back(static_cast<char>(0xF0U | (codepoint >> 18U)));
+                out.push_back(
+                    static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3FU)));
+                out.push_back(
+                    static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+                out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+              }
+              break;
+            }
+          }
+          out.push_back('u');
+          break;
+        }
+        default:
+          out.push_back(escaped);
+          break;
+        }
+      }
+      return out;
     }
   }
   return value;
+}
+
+std::string remove_numeric_separators(const std::string &value) {
+  std::string out;
+  out.reserve(value.size());
+  for (char c : value) {
+    if (c != '_') {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+std::int64_t parse_integer_literal(const std::string &value) {
+  std::string text = remove_numeric_separators(value);
+  int base = 10;
+  std::size_t start = 0;
+  if (text.size() > 2U && text[0] == '0') {
+    const char prefix = text[1] >= 'A' && text[1] <= 'Z'
+                            ? static_cast<char>(text[1] - 'A' + 'a')
+                            : text[1];
+    if (prefix == 'x' || prefix == 'b' || prefix == 'o') {
+      base = prefix == 'x' ? 16 : (prefix == 'b' ? 2 : 8);
+      start = 2;
+    }
+  }
+  return std::stoll(text.substr(start), nullptr, base);
+}
+
+double parse_float_literal(const std::string &value) {
+  return std::stod(remove_numeric_separators(value));
 }
 
 enum class CaptureSourceKind : std::uint32_t { Local = 0, Capture = 1 };
@@ -163,6 +268,7 @@ private:
   std::uint32_t compile_clause_subject(const ast::Expr &clause);
   void compile_param_pattern_prologues();
   std::uint32_t compile_if(const ast::Expr &expr);
+  std::uint32_t compile_logical(const ast::Expr &expr);
   std::uint32_t compile_loop(const ast::Expr &expr);
   std::uint32_t compile_match_dispatch(const ast::Expr &expr);
   std::uint32_t compile_pattern_assign(const ast::Expr &expr);
@@ -390,13 +496,13 @@ public:
     if (token == "INTEGER") {
       Constant constant;
       constant.kind = ConstantKind::Integer;
-      constant.int_value = std::stoll(value);
+      constant.int_value = parse_integer_literal(value);
       return intern_constant(constant);
     }
     if (token == "FLOAT") {
       Constant constant;
       constant.kind = ConstantKind::Float;
-      constant.float_value = std::stod(value);
+      constant.float_value = parse_float_literal(value);
       return intern_constant(constant);
     }
     if (token == "STRING") {
@@ -1872,6 +1978,31 @@ std::uint32_t CodeEmitter::compile_if(const ast::Expr &expr) {
   return dst;
 }
 
+std::uint32_t CodeEmitter::compile_logical(const ast::Expr &expr) {
+  const ast::Expr *left = node_field(expr, "left");
+  const ast::Expr *right = node_field(expr, "right");
+  const std::uint32_t dst = alloc_temp();
+  if (left == nullptr || right == nullptr) {
+    diag(expr.span, "BC2001", "HLogical is missing child nodes");
+    return dst;
+  }
+
+  const std::uint32_t left_reg = compile_expr(*left);
+  emit_instruction(Opcode::Move, {{dst, false}, {left_reg, false}}, left->span);
+  const Opcode jump_opcode = string_field(expr, "op") == "or"
+                                 ? Opcode::JumpIfTrue
+                                 : Opcode::JumpIfFalse;
+  const std::size_t jump_end =
+      emit_instruction(jump_opcode, {{left_reg, false}, {-1, true}}, expr.span);
+  const std::uint32_t right_reg = compile_expr(*right);
+  if (right_reg != dst) {
+    emit_instruction(Opcode::Move, {{dst, false}, {right_reg, false}},
+                     right->span);
+  }
+  patch_operand(jump_end, 1, current_pc(), false);
+  return dst;
+}
+
 std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
   const std::string kind = string_field(expr, "kind");
   const ast::Expr *cond = node_field(expr, "cond");
@@ -2217,6 +2348,9 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   }
   if (expr.kind == "HIf") {
     return compile_if(expr);
+  }
+  if (expr.kind == "HLogical") {
+    return compile_logical(expr);
   }
   if (expr.kind == "HLoop") {
     return compile_loop(expr);

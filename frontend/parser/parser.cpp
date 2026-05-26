@@ -178,6 +178,7 @@ void append_item_or_merge_clause_def(
 bool no_space_before_pattern_token(lexer::TokenKind kind) {
   return kind == lexer::TokenKind::Comma || kind == lexer::TokenKind::Colon ||
          kind == lexer::TokenKind::Dot || kind == lexer::TokenKind::LParen ||
+         kind == lexer::TokenKind::DotDot ||
          kind == lexer::TokenKind::LBracket ||
          kind == lexer::TokenKind::LBrace ||
          kind == lexer::TokenKind::Question ||
@@ -187,8 +188,8 @@ bool no_space_before_pattern_token(lexer::TokenKind kind) {
 
 bool no_space_after_pattern_token(lexer::TokenKind kind) {
   return kind == lexer::TokenKind::Colon || kind == lexer::TokenKind::Dot ||
-         kind == lexer::TokenKind::Caret || kind == lexer::TokenKind::Star ||
-         kind == lexer::TokenKind::LParen ||
+         kind == lexer::TokenKind::DotDot || kind == lexer::TokenKind::Caret ||
+         kind == lexer::TokenKind::Star || kind == lexer::TokenKind::LParen ||
          kind == lexer::TokenKind::LBracket || kind == lexer::TokenKind::LBrace;
 }
 
@@ -1588,7 +1589,7 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   if (token.kind == lexer::TokenKind::Plus ||
       token.kind == lexer::TokenKind::Minus ||
       token.kind == lexer::TokenKind::KeywordNot) {
-    std::unique_ptr<ast::Expr> operand = parse_expression(7, stop_mode);
+    std::unique_ptr<ast::Expr> operand = parse_expression(8, stop_mode);
     auto expr =
         ast::make_expr("AstUnary", ast::join_spans(token.span, operand->span));
     expr->string_field("op", token.lexeme);
@@ -1931,20 +1932,23 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
   case lexer::TokenKind::KeywordIn:
     *info = InfixInfo{4, Assoc::Left, "in"};
     return true;
+  case lexer::TokenKind::DotDot:
+    *info = InfixInfo{5, Assoc::Left, ".."};
+    return true;
   case lexer::TokenKind::Plus:
-    *info = InfixInfo{5, Assoc::Left, "+"};
+    *info = InfixInfo{6, Assoc::Left, "+"};
     return true;
   case lexer::TokenKind::Minus:
-    *info = InfixInfo{5, Assoc::Left, "-"};
+    *info = InfixInfo{6, Assoc::Left, "-"};
     return true;
   case lexer::TokenKind::Star:
-    *info = InfixInfo{6, Assoc::Left, "*"};
+    *info = InfixInfo{7, Assoc::Left, "*"};
     return true;
   case lexer::TokenKind::Slash:
-    *info = InfixInfo{6, Assoc::Left, "/"};
+    *info = InfixInfo{7, Assoc::Left, "/"};
     return true;
   case lexer::TokenKind::Percent:
-    *info = InfixInfo{6, Assoc::Left, "%"};
+    *info = InfixInfo{7, Assoc::Left, "%"};
     return true;
   default:
     return false;

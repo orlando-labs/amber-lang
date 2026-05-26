@@ -33,7 +33,7 @@ Check with `make spec-sync-check`.
 | `docs/engineering/runtime-v1.md` | 1 |
 | `docs/engineering/typed-v1.md` | 1 |
 | `docs/engineering/wasm-accelerator-v1.md` | 1 |
-| `spec/changelog/v20.1.md` | 5 |
+| `spec/changelog/v20.1.md` | 6 |
 
 ## Registry Inventory
 
@@ -42,8 +42,9 @@ Check with `make spec-sync-check`.
 | `spec/registries/bytecode_sections.yaml` | 85 | `9c51c65477c8021281a9299050bab7352b7fe597f5842bb165a0dcae7ae5d7d9` |
 | `spec/registries/diagnostics.yaml` | 51 | `ff58436de34c754d07d80aa8b78672bedc162146657561168bec72c27b6c0de8` |
 | `spec/registries/opcodes.yaml` | 100 | `809f8a89a1da015b0aef01890ed2e8f8f2be7139eac314f14c714208cafe2431` |
-| `spec/registries/runtime_errors.yaml` | 26 | `f50442721995374983ecfd421e17aaf25508158cf16f49d010fac32ee6195b8a` |
-| `spec/registries/tokens.yaml` | 99 | `53a24e8d9266cd4c67a502bf9b9bb5e96f1aefd0d9bd28722abbfb7ecf8730b2` |
+| `spec/registries/prelude.yaml` | 239 | `d1fc19408d070c1cacc9de2d0c7bc66cd305b3b9aef49337fb5fc5c8b2b0e254` |
+| `spec/registries/runtime_errors.yaml` | 32 | `579600a8165311720c36f1ec088712f9f40205287f1320380de31d6d485720ee` |
+| `spec/registries/tokens.yaml` | 100 | `12f01f8e80b121de58c88fed8b99870735e5b3db4a2313255bc1cec8be4ec885` |
 
 ## Anchor Map
 
@@ -323,8 +324,8 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/loader-v1.md`](../../docs/engineering/loader-v1.md) | 1 | 1 | [`amberloaderv1`](../../docs/engineering/loader-v1.md#amberloaderv1) | amber.loader.v1 |
 | [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 1 | 1 | [`amber-v201-migration-notes`](../../docs/engineering/migration-notes-v20.1.md#amber-v201-migration-notes) | Amber v20.1 Migration Notes |
 | [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 5 | 2 | [`runtime-and-artifact-compatibility`](../../docs/engineering/migration-notes-v20.1.md#runtime-and-artifact-compatibility) | Runtime And Artifact Compatibility |
-| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 24 | 2 | [`repository-layout-changes`](../../docs/engineering/migration-notes-v20.1.md#repository-layout-changes) | Repository Layout Changes |
-| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 36 | 2 | [`maintainer-checklist`](../../docs/engineering/migration-notes-v20.1.md#maintainer-checklist) | Maintainer Checklist |
+| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 28 | 2 | [`repository-layout-changes`](../../docs/engineering/migration-notes-v20.1.md#repository-layout-changes) | Repository Layout Changes |
+| [`docs/engineering/migration-notes-v20.1.md`](../../docs/engineering/migration-notes-v20.1.md) | 42 | 2 | [`maintainer-checklist`](../../docs/engineering/migration-notes-v20.1.md#maintainer-checklist) | Maintainer Checklist |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 1 | 1 | [`ambermirv1`](../../docs/engineering/mir-v1.md#ambermirv1) | amber.mir.v1 |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 24 | 2 | [`ir-shape`](../../docs/engineering/mir-v1.md#ir-shape) | IR Shape |
 | [`docs/engineering/mir-v1.md`](../../docs/engineering/mir-v1.md) | 57 | 2 | [`ssa-validator`](../../docs/engineering/mir-v1.md#ssa-validator) | SSA Validator |
@@ -342,5 +343,6 @@ Check with `make spec-sync-check`.
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 1 | 1 | [`amber-v201-changelog`](../../spec/changelog/v20.1.md#amber-v201-changelog) | Amber v20.1 Changelog |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 5 | 2 | [`w12-documentationspec-sync`](../../spec/changelog/v20.1.md#w12-documentationspec-sync) | W12 Documentation/Spec Sync |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 17 | 2 | [`w11-modern-profile-baseline`](../../spec/changelog/v20.1.md#w11-modern-profile-baseline) | W11 Modern Profile Baseline |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 27 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 40 | 2 | [`planned-closure-work`](../../spec/changelog/v20.1.md#planned-closure-work) | Planned Closure Work |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 27 | 2 | [`w13-compiler-contract-closure-slice`](../../spec/changelog/v20.1.md#w13-compiler-contract-closure-slice) | W13 Compiler-Contract Closure Slice |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 51 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 64 | 2 | [`planned-closure-work`](../../spec/changelog/v20.1.md#planned-closure-work) | Planned Closure Work |

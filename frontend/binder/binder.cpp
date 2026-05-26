@@ -335,6 +335,21 @@ private:
       declare_binding(scope_index, string_value(item, "name"), "constant",
                       "mixin", item.span, false, "",
                       DuplicatePolicy::ReopenSameRole);
+      return;
+    }
+    if (item.kind == "AstExprStmt" &&
+        graph_.scopes[scope_index].kind == "module") {
+      const ast::Expr *expr = node_field(item, "expr");
+      const ast::Expr *left = expr != nullptr && expr->kind == "AstAssign"
+                                  ? node_field(*expr, "left")
+                                  : nullptr;
+      if (left != nullptr && left->kind == "AstName") {
+        const std::string name = string_value(*left, "name");
+        if (name != "_") {
+          declare_binding(scope_index, name, "local", "module_cell", left->span,
+                          false);
+        }
+      }
     }
   }
 

@@ -1,11 +1,17 @@
 schema: amber.runtime_errors.registry.v1
 spec_anchor: amber_spec_consolidated_v20_1_main.md
 errors:
+  - NameError
+  - ArgumentError
   - MatchError
   - TypeError
   - NoMethodError
   - ImportError
   - ModuleInitError
+  - EmptyCollectionError
+  - IndexError
+  - KeyError
+  - ZeroDivisionError
   - IsolationError
   - DestroyedAccessError
   - UseAfterFreeError
