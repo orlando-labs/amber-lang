@@ -37,6 +37,7 @@ tokens:
     - PERCENT
     - EQUAL
     - EQUAL_EQUAL
+    - EQUAL_EQUAL_EQUAL
     - BANG_EQUAL
     - LESS
     - LESS_EQUAL

@@ -36,6 +36,8 @@ build/amberc native-verify corpus/bc/module/basic/source.am
 build/amberc bc corpus/bc/module/basic/source.am
 build/amberc bc-disasm corpus/bc/disasm/basic/source.am
 build/amberc build tests/fixtures/w14_build/amber.build.json --out-dir build/w14_build/out --cache-dir build/w14_build/cache
+build/amberc metadata /path/to/module.amberbc --json
+build/amberc verify /path/to/module.amberbc --json
 build/amberc amberbc-dump /path/to/module.amberbc
 build/amberc amberbc-verify /path/to/module.amberbc
 build/amberc amberbc-disasm /path/to/module.amberbc
@@ -61,13 +63,13 @@ Current matrix status:
 | `W5.4` | done | public heap object headers, shape descriptors, slot-backed instance ivars, stable shape transitions, dead-shape guards, runtime owner method-table descriptors, and method-table observability for class/instance dispatch |
 | `W6.1` | done | runtime heap allocator boundary, per-worker arena stats, object header allocation metadata, remote-free queues with owner-drain semantics, and VM allocation paths for instances, collections, maps, and closures |
 | `W6.2` | done | lifecycle state machine, `destroy!` dispatch, `OBJ_DESTROY` / `OBJ_DEALLOC`, tombstone header rewrite, payload clearing for instances/collections/closures, and destroyed/deallocated access guards |
-| `W6.3` | done | non-moving GC boundary, object generations, root scanning, write barriers, remembered sets, safepoint-triggered collection, logical reclaim of unrooted cycles, and parallel GC smoke coverage |
-| `W6.4` | done | `PinToken` registry, active pin GC roots, stale-unpin guards, nested pin scopes, opaque native handles, pinned value-buffer views, native wait cancellation poll hooks, and pinned-object lifecycle guards |
+| `W6.3` | done | non-moving GC boundary, object generations, root scanning, write barriers, remembered sets, safepoint-triggered collection, caller/back-edge safepoint roots, rooted/unrooted local and shared cycles, and parallel GC smoke coverage |
+| `W6.4` | done | `PinToken` registry, active pin GC roots, stale-unpin guards, nested pin scopes, exception-unwind release, opaque native handles, pinned value-buffer views, native wait cancellation poll hooks, and pinned-object lifecycle guards |
 | `W7.1` | done | scheduler core with bounded worker pool, strand TLS scopes, runnable global/local queues, timer wake queue, explicit wake coalescing, and parallel strand smoke coverage |
 | `W7.2` | done | task lifecycle runtime with task TLS, join/rethrow, join timeouts without auto-cancel, cooperative cancellation safepoints, waiting parent scope exit, structured child sets, and first-failure sibling cancellation |
 | `W7.3` | done | concurrency runtime primitives with rendezvous/buffered `RuntimeChannel`, FIFO send/recv wait queues, explicit close and `ChannelClosedError`, shareability-gated payloads, non-reentrant `RuntimeMutex`, and seq-cst `RuntimeAtomic` |
-| `W8.1` | done | `RuntimeModuleLoader` for serialized `.amberbc`, verifier-gated module mapping, dependency linking, deterministic init order, single-run init, missing-dependency import failures, cycle-aware `ModuleInitError`, and failed-init snapshots |
-| `W8.2` | done | runtime export-cell/import-alias materialization, read-only alias readiness checks, missing-export `ImportError`, dependency format/language/ABI compatibility diagnostics, re-export chain resolution, and source-mapped loader diagnostics for init faults |
+| `W8.1` | done | `RuntimeModuleLoader` for serialized `.amberbc`, verifier-gated module mapping, dependency linking, deterministic init order, single-run init, missing-dependency import failures, cycle-aware `ModuleInitError`, failed-init snapshots, and sticky failed-init retry behavior |
+| `W8.2` | done | runtime export-cell/import-alias materialization, live alias readiness/failure snapshots, read-only alias readiness checks, missing-export `ImportError`, dependency format/language/ABI compatibility diagnostics, re-export chain resolution, and source-mapped loader diagnostics for init faults |
 | `W8.3` | done | runtime collections contract for sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, `EmptyCollectionError` reduce guard, and deterministic `Map` keys/values/entries/map/select/reject/transform_values/each |
 | `W8.4` | done | deterministic full conformance runner for `parse/lower/check/compile/disasm/run/load`, M1-M5 gate bundles, failure rendering, and CI one-command `make conformance` |
 | `W9.1` | done | optional Amber/Typed checker lane with `TypeTerm` parsing/canonicalization, exported callable annotation boundaries, parameter/default/return diagnostics, basic truthiness flow for `and`/`or`, strict `case!` exhaustiveness checks, runtime type-hook metadata, `amberc typed`, and M6 typed corpus |
@@ -78,7 +80,7 @@ Current matrix status:
 | `W10.1` | done | advanced concurrency runtime with explicit `RuntimeMoveSlot` ownership transfer for channel/select boundaries, moved-from `MovedValueError` guards, fair-ish `runtime_select` recv/send arms with timeout/else behavior, and structured-task supervisor policies `cancel_scope`, `one_for_one`, `one_for_all`, and `rest_for_one` |
 | `W10.2` | done | `amber.io` awaitable/readiness runtime bridge with `RuntimeAwaitable`, awaitable-compatible `runtime_select` arms, timeout/failure/cancellation states, and native wait integration through active W6.4 pin tokens |
 | `W10.3` | done | `amber.mir.v1` optimizer IR with HIR-to-MIR lowering, SSA value/block validation, deterministic JSON/text dumps, `mir`/`mir-dump`/`mir-verify` CLI, and pass harness phase/invalidation checks |
-| `W10.4` | done | `amber.native.v1` native/JIT metadata backend over MIR+bytecode with frozen-world assumptions, runtime call stubs, JIT patchpoint descriptors, root/exception/safepoint maps, `native`/`native-dump`/`native-verify` CLI, and frozen runtime trampoline execution with stale-assumption bytecode fallback |
+| `W10.4` | done | `amber.native.v1` native/JIT metadata backend over MIR+bytecode with frozen-world assumptions, runtime call stubs, JIT patchpoint descriptors, allocation/call/back-edge root maps, exception/safepoint maps, `native`/`native-dump`/`native-verify` CLI, and frozen runtime trampoline execution with stale-assumption bytecode fallback |
 | `W10.5` | done | `amber.image.v1` frozen image builder with reproducible `.amberimg` artifacts over signed `.amberpkg` payloads, embedded native metadata summaries, freeze-analysis verification, `image-build`/`image-inspect`/`image-verify` CLI, and runtime load that installs the frozen-world/reload barrier |
 | `W11.1` | done | `amber.capabilities.v1` manifest/profile baseline with `[capabilities]` parsing, canonical capability taxonomy and alias normalization, `CAPS` bytecode metadata, package/image propagation, host grant resolution, `CapabilityError` runtime checks, and `capabilities-check` CLI |
 | `W11.2` | done | `amber.effects.v1` callable effect rows with `!{...}` parser/binder/HIR preservation, typed/effects summaries and subset diagnostics, `EFCT` bytecode metadata, package/image/reload propagation, `EffectViolationError` runtime checks, and `effects-check` CLI |
@@ -165,6 +167,10 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   deterministic `.amberbc` emission into an output directory, cache-keyed
   incremental rebuilds, B2 stdlib bootstrap metadata, stdlib ABI dependency
   pinning, and required/optional/forbidden profile feature metadata in `PROF`;
+- `amberc metadata <file.amberbc> --json` and
+  `amberc verify <file.amberbc> --json` as the public `.amberbc` artifact
+  inspection/verification surface, with structured verifier JSON for corrupted
+  bytecode files;
 - `make spec-sync-check` for the W12 documentation/spec-sync gate, validating
   the generated [anchor map](docs/engineering/spec-anchor-map-v1.md), local
   Markdown links, the [v20.1 changelog](spec/changelog/v20.1.md),
@@ -179,7 +185,7 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
 - `amber.bc.v1` typed schema, canonical `.amberbc` serializer/deserializer, structural verifier skeleton, JSON dump, and deterministic text disassembly for the current bytecode subset;
 - `amberc bc <file>` and `amberc bc-disasm <file>` HIR-to-bytecode emitter path for current supported methods/classes/control-flow subset, including clause-method metadata in `BcMethod.clause_table` with dedicated emitted clause pattern probe code, `default_thunk_ids[]`, `type_hook_ids[]` metadata for annotated parameter/return boundaries, `PATS` binding descriptors, matcher-expression and dynamic-matcher bridge lowering for `case`, static pattern-opcode lowering for block-param prologues and pattern assignment, and path-based `CLAS` descriptors for class/mixin owners with preserved superclass/include/extend metadata;
 - `runtime/vm` execution baseline for verified `BcCode` in unit tests: frame stack, register file, `last_result`, branches, direct entry, closure capture materialization, closure `CALL`, constructor `CALL`, eager clause-table method dispatch, scalar and collection `SEND` / `SEND_DYN`, `RAISE` / handler-table unwinding, inline matcher execution without AST-walk fallback, slot-backed instance shapes, stable runtime method tables, W6.1 heap allocation boundary for objects/arrays/closures, W6.2 lifecycle tombstones, W6.3 non-moving GC boundary, W6.4 pinning/native-handle boundary, W9.2 atomic open-world transactions/freeze guards, W9.3 immutable reflection mirror snapshots, W9.5 atomic package hot-reload swaps, W10.1 advanced concurrency primitives, and W10.2 awaitable readiness bridge;
-- `runtime/vm` W6.1-W6.4 memory baseline with `RuntimeHeap`, worker scopes, per-worker arena counters, object allocation ids, remote-free enqueue/drain semantics, safepoint drain hooks, allocation-heavy smoke coverage, lifecycle state transitions, tombstone payload release, destroyed/deallocated access guards, object generations, root scanning, write barriers, remembered sets, logical reclaim of unrooted cycles, parallel GC smoke coverage, active pin roots, stale-unpin guards, nested pin scopes, opaque handles, pinned value-buffer views, native wait cancellation polling, and pinned-object lifecycle guards;
+- `runtime/vm` W6.1-W6.4 memory baseline with `RuntimeHeap`, worker scopes, per-worker arena counters, object allocation ids, remote-free enqueue/drain semantics, safepoint drain hooks, allocation-heavy smoke coverage, lifecycle state transitions, tombstone payload release, destroyed/deallocated access guards, object generations, root scanning, write barriers, remembered sets, caller/back-edge safepoint roots, rooted/unrooted local and shared cycles, parallel GC smoke coverage, active pin roots, stale-unpin guards, nested pin scopes, exception-unwind release, opaque handles, pinned value-buffer views, native wait cancellation polling, and pinned-object lifecycle guards;
 - `runtime/vm` W7.1 scheduler core with `RuntimeScheduler`, `RuntimeStrandScope`, current strand/worker TLS introspection, runnable global/local queues, timer-backed sleeping strands, explicit wake coalescing, deterministic idle waits, and parallel strand smoke coverage;
 - `runtime/vm` W7.2 task runtime with `spawn_task`, task TLS/cancellation polling, `join_task` failure propagation and timeout results, cooperative cancellation safepoints, waiting scope-exit parents, structured child snapshots, first-failure propagation, and sibling cancellation coverage;
 - `runtime/vm` W7.3 concurrency base with `RuntimeChannel` rendezvous/buffered modes, FIFO blocking send/recv queues, explicit `close()`, `ChannelClosedError`, timeout/cancellation-aware blocking results, recursive shareability checks for channel payloads, non-reentrant `RuntimeMutex`, and seq-cst `RuntimeAtomic`;
@@ -192,9 +198,10 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
 - `optimizer/native` W10.4 native/JIT readiness layer with one
   `NativeCodeObject` per `BcCode`, bytecode-trampoline machine-code payloads,
   reflective slow stubs for dynamic dispatch/type/pattern hooks, call/ivar IC
-  patchpoint descriptors, root/exception/safepoint maps, and recorded
-  world-epoch/method-table assumptions, plus `runtime/native_bridge` frozen
-  execution and stale-assumption bytecode re-entry;
+  patchpoint descriptors, allocation/call/back-edge root maps,
+  exception/safepoint maps, and recorded world-epoch/method-table assumptions,
+  plus `runtime/native_bridge` frozen execution, native trampoline heap-root
+  preservation, and stale-assumption bytecode re-entry;
 - `frozen/image` and `runtime/frozen_image` W10.5 frozen-image path with
   deterministic `.amberimg` serialization, package/native digest checks,
   bytecode/native verification, explicit freeze-analysis records, runtime
@@ -225,7 +232,7 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   provenance, contracts/properties, privacy lineage, durable workflow history,
   and runtime mirror/validation exposure;
 - `runtime/vm` W8.3 collections contract with closure-block execution for eager sequence `each/map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, deterministic `EmptyCollectionError` for empty `reduce` without init, and ordered `Map#keys/#values/#entries/#map/#select/#reject/#transform_values/#each`;
-- `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
+- `runtime/module_loader` W8.1-W8.2 dependency loader with serialized `.amberbc` decode/verify on every load path, deterministic dependency linking, dependency-before-dependent module init, single-run init snapshots, sticky failed-init/cyclic-init retries, missing dependency/export `ImportError`, cycle-aware `ModuleInitError`, live export-cell/import-alias snapshots, read-only alias readiness checks, dependency ABI/version diagnostics, re-export chain resolution, and source-mapped VM fault propagation for failed module init;
 - `runtime/module_loader` W14 profile gate for `PROF` required/optional/forbidden
   features, rejecting unsupported required host profiles before module init with
   `UnsupportedProfileError`;

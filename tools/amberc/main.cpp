@@ -59,6 +59,8 @@ void usage(std::ostream &out) {
   out << "  amberc bc-disasm <file>\n";
   out << "  amberc build <amber.build.json> [--out-dir <dir>] "
          "[--cache-dir <dir>] [--no-cache]\n";
+  out << "  amberc metadata <file.amberbc> --json\n";
+  out << "  amberc verify <file.amberbc> --json\n";
   out << "  amberc amberbc-dump <file>\n";
   out << "  amberc amberbc-verify <file>\n";
   out << "  amberc amberbc-disasm <file>\n";
@@ -1104,6 +1106,41 @@ int run_image_command(int argc, char **argv) {
   return 2;
 }
 
+int run_bytecode_artifact_command(const std::string &command,
+                                  const std::string &path,
+                                  bool structured_decode_errors) {
+  const std::string binary = read_file(path);
+  const std::vector<std::uint8_t> bytes(binary.begin(), binary.end());
+  amber::bytecode::DecodeResult decode_result =
+      amber::bytecode::deserialize_module(bytes);
+  if (!decode_result.ok()) {
+    const std::string errors =
+        amber::bytecode::verify_errors_to_json(decode_result.errors);
+    if (structured_decode_errors) {
+      std::cout << errors;
+    } else {
+      std::cerr << errors;
+    }
+    return 1;
+  }
+
+  if (command == "verify" || command == "amberbc-verify") {
+    std::cout << amber::bytecode::verify_errors_to_json({});
+    return 0;
+  }
+
+  const std::string artifact_hash = amber::lexer::sha256_hex(binary);
+  if (command == "amberbc-disasm") {
+    std::cout << amber::bytecode::module_to_disasm(
+        decode_result.module, decode_result.sections, artifact_hash);
+    return 0;
+  }
+
+  std::cout << amber::bytecode::module_to_json(
+      decode_result.module, decode_result.sections, artifact_hash);
+  return 0;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1142,6 +1179,14 @@ int main(int argc, char **argv) {
     }
     if (argc >= 2 && std::string(argv[1]).find("image-") == 0U) {
       return run_image_command(argc, argv);
+    }
+    if (argc >= 2 && (std::string(argv[1]) == "metadata" ||
+                      std::string(argv[1]) == "verify")) {
+      if (argc != 4 || std::string(argv[3]) != "--json") {
+        usage(std::cerr);
+        return 2;
+      }
+      return run_bytecode_artifact_command(argv[1], argv[2], true);
     }
     if (argc >= 2 && std::string(argv[1]) == "explain") {
       if (argc != 5 || std::string(argv[3]) != "--span") {
@@ -1202,28 +1247,7 @@ int main(int argc, char **argv) {
     const std::string command = argv[1];
     if (command == "amberbc-dump" || command == "amberbc-verify" ||
         command == "amberbc-disasm") {
-      const std::string binary = read_file(path);
-      const std::vector<std::uint8_t> bytes(binary.begin(), binary.end());
-      amber::bytecode::DecodeResult decode_result =
-          amber::bytecode::deserialize_module(bytes);
-      if (!decode_result.ok()) {
-        std::cerr << amber::bytecode::verify_errors_to_json(
-            decode_result.errors);
-        return 1;
-      }
-      if (command == "amberbc-verify") {
-        std::cout << amber::bytecode::verify_errors_to_json({});
-        return 0;
-      }
-      const std::string artifact_hash = amber::lexer::sha256_hex(binary);
-      if (command == "amberbc-disasm") {
-        std::cout << amber::bytecode::module_to_disasm(
-            decode_result.module, decode_result.sections, artifact_hash);
-        return 0;
-      }
-      std::cout << amber::bytecode::module_to_json(
-          decode_result.module, decode_result.sections, artifact_hash);
-      return 0;
+      return run_bytecode_artifact_command(command, path, false);
     }
 
     const std::string source = read_file(path);

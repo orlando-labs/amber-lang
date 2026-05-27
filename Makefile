@@ -30,6 +30,8 @@ FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BIND
 CORE_SRCS := $(PROFILE_SRCS) $(BUILD_SRCS) $(FRONTEND_SRCS) $(MIR_SRCS) $(NATIVE_SRCS) $(BYTECODE_SRCS)
 AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS) $(PACKAGE_SRCS) $(FROZEN_SRCS)
 AMBERTEST_SRCS := tools/ambertest/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
+IAMBER_SRCS := tools/iamber/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
+IAMBER_LDLIBS ?= -lncurses
 LEXER_TEST_SRCS := tests/lexer_tests.cpp $(LEXER_SRCS)
 PARSER_TEST_SRCS := tests/parser_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
 BINDER_TEST_SRCS := tests/binder_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
@@ -99,6 +101,7 @@ FORMAT_FILES := \
 	package/package.cpp \
 	package/package.h \
 	tools/amberc/main.cpp \
+	tools/iamber/main.cpp \
 	tools/ambertest/main.cpp \
 	tests/lexer_tests.cpp \
 	tests/parser_tests.cpp \
@@ -121,7 +124,7 @@ FORMAT_FILES := \
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -132,6 +135,9 @@ $(BUILD_DIR)/amberc: $(AMBERC_SRCS) | $(BUILD_DIR)/.dir
 
 $(BUILD_DIR)/ambertest: $(AMBERTEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(AMBERTEST_SRCS) $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/iamber: $(IAMBER_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(IAMBER_SRCS) $(LDFLAGS) $(IAMBER_LDLIBS) -o $@
 
 $(BUILD_DIR)/lexer_tests: $(LEXER_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LEXER_TEST_SRCS) $(LDFLAGS) -o $@
@@ -202,6 +208,12 @@ test: build
 	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-first.json
 	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-second.json
 	$(BUILD_DIR)/amberc amberbc-verify $(BUILD_DIR)/w14_build/out/demo.main.amberbc > $(BUILD_DIR)/w14-main.verify.json
+	$(BUILD_DIR)/amberc metadata $(BUILD_DIR)/w14_build/out/demo.main.amberbc --json > $(BUILD_DIR)/w14-main.metadata.json
+	$(BUILD_DIR)/amberc verify $(BUILD_DIR)/w14_build/out/demo.main.amberbc --json > $(BUILD_DIR)/w14-main.public-verify.json
+	! $(BUILD_DIR)/amberc verify tests/fixtures/bad.amberbc --json > $(BUILD_DIR)/bad.public-verify.json
+	grep -q '"schema": "amber.bc.v1"' $(BUILD_DIR)/w14-main.metadata.json
+	grep -q '"schema": "amber.bc.verify.v1"' $(BUILD_DIR)/w14-main.public-verify.json
+	grep -q '"code":"BC1002"' $(BUILD_DIR)/bad.public-verify.json
 	$(BUILD_DIR)/amberc amberbc-disasm $(BUILD_DIR)/w14_build/out/demo.main.amberbc > $(BUILD_DIR)/w14-main.disasm.txt
 	$(BUILD_DIR)/ambertest run corpus
 

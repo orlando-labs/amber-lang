@@ -1063,6 +1063,28 @@ private:
   }
 
   std::unique_ptr<Node> lower_expr(const ast::Expr &expr) {
+    if (expr.kind == "AstInterpolatedString") {
+      auto node = make_node("HInterpolatedString", expr.span);
+      std::vector<std::unique_ptr<Node>> parts;
+      if (const ast::ListField *list = list_field(expr, "parts")) {
+        for (const std::unique_ptr<ast::Expr> &part : list->values) {
+          if (part->kind == "AstInterpolationLiteral") {
+            auto lowered = make_node("HInterpolationLiteral", part->span);
+            lowered->string_field("token", string_value(*part, "token"));
+            lowered->string_field("value", string_value(*part, "value"));
+            parts.push_back(std::move(lowered));
+          } else if (part->kind == "AstInterpolationExpr") {
+            auto lowered = make_node("HInterpolationExpr", part->span);
+            if (const ast::Expr *inner = node_field(*part, "expr")) {
+              lowered->node_field("expr", lower_expr(*inner));
+            }
+            parts.push_back(std::move(lowered));
+          }
+        }
+      }
+      node->list_field("parts", std::move(parts));
+      return node;
+    }
     if (expr.kind == "AstLiteral") {
       auto node = make_node("HConst", expr.span);
       node->string_field("token", string_value(expr, "token"));

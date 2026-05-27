@@ -2,7 +2,7 @@
 
 Status: `W8.1` dependency linking/module-init and `W8.2` export/import
 diagnostics are implemented, with `W8.4` load conformance coverage through
-`ambertest`.
+`ambertest` and focused post-W15 export-cell cycle regression tests.
 
 The loader consumes serialized `.amberbc` bytes, routes every load through the
 bytecode verifier, links the `DEPS` graph by logical module id supplied by the
@@ -26,6 +26,8 @@ Implemented surface:
   `add_import_alias(module, local, dependency, export)`;
 - alias readiness checks through `read_import_alias(...)`, producing
   `ModuleInitError` for early reads of uninitialized exports;
+- live import-alias snapshots that observe export-cell transitions from
+  uninitialized to ready or failed;
 - missing export reporting as `ImportError`;
 - dependency bytecode format, language-version, and ABI-hash compatibility
   diagnostics at link time;
@@ -34,6 +36,8 @@ Implemented surface:
   identity and source locations when VM init faults include `SPAN` / `LINE`;
 - cycle-aware init failure as `ModuleInitError`;
 - VM init failure propagation into failed module snapshots;
+- sticky failed-init and cyclic-init state across repeated load/init attempts,
+  with failed export cells retaining the original loader error;
 - conformance `load` fixtures compile source, serialize to `.amberbc`, map the
   bytes through `RuntimeModuleLoader`, and assert deterministic init/module
   snapshots.

@@ -56,6 +56,7 @@ enum class TokenKind {
   Percent,
   Equal,
   EqualEqual,
+  EqualEqualEqual,
   BangEqual,
   Less,
   LessEqual,

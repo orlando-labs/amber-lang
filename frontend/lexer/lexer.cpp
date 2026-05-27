@@ -171,7 +171,11 @@ LexResult Lexer::lex() {
       break;
     case '=':
       advance();
-      if (!at_end() && current() == '=') {
+      if (!at_end() && current() == '=' && peek() == '=') {
+        advance();
+        advance();
+        emit(TokenKind::EqualEqualEqual, start, "===");
+      } else if (!at_end() && current() == '=') {
         advance();
         emit(TokenKind::EqualEqual, start, "==");
       } else {
@@ -564,10 +568,9 @@ void Lexer::lex_string(char quote) {
   bool closed = false;
   while (!at_end()) {
     if (current() == '\\') {
+      const Position escape_start = position();
       advance();
-      if (!at_end()) {
-        advance();
-      }
+      validate_string_escape(escape_start, quote);
       continue;
     }
     if (current() == quote) {
@@ -587,6 +590,85 @@ void Lexer::lex_string(char quote) {
   const std::string text =
       source_.substr(start.offset, position().offset - start.offset);
   emit(TokenKind::String, start, text);
+}
+
+bool Lexer::validate_string_escape(Position escape_start, char quote) {
+  if (at_end()) {
+    error(escape_start, "unterminated escape sequence in string literal");
+    return false;
+  }
+  if (at_line_break()) {
+    error(escape_start, "unterminated escape sequence in string literal");
+    return false;
+  }
+
+  const char escaped = current();
+  switch (escaped) {
+  case 'n':
+  case 'r':
+  case 't':
+  case '\\':
+  case '"':
+  case '#':
+    advance();
+    return true;
+  case '\'':
+    if (quote == '\'') {
+      advance();
+      return true;
+    }
+    break;
+  case 'u': {
+    advance();
+    if (at_end() || current() != '{') {
+      error(escape_start, "unicode escape must use \\u{HEX}");
+      return false;
+    }
+    advance();
+    std::uint32_t codepoint = 0;
+    int digits = 0;
+    while (!at_end() && current() != '}') {
+      const char c = current();
+      if (!is_hex_digit(c)) {
+        error(position(), "unicode escape contains a non-hex digit");
+        advance();
+        continue;
+      }
+      std::uint32_t digit = 0;
+      if (c >= '0' && c <= '9') {
+        digit = static_cast<std::uint32_t>(c - '0');
+      } else if (c >= 'a' && c <= 'f') {
+        digit = static_cast<std::uint32_t>(c - 'a' + 10);
+      } else {
+        digit = static_cast<std::uint32_t>(c - 'A' + 10);
+      }
+      codepoint = (codepoint << 4U) | digit;
+      ++digits;
+      advance();
+    }
+    if (at_end() || current() != '}') {
+      error(escape_start, "unicode escape must end with '}'");
+      return false;
+    }
+    advance();
+    if (digits == 0 || digits > 6) {
+      error(escape_start, "unicode escape must contain 1 to 6 hex digits");
+      return false;
+    }
+    if (codepoint > 0x10FFFFU ||
+        (codepoint >= 0xD800U && codepoint <= 0xDFFFU)) {
+      error(escape_start, "unicode escape codepoint is invalid");
+      return false;
+    }
+    return true;
+  }
+  default:
+    break;
+  }
+
+  error(escape_start, "invalid escape sequence in string literal");
+  advance();
+  return false;
 }
 
 void Lexer::consume_comment() {
@@ -681,6 +763,11 @@ bool Lexer::is_identifier_part(std::uint32_t codepoint) {
 }
 
 bool Lexer::is_digit(char c) { return c >= '0' && c <= '9'; }
+
+bool Lexer::is_hex_digit(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+         (c >= 'A' && c <= 'F');
+}
 
 bool Lexer::is_keyword_text(const std::string &text, TokenKind *kind) {
   static const std::unordered_map<std::string_view, TokenKind> keywords = {

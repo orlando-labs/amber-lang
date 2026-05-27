@@ -151,6 +151,29 @@ bool has_root_map_for_ip(const amber::native::NativeCodeObject &code,
   return false;
 }
 
+bool has_safepoint_kind(const amber::native::NativeCodeObject &code,
+                        const std::string &kind) {
+  for (const amber::native::NativeSafepointMap &safepoint :
+       code.safepoint_maps) {
+    if (safepoint.kind == kind) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool safepoint_kind_has_root_map(const amber::native::NativeCodeObject &code,
+                                 const std::string &kind) {
+  for (const amber::native::NativeSafepointMap &safepoint :
+       code.safepoint_maps) {
+    if (safepoint.kind == kind &&
+        has_root_map_for_ip(code, safepoint.ip_offset)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool has_native_diagnostic(const amber::native::NativeValidationResult &result,
                            const std::string &code) {
   for (const amber::native::NativeDiagnostic &diagnostic : result.diagnostics) {
@@ -243,6 +266,150 @@ void test_exception_edges_have_native_root_and_slowpath_metadata() {
          "exception handler pc has a native root map");
 }
 
+void test_native_root_maps_cover_gc_boundary_kinds() {
+  amber::bytecode::BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+
+  amber::bytecode::Constant one;
+  one.kind = amber::bytecode::ConstantKind::Integer;
+  one.int_value = 1;
+  module.const_pool.push_back(one);
+
+  amber::bytecode::BcCode code;
+  code.code_id = 1;
+  code.kind = amber::bytecode::CodeKind::Method;
+  code.reg_count = 5;
+  code.instructions.push_back(
+      {amber::bytecode::Opcode::LoadK, {{0, false}, {0, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::MakeList,
+                               {{1, false}, {0, false}, {1, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::MakeClosure,
+                               {{2, false}, {2, false}, {0, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::Call,
+                               {{3, false},
+                                {2, false},
+                                {0, false},
+                                {0, false},
+                                {-1, true},
+                                {0, false}}});
+  code.instructions.push_back(
+      {amber::bytecode::Opcode::LoadBool, {{4, false}, {1, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::Safepoint, {}});
+  code.instructions.push_back(
+      {amber::bytecode::Opcode::JumpIfFalse, {{4, false}, {9, false}}});
+  code.instructions.push_back(
+      {amber::bytecode::Opcode::LoadBool, {{4, false}, {0, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::Jump, {{5, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::Return, {{1, false}}});
+  code.safepoint_table.push_back({5, 0});
+
+  amber::bytecode::BcCode callee;
+  callee.code_id = 2;
+  callee.kind = amber::bytecode::CodeKind::Block;
+  callee.reg_count = 1;
+  callee.instructions.push_back(
+      {amber::bytecode::Opcode::LoadK, {{0, false}, {0, false}}});
+  callee.instructions.push_back(
+      {amber::bytecode::Opcode::Return, {{0, false}}});
+  module.code_objects = {code, callee};
+
+  amber::mir::Module mir_module;
+  mir_module.module_name = "native.boundaries";
+  const amber::native::NativeModule native_module =
+      amber::native::compile_native_module(module, mir_module);
+  const amber::native::NativeValidationResult validation =
+      amber::native::validate_native_module(native_module, &module);
+  expect(validation.ok(),
+         amber::native::diagnostics_to_json(validation.diagnostics));
+
+  const amber::native::NativeCodeObject *native_code =
+      native_code_for_bc(native_module, 1);
+  expect(native_code != nullptr, "boundary native code object exists");
+  expect(has_safepoint_kind(*native_code, "allocation"),
+         "native metadata records allocation safepoint");
+  expect(has_safepoint_kind(*native_code, "call"),
+         "native metadata records call safepoint");
+  expect(has_safepoint_kind(*native_code, "backedge"),
+         "native metadata records backedge safepoint");
+  expect(safepoint_kind_has_root_map(*native_code, "allocation"),
+         "allocation safepoint should have a root map");
+  expect(safepoint_kind_has_root_map(*native_code, "call"),
+         "call safepoint should have a root map");
+  expect(safepoint_kind_has_root_map(*native_code, "backedge"),
+         "backedge safepoint should have a root map");
+}
+
+void test_native_trampoline_safepoint_preserves_heap_argument_root() {
+  amber::bytecode::BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+
+  amber::bytecode::Constant one;
+  one.kind = amber::bytecode::ConstantKind::Integer;
+  one.int_value = 1;
+  module.const_pool.push_back(one);
+
+  amber::bytecode::BcCode identity;
+  identity.code_id = 1;
+  identity.kind = amber::bytecode::CodeKind::Method;
+  identity.reg_count = 1;
+  identity.instructions.push_back({amber::bytecode::Opcode::Safepoint, {}});
+  identity.instructions.push_back(
+      {amber::bytecode::Opcode::Return, {{0, false}}});
+  identity.safepoint_table.push_back({0, 0});
+
+  amber::bytecode::BcCode make_list;
+  make_list.code_id = 2;
+  make_list.kind = amber::bytecode::CodeKind::Method;
+  make_list.reg_count = 2;
+  make_list.instructions.push_back(
+      {amber::bytecode::Opcode::LoadK, {{0, false}, {0, false}}});
+  make_list.instructions.push_back({amber::bytecode::Opcode::MakeList,
+                                    {{1, false}, {0, false}, {1, false}}});
+  make_list.instructions.push_back(
+      {amber::bytecode::Opcode::Return, {{1, false}}});
+  module.code_objects = {identity, make_list};
+
+  amber::mir::Module mir_module;
+  mir_module.module_name = "native.trampoline_roots";
+  const amber::native::NativeModule native_module =
+      amber::native::compile_native_module(module, mir_module);
+  const amber::native::NativeValidationResult validation =
+      amber::native::validate_native_module(native_module, &module);
+  expect(validation.ok(),
+         amber::native::diagnostics_to_json(validation.diagnostics));
+  const amber::native::NativeCodeObject *native_code =
+      native_code_for_bc(native_module, 1);
+  expect(native_code != nullptr, "trampoline root native code object exists");
+
+  amber::runtime::RuntimeWorld world(module);
+  amber::runtime::ExecutionResult made = world.execute(2);
+  expect(made.ok() && made.value.is_list(),
+         "trampoline root probe should allocate a world list");
+  const std::shared_ptr<amber::runtime::ListValue> list = made.value.as_list();
+
+  expect(world.freeze_world().ok(), "trampoline root world should freeze");
+  const amber::native::NativeModule bound =
+      amber::runtime::bind_native_module_to_world(native_module,
+                                                  world.world_mirror());
+  world.request_garbage_collection(amber::runtime::RuntimeGcCycle::Full);
+  const amber::runtime::ExecutionResult result =
+      amber::runtime::execute_native_code(world, bound, native_code->native_id,
+                                          {made.value});
+  expect(result.ok(), "native trampoline safepoint should execute");
+  expect(result.value.is_list() && result.value.as_list() == list,
+         "native trampoline should return original heap argument");
+  expect(list->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "native trampoline safepoint should preserve argument root");
+  const amber::runtime::RuntimeHeapStats stats = world.heap_stats();
+  expect(stats.gc_safepoint_collections == 1,
+         "native trampoline safepoint should run requested GC");
+  expect(stats.gc_reclaimed_objects == 0,
+         "native trampoline safepoint should not reclaim argument root");
+}
+
 void test_native_validation_rejects_missing_slowpath_metadata() {
   const CompiledArtifacts artifacts = compile_ok("def add(x, y):\n"
                                                  "  x + y\n");
@@ -331,6 +498,8 @@ int main() {
   test_native_metadata_preserves_call_and_root_maps();
   test_reflective_send_dyn_uses_slow_stub_metadata();
   test_exception_edges_have_native_root_and_slowpath_metadata();
+  test_native_root_maps_cover_gc_boundary_kinds();
+  test_native_trampoline_safepoint_preserves_heap_argument_root();
   test_native_validation_rejects_missing_slowpath_metadata();
   test_native_trampoline_requires_frozen_world_and_executes();
   test_stale_native_assumption_can_fall_back_to_bytecode();

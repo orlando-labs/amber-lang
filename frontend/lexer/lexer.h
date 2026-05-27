@@ -43,6 +43,7 @@ private:
   void lex_identifier_or_keyword();
   void lex_number();
   void lex_string(char quote);
+  bool validate_string_escape(Position escape_start, char quote);
   void consume_comment();
 
   bool is_identifier_start_at(std::size_t offset) const;
@@ -53,6 +54,7 @@ private:
   static bool is_identifier_start(std::uint32_t codepoint);
   static bool is_identifier_part(std::uint32_t codepoint);
   static bool is_digit(char c);
+  static bool is_hex_digit(char c);
   static bool is_keyword_text(const std::string &text, TokenKind *kind);
   static bool is_placeholder_text(const std::string &text);
 

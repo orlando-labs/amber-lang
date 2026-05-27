@@ -203,12 +203,16 @@ std::string canonical_phase(const std::string &phase) {
   if (phase == "disasm") {
     return "bc-disasm";
   }
+  if (phase == "lex-diag") {
+    return "lex-diag";
+  }
   return phase;
 }
 
 int phase_bundle_level(const std::string &phase) {
   const std::string canonical = canonical_phase(phase);
-  if (canonical == "lex" || canonical == "parse-expr" || canonical == "parse" ||
+  if (canonical == "lex" || canonical == "lex-diag" ||
+      canonical == "parse-expr" || canonical == "parse" ||
       canonical == "bind" || canonical == "bind-diag" || canonical == "hir" ||
       canonical == "check") {
     return 1;
@@ -446,6 +450,31 @@ bool run_lex_case(const TestCase &test_case) {
   const std::string expected = read_file(expect_path);
   if (actual != expected) {
     print_mismatch(test_case, "token dump", expected, actual);
+    return false;
+  }
+  return true;
+}
+
+bool run_lex_diag_case(const TestCase &test_case) {
+  const std::string source_path =
+      join_path(test_case.directory, test_case.source);
+  const std::string expect_path =
+      join_path(test_case.directory, test_case.expect);
+  const std::string source = read_file(source_path);
+
+  amber::lexer::Lexer lexer(source, source_path);
+  amber::lexer::LexResult result = lexer.lex();
+  if (result.diagnostics.empty()) {
+    std::cerr << test_case.directory
+              << ": expected lexer diagnostics, got success\n";
+    return false;
+  }
+
+  const std::string actual =
+      amber::lexer::diagnostics_to_json(result.diagnostics);
+  const std::string expected = read_file(expect_path);
+  if (actual != expected) {
+    print_mismatch(test_case, "lexer diagnostic", expected, actual);
     return false;
   }
   return true;
@@ -1072,6 +1101,12 @@ int main(int argc, char **argv) {
       const std::string phase = canonical_phase(test_case.phase);
       if (phase == "lex") {
         if (run_lex_case(test_case)) {
+          ++passed;
+        } else {
+          ++failed;
+        }
+      } else if (phase == "lex-diag") {
+        if (run_lex_diag_case(test_case)) {
           ++passed;
         } else {
           ++failed;

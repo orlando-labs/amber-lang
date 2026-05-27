@@ -1,0 +1,17 @@
+{
+  "format": "amber.tokens.v1",
+  "source_hash": "sha256:f3eb50fcf376c0ce80cef949b1fe82855dd55416ac492343adf041784f7de808",
+  "tokens": [
+    {"kind":"KEYWORD_DEF","lexeme":"def","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":1,"col":4,"offset":3}}},
+    {"kind":"IDENTIFIER","lexeme":"escapes","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":1,"col":5,"offset":4},"end":{"line":1,"col":12,"offset":11}}},
+    {"kind":"LPAREN","lexeme":"(","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":1,"col":12,"offset":11},"end":{"line":1,"col":13,"offset":12}}},
+    {"kind":"RPAREN","lexeme":")","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":1,"col":13,"offset":12},"end":{"line":1,"col":14,"offset":13}}},
+    {"kind":"COLON","lexeme":":","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":1,"col":14,"offset":13},"end":{"line":1,"col":15,"offset":14}}},
+    {"kind":"NEWLINE","lexeme":"\n","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":1,"col":15,"offset":14},"end":{"line":2,"col":1,"offset":15}}},
+    {"kind":"INDENT","lexeme":"","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":2,"col":1,"offset":15},"end":{"line":2,"col":3,"offset":17}}},
+    {"kind":"STRING","lexeme":"\"line\\n tab\\t quote\\\" hash\\# slash\\\\ uni\\u{41}\"","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":2,"col":3,"offset":17},"end":{"line":2,"col":50,"offset":64}}},
+    {"kind":"NEWLINE","lexeme":"\n","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":2,"col":50,"offset":64},"end":{"line":3,"col":1,"offset":65}}},
+    {"kind":"DEDENT","lexeme":"","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":3,"col":1,"offset":65},"end":{"line":3,"col":1,"offset":65}}},
+    {"kind":"EOF","lexeme":"","span":{"file":"corpus/parse/lexer/string_escape_validation/source.am","start":{"line":3,"col":1,"offset":65},"end":{"line":3,"col":1,"offset":65}}}
+  ]
+}

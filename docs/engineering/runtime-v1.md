@@ -71,7 +71,8 @@ Current implemented slice:
 - runtime keyword shaping for positional/keyword method dispatch, with
   monomorphic call-cache keys guarded by selector, positional count, canonical
   keyword symbol shape, block presence, receiver class, world epoch, and method
-  version;
+  version, plus runtime cache stats for focused dispatch-cache regression
+  coverage;
 - forwarded block values for user-defined `SEND` / `SEND_DYN` / constructor
   `init` dispatch;
 - eager runtime execution of `BcMethod.clause_table[]` through emitted clause
@@ -113,11 +114,13 @@ Current implemented slice:
   records, root scanning for VM frames and runtime class cvars, write barriers
   for heap-reference writes, mature-to-young remembered sets, shared-to-confined
   isolation rejection, safepoint-triggered collection requests, unrooted cycle
-  logical reclaim, and parallel smoke coverage;
+  logical reclaim, caller/back-edge safepoint root preservation, rooted
+  local/shared cycle preservation, and parallel smoke coverage;
 - `W6.4` pinning/native boundary with public `RuntimePinToken`,
   active-pin registry roots for GC, `RuntimePinScope` nesting, stale/double
   unpin guards, `PinnedObjectError` lifecycle rejection, opaque managed handles,
-  pinned list/tuple value-buffer views, and native wait cancellation poll hooks;
+  pinned list/tuple value-buffer views, native wait cancellation poll hooks, and
+  exception-unwind pin-scope release;
 - `W7.1` worker-pool scheduler with public `RuntimeScheduler`,
   `RuntimeWorkerScope` / `RuntimeStrandScope` TLS, global and worker-local
   runnable queues, timer-backed sleeping strands, explicit wake coalescing,
@@ -192,15 +195,18 @@ Current implemented slice:
   capture/call baseline, plus emitted and dynamic send scenarios, class-side
   lookup/send, constructor call, keyword shaping, block forwarding, instance
   dispatch, unicode auto-assign, ivar/cvar load/store, multi-segment class
-  refs, cache guard miss paths, dynamic method replacement invalidation, late
-  include invalidation, object `deconstruct*` pattern protocol paths, and
+  refs, cache guard miss paths, keyword order canonicalization, block-presence
+  cache separation, keyword-call world-epoch invalidation, dynamic method
+  replacement invalidation, late include invalidation, object `deconstruct*`
+  pattern protocol paths, and
   handled/unhandled `RAISE` paths, plus W5.4 slot-shape transition stability,
   dead-shape guard, method-table descriptor coverage, W6.1 allocator stress /
   remote-free / VM allocation-path coverage, W6.2 lifecycle destroy, dealloc,
   tombstone, and dead-access coverage, W6.3 non-moving GC, barrier,
-  remembered-set, safepoint-root, and parallel smoke coverage, and W6.4 pin
-  roots, stale-unpin, nested-scope, opaque-handle, buffer-view,
-  dealloc-after-pin, native-wait-cancel, and parallel pin/unpin coverage, plus
+  remembered-set, safepoint-root, caller/back-edge root, rooted cycle, and
+  parallel smoke coverage, and W6.4 pin roots, stale-unpin, nested-scope,
+  exception-unwind release, opaque-handle, buffer-view, dealloc-after-pin,
+  native-wait-cancel, and parallel pin/unpin coverage, plus
   W7.1 worker-pool scheduler, strand TLS scope, timer wake, explicit wake
   coalescing, and parallel strand smoke coverage, and W7.2 task lifecycle,
   join/rethrow, timed join, cooperative cancellation, waiting scope-exit parent,
@@ -209,8 +215,10 @@ Current implemented slice:
   reentrancy/contention coverage, and atomic compare-and-set contention
   coverage, plus W8.1-W8.2 verifier-gated module load, missing dependency,
   dependency init order, single-run init, cycle detection, failed-init, export
-  alias, missing export, version/ABI mismatch, re-export, and source-mapped
-  loader diagnostic coverage, plus W8.3 eager sequence chaining, `reduce`
+  alias, missing export, version/ABI mismatch, re-export, source-mapped
+  loader diagnostic coverage, post-W15 live alias export-cell transitions, and
+  sticky failed-init/cyclic-init retry coverage, plus W8.3 eager sequence
+  chaining, `reduce`
   empty-error, `flat_map`, `count`, `find`, `group_by`, ordered `Map`
   projection/transform coverage, and W9.2 open-world transaction coverage for
   rollback, `WorldFrozenError`, `SuperclassMismatchError`, include-cycle
@@ -227,6 +235,7 @@ Current implemented slice:
   W10.2 awaitable coverage for select readiness/timeout/failure, scheduler wake
   after native wait completion, stale-pin failure, and cancellation finishing
   native waits, plus W10.4 native metadata/trampoline coverage for root maps,
+  allocation/call/back-edge safepoints, native trampoline argument roots,
   reflective `SEND_DYN` stubs, frozen-world execution, and stale-assumption
   bytecode fallback, plus W10.5 frozen image coverage for reproducible
   `.amberimg` build/verify, frozen runtime load, bound native execution, and

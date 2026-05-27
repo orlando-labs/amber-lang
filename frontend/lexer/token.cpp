@@ -135,6 +135,8 @@ const char *token_kind_name(TokenKind kind) {
     return "EQUAL";
   case TokenKind::EqualEqual:
     return "EQUAL_EQUAL";
+  case TokenKind::EqualEqualEqual:
+    return "EQUAL_EQUAL_EQUAL";
   case TokenKind::BangEqual:
     return "BANG_EQUAL";
   case TokenKind::Less:

@@ -972,6 +972,13 @@ struct RuntimeWorldMirror {
   std::vector<RuntimeOwnerMirror> owners;
 };
 
+struct RuntimeDispatchCacheStats {
+  std::uint64_t call_cache_entries = 0;
+  std::uint64_t call_cache_hits = 0;
+  std::uint64_t call_cache_misses = 0;
+  std::uint64_t call_cache_updates = 0;
+};
+
 struct RuntimePackageReloadDiagnostic {
   std::string error_name;
   std::string message;
@@ -1046,9 +1053,25 @@ struct Fault {
   std::string trace_text;
 };
 
+struct ExecutionLocal {
+  std::uint32_t slot = 0;
+  std::string name;
+  std::string role;
+  std::string binding_kind;
+  bool initialized = false;
+  Value value = Value::null();
+};
+
 struct ExecutionResult {
+  ExecutionResult() = default;
+  ExecutionResult(Value result_value, std::optional<Fault> result_fault,
+                  std::vector<ExecutionLocal> result_locals = {})
+      : value(std::move(result_value)), fault(std::move(result_fault)),
+        locals(std::move(result_locals)) {}
+
   Value value = Value::null();
   std::optional<Fault> fault;
+  std::vector<ExecutionLocal> locals;
 
   bool ok() const { return !fault.has_value(); }
 };
@@ -1112,6 +1135,7 @@ public:
   std::optional<RuntimeOwnerMirror>
   mixin_mirror(std::uint32_t mixin_index) const;
   RuntimeWorldMirror world_mirror() const;
+  RuntimeDispatchCacheStats dispatch_cache_stats() const;
   RuntimeHeapStats heap_stats() const;
   std::uint64_t drain_remote_frees();
   std::uint64_t drain_remote_frees(std::uint64_t worker_id);

@@ -103,6 +103,21 @@ Current limits:
   invalidation-fallback metadata checks; corpus phases are not wired yet;
 - `image-build` / `image-inspect` / `image-verify` are available through
   `amberc` and focused unit tests; corpus phases are not wired yet;
+- public `.amberbc` artifact `metadata --json` and `verify --json` commands
+  are covered by `make test` smoke checks, including structured verifier JSON
+  for a corrupted artifact;
+- keyword/callsite cache corpus coverage is focused in VM tests: duplicate
+  keyword value-read ordering, canonical keyword-shape cache hits,
+  block-presence cache misses, and keyword-call invalidation after
+  `world_epoch` changes;
+- export-cell cycle corpus coverage is focused in module-loader tests: live
+  alias snapshots across uninitialized/ready/failed export states, sticky
+  failed init, repeated cyclic init attempts, and cyclic alias failure
+  snapshots;
+- GC root-map conformance coverage is focused in VM/native tests: requested
+  safepoint GC across callee frames and loop back-edges, rooted local/shared
+  cycles, exception-unwind pin release, allocation/call/back-edge native root
+  maps, and native trampoline heap-argument rooting;
 - `capabilities-check` is available through `amberc` and focused unit tests;
   corpus profile fixtures are not wired yet;
 - `effects-check` is available through `amberc` and focused unit tests; corpus

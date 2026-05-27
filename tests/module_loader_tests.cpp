@@ -229,6 +229,20 @@ void test_loader_marks_failed_init() {
   expect(snapshot.init_runs == 0, "failed init should not count as successful");
   expect(snapshot.message.find("BoomInit") != std::string::npos,
          "failed init message should preserve VM fault");
+
+  const amber::runtime::RuntimeModuleLoadResult retried =
+      loader.initialize_module("bad.init");
+  expect(!retried.ok, "failed init should stay failed on retry");
+  expect(retried.error_name == "ModuleInitError",
+         "retry should preserve ModuleInitError");
+  expect(retried.message == initialized.message,
+         "retry should preserve original failure message");
+  const amber::runtime::RuntimeModuleSnapshot &retry_snapshot =
+      snapshot_named(retried, "bad.init");
+  expect(retry_snapshot.state == amber::runtime::RuntimeModuleState::Failed,
+         "retry should leave failed module failed");
+  expect(retry_snapshot.init_runs == 0,
+         "failed module init should not rerun on retry");
 }
 
 void test_loader_materializes_exports_and_import_aliases() {
@@ -269,6 +283,122 @@ void test_loader_materializes_exports_and_import_aliases() {
          "import alias should observe ready export cell after init");
   expect(alias->export_cell.resolved_module_name == "core.values",
          "import alias should resolve to exporting module");
+}
+
+void test_loader_live_alias_snapshots_track_export_updates() {
+  amber::runtime::RuntimeModuleLoader loader;
+  amber::bytecode::BcModule core = make_module({}, 42);
+  add_code_export(&core, "Answer");
+  amber::bytecode::BcModule app = make_module({"core.values"}, 1);
+
+  add_ok(loader, "core.values", core);
+  add_ok(loader, "app.main", app);
+  const amber::runtime::RuntimeModuleLoadResult alias_added =
+      loader.add_import_alias("app.main", "Answer", "core.values", "Answer");
+  expect(alias_added.ok, "live alias registration should succeed");
+
+  const amber::runtime::RuntimeModuleLoadResult linked = loader.link();
+  expect(linked.ok, "live alias modules should link");
+
+  const std::optional<amber::runtime::RuntimeImportAliasSnapshot> alias_before =
+      loader.import_alias_snapshot("app.main", "Answer");
+  expect(alias_before.has_value(),
+         "live alias snapshot should be visible before init");
+  expect(alias_before->export_cell.state ==
+             amber::runtime::RuntimeExportCellState::Uninitialized,
+         "live alias should observe uninitialized export before init");
+
+  const amber::runtime::RuntimeModuleLoadResult early_read =
+      loader.read_import_alias("app.main", "Answer");
+  expect(!early_read.ok, "live alias read before export init should fail");
+  expect(early_read.error_name == "ModuleInitError",
+         "early live alias read should report ModuleInitError");
+
+  const amber::runtime::RuntimeModuleLoadResult core_initialized =
+      loader.initialize_module("core.values");
+  expect(core_initialized.ok, "exporting module should initialize");
+
+  const std::optional<amber::runtime::RuntimeImportAliasSnapshot> alias_after =
+      loader.import_alias_snapshot("app.main", "Answer");
+  expect(alias_after.has_value(),
+         "live alias snapshot should stay visible after init");
+  expect(alias_after->export_cell.state ==
+             amber::runtime::RuntimeExportCellState::Ready,
+         "live alias should observe ready export after init");
+  expect(alias_after->export_cell.resolved_module_name == "core.values",
+         "live alias should retain resolved exporting module");
+
+  const amber::runtime::RuntimeModuleLoadResult ready_read =
+      loader.read_import_alias("app.main", "Answer");
+  expect(ready_read.ok, "live alias read should succeed after export init");
+}
+
+void test_loader_cyclic_import_aliases_fail_and_stay_failed() {
+  amber::runtime::RuntimeModuleLoader loader;
+  amber::bytecode::BcModule cycle_a = make_module({"cycle.b"}, 1);
+  add_code_export(&cycle_a, "A");
+  amber::bytecode::BcModule cycle_b = make_module({"cycle.a"}, 2);
+  add_code_export(&cycle_b, "B");
+
+  add_ok(loader, "cycle.a", cycle_a);
+  add_ok(loader, "cycle.b", cycle_b);
+  expect(loader.add_import_alias("cycle.a", "B", "cycle.b", "B").ok,
+         "cycle.a import alias registration should succeed");
+  expect(loader.add_import_alias("cycle.b", "A", "cycle.a", "A").ok,
+         "cycle.b import alias registration should succeed");
+
+  const amber::runtime::RuntimeModuleLoadResult linked = loader.link();
+  expect(linked.ok, "cyclic aliases should link before init access");
+
+  const std::optional<amber::runtime::RuntimeImportAliasSnapshot> alias_before =
+      loader.import_alias_snapshot("cycle.a", "B");
+  expect(alias_before.has_value(),
+         "cyclic alias snapshot should be visible before init");
+  expect(alias_before->export_cell.state ==
+             amber::runtime::RuntimeExportCellState::Uninitialized,
+         "cyclic alias should observe uninitialized export before init");
+
+  const amber::runtime::RuntimeModuleLoadResult early_read =
+      loader.read_import_alias("cycle.a", "B");
+  expect(!early_read.ok, "cyclic alias read before init should fail");
+  expect(early_read.error_name == "ModuleInitError",
+         "cyclic early alias read should report ModuleInitError");
+
+  const amber::runtime::RuntimeModuleLoadResult initialized =
+      loader.initialize_all();
+  expect(!initialized.ok, "cyclic import aliases should fail during init");
+  expect(initialized.error_name == "ModuleInitError",
+         "cyclic import aliases should report ModuleInitError");
+  expect(initialized.message.find("cyclic module initialization") !=
+             std::string::npos,
+         "cyclic import aliases should include cycle context");
+  expect(snapshot_named(initialized, "cycle.a").state ==
+             amber::runtime::RuntimeModuleState::Failed,
+         "cycle.a should stay failed after cyclic alias init");
+  expect(snapshot_named(initialized, "cycle.b").state ==
+             amber::runtime::RuntimeModuleState::Failed,
+         "cycle.b should stay failed after cyclic alias init");
+
+  const std::optional<amber::runtime::RuntimeImportAliasSnapshot> alias_after =
+      loader.import_alias_snapshot("cycle.a", "B");
+  expect(alias_after.has_value(),
+         "cyclic alias snapshot should remain visible after failure");
+  expect(alias_after->export_cell.state ==
+             amber::runtime::RuntimeExportCellState::Failed,
+         "cyclic alias should observe failed export cell after init failure");
+  expect(alias_after->export_cell.message.find(
+             "cyclic module initialization") != std::string::npos,
+         "failed cyclic alias should retain cycle message");
+
+  const amber::runtime::RuntimeModuleLoadResult retried =
+      loader.initialize_all();
+  expect(!retried.ok, "cyclic init failure should stay failed on retry");
+  expect(retried.error_name == "ModuleInitError",
+         "cyclic retry should preserve ModuleInitError");
+  expect(snapshot_named(retried, "cycle.a").init_runs == 0,
+         "cycle.a init should not rerun after cyclic failure");
+  expect(snapshot_named(retried, "cycle.b").init_runs == 0,
+         "cycle.b init should not rerun after cyclic failure");
 }
 
 void test_loader_reports_missing_export() {
@@ -406,6 +536,8 @@ int main() {
   test_loader_detects_init_cycles();
   test_loader_marks_failed_init();
   test_loader_materializes_exports_and_import_aliases();
+  test_loader_live_alias_snapshots_track_export_updates();
+  test_loader_cyclic_import_aliases_fail_and_stay_failed();
   test_loader_reports_missing_export();
   test_loader_reports_version_and_abi_mismatch();
   test_loader_rejects_unsupported_required_profile();

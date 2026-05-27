@@ -4016,6 +4016,7 @@ using amber::bytecode::Constant;
 using amber::bytecode::ConstantKind;
 using amber::bytecode::Instruction;
 using amber::bytecode::Opcode;
+using amber::bytecode::SlotLayoutEntry;
 
 constexpr std::uint32_t kMethodFlagInstance = 1U;
 constexpr std::uint32_t kMethodFlagClass = 2U;
@@ -4204,6 +4205,9 @@ struct RuntimeState {
   bool world_frozen = false;
   std::uint64_t world_epoch = 1;
   std::unordered_map<std::uint64_t, CallCacheEntry> call_caches;
+  std::uint64_t call_cache_hits = 0;
+  std::uint64_t call_cache_misses = 0;
+  std::uint64_t call_cache_updates = 0;
   std::unordered_map<std::uint64_t, IvarCacheEntry> ivar_caches;
   std::uint64_t next_shape_id = 1;
   std::vector<std::shared_ptr<ShapeDescriptor>> root_shapes;
@@ -4511,7 +4515,7 @@ public:
     if (fault_.has_value()) {
       return {Value::null(), fault_};
     }
-    return {final_value_, std::nullopt};
+    return {final_value_, std::nullopt, completed_locals_for(*entry)};
   }
 
 private:
@@ -4519,6 +4523,34 @@ private:
                        const std::string &message, std::uint32_t code_id,
                        std::uint32_t pc) {
     return {Value::null(), Fault{error_name, message, code_id, pc}};
+  }
+
+  std::string string_or_empty(std::uint32_t string_id) const {
+    if (string_id >= module_.strings.size()) {
+      return "";
+    }
+    return module_.strings[string_id];
+  }
+
+  std::vector<ExecutionLocal> completed_locals_for(const BcCode &code) const {
+    std::vector<ExecutionLocal> locals;
+    locals.reserve(code.local_layout.size());
+    for (const SlotLayoutEntry &entry : code.local_layout) {
+      ExecutionLocal local;
+      local.slot = entry.slot;
+      local.name = string_or_empty(entry.name_str_id);
+      local.role = string_or_empty(entry.role_str_id);
+      local.binding_kind = string_or_empty(entry.binding_kind_str_id);
+      local.initialized =
+          entry.slot < last_completed_initialized_.size() &&
+          last_completed_initialized_[entry.slot] != 0U &&
+          entry.slot < last_completed_regs_.size();
+      if (local.initialized) {
+        local.value = last_completed_regs_[entry.slot];
+      }
+      locals.push_back(std::move(local));
+    }
+    return locals;
   }
 
   bool ensure_lifecycle_access(const Frame &frame, const Value &value) {
@@ -5540,6 +5572,7 @@ private:
     const auto found =
         state_->call_caches.find(inline_cache_key(frame, site_id));
     if (found == state_->call_caches.end()) {
+      ++state_->call_cache_misses;
       return nullptr;
     }
     const CallCacheEntry &entry = found->second;
@@ -5553,8 +5586,10 @@ private:
         receiver_class_index >= state_->classes.size() ||
         entry.method_version !=
             state_->classes[receiver_class_index].method_version) {
+      ++state_->call_cache_misses;
       return nullptr;
     }
+    ++state_->call_cache_hits;
     return &entry.method;
   }
 
@@ -5579,6 +5614,7 @@ private:
     entry.world_epoch = state_->world_epoch;
     entry.method = method;
     state_->call_caches[inline_cache_key(frame, site_id)] = entry;
+    ++state_->call_cache_updates;
   }
 
   std::optional<std::uint32_t> probe_ivar_cache(const Frame &frame,
@@ -5850,7 +5886,7 @@ private:
     }
   }
 
-  bool pattern_triple_eq(const Frame &frame, const Value &matcher,
+  bool pattern_triple_eq(Frame &frame, const Value &matcher,
                          const Value &value, bool *out) {
     if (matcher.is_class_object()) {
       const std::uint32_t target_class_index =
@@ -5878,12 +5914,12 @@ private:
     }
 
     Value result = Value::null();
-    const SendStatus scalar_status = try_apply_scalar_send(
-        frame, matcher, "===", {value}, Value::null(), false, &result);
-    if (scalar_status == SendStatus::Faulted) {
+    bool handled = false;
+    if (!try_apply_protocol_send(frame, matcher, "===", {value}, &result,
+                                 &handled)) {
       return false;
     }
-    if (scalar_status == SendStatus::Matched) {
+    if (handled) {
       if (!result.is_bool()) {
         set_fault(frame, "TypeError", "pattern triple-eq did not return bool");
         return false;
@@ -6930,7 +6966,8 @@ private:
       return SendStatus::Faulted;
     }
 
-    if (selector == "==" || selector == "===") {
+    if ((selector == "==" || selector == "===") &&
+        !receiver.is_instance_object() && !receiver.is_class_object()) {
       if (!require_arity(1) || !require_no_block()) {
         return SendStatus::Faulted;
       }
@@ -10547,6 +10584,19 @@ RuntimeWorldMirror RuntimeWorld::world_mirror() const {
         owner_mirror_for(*impl_->module, *impl_->state, index));
   }
   return mirror;
+}
+
+RuntimeDispatchCacheStats RuntimeWorld::dispatch_cache_stats() const {
+  RuntimeDispatchCacheStats stats;
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return stats;
+  }
+  stats.call_cache_entries =
+      static_cast<std::uint64_t>(impl_->state->call_caches.size());
+  stats.call_cache_hits = impl_->state->call_cache_hits;
+  stats.call_cache_misses = impl_->state->call_cache_misses;
+  stats.call_cache_updates = impl_->state->call_cache_updates;
+  return stats;
 }
 
 RuntimeHeapStats RuntimeWorld::heap_stats() const {

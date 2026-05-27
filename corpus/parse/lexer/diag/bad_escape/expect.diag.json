@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"L0001","severity":"error","phase":"lexer","message":"invalid escape sequence in string literal","primary_span":{"file":"corpus/parse/lexer/diag/bad_escape/source.am","start":{"line":1,"col":5,"offset":4},"end":{"line":1,"col":6,"offset":5}},"related":[],"notes":[]}
+  ]
+}

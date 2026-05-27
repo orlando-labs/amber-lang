@@ -97,6 +97,7 @@ private:
   std::string parse_clause_pattern_text();
   std::vector<std::unique_ptr<ast::Expr>> parse_block_params();
   std::vector<std::string> parse_many_def_patterns(lexer::Span *span_out);
+  std::string consume_method_name_text(const std::string &message);
   std::string consume_identifier_text(const std::string &message);
   bool match_contextual(const char *text);
   bool starts_clause_body() const;
@@ -105,6 +106,8 @@ private:
   std::unique_ptr<ast::Expr> parse_expression(int min_precedence,
                                               StopMode stop_mode);
   std::unique_ptr<ast::Expr> parse_prefix(StopMode stop_mode);
+  std::unique_ptr<ast::Expr>
+  parse_string_literal_expr(const lexer::Token &token);
   std::unique_ptr<ast::Expr> parse_postfix(std::unique_ptr<ast::Expr> expr,
                                            StopMode stop_mode);
   std::unique_ptr<ast::Expr> parse_block_suffix(StopMode stop_mode);

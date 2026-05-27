@@ -11,6 +11,8 @@ Implemented surface:
 - CLI inspection in [tools/amberc/main.cpp](/Users/slowpilot/workspace/amber/tools/amberc/main.cpp:1):
   - `amberc bc <file>`
   - `amberc bc-disasm <file>`
+  - `amberc metadata <file.amberbc> --json`
+  - `amberc verify <file.amberbc> --json`
 - `amberc amberbc-dump <file>`
 - `amberc amberbc-verify <file>`
 - `amberc amberbc-disasm <file>`
@@ -70,6 +72,12 @@ Current `CODE` encoding stores:
 - `flags` where bit `0x1` means `requires_commit`
 
 `module_to_json(...)` dumps the fully decoded module as `amber.bc.v1`.
+`amberc metadata <file.amberbc> --json` exposes the same JSON for serialized
+artifacts. `amberc verify <file.amberbc> --json` emits the
+`amber.bc.verify.v1` verifier schema and returns a non-zero exit code when
+decode/verification fails; corrupted bytecode still produces structured JSON on
+stdout. The older `amberbc-*` commands remain supported aliases for existing
+scripts.
 
 `PROF` stores W14 build/profile feature metadata:
 

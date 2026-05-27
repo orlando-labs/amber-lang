@@ -15,6 +15,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -818,6 +819,30 @@ send_instr(std::uint32_t dst, std::uint32_t recv, std::uint32_t selector,
   return insn;
 }
 
+amber::bytecode::Instruction send_kw_instr(
+    std::uint32_t dst, std::uint32_t recv, std::uint32_t selector,
+    const std::vector<std::uint32_t> &arg_regs,
+    const std::vector<std::pair<std::uint32_t, std::uint32_t>> &kw_regs,
+    std::int64_t block_reg = -1, std::uint32_t site_id = 0) {
+  amber::bytecode::Instruction insn;
+  insn.opcode = amber::bytecode::Opcode::Send;
+  insn.operands.push_back({dst, false});
+  insn.operands.push_back({recv, false});
+  insn.operands.push_back({selector, false});
+  insn.operands.push_back({static_cast<std::int64_t>(arg_regs.size()), false});
+  for (std::uint32_t reg : arg_regs) {
+    insn.operands.push_back({reg, false});
+  }
+  insn.operands.push_back({static_cast<std::int64_t>(kw_regs.size()), false});
+  for (const auto &[symbol_id, reg] : kw_regs) {
+    insn.operands.push_back({symbol_id, false});
+    insn.operands.push_back({reg, false});
+  }
+  insn.operands.push_back({block_reg, block_reg < 0});
+  insn.operands.push_back({site_id, false});
+  return insn;
+}
+
 amber::runtime::Value make_symbol_map(
     const amber::bytecode::BcModule &module,
     std::initializer_list<std::pair<const char *, amber::runtime::Value>>
@@ -840,6 +865,277 @@ arena_stats_for(const amber::runtime::RuntimeHeapStats &stats,
     }
   }
   return nullptr;
+}
+
+void test_runtime_duplicate_keyword_values_are_read_before_duplicate_check() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  const std::uint32_t box_id = ensure_symbol_id(&module, "Box");
+  const std::uint32_t route_id = ensure_symbol_id(&module, "route");
+  const std::uint32_t alpha_id = ensure_symbol_id(&module, "α");
+  const std::uint32_t alpha_string_id = append_string(&module, "α");
+  append_path_const(&module, {});
+  const std::uint32_t five_id = append_integer_const(&module, 5);
+
+  BcClass box;
+  box.class_name_sym_id = box_id;
+  box.method_range_start = 0;
+  box.method_range_count = 1;
+  module.classes.push_back(box);
+
+  BcMethod route;
+  route.selector_sym_id = route_id;
+  route.owner_dispatch_ref = 0;
+  route.entry_code_id = 2;
+  route.flags = 1;
+  route.params.push_back({alpha_id, alpha_string_id, kMethodParamFlagKeyword});
+  module.methods.push_back(route);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 3;
+  caller.instructions.push_back(
+      {Opcode::LoadK, {{1, false}, {five_id, false}}});
+  caller.instructions.push_back(
+      send_kw_instr(2, 0, route_id, {}, {{alpha_id, 1}, {alpha_id, 2}}, -1, 0));
+  caller.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode body;
+  body.code_id = 2;
+  body.kind = CodeKind::Method;
+  body.reg_count = 1;
+  body.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body};
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  instance->header.class_index = 0;
+  amber::runtime::RuntimeWorld world(module);
+
+  const amber::runtime::ExecutionResult exec =
+      world.execute(1, {amber::runtime::Value::instance(instance)});
+  expect(!exec.ok(), "duplicate keyword with bad value should fail");
+  expect(exec.fault.has_value() && exec.fault->error_name == "NameError",
+         "keyword values should be read before duplicate keyword detection");
+}
+
+void test_runtime_keyword_shape_cache_canonicalizes_keyword_order() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  const std::uint32_t box_id = ensure_symbol_id(&module, "Box");
+  const std::uint32_t route_id = ensure_symbol_id(&module, "route");
+  const std::uint32_t alpha_id = ensure_symbol_id(&module, "α");
+  const std::uint32_t beta_id = ensure_symbol_id(&module, "β");
+  const std::uint32_t alpha_string_id = append_string(&module, "α");
+  const std::uint32_t beta_string_id = append_string(&module, "β");
+  append_path_const(&module, {});
+
+  BcClass box;
+  box.class_name_sym_id = box_id;
+  box.method_range_start = 0;
+  box.method_range_count = 1;
+  module.classes.push_back(box);
+
+  BcMethod route;
+  route.selector_sym_id = route_id;
+  route.owner_dispatch_ref = 0;
+  route.entry_code_id = 2;
+  route.flags = 1;
+  route.params.push_back({alpha_id, alpha_string_id, kMethodParamFlagKeyword});
+  route.params.push_back({beta_id, beta_string_id, kMethodParamFlagKeyword});
+  module.methods.push_back(route);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 7;
+  caller.instructions.push_back(
+      send_kw_instr(5, 0, route_id, {}, {{alpha_id, 1}, {beta_id, 2}}, -1, 0));
+  caller.instructions.push_back(
+      send_kw_instr(6, 0, route_id, {}, {{beta_id, 4}, {alpha_id, 3}}, -1, 0));
+  caller.instructions.push_back({Opcode::Return, {{6, false}}});
+
+  BcCode body;
+  body.code_id = 2;
+  body.kind = CodeKind::Method;
+  body.reg_count = 2;
+  body.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body};
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  instance->header.class_index = 0;
+  amber::runtime::RuntimeWorld world(module);
+
+  const amber::runtime::ExecutionResult exec = world.execute(
+      1,
+      {amber::runtime::Value::instance(instance),
+       amber::runtime::Value::integer(3), amber::runtime::Value::integer(4),
+       amber::runtime::Value::integer(8), amber::runtime::Value::integer(9)});
+  expect(exec.ok(), "keyword shape cache order probe failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 8,
+         "reversed keyword order should still bind by name");
+  const amber::runtime::RuntimeDispatchCacheStats stats =
+      world.dispatch_cache_stats();
+  expect(stats.call_cache_entries == 1, "keyword cache should keep one entry");
+  expect(stats.call_cache_misses == 1 && stats.call_cache_updates == 1 &&
+             stats.call_cache_hits == 1,
+         "canonical keyword shape should hit for reversed keyword order");
+}
+
+void test_runtime_call_cache_distinguishes_block_presence() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  const std::uint32_t box_id = ensure_symbol_id(&module, "Box");
+  const std::uint32_t value_id = ensure_symbol_id(&module, "value");
+  append_path_const(&module, {});
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+
+  BcClass box;
+  box.class_name_sym_id = box_id;
+  box.method_range_start = 0;
+  box.method_range_count = 1;
+  module.classes.push_back(box);
+
+  BcMethod value;
+  value.selector_sym_id = value_id;
+  value.owner_dispatch_ref = 0;
+  value.entry_code_id = 2;
+  value.flags = 1;
+  module.methods.push_back(value);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 4;
+  caller.instructions.push_back(send_instr(2, 0, value_id, {}, -1, 0));
+  caller.instructions.push_back(send_instr(3, 0, value_id, {}, 1, 0));
+  caller.instructions.push_back({Opcode::Return, {{3, false}}});
+
+  BcCode body;
+  body.code_id = 2;
+  body.kind = CodeKind::Method;
+  body.reg_count = 1;
+  body.instructions.push_back({Opcode::LoadK, {{0, false}, {one_id, false}}});
+  body.instructions.push_back({Opcode::Return, {{0, false}}});
+
+  BcCode block;
+  block.code_id = 3;
+  block.kind = CodeKind::Block;
+  block.reg_count = 1;
+  block.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body, block};
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  instance->header.class_index = 0;
+  amber::runtime::RuntimeWorld world(module);
+
+  const amber::runtime::ExecutionResult exec = world.execute(
+      1, {amber::runtime::Value::instance(instance), make_closure_value(3)});
+  expect(exec.ok(), "block presence cache guard probe failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 1,
+         "block-presence probe should return method value");
+  const amber::runtime::RuntimeDispatchCacheStats stats =
+      world.dispatch_cache_stats();
+  expect(stats.call_cache_entries == 1, "block guard should reuse site entry");
+  expect(stats.call_cache_hits == 0 && stats.call_cache_misses == 2 &&
+             stats.call_cache_updates == 2,
+         "block presence should force a call-cache miss for same site");
+}
+
+void test_runtime_keyword_call_cache_invalidates_on_world_epoch() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  const std::uint32_t box_id = ensure_symbol_id(&module, "Box");
+  const std::uint32_t route_id = ensure_symbol_id(&module, "route");
+  const std::uint32_t alpha_id = ensure_symbol_id(&module, "α");
+  const std::uint32_t alpha_string_id = append_string(&module, "α");
+  append_path_const(&module, {});
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+  const std::uint32_t two_id = append_integer_const(&module, 2);
+
+  BcClass box;
+  box.class_name_sym_id = box_id;
+  box.method_range_start = 0;
+  box.method_range_count = 1;
+  module.classes.push_back(box);
+
+  BcMethod original;
+  original.selector_sym_id = route_id;
+  original.owner_dispatch_ref = 0;
+  original.entry_code_id = 2;
+  original.flags = 1;
+  original.params.push_back(
+      {alpha_id, alpha_string_id, kMethodParamFlagKeyword});
+  module.methods.push_back(original);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 3;
+  caller.instructions.push_back(
+      send_kw_instr(2, 0, route_id, {}, {{alpha_id, 1}}, -1, 0));
+  caller.instructions.push_back({Opcode::Return, {{2, false}}});
+
+  BcCode body_one;
+  body_one.code_id = 2;
+  body_one.kind = CodeKind::Method;
+  body_one.reg_count = 1;
+  body_one.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {one_id, false}}});
+  body_one.instructions.push_back({Opcode::Return, {{0, false}}});
+
+  BcCode body_two;
+  body_two.code_id = 3;
+  body_two.kind = CodeKind::Method;
+  body_two.reg_count = 1;
+  body_two.instructions.push_back(
+      {Opcode::LoadK, {{0, false}, {two_id, false}}});
+  body_two.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {caller, body_one, body_two};
+
+  auto instance = std::make_shared<amber::runtime::InstanceValue>();
+  instance->class_index = 0;
+  instance->header.class_index = 0;
+  amber::runtime::RuntimeWorld world(module);
+
+  const amber::runtime::ExecutionResult before =
+      world.execute(1, {amber::runtime::Value::instance(instance),
+                        amber::runtime::Value::integer(9)});
+  expect(before.ok(), "keyword cache preflight send failed");
+  expect(before.value.is_integer() && before.value.as_integer() == 1,
+         "initial keyword method should return original value");
+  amber::runtime::RuntimeDispatchCacheStats stats =
+      world.dispatch_cache_stats();
+  expect(stats.call_cache_misses == 1 && stats.call_cache_updates == 1 &&
+             stats.call_cache_hits == 0,
+         "initial keyword call should populate cache after one miss");
+
+  const std::uint64_t epoch_before = world.world_epoch();
+  BcMethod replacement = original;
+  replacement.entry_code_id = 3;
+  const amber::runtime::ExecutionResult defined =
+      world.define_instance_method(0, replacement);
+  expect(defined.ok(), "keyword cache method replacement failed");
+  expect(world.world_epoch() == epoch_before + 1,
+         "keyword method replacement should bump world epoch");
+
+  const amber::runtime::ExecutionResult after =
+      world.execute(1, {amber::runtime::Value::instance(instance),
+                        amber::runtime::Value::integer(9)});
+  expect(after.ok(), "keyword cache post-mutation send failed");
+  expect(after.value.is_integer() && after.value.as_integer() == 2,
+         "keyword call cache should invalidate after world mutation");
+  stats = world.dispatch_cache_stats();
+  expect(stats.call_cache_misses == 2 && stats.call_cache_updates == 2 &&
+             stats.call_cache_hits == 0,
+         "stale keyword cache entry should miss and refresh after epoch bump");
 }
 
 void test_execute_emitted_class_method_send() {
@@ -2496,6 +2792,163 @@ void test_runtime_gc_safepoint_scans_vm_frame_roots() {
          "requested safepoint GC should be a full cycle");
 }
 
+void test_runtime_gc_safepoint_preserves_caller_roots_during_call() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  Constant one;
+  one.kind = ConstantKind::Integer;
+  one.int_value = 1;
+  module.const_pool.push_back(one);
+
+  BcCode caller;
+  caller.code_id = 1;
+  caller.kind = CodeKind::Method;
+  caller.reg_count = 4;
+  caller.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  caller.instructions.push_back(
+      {Opcode::MakeList, {{1, false}, {0, false}, {1, false}}});
+  caller.instructions.push_back(
+      {Opcode::MakeClosure, {{2, false}, {2, false}, {0, false}}});
+  caller.instructions.push_back({Opcode::Call,
+                                 {{3, false},
+                                  {2, false},
+                                  {0, false},
+                                  {0, false},
+                                  {-1, true},
+                                  {0, false}}});
+  caller.instructions.push_back({Opcode::Return, {{1, false}}});
+
+  BcCode callee;
+  callee.code_id = 2;
+  callee.kind = CodeKind::Block;
+  callee.reg_count = 1;
+  callee.instructions.push_back({Opcode::Safepoint, {}});
+  callee.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  callee.instructions.push_back({Opcode::Return, {{0, false}}});
+
+  module.code_objects = {caller, callee};
+
+  amber::runtime::RuntimeWorld world(module);
+  world.request_garbage_collection(amber::runtime::RuntimeGcCycle::Full);
+  const amber::runtime::ExecutionResult exec = world.execute(1);
+  expect(exec.ok(), "call-boundary safepoint probe should execute");
+  expect(exec.value.is_list(),
+         "caller root should be returned after callee GC");
+  expect(exec.value.as_list()->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "callee safepoint GC should preserve caller frame roots");
+  const amber::runtime::RuntimeHeapStats stats = world.heap_stats();
+  expect(stats.gc_safepoint_collections == 1,
+         "callee safepoint should run requested GC once");
+  expect(stats.gc_reclaimed_objects == 0,
+         "callee safepoint should not reclaim caller live roots");
+}
+
+void test_runtime_gc_backedge_safepoint_preserves_live_roots() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  Constant one;
+  one.kind = ConstantKind::Integer;
+  one.int_value = 1;
+  module.const_pool.push_back(one);
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Method;
+  code.reg_count = 3;
+  code.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  code.instructions.push_back(
+      {Opcode::MakeList, {{1, false}, {0, false}, {1, false}}});
+  code.instructions.push_back({Opcode::LoadBool, {{2, false}, {1, false}}});
+  code.instructions.push_back({Opcode::Safepoint, {}});
+  code.instructions.push_back({Opcode::JumpIfFalse, {{2, false}, {7, false}}});
+  code.instructions.push_back({Opcode::LoadBool, {{2, false}, {0, false}}});
+  code.instructions.push_back({Opcode::Jump, {{3, false}}});
+  code.instructions.push_back({Opcode::Return, {{1, false}}});
+  code.safepoint_table.push_back({3, 0});
+  module.code_objects.push_back(code);
+
+  amber::runtime::RuntimeWorld world(module);
+  world.request_garbage_collection(amber::runtime::RuntimeGcCycle::Full);
+  const amber::runtime::ExecutionResult exec = world.execute(1);
+  expect(exec.ok(), "backedge safepoint probe should execute");
+  expect(exec.value.is_list(), "loop root should be returned after backedge");
+  expect(exec.value.as_list()->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "backedge safepoint GC should preserve live loop root");
+  const amber::runtime::RuntimeHeapStats stats = world.heap_stats();
+  expect(stats.gc_safepoint_collections == 1,
+         "loop safepoint should consume one GC request");
+  expect(stats.gc_reclaimed_objects == 0,
+         "loop safepoint should not reclaim live loop roots");
+}
+
+void test_runtime_gc_preserves_rooted_local_and_shared_cycles() {
+  amber::runtime::RuntimeHeap heap;
+
+  amber::runtime::Value local_left = heap.make_list_value({});
+  amber::runtime::Value local_right = heap.make_list_value({});
+  std::shared_ptr<amber::runtime::ListValue> local_left_ptr =
+      local_left.as_list();
+  std::shared_ptr<amber::runtime::ListValue> local_right_ptr =
+      local_right.as_list();
+  local_left_ptr->items.push_back(local_right);
+  local_right_ptr->items.push_back(local_left);
+
+  const amber::runtime::RuntimeGcResult rooted_local =
+      heap.collect_garbage({local_left}, amber::runtime::RuntimeGcCycle::Full);
+  expect(rooted_local.marked == 2 && rooted_local.reclaimed == 0,
+         "full GC should preserve a rooted local reference cycle");
+  expect(local_left_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "rooted local cycle left node should stay live");
+  expect(local_right_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "rooted local cycle right node should stay live");
+
+  local_left = amber::runtime::Value::null();
+  local_right = amber::runtime::Value::null();
+  const amber::runtime::RuntimeGcResult unrooted_local =
+      heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Full);
+  expect(unrooted_local.reclaimed == 2,
+         "full GC should reclaim local cycle after roots clear");
+
+  amber::runtime::Value shared_left = heap.make_tuple_value({});
+  amber::runtime::Value shared_right = heap.make_tuple_value({});
+  std::shared_ptr<amber::runtime::TupleValue> shared_left_ptr =
+      shared_left.as_tuple();
+  std::shared_ptr<amber::runtime::TupleValue> shared_right_ptr =
+      shared_right.as_tuple();
+  shared_left_ptr->items.push_back(shared_right);
+  shared_right_ptr->items.push_back(shared_left);
+
+  const amber::runtime::RuntimeGcResult rooted_shared = heap.collect_garbage(
+      {shared_left}, amber::runtime::RuntimeGcCycle::Shared);
+  expect(rooted_shared.marked == 2 && rooted_shared.reclaimed == 0,
+         "shared GC should preserve a rooted shared reference cycle");
+  expect(shared_left_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "rooted shared cycle left node should stay live");
+  expect(shared_right_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Live,
+         "rooted shared cycle right node should stay live");
+
+  shared_left = amber::runtime::Value::null();
+  shared_right = amber::runtime::Value::null();
+  const amber::runtime::RuntimeGcResult unrooted_shared =
+      heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Shared);
+  expect(unrooted_shared.reclaimed == 2,
+         "shared GC should reclaim shared cycle after roots clear");
+  expect(shared_left_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Deallocated,
+         "unrooted shared cycle left node should be tombstoned");
+  expect(shared_right_ptr->header.lifetime_state ==
+             amber::runtime::ObjectLifetimeState::Deallocated,
+         "unrooted shared cycle right node should be tombstoned");
+}
+
 void test_runtime_gc_parallel_smoke() {
   amber::runtime::RuntimeHeap heap;
   std::vector<amber::runtime::Value> shared_roots;
@@ -2612,6 +3065,33 @@ void test_runtime_pin_scope_nesting_counts_and_releases() {
   expect(heap.pin_count(value) == 0, "outer scope should release final pin");
   expect((list->header.flags & amber::runtime::kObjectFlagPinned) == 0U,
          "final unpin should clear object pinned flag");
+}
+
+void test_runtime_pin_scope_releases_during_exception_unwind() {
+  amber::runtime::RuntimeHeap heap;
+  const amber::runtime::Value value = heap.make_list_value({});
+  const std::shared_ptr<amber::runtime::ListValue> list = value.as_list();
+
+  bool caught = false;
+  try {
+    amber::runtime::RuntimePinScope scope(heap, value);
+    expect(scope.active(), "exception unwind pin scope should be active");
+    expect(heap.pin_count(value) == 1,
+           "exception unwind pin scope should pin once");
+    throw std::runtime_error("unwind pin scope");
+  } catch (const std::runtime_error &) {
+    caught = true;
+  }
+
+  expect(caught, "exception unwind probe should catch thrown exception");
+  expect(heap.pin_count(value) == 0,
+         "pin scope destructor should release during exception unwind");
+  expect((list->header.flags & amber::runtime::kObjectFlagPinned) == 0U,
+         "exception unwind should clear object pinned flag");
+  const amber::runtime::RuntimeGcResult after_unwind =
+      heap.collect_garbage({}, amber::runtime::RuntimeGcCycle::Full);
+  expect(after_unwind.reclaimed == 1,
+         "object should be collectable after exception-unwind pin release");
 }
 
 void test_runtime_pin_opaque_handle_boundary() {
@@ -5318,6 +5798,10 @@ int main() {
   test_execute_emitted_default_method();
   test_execute_emitted_keyword_method();
   test_execute_emitted_block_send();
+  test_runtime_duplicate_keyword_values_are_read_before_duplicate_check();
+  test_runtime_keyword_shape_cache_canonicalizes_keyword_order();
+  test_runtime_call_cache_distinguishes_block_presence();
+  test_runtime_keyword_call_cache_invalidates_on_world_epoch();
   test_manual_dynamic_send();
   test_execute_emitted_class_method_send();
   test_execute_emitted_constructor_call();
@@ -5367,9 +5851,13 @@ int main() {
   test_runtime_gc_write_barrier_remembers_mature_to_young_edge();
   test_runtime_gc_write_barrier_rejects_invalid_edges();
   test_runtime_gc_safepoint_scans_vm_frame_roots();
+  test_runtime_gc_safepoint_preserves_caller_roots_during_call();
+  test_runtime_gc_backedge_safepoint_preserves_live_roots();
+  test_runtime_gc_preserves_rooted_local_and_shared_cycles();
   test_runtime_gc_parallel_smoke();
   test_runtime_pin_roots_gc_and_rejects_stale_unpin();
   test_runtime_pin_scope_nesting_counts_and_releases();
+  test_runtime_pin_scope_releases_during_exception_unwind();
   test_runtime_pin_opaque_handle_boundary();
   test_runtime_pin_buffer_view_mode();
   test_runtime_pin_dealloc_after_pin_violation();

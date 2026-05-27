@@ -58,6 +58,9 @@ output artifacts.
 ## Conformance
 
 `make test` runs the W14 fixture twice and verifies the emitted root module with
-`amberc amberbc-verify`. `make conformance` runs
+both `amberc amberbc-verify` and the public
+`amberc verify <file.amberbc> --json` surface. It also smoke-checks
+`amberc metadata <file.amberbc> --json` and a corrupted-bytecode verifier
+failure. `make conformance` runs
 `ambertest run corpus --bundle M11`, which adds a compile-all postpass over the
 compile/disasm/run/load corpus.

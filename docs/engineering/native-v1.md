@@ -46,6 +46,8 @@ Each object records:
   patchpoint guard misses, and frozen-world invalidation fallback;
 - conservative root maps, exception maps, and safepoint maps;
 - frozen-world assumptions for `world_epoch` and owner `method_version`.
+- focused conformance coverage for allocation, call, and back-edge safepoints
+  that each carry matching root maps.
 
 The current reference runtime intentionally does not emit host machine code.
 `machine_code_blob` is a deterministic trampoline payload that lets the runtime
@@ -65,6 +67,8 @@ the frozen world epoch and owner method versions into every code object.
 - callers may request bytecode fallback for stale assumptions, modeling the
   specified no-deopt path where invalid native code is discarded at a safe call
   boundary.
+- trampoline execution is covered with a requested GC at the bytecode
+  safepoint, proving heap arguments remain rooted across the native boundary.
 
 ## Validation
 

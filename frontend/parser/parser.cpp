@@ -1,4 +1,5 @@
 #include "frontend/parser/parser.h"
+#include "frontend/lexer/lexer.h"
 #include "frontend/pattern/pattern.h"
 
 #include <cstdlib>
@@ -280,6 +281,44 @@ const ast::Expr *last_postfix_tail(const ast::Expr &expr) {
   return tails->values.back().get();
 }
 
+lexer::Position offset_position_in_token(const lexer::Token &token,
+                                         std::size_t lexeme_offset) {
+  lexer::Position position = token.span.start;
+  position.offset += lexeme_offset;
+  position.col += lexeme_offset;
+  return position;
+}
+
+lexer::Span span_for_token_slice(const lexer::Token &token,
+                                 std::size_t begin_offset,
+                                 std::size_t end_offset) {
+  return lexer::Span{token.span.file,
+                     offset_position_in_token(token, begin_offset),
+                     offset_position_in_token(token, end_offset)};
+}
+
+void shift_position_from_interpolation(lexer::Position *position,
+                                       const lexer::Position &base) {
+  position->offset += base.offset;
+  position->line += base.line - 1;
+  if (position->line == base.line) {
+    position->col += base.col - 1;
+  }
+}
+
+void shift_token_spans_from_interpolation(std::vector<lexer::Token> *tokens,
+                                          const lexer::Position &base) {
+  for (lexer::Token &token : *tokens) {
+    shift_position_from_interpolation(&token.span.start, base);
+    shift_position_from_interpolation(&token.span.end, base);
+  }
+}
+
+bool is_operator_method_name(lexer::TokenKind kind) {
+  return kind == lexer::TokenKind::EqualEqual ||
+         kind == lexer::TokenKind::EqualEqualEqual;
+}
+
 } // namespace
 
 Parser::Parser(const std::vector<lexer::Token> &tokens) : tokens_(tokens) {
@@ -530,8 +569,8 @@ std::unique_ptr<ast::Expr>
 Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
   const lexer::Token start =
       start_override != nullptr ? *start_override : advance();
-  const lexer::Token name_token =
-      consume(lexer::TokenKind::Identifier, "expected function name");
+  const std::string name_text =
+      consume_method_name_text("expected function name");
   std::unique_ptr<ast::Expr> signature;
   if (!class_method && is_simple_many_def_header()) {
     lexer::Span signature_span{};
@@ -573,7 +612,7 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
     clauses.push_back(std::move(clause));
     auto node =
         ast::make_expr("AstClauseDef", ast::join_spans(start.span, end_span));
-    node->string_field("name", name_token.lexeme);
+    node->string_field("name", name_text);
     node->node_field("base_signature", std::move(signature));
     node->list_field("clauses", std::move(clauses));
     node->list_field("else_body", {});
@@ -608,7 +647,7 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
     }
     auto node =
         ast::make_expr("AstClauseDef", ast::join_spans(start.span, end_span));
-    node->string_field("name", name_token.lexeme);
+    node->string_field("name", name_text);
     node->node_field("base_signature", std::move(signature));
     node->list_field("clauses", std::move(clause_body.clauses));
     node->list_field("else_body", std::move(clause_body.else_body));
@@ -621,7 +660,7 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
 
   auto node = ast::make_expr(class_method ? "AstClassMethodDef" : "AstDefStmt",
                              ast::join_spans(start.span, end_span));
-  node->string_field("name", name_token.lexeme);
+  node->string_field("name", name_text);
   node->node_field("signature", std::move(signature));
   node->list_field("body", std::move(body));
   return node;
@@ -1437,6 +1476,15 @@ std::string Parser::parse_module_path() {
   return path;
 }
 
+std::string Parser::consume_method_name_text(const std::string &message) {
+  if (check(lexer::TokenKind::Identifier) ||
+      is_operator_method_name(current().kind)) {
+    return advance().lexeme;
+  }
+  error(current(), message);
+  return current().lexeme;
+}
+
 std::string Parser::consume_identifier_text(const std::string &message) {
   const lexer::Token token = consume(lexer::TokenKind::Identifier, message);
   return token.lexeme;
@@ -1547,9 +1595,11 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   if (token.kind == lexer::TokenKind::LastValue) {
     return ast::make_expr("AstLastValue", token.span);
   }
+  if (token.kind == lexer::TokenKind::String) {
+    return parse_string_literal_expr(token);
+  }
   if (token.kind == lexer::TokenKind::Integer ||
       token.kind == lexer::TokenKind::Float ||
-      token.kind == lexer::TokenKind::String ||
       token.kind == lexer::TokenKind::KeywordTrue ||
       token.kind == lexer::TokenKind::KeywordFalse ||
       token.kind == lexer::TokenKind::KeywordNull) {
@@ -1600,6 +1650,143 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   error(token, "expected expression");
   auto expr = ast::make_expr("AstError", token.span);
   expr->string_field("token", token.lexeme);
+  return expr;
+}
+
+std::unique_ptr<ast::Expr>
+Parser::parse_string_literal_expr(const lexer::Token &token) {
+  auto literal = [&]() {
+    auto expr = ast::make_expr("AstLiteral", token.span);
+    expr->string_field("token", lexer::token_kind_name(token.kind));
+    expr->string_field("value", token.lexeme);
+    return expr;
+  };
+
+  if (token.lexeme.size() < 2 || token.lexeme.front() != '"') {
+    return literal();
+  }
+
+  const std::size_t content_end = token.lexeme.size() - 1U;
+  std::vector<std::unique_ptr<ast::Expr>> parts;
+  std::size_t literal_begin = 1U;
+  std::size_t cursor = 1U;
+  bool saw_interpolation = false;
+
+  auto push_literal_part = [&](std::size_t begin, std::size_t end) {
+    if (end <= begin) {
+      return;
+    }
+    auto part =
+        ast::make_expr("AstInterpolationLiteral",
+                       span_for_token_slice(token, begin, end));
+    part->string_field("token", "STRING");
+    part->string_field("value",
+                       "\"" + token.lexeme.substr(begin, end - begin) + "\"");
+    parts.push_back(std::move(part));
+  };
+
+  auto find_interpolation_end = [&](std::size_t begin,
+                                    std::size_t *end_out) -> bool {
+    int depth = 0;
+    std::size_t i = begin;
+    while (i < content_end) {
+      const char c = token.lexeme[i];
+      if (c == '\\') {
+        i += 2;
+        continue;
+      }
+      if (c == '"' || c == '\'') {
+        const char quote = c;
+        ++i;
+        while (i < content_end) {
+          if (token.lexeme[i] == '\\') {
+            i += 2;
+            continue;
+          }
+          if (token.lexeme[i] == quote) {
+            ++i;
+            break;
+          }
+          ++i;
+        }
+        continue;
+      }
+      if (c == '{') {
+        ++depth;
+        ++i;
+        continue;
+      }
+      if (c == '}') {
+        if (depth == 0) {
+          *end_out = i;
+          return true;
+        }
+        --depth;
+        ++i;
+        continue;
+      }
+      ++i;
+    }
+    return false;
+  };
+
+  while (cursor < content_end) {
+    if (token.lexeme[cursor] == '\\') {
+      cursor += 2;
+      continue;
+    }
+    if (token.lexeme[cursor] == '#' && cursor + 1U < content_end &&
+        token.lexeme[cursor + 1U] == '{') {
+      saw_interpolation = true;
+      push_literal_part(literal_begin, cursor);
+      const std::size_t expr_begin = cursor + 2U;
+      std::size_t expr_end = expr_begin;
+      if (!find_interpolation_end(expr_begin, &expr_end)) {
+        error(token, "unterminated string interpolation");
+        return literal();
+      }
+      const std::string expr_source =
+          token.lexeme.substr(expr_begin, expr_end - expr_begin);
+      const lexer::Position expr_base =
+          offset_position_in_token(token, expr_begin);
+      amber::lexer::Lexer lexer(expr_source, token.span.file);
+      amber::lexer::LexResult lex_result = lexer.lex();
+      shift_token_spans_from_interpolation(&lex_result.tokens, expr_base);
+      if (!lex_result.ok()) {
+        for (lexer::Diagnostic diagnostic : lex_result.diagnostics) {
+          shift_position_from_interpolation(&diagnostic.span.start, expr_base);
+          shift_position_from_interpolation(&diagnostic.span.end, expr_base);
+          diagnostics_.push_back(std::move(diagnostic));
+        }
+        return literal();
+      }
+      Parser nested(lex_result.tokens);
+      ParseResult parsed = nested.parse_expression_unit();
+      if (!parsed.ok()) {
+        for (lexer::Diagnostic diagnostic : parsed.diagnostics) {
+          diagnostics_.push_back(std::move(diagnostic));
+        }
+        return literal();
+      }
+      auto part =
+          ast::make_expr("AstInterpolationExpr",
+                         span_for_token_slice(token, cursor, expr_end + 1U));
+      part->node_field("expr", std::move(parsed.expr));
+      parts.push_back(std::move(part));
+      cursor = expr_end + 1U;
+      literal_begin = cursor;
+      continue;
+    }
+    ++cursor;
+  }
+
+  if (!saw_interpolation) {
+    return literal();
+  }
+  push_literal_part(literal_begin, content_end);
+
+  auto expr = ast::make_expr("AstInterpolatedString", token.span);
+  expr->list_field("parts", std::move(parts));
   return expr;
 }
 
@@ -1914,6 +2101,9 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
   case lexer::TokenKind::EqualEqual:
     *info = InfixInfo{4, Assoc::Left, "=="};
     return true;
+  case lexer::TokenKind::EqualEqualEqual:
+    *info = InfixInfo{4, Assoc::Left, "==="};
+    return true;
   case lexer::TokenKind::BangEqual:
     *info = InfixInfo{4, Assoc::Left, "!="};
     return true;
@@ -1956,7 +2146,8 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
 }
 
 bool Parser::is_method_name_token(const lexer::Token &token) const {
-  return token.kind == lexer::TokenKind::Identifier;
+  return token.kind == lexer::TokenKind::Identifier ||
+         is_operator_method_name(token.kind);
 }
 
 void Parser::error(const lexer::Token &token, const std::string &message) {

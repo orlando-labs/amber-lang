@@ -9,7 +9,10 @@ contracts for source rules, bytecode verifier initializedness, runtime UNINIT
 guards, `CALL`, and source traces. W14 adds build/bootstrap/conformance
 metadata through `amber.build.v1`, `amberc build`, and optional `.amberbc`
 `PROF` profile metadata. W15 hardens `amber.native.v1` metadata with explicit
-slowpaths, invalidation fallback, and exception-edge root maps.
+slowpaths, invalidation fallback, and exception-edge root maps. The post-W15
+CLI surface adds public `amberc metadata <file.amberbc> --json` and
+`amberc verify <file.amberbc> --json` entrypoints over the same `.amberbc`
+format.
 
 Existing artifacts produced by the W11.6 baseline remain in the same format
 families. Invalid hand-authored `.amberbc` fixtures may now fail earlier under
