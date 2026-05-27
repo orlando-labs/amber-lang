@@ -1,4 +1,5 @@
 #include "bytecode/emitter.h"
+#include "bytecode/format.h"
 #include "frontend/binder/binder.h"
 #include "frontend/checker/checker.h"
 #include "frontend/hir/hir.h"
@@ -134,7 +135,16 @@ CompileResult compile_source_text(const std::string &source,
         false, {}, amber::lexer::diagnostics_to_json(emit_result.diagnostics)};
   }
   emit_result.module.effects = check_result.effect_summaries;
-  return {true, std::move(emit_result.module), {}};
+  const std::vector<std::uint8_t> bytes =
+      amber::bytecode::serialize_module(emit_result.module);
+  amber::bytecode::DecodeResult decode_result =
+      amber::bytecode::deserialize_module(bytes);
+  if (!decode_result.ok()) {
+    return {false,
+            {},
+            amber::bytecode::verify_errors_to_json(decode_result.errors)};
+  }
+  return {true, std::move(decode_result.module), {}};
 }
 
 std::string session_source_until(const std::vector<Cell> &cells,

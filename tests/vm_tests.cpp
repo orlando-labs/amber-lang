@@ -93,6 +93,47 @@ void test_execute_emitted_method() {
   expect(exec.value.as_integer() == 7, "echo should return argument");
 }
 
+void test_execute_module_init_calls_top_level_def() {
+  amber::bytecode::EmitResult emit_result = emit_ok("def f(x):\n"
+                                                    "  x + 42\n"
+                                                    "\n"
+                                                    "f(3)\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  expect(decoded.module.init.has_entry_code_id,
+         "module init entry should exist");
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(decoded.module,
+                                   decoded.module.init.entry_code_id);
+  expect(exec.ok(), "module init top-level def call failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 45,
+         "module init should return top-level function result");
+}
+
+void test_top_level_function_closure_captures_sibling_function() {
+  amber::bytecode::EmitResult emit_result = emit_ok("def tap(x):\n"
+                                                    "  x\n"
+                                                    "\n"
+                                                    "def describe(a):\n"
+                                                    "  tap(a)\n"
+                                                    "\n"
+                                                    "describe(7)\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(decoded.module,
+                                   decoded.module.init.entry_code_id);
+  expect(exec.ok(), "top-level function sibling capture failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 7,
+         "top-level function should call captured sibling function");
+}
+
 void test_runtime_capability_checks() {
   amber::bytecode::BcModule module;
   module.capabilities.push_back(
@@ -5789,6 +5830,8 @@ void test_manual_raise_unhandled_fault_trace() {
 
 int main() {
   test_execute_emitted_method();
+  test_execute_module_init_calls_top_level_def();
+  test_top_level_function_closure_captures_sibling_function();
   test_branching_and_last_result();
   test_manual_closure_call_and_capture();
   test_runtime_uninitialized_register_read_raises_name_error();

@@ -280,13 +280,16 @@ public:
     const int module_scope = find_scope_index("module", module_span(), "");
     const std::string module_proc =
         lower_module_procedure(module_scope, collect_module_exec_items());
+    module_procedure_id_ = module_proc;
+    std::vector<std::unique_ptr<Node>> module_items = lower_module_items();
+    materialize_module_function_bindings(module_proc, module_items);
 
     auto root = make_node("HModule", module_span());
     root->string_field("module_name", module_name_);
     root->string_field("init", module_proc);
     root->list_field("imports", lower_imports());
     root->list_field("exports", lower_exports());
-    root->list_field("items", lower_module_items());
+    root->list_field("items", std::move(module_items));
     program.root = std::move(root);
     program.procedures = std::move(procedures_);
     return program;
@@ -313,6 +316,7 @@ private:
   std::map<int, std::vector<const binder::Binding *>> capture_bindings_cache_;
   std::map<int, const binder::Signature *> signatures_by_scope_;
   ProcedureContext *current_proc_ = nullptr;
+  std::string module_procedure_id_;
 
   lexer::Span module_span() const {
     if (items_.empty()) {
@@ -451,15 +455,181 @@ private:
   std::vector<const ast::Expr *> collect_module_exec_items() const {
     std::vector<const ast::Expr *> values;
     for (const std::unique_ptr<ast::Expr> &item : items_) {
-      if (item->kind == "AstPackageDecl" || item->kind == "AstImportStmt" ||
-          item->kind == "AstExportStmt" || item->kind == "AstClassDef" ||
-          item->kind == "AstMixinDef" || item->kind == "AstDefStmt" ||
-          item->kind == "AstClassMethodDef" || item->kind == "AstClauseDef") {
+      if (!is_module_exec_item(*item)) {
         continue;
       }
       values.push_back(item.get());
     }
     return values;
+  }
+
+  bool is_module_exec_item(const ast::Expr &item) const {
+    return item.kind != "AstPackageDecl" && item.kind != "AstImportStmt" &&
+           item.kind != "AstExportStmt" && item.kind != "AstClassDef" &&
+           item.kind != "AstMixinDef" && item.kind != "AstDefStmt" &&
+           item.kind != "AstClassMethodDef" && item.kind != "AstClauseDef";
+  }
+
+  bool is_module_callable_decl(const ast::Expr &item) const {
+    return item.kind == "AstDefStmt";
+  }
+
+  Procedure *mutable_procedure_by_id(const std::string &id) {
+    for (Procedure &procedure : procedures_) {
+      if (procedure.id == id) {
+        return &procedure;
+      }
+    }
+    return nullptr;
+  }
+
+  std::string module_local_slot_for_decl(const Procedure &procedure,
+                                         const ast::Expr &item) const {
+    const std::string name = string_value(item, "name");
+    for (const ProcedureLocal &local : procedure.locals) {
+      if (local.name == name && local.role == "function" &&
+          same_span(local.span, item.span)) {
+        return local.slot;
+      }
+    }
+    return "";
+  }
+
+  std::string module_local_slot_for_binding(
+      const binder::Binding &binding) const {
+    for (const Procedure &procedure : procedures_) {
+      if (procedure.id != module_procedure_id_) {
+        continue;
+      }
+      for (const ProcedureLocal &local : procedure.locals) {
+        if (local.name == binding.name && same_span(local.span, binding.span)) {
+          return local.slot;
+        }
+      }
+    }
+    return "";
+  }
+
+  std::vector<CapturePlan>
+  build_module_method_capture_plans(int scope_index) {
+    std::vector<CapturePlan> plans;
+    if (scope_index < 0) {
+      return plans;
+    }
+    const std::vector<const binder::Binding *> &captures =
+        capture_bindings_for_scope(scope_index);
+    for (const binder::Binding *binding : captures) {
+      if (binding == nullptr) {
+        continue;
+      }
+      const std::string source_slot = module_local_slot_for_binding(*binding);
+      if (source_slot.empty()) {
+        continue;
+      }
+      plans.push_back(CapturePlan{binding, "u" + std::to_string(plans.size()),
+                                  "local", source_slot});
+    }
+    return plans;
+  }
+
+  std::string procedure_id_for_module_decl(
+      const ast::Expr &item,
+      const std::vector<std::unique_ptr<Node>> &module_items) const {
+    const std::string name = string_value(item, "name");
+    for (const std::unique_ptr<Node> &module_item : module_items) {
+      if (module_item == nullptr || module_item->kind != "HMethod" ||
+          string_value(*module_item, "name") != name ||
+          !same_span(module_item->span, item.span)) {
+        continue;
+      }
+      return string_value(*module_item, "procedure");
+    }
+    return "";
+  }
+
+  std::vector<std::unique_ptr<Node>>
+  build_capture_nodes_for_procedure(const std::string &procedure_id) const {
+    std::vector<std::unique_ptr<Node>> nodes;
+    for (const Procedure &procedure : procedures_) {
+      if (procedure.id != procedure_id) {
+        continue;
+      }
+      for (const ProcedureCapture &capture : procedure.captures) {
+        auto node = make_node("HCapture", capture.span);
+        node->string_field("slot", capture.slot);
+        node->string_field("name", capture.name);
+        node->string_field("source_kind", capture.source_kind);
+        node->string_field("source_slot", capture.source_slot);
+        node->string_field("source_name", capture.source_name);
+        nodes.push_back(std::move(node));
+      }
+      break;
+    }
+    return nodes;
+  }
+
+  std::unique_ptr<Node> make_function_binding_init(
+      const ast::Expr &item, const std::string &slot,
+      const std::string &procedure_id) {
+    auto closure = make_node("HClosure", item.span);
+    closure->string_field("procedure", procedure_id);
+    closure->list_field("captures",
+                        build_capture_nodes_for_procedure(procedure_id));
+
+    auto store = make_node("HStoreLocal", item.span);
+    store->string_field("slot", slot);
+    store->node_field("expr", std::move(closure));
+    return store;
+  }
+
+  std::unique_ptr<Node> make_null_last_set(const lexer::Span &span) {
+    auto node = make_node("HLastSet", span);
+    node->node_field("expr", make_null_const(span));
+    return node;
+  }
+
+  void materialize_module_function_bindings(
+      const std::string &module_proc,
+      const std::vector<std::unique_ptr<Node>> &module_items) {
+    Procedure *procedure = mutable_procedure_by_id(module_proc);
+    if (procedure == nullptr || procedure->body == nullptr) {
+      return;
+    }
+    ast::ListField *items = mutable_list_field(*procedure->body, "items");
+    if (items == nullptr) {
+      return;
+    }
+
+    std::vector<std::unique_ptr<Node>> lowered_exec_items =
+        std::move(items->values);
+    std::vector<std::unique_ptr<Node>> reordered;
+    std::size_t exec_index = 0;
+    for (const std::unique_ptr<ast::Expr> &item : items_) {
+      if (item == nullptr) {
+        continue;
+      }
+      if (is_module_callable_decl(*item)) {
+        const std::string slot = module_local_slot_for_decl(*procedure, *item);
+        const std::string procedure_id =
+            procedure_id_for_module_decl(*item, module_items);
+        if (!slot.empty() && !procedure_id.empty()) {
+          reordered.push_back(
+              make_function_binding_init(*item, slot, procedure_id));
+          reordered.push_back(make_null_last_set(item->span));
+        }
+        continue;
+      }
+      if (!is_module_exec_item(*item)) {
+        continue;
+      }
+      if (exec_index < lowered_exec_items.size()) {
+        reordered.push_back(std::move(lowered_exec_items[exec_index++]));
+      }
+    }
+    while (exec_index < lowered_exec_items.size()) {
+      reordered.push_back(std::move(lowered_exec_items[exec_index++]));
+    }
+    items->values = std::move(reordered);
   }
 
   std::vector<std::unique_ptr<Node>> lower_imports() {
@@ -613,10 +783,15 @@ private:
           body_items.push_back(stmt.get());
         }
       }
+      std::vector<CapturePlan> capture_plans;
+      if (dispatch_side == "module") {
+        capture_plans = build_module_method_capture_plans(scope_index);
+      }
       const std::string procedure_id = lower_procedure(
           scope_index, string_value(item, "name"), "method",
           procedure_name_for_owner(string_value(item, "name")), signature,
-          body_items, item.span, {}, nullptr, node_field(item, "signature"));
+          body_items, item.span, capture_plans, nullptr,
+          node_field(item, "signature"));
       node->string_field("procedure", procedure_id);
       for (const Procedure &procedure : procedures_) {
         if (procedure.id == procedure_id && procedure.signature != nullptr) {

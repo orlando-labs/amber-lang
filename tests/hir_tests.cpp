@@ -169,6 +169,78 @@ void test_method_and_send_lowering() {
   expect(string_field(*expr, "selector") == "uniq", "outer selector");
 }
 
+void test_module_def_materializes_callable_binding() {
+  const amber::hir::Program program = lower_ok("def f(x):\n"
+                                               "  x + 42\n"
+                                               "\n"
+                                               "f(3)\n");
+  const amber::hir::Procedure *init =
+      procedure_by_name(program, "__module_init__");
+  expect(init != nullptr && init->body != nullptr, "module init exists");
+
+  const amber::ast::Expr *method = module_item_by_name(program, "f");
+  expect(method != nullptr && method->kind == "HMethod", "method item exists");
+  const std::string method_procedure = string_field(*method, "procedure");
+
+  const amber::ast::Expr *store = list_item(*init->body, "items", 0);
+  expect(store != nullptr && store->kind == "HStoreLocal",
+         "module def initializes function binding");
+  const amber::ast::Expr *closure = node_field(*store, "expr");
+  expect(closure != nullptr && closure->kind == "HClosure",
+         "module def stores callable closure");
+  expect(string_field(*closure, "procedure") == method_procedure,
+         "module def closure points at method body");
+
+  const amber::ast::Expr *call_stmt = list_item(*init->body, "items", 2);
+  expect(call_stmt != nullptr && call_stmt->kind == "HLastSet",
+         "module call remains after def initialization");
+  const amber::ast::Expr *call_expr = node_field(*call_stmt, "expr");
+  expect(call_expr != nullptr && call_expr->kind == "HCall",
+         "top-level call stays callable invocation");
+  const amber::ast::Expr *callable = node_field(*call_expr, "callable");
+  expect(callable != nullptr && callable->kind == "HLoadLocal",
+         "top-level call reads initialized function binding");
+  expect(string_field(*callable, "slot") == string_field(*store, "slot"),
+         "top-level call uses same function slot");
+}
+
+void test_module_def_closure_captures_prior_function() {
+  const amber::hir::Program program = lower_ok("def tap(x):\n"
+                                               "  x\n"
+                                               "\n"
+                                               "def describe(a):\n"
+                                               "  tap(a)\n"
+                                               "\n"
+                                               "describe(7)\n");
+  const amber::hir::Procedure *init =
+      procedure_by_name(program, "__module_init__");
+  expect(init != nullptr && init->body != nullptr, "module init exists");
+
+  const amber::ast::Expr *describe_store = list_item(*init->body, "items", 2);
+  expect(describe_store != nullptr && describe_store->kind == "HStoreLocal",
+         "second module def initializes function binding");
+  const amber::ast::Expr *describe_closure =
+      node_field(*describe_store, "expr");
+  expect(describe_closure != nullptr && describe_closure->kind == "HClosure",
+         "second module def stores callable closure");
+  const amber::ast::Expr *capture =
+      list_item(*describe_closure, "captures", 0);
+  expect(capture != nullptr && capture->kind == "HCapture",
+         "second module closure captures first function");
+  expect(string_field(*capture, "source_slot") == "l0",
+         "second module closure captures tap slot");
+
+  const amber::hir::Procedure *describe =
+      procedure_by_id(program, string_field(*describe_closure, "procedure"));
+  expect(describe != nullptr, "describe procedure exists");
+  const amber::ast::Expr *stmt = list_item(*describe->body, "items", 0);
+  const amber::ast::Expr *call = stmt == nullptr ? nullptr : node_field(*stmt, "expr");
+  expect(call != nullptr && call->kind == "HCall", "describe body calls tap");
+  const amber::ast::Expr *callable = node_field(*call, "callable");
+  expect(callable != nullptr && callable->kind == "HLoadCapture",
+         "describe body reads captured tap");
+}
+
 void test_safe_navigation_lowering() {
   const amber::hir::Program program = lower_ok("def city(user):\n"
                                                "  user.?.address.?.city\n");
@@ -993,6 +1065,8 @@ void test_nested_capture_propagation() {
 
 int main() {
   test_method_and_send_lowering();
+  test_module_def_materializes_callable_binding();
+  test_module_def_closure_captures_prior_function();
   test_safe_navigation_lowering();
   test_safe_call_and_index_lowering();
   test_builtin_send_lowering();

@@ -1,18 +1,18 @@
-; amber.bc.v1 sha256=a47ddda83289d3f0090c4ae5b435918145f89e4e92ac4866809e7f55ae036077
+; amber.bc.v1 sha256=0806e7c440ad583b6446d31567ff419b6728148bf64fd149c86db8d1c0120fed
 .header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
 .sections
   STRS offset=344 size=102 align=1 flags=0
   SYMS offset=446 size=44 align=1 flags=0
   KONS offset=490 size=21 align=1 flags=0
-  CODE offset=511 size=543 align=1 flags=0
-  METH offset=1054 size=68 align=1 flags=0
-  CLAS offset=1122 size=4 align=1 flags=0
-  DEPS offset=1126 size=4 align=1 flags=0
-  EXPT offset=1130 size=4 align=1 flags=0
-  INIT offset=1134 size=9 align=1 flags=0
-  SPAN offset=1143 size=1876 align=1 flags=0
-  LINE offset=3019 size=316 align=1 flags=0
-  LOCS offset=3335 size=84 align=1 flags=0
+  CODE offset=511 size=584 align=1 flags=0
+  METH offset=1095 size=68 align=1 flags=0
+  CLAS offset=1163 size=4 align=1 flags=0
+  DEPS offset=1167 size=4 align=1 flags=0
+  EXPT offset=1171 size=4 align=1 flags=0
+  INIT offset=1175 size=9 align=1 flags=0
+  SPAN offset=1184 size=2236 align=1 flags=0
+  LINE offset=3420 size=376 align=1 flags=0
+  LOCS offset=3796 size=84 align=1 flags=0
 .strs
   s0 "scan"
   s1 "function"
@@ -35,14 +35,24 @@
   k1 integer 1
   k2 path [4, 5]
 .code
-code c1 kind=module regs=2 flags=0
+code c1 kind=module regs=4 flags=0
   local l0 name=s0(scan) role=s1(function) binding=s2(local)
-  0000 CLOSE_UPVALUES 0
-  0001 GETLAST 1
-  0002 RETURN 1
+  0000 MAKE_CLOSURE 1 2 0
+  0001 MOVE 0 1
+  0002 SETLAST 0
+  0003 LOADNULL 2
+  0004 SETLAST 2
+  0005 CLOSE_UPVALUES 0
+  0006 GETLAST 3
+  0007 RETURN 3
   span 0..1 corpus/bc/disasm/basic/source.am:1:1-4:21
   span 1..2 corpus/bc/disasm/basic/source.am:1:1-4:21
   span 2..3 corpus/bc/disasm/basic/source.am:1:1-4:21
+  span 3..4 corpus/bc/disasm/basic/source.am:1:1-4:21
+  span 4..5 corpus/bc/disasm/basic/source.am:1:1-4:21
+  span 5..6 corpus/bc/disasm/basic/source.am:1:1-4:21
+  span 6..7 corpus/bc/disasm/basic/source.am:1:1-4:21
+  span 7..8 corpus/bc/disasm/basic/source.am:1:1-4:21
 code c2 kind=method regs=10 flags=0
   local l0 name=s3(xs) role=s4(param) binding=s2(local)
   local l1 name=s5(limit) role=s4(param) binding=s2(local)
@@ -113,6 +123,11 @@ code c3 kind=block regs=4 flags=0
   c1 pc=0 line=1
   c1 pc=1 line=1
   c1 pc=2 line=1
+  c1 pc=3 line=1
+  c1 pc=4 line=1
+  c1 pc=5 line=1
+  c1 pc=6 line=1
+  c1 pc=7 line=1
   c2 pc=0 line=2
   c2 pc=1 line=2
   c2 pc=2 line=2
@@ -137,7 +152,7 @@ code c3 kind=block regs=4 flags=0
   c3 pc=4 line=4
   c3 pc=5 line=4
 .locs
-  c1 l0 name=s0(scan) 0..3
+  c1 l0 name=s0(scan) 0..8
   c2 l0 name=s3(xs) 0..17
   c2 l1 name=s5(limit) 0..17
   c3 l0 name=s6(_1) 0..6
