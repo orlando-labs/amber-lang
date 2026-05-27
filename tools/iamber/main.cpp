@@ -96,6 +96,23 @@ effect_diagnostics_only(const amber::checker::CheckResult &result) {
   return diagnostics;
 }
 
+std::string diagnostics_to_summary(
+    const std::vector<amber::lexer::Diagnostic> &diagnostics) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < diagnostics.size(); ++i) {
+    const amber::lexer::Diagnostic &diagnostic = diagnostics[i];
+    if (i != 0U) {
+      out << "\n";
+    }
+    out << diagnostic.code << ": " << diagnostic.message;
+    if (!diagnostic.span.file.empty() && diagnostic.span.start.line > 0) {
+      out << " at " << diagnostic.span.file << ":"
+          << diagnostic.span.start.line << ":" << diagnostic.span.start.col;
+    }
+  }
+  return out.str();
+}
+
 CompileResult compile_source_text(const std::string &source,
                                   const std::string &source_path) {
   amber::lexer::LexResult lex_result = lex_source(source, source_path);
@@ -116,6 +133,12 @@ CompileResult compile_source_text(const std::string &source,
   if (!bind_result.ok()) {
     return {
         false, {}, amber::lexer::diagnostics_to_json(bind_result.diagnostics)};
+  }
+  const std::vector<amber::lexer::Diagnostic> unresolved_name_diagnostics =
+      amber::binder::unresolved_name_diagnostics(parse_result.items,
+                                                 bind_result.graph);
+  if (!unresolved_name_diagnostics.empty()) {
+    return {false, {}, diagnostics_to_summary(unresolved_name_diagnostics)};
   }
 
   amber::checker::CheckResult check_result = amber::checker::check_module(

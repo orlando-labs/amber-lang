@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -49,6 +50,33 @@ amber::binder::BindResult bind_any(const std::string &source) {
 
   return amber::binder::bind_module(parse_result.items,
                                     parse_result.module_name);
+}
+
+std::vector<amber::lexer::Diagnostic>
+unresolved_name_diagnostics_for(const std::string &source) {
+  amber::lexer::Lexer lexer(source, "<test>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(parse_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(bind_result.diagnostics);
+    std::exit(1);
+  }
+
+  return amber::binder::unresolved_name_diagnostics(parse_result.items,
+                                                    bind_result.graph);
 }
 
 std::unique_ptr<amber::ast::Expr> parse_expr_ok(const std::string &source) {
@@ -348,6 +376,36 @@ void test_wildcard_name_diagnostics() {
                                              "  _ = 1\n");
   expect(!write.ok(), "wildcard write rejected");
   expect_diagnostic_code(write, "B0002");
+}
+
+void test_unresolved_name_diagnostics() {
+  std::vector<amber::lexer::Diagnostic> bare =
+      unresolved_name_diagnostics_for("x\n");
+  expect(bare.size() == 1U, "bare unresolved name gets one diagnostic");
+  expect(bare[0].code == "E2012", "bare unresolved name diagnostic code");
+  expect(bare[0].message == "undefined name 'x'",
+         "bare unresolved name diagnostic message");
+
+  std::vector<amber::lexer::Diagnostic> call =
+      unresolved_name_diagnostics_for("f(x)\n");
+  expect(call.size() == 2U, "call unresolved names get two diagnostics");
+  expect(call[0].message == "undefined callable 'f'",
+         "call base diagnostic is callable-specific");
+  expect(call[1].message == "undefined name 'x'",
+         "call arg diagnostic remains ordinary name-specific");
+
+  std::vector<amber::lexer::Diagnostic> literal_call =
+      unresolved_name_diagnostics_for("f(1)\n");
+  expect(literal_call.size() == 1U,
+         "literal call unresolved callable gets one diagnostic");
+  expect(literal_call[0].message == "undefined callable 'f'",
+         "literal call diagnostic is callable-specific");
+
+  std::vector<amber::lexer::Diagnostic> reflective_send =
+      unresolved_name_diagnostics_for("receiver = 1\n"
+                                      "send(receiver, \"tick\")\n");
+  expect(reflective_send.empty(),
+         "reflective send builtin is not reported as undefined");
 }
 
 void test_default_ordering_diagnostics() {
@@ -714,6 +772,7 @@ int main() {
   test_placeholder_diagnostics();
   test_duplicate_binding_diagnostics();
   test_wildcard_name_diagnostics();
+  test_unresolved_name_diagnostics();
   test_default_ordering_diagnostics();
   test_auto_assign_default_warning();
   test_clause_def_bindings();

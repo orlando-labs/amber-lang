@@ -101,6 +101,14 @@ which reads `AstTailCall` / `AstTailSafeCall` or a postfix chain ending in one
 of those tails and normalizes `AstKeywordArg` nodes into the same
 `CallArgShape` sequence consumed by `bind_call_shape(...)`.
 
+Strict compile clients can call `unresolved_name_diagnostics(...)` after a
+successful bind to reject ordinary unresolved name reads before HIR lowering.
+The helper classifies an unresolved postfix-call base as an undefined callable,
+keeps unresolved call arguments as ordinary undefined names, and preserves the
+reflective `send(receiver, selector, ...)` builtin escape hatch. It emits:
+
+- `E2012`: unresolved ordinary name after binding.
+
 For the current pattern slice, binder parses pattern surface text for
 clause-style `def`, `case` arms, explicit block params, and pattern assignment.
 It extracts local binders so names such as `n`, `x`, `y`, `w`, `h`, `whole`,

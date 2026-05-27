@@ -27,6 +27,7 @@ diagnostics:
   - { code: E2009, severity: error, phase: binder, condition: unknown keyword argument at call site }
   - { code: E2010, severity: error, phase: binder, condition: too many positional arguments for callable signature }
   - { code: E2011, severity: error, phase: binder, condition: missing required parameter after explicit bind }
+  - { code: E2012, severity: error, phase: binder, condition: unresolved ordinary name after binding }
   - { code: E3001, severity: error, phase: parser, condition: include outside declarative class or mixin body }
   - { code: E3002, severity: error, phase: binder, condition: statically provable non-mixin include target }
   - { code: E3003, severity: error, phase: binder, condition: statically provable include cycle }

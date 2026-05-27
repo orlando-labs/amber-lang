@@ -127,6 +127,9 @@ struct CallBindResult {
 
 BindResult bind_module(const std::vector<std::unique_ptr<ast::Expr>> &items,
                        const std::string &module_name);
+std::vector<lexer::Diagnostic> unresolved_name_diagnostics(
+    const std::vector<std::unique_ptr<ast::Expr>> &items,
+    const BindGraph &graph);
 CallSiteShape extract_call_shape(const ast::Expr &expr);
 CallBindResult bind_call_shape(const Signature &signature,
                                const std::vector<CallArgShape> &args);

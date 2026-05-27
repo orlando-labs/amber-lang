@@ -1016,6 +1016,79 @@ bool diagnostics_ok(const std::vector<lexer::Diagnostic> &diagnostics) {
   return true;
 }
 
+struct NameRefKey {
+  std::string file;
+  std::size_t start_offset = 0;
+  std::size_t end_offset = 0;
+  std::string name;
+};
+
+NameRefKey name_ref_key(const lexer::Span &span, const std::string &name) {
+  return NameRefKey{span.file, span.start.offset, span.end.offset, name};
+}
+
+bool same_name_ref_key(const NameRefKey &left, const NameRefKey &right) {
+  return left.file == right.file && left.start_offset == right.start_offset &&
+         left.end_offset == right.end_offset && left.name == right.name;
+}
+
+bool contains_name_ref_key(const std::vector<NameRefKey> &keys,
+                           const NameRefKey &target) {
+  for (const NameRefKey &key : keys) {
+    if (same_name_ref_key(key, target)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool is_reflective_send_call(const ast::Expr &base, const ast::Expr &tail) {
+  if (tail.kind != "AstTailCall" || string_value(base, "name") != "send") {
+    return false;
+  }
+  const ast::ListField *args = list_field(tail, "args");
+  if (args == nullptr || args->values.size() < 2U) {
+    return false;
+  }
+  return args->values[0]->kind != "AstKeywordArg" &&
+         args->values[1]->kind != "AstKeywordArg";
+}
+
+void collect_call_name_contexts(const ast::Expr &expr,
+                                std::vector<NameRefKey> *callable_names,
+                                std::vector<NameRefKey> *reflective_names) {
+  if (expr.kind == "AstPostfixChain") {
+    const ast::Expr *base = node_field(expr, "base");
+    const ast::ListField *tails = list_field(expr, "tails");
+    if (base != nullptr && base->kind == "AstName" && tails != nullptr &&
+        !tails->values.empty()) {
+      const ast::Expr &first_tail = *tails->values.front();
+      if (first_tail.kind == "AstTailCall" ||
+          first_tail.kind == "AstTailSafeCall") {
+        const NameRefKey key =
+            name_ref_key(base->span, string_value(*base, "name"));
+        if (is_reflective_send_call(*base, first_tail)) {
+          reflective_names->push_back(key);
+        } else {
+          callable_names->push_back(key);
+        }
+      }
+    }
+  }
+
+  for (const ast::NodeField &field : expr.node_fields) {
+    if (field.value) {
+      collect_call_name_contexts(*field.value, callable_names,
+                                 reflective_names);
+    }
+  }
+  for (const ast::ListField &field : expr.list_fields) {
+    for (const std::unique_ptr<ast::Expr> &value : field.values) {
+      collect_call_name_contexts(*value, callable_names, reflective_names);
+    }
+  }
+}
+
 } // namespace
 
 bool BindResult::ok() const { return diagnostics_ok(diagnostics); }
@@ -1169,6 +1242,38 @@ BindResult bind_module(const std::vector<std::unique_ptr<ast::Expr>> &items,
   (void)module_name;
   Binder binder;
   return binder.bind(items);
+}
+
+std::vector<lexer::Diagnostic> unresolved_name_diagnostics(
+    const std::vector<std::unique_ptr<ast::Expr>> &items,
+    const BindGraph &graph) {
+  std::vector<NameRefKey> callable_names;
+  std::vector<NameRefKey> reflective_names;
+  for (const std::unique_ptr<ast::Expr> &item : items) {
+    if (item) {
+      collect_call_name_contexts(*item, &callable_names, &reflective_names);
+    }
+  }
+
+  std::vector<lexer::Diagnostic> diagnostics;
+  for (const Reference &ref : graph.references) {
+    if (ref.resolved || ref.ref_kind != "name") {
+      continue;
+    }
+    const NameRefKey key = name_ref_key(ref.span, ref.name);
+    if (contains_name_ref_key(reflective_names, key)) {
+      continue;
+    }
+    const bool callable = contains_name_ref_key(callable_names, key);
+    diagnostics.push_back(lexer::Diagnostic{
+        "E2012",
+        "error",
+        "binder",
+        callable ? "undefined callable '" + ref.name + "'"
+                 : "undefined name '" + ref.name + "'",
+        ref.span});
+  }
+  return diagnostics;
 }
 
 std::string bind_graph_to_json(const BindGraph &graph,
