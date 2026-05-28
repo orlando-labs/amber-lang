@@ -108,6 +108,10 @@ private:
   std::unique_ptr<ast::Expr> parse_prefix(StopMode stop_mode);
   std::unique_ptr<ast::Expr>
   parse_paren_or_tuple_literal(const lexer::Token &open, StopMode stop_mode);
+  std::unique_ptr<ast::Expr>
+  parse_brace_collection_literal(const lexer::Token &open, StopMode stop_mode);
+  std::unique_ptr<ast::Expr> parse_set_literal(const lexer::Token &open,
+                                               StopMode stop_mode);
   std::unique_ptr<ast::Expr> parse_map_literal(const lexer::Token &open,
                                                StopMode stop_mode);
   std::unique_ptr<ast::Expr>
@@ -123,6 +127,7 @@ private:
   bool is_stop_token(StopMode stop_mode) const;
   bool starts_primary() const;
   bool starts_bare_arg() const;
+  bool starts_map_literal_entry() const;
   bool can_accept_bare_call(const ast::Expr &expr) const;
   bool can_accept_direct_block_suffix(const ast::Expr &expr) const;
   bool is_assignable(const ast::Expr &expr) const;

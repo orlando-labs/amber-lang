@@ -1729,7 +1729,7 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
     return expr;
   }
   if (token.kind == lexer::TokenKind::LBrace) {
-    return parse_map_literal(token, stop_mode);
+    return parse_brace_collection_literal(token, stop_mode);
   }
   if (token.kind == lexer::TokenKind::Plus ||
       token.kind == lexer::TokenKind::Minus ||
@@ -1782,6 +1782,37 @@ Parser::parse_paren_or_tuple_literal(const lexer::Token &open,
 
   auto expr =
       ast::make_expr("AstTupleLiteral", ast::join_spans(open.span, close.span));
+  expr->list_field("elements", std::move(elements));
+  return expr;
+}
+
+std::unique_ptr<ast::Expr>
+Parser::parse_brace_collection_literal(const lexer::Token &open,
+                                       StopMode stop_mode) {
+  if (check(lexer::TokenKind::RBrace) || starts_map_literal_entry()) {
+    return parse_map_literal(open, stop_mode);
+  }
+  return parse_set_literal(open, stop_mode);
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_set_literal(const lexer::Token &open,
+                                                     StopMode stop_mode) {
+  std::vector<std::unique_ptr<ast::Expr>> elements;
+
+  while (!check(lexer::TokenKind::RBrace) && !at_end()) {
+    elements.push_back(parse_expression(1, stop_mode));
+    if (!match(lexer::TokenKind::Comma)) {
+      break;
+    }
+    if (check(lexer::TokenKind::RBrace)) {
+      break;
+    }
+  }
+
+  const lexer::Token close =
+      consume(lexer::TokenKind::RBrace, "expected '}' after set literal");
+  auto expr =
+      ast::make_expr("AstSetLiteral", ast::join_spans(open.span, close.span));
   expr->list_field("elements", std::move(elements));
   return expr;
 }
@@ -2251,6 +2282,18 @@ bool Parser::starts_bare_arg() const {
   default:
     return false;
   }
+}
+
+bool Parser::starts_map_literal_entry() const {
+  if (current().kind == lexer::TokenKind::Identifier ||
+      current().kind == lexer::TokenKind::String) {
+    return peek().kind == lexer::TokenKind::Colon;
+  }
+  if (current().kind == lexer::TokenKind::Colon &&
+      peek().kind == lexer::TokenKind::Identifier) {
+    return peek(2).kind == lexer::TokenKind::Colon;
+  }
+  return false;
 }
 
 bool Parser::can_accept_bare_call(const ast::Expr &expr) const {

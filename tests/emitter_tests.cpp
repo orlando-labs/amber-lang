@@ -406,6 +406,7 @@ void test_collection_literal_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("[1, 2]\n"
               "(3, 4)\n"
+              "{5}\n"
               "{id: :ok, \"name\": 5}\n");
   const amber::bytecode::BcCode *code =
       code_by_kind(emit_result.module, amber::bytecode::CodeKind::Module);
@@ -414,6 +415,8 @@ void test_collection_literal_emission() {
          "list literal emits MAKE_LIST");
   expect(contains_opcode(*code, amber::bytecode::Opcode::MakeTuple),
          "tuple literal emits MAKE_TUPLE");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::MakeSet),
+         "set literal emits MAKE_SET");
   expect(contains_opcode(*code, amber::bytecode::Opcode::MakeMap),
          "map literal emits MAKE_MAP");
   expect(contains_symbol(emit_result.module, "ok"),

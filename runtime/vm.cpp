@@ -59,6 +59,7 @@ void increment_kind_allocation(RuntimeHeapStats &stats, HeapObjectKind kind) {
     return;
   case HeapObjectKind::List:
   case HeapObjectKind::Tuple:
+  case HeapObjectKind::Set:
     ++stats.array_allocations;
     return;
   case HeapObjectKind::Map:
@@ -85,6 +86,7 @@ struct RuntimeSyncBoundaryError {
 
 std::optional<RuntimeSyncBoundaryError>
 runtime_value_shareability_error(const Value &value);
+bool value_equals(const Value &lhs, const Value &rhs);
 
 } // namespace
 
@@ -237,6 +239,24 @@ std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
     return std::nullopt;
   }
 
+  if (value.is_set()) {
+    const std::shared_ptr<SetValue> set = value.as_set();
+    if (set == nullptr) {
+      return RuntimeSyncBoundaryError{"TypeError", "set value is null"};
+    }
+    if (!set->frozen) {
+      return runtime_isolation_error();
+    }
+    for (const Value &item : set->items) {
+      std::optional<RuntimeSyncBoundaryError> error =
+          runtime_value_shareability_error_impl(item, visited);
+      if (error.has_value()) {
+        return error;
+      }
+    }
+    return std::nullopt;
+  }
+
   if (value.is_map()) {
     const std::shared_ptr<MapValue> map = value.as_map();
     if (map == nullptr) {
@@ -326,6 +346,13 @@ void runtime_append_child_values(const Value &value,
     if (tuple != nullptr) {
       children->insert(children->end(), tuple->items.begin(),
                        tuple->items.end());
+    }
+    return;
+  }
+  if (value.is_set()) {
+    const std::shared_ptr<SetValue> set = value.as_set();
+    if (set != nullptr) {
+      children->insert(children->end(), set->items.begin(), set->items.end());
     }
     return;
   }
@@ -3359,6 +3386,8 @@ private:
       return &static_cast<ListValue *>(record.ptr)->header;
     case HeapObjectKind::Tuple:
       return &static_cast<TupleValue *>(record.ptr)->header;
+    case HeapObjectKind::Set:
+      return &static_cast<SetValue *>(record.ptr)->header;
     case HeapObjectKind::Map:
       return &static_cast<MapValue *>(record.ptr)->header;
     case HeapObjectKind::Closure:
@@ -3458,6 +3487,11 @@ private:
       out->insert(out->end(), tuple->items.begin(), tuple->items.end());
       return;
     }
+    case HeapObjectKind::Set: {
+      const auto *set = static_cast<const SetValue *>(record.ptr);
+      out->insert(out->end(), set->items.begin(), set->items.end());
+      return;
+    }
     case HeapObjectKind::Map: {
       const auto *map = static_cast<const MapValue *>(record.ptr);
       for (const MapEntry &entry : map->entries) {
@@ -3518,6 +3552,13 @@ private:
       auto *tuple = static_cast<TupleValue *>(record.ptr);
       move_values_for_deferred_release(&tuple->items, deferred);
       tuple->header.shape = dead_shape;
+      return;
+    }
+    case HeapObjectKind::Set: {
+      auto *set = static_cast<SetValue *>(record.ptr);
+      move_values_for_deferred_release(&set->items, deferred);
+      set->frozen = false;
+      set->header.shape = dead_shape;
       return;
     }
     case HeapObjectKind::Map: {
@@ -3728,6 +3769,34 @@ Value RuntimeHeap::make_tuple_value(std::vector<Value> items) {
         value.header.owner.kind = OwnerTokenKind::Shareable;
         value.header.generation = ObjectGeneration::Shared;
         value.items = std::move(items);
+      });
+  return {std::move(value)};
+}
+
+Value RuntimeHeap::make_set_value(std::vector<Value> items, bool frozen) {
+  std::vector<Value> unique_items;
+  unique_items.reserve(items.size());
+  for (Value &item : items) {
+    const bool exists =
+        std::find_if(unique_items.begin(), unique_items.end(),
+                     [&](const Value &seen) {
+                       return value_equals(seen, item);
+                     }) != unique_items.end();
+    if (!exists) {
+      unique_items.push_back(std::move(item));
+    }
+  }
+
+  auto value = impl_->allocate<SetValue>(
+      HeapObjectKind::Set, [frozen, &unique_items](SetValue &value) {
+        value.header.flags =
+            frozen ? kObjectFlagFrozen | kObjectFlagShareable : 0U;
+        value.header.owner.kind =
+            frozen ? OwnerTokenKind::Shareable : OwnerTokenKind::Confined;
+        value.header.generation =
+            frozen ? ObjectGeneration::Shared : ObjectGeneration::Young;
+        value.items = std::move(unique_items);
+        value.frozen = frozen;
       });
   return {std::move(value)};
 }
@@ -3954,6 +4023,10 @@ bool Value::is_tuple() const {
   return std::holds_alternative<std::shared_ptr<TupleValue>>(payload);
 }
 
+bool Value::is_set() const {
+  return std::holds_alternative<std::shared_ptr<SetValue>>(payload);
+}
+
 bool Value::is_map() const {
   return std::holds_alternative<std::shared_ptr<MapValue>>(payload);
 }
@@ -3990,6 +4063,10 @@ std::shared_ptr<TupleValue> Value::as_tuple() const {
   return std::get<std::shared_ptr<TupleValue>>(payload);
 }
 
+std::shared_ptr<SetValue> Value::as_set() const {
+  return std::get<std::shared_ptr<SetValue>>(payload);
+}
+
 std::shared_ptr<MapValue> Value::as_map() const {
   return std::get<std::shared_ptr<MapValue>>(payload);
 }
@@ -4000,6 +4077,10 @@ Value make_list_value(std::vector<Value> items, bool frozen) {
 
 Value make_tuple_value(std::vector<Value> items) {
   return default_runtime_heap().make_tuple_value(std::move(items));
+}
+
+Value make_set_value(std::vector<Value> items, bool frozen) {
+  return default_runtime_heap().make_set_value(std::move(items), frozen);
 }
 
 Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen) {
@@ -4025,7 +4106,7 @@ constexpr std::int64_t kPatternFailModeMatchError = 1;
 
 bool value_has_heap_payload_tag(const Value &value) {
   return value.is_closure() || value.is_instance_object() || value.is_list() ||
-         value.is_tuple() || value.is_map();
+         value.is_tuple() || value.is_set() || value.is_map();
 }
 
 const ObjHeader *heap_header_from_value(const Value &value) {
@@ -4043,6 +4124,10 @@ const ObjHeader *heap_header_from_value(const Value &value) {
   }
   if (value.is_tuple()) {
     const std::shared_ptr<TupleValue> object = value.as_tuple();
+    return object == nullptr ? nullptr : &object->header;
+  }
+  if (value.is_set()) {
+    const std::shared_ptr<SetValue> object = value.as_set();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_map()) {
@@ -4067,6 +4152,10 @@ ObjHeader *mutable_heap_header_from_value(const Value &value) {
   }
   if (value.is_tuple()) {
     const std::shared_ptr<TupleValue> object = value.as_tuple();
+    return object == nullptr ? nullptr : &object->header;
+  }
+  if (value.is_set()) {
+    const std::shared_ptr<SetValue> object = value.as_set();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_map()) {
@@ -4436,6 +4525,31 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     }
     return true;
   }
+  if (lhs.is_set()) {
+    const std::shared_ptr<SetValue> left = lhs.as_set();
+    const std::shared_ptr<SetValue> right = rhs.as_set();
+    if (left == nullptr || right == nullptr) {
+      return left == right;
+    }
+    if (left->items.size() != right->items.size()) {
+      return false;
+    }
+    std::vector<bool> matched(right->items.size(), false);
+    for (const Value &left_item : left->items) {
+      bool found = false;
+      for (std::size_t i = 0; i < right->items.size(); ++i) {
+        if (!matched[i] && value_equals(left_item, right->items[i])) {
+          matched[i] = true;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        return false;
+      }
+    }
+    return true;
+  }
   if (lhs.is_map()) {
     const std::shared_ptr<MapValue> left = lhs.as_map();
     const std::shared_ptr<MapValue> right = rhs.as_map();
@@ -4735,6 +4849,16 @@ private:
       }
       return;
     }
+    if (value.is_set()) {
+      const std::shared_ptr<SetValue> set = value.as_set();
+      if (set != nullptr) {
+        set->items.clear();
+        set->items.shrink_to_fit();
+        set->frozen = false;
+        set->header.shape = state_->dead_shape;
+      }
+      return;
+    }
     if (value.is_map()) {
       const std::shared_ptr<MapValue> map = value.as_map();
       if (map != nullptr) {
@@ -4809,6 +4933,10 @@ private:
 
   Value make_tuple_value(std::vector<Value> items) {
     return state_->heap.make_tuple_value(std::move(items));
+  }
+
+  Value make_set_value(std::vector<Value> items, bool frozen = false) {
+    return state_->heap.make_set_value(std::move(items), frozen);
   }
 
   Value make_symbol_map_value(std::vector<MapEntry> entries,
@@ -5345,6 +5473,18 @@ private:
       }
       *out_source_was_tuple = true;
       return tuple->items;
+    }
+    if (value.is_set()) {
+      const std::shared_ptr<SetValue> set = value.as_set();
+      if (set == nullptr) {
+        set_fault(frame, "TypeError", "set value is null");
+        return std::nullopt;
+      }
+      if (!ensure_lifecycle_access(frame, value)) {
+        return std::nullopt;
+      }
+      *out_source_was_tuple = false;
+      return set->items;
     }
     return std::nullopt;
   }
@@ -6953,7 +7093,7 @@ private:
 
     const bool builtin_selector =
         selector_in({"==", "==="}) ||
-        ((receiver.is_list() || receiver.is_tuple()) &&
+        ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          selector_in({"empty?", "[]", "deconstruct", "first", "count", "to_a",
                       "lazy", "each", "map", "flat_map", "select", "reject",
                       "find", "group_by", "any?", "all?", "none?",
@@ -6982,7 +7122,7 @@ private:
       return SendStatus::Matched;
     }
 
-    if (receiver.is_list() || receiver.is_tuple()) {
+    if (receiver.is_list() || receiver.is_tuple() || receiver.is_set()) {
       std::vector<Value> items;
       bool source_was_tuple = false;
       const std::optional<std::vector<Value>> extracted =
@@ -7839,6 +7979,7 @@ private:
       return;
     }
     case Opcode::MakeList:
+    case Opcode::MakeSet:
     case Opcode::MakeTuple: {
       std::uint32_t dst = 0;
       std::uint32_t first_reg = 0;
@@ -7856,9 +7997,12 @@ private:
           return;
         }
       }
-      const Value value = insn.opcode == Opcode::MakeTuple
-                              ? make_tuple_value(std::move(items))
-                              : make_list_value(std::move(items));
+      const Value value =
+          insn.opcode == Opcode::MakeTuple
+              ? make_tuple_value(std::move(items))
+              : (insn.opcode == Opcode::MakeSet
+                     ? make_set_value(std::move(items))
+                     : make_list_value(std::move(items)));
       if (!write_reg(frame, dst, value)) {
         return;
       }
@@ -7935,6 +8079,18 @@ private:
           return;
         }
         if (!write_reg(frame, dst, make_symbol_map_value(map->entries, true))) {
+          return;
+        }
+      } else if (value.is_set()) {
+        const std::shared_ptr<SetValue> set = value.as_set();
+        if (set == nullptr) {
+          set_fault(frame, "TypeError", "set value is null");
+          return;
+        }
+        if (!ensure_lifecycle_access(frame, value)) {
+          return;
+        }
+        if (!write_reg(frame, dst, make_set_value(set->items, true))) {
           return;
         }
       } else {
@@ -10969,6 +11125,32 @@ std::string value_to_debug_string(const Value &value,
       out << value_to_debug_string(tuple->items[i], module);
     }
     out << ")";
+    return out.str();
+  }
+  if (value.is_set()) {
+    const std::shared_ptr<SetValue> set = value.as_set();
+    if (set == nullptr) {
+      return "{<null-set>}";
+    }
+    const std::string lifecycle = lifecycle_debug_label(set->header);
+    if (!lifecycle.empty()) {
+      return "{<" + lifecycle + "-set>}";
+    }
+    if (set->items.empty()) {
+      return "Set{}";
+    }
+    std::ostringstream out;
+    out << "{";
+    for (std::size_t i = 0; i < set->items.size(); ++i) {
+      if (i != 0U) {
+        out << ", ";
+      }
+      out << value_to_debug_string(set->items[i], module);
+    }
+    if (set->items.size() == 1U) {
+      out << ",";
+    }
+    out << "}";
     return out.str();
   }
   if (value.is_map()) {

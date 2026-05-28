@@ -1292,10 +1292,13 @@ private:
     if (expr.kind == "AstGroup") {
       return lower_expr(*node_field_required(expr, "expr"));
     }
-    if (expr.kind == "AstListLiteral" || expr.kind == "AstTupleLiteral") {
-      auto node = make_node(expr.kind == "AstListLiteral" ? "HListLiteral"
-                                                          : "HTupleLiteral",
-                            expr.span);
+    if (expr.kind == "AstListLiteral" || expr.kind == "AstTupleLiteral" ||
+        expr.kind == "AstSetLiteral") {
+      const char *kind = expr.kind == "AstListLiteral"
+                             ? "HListLiteral"
+                             : (expr.kind == "AstTupleLiteral" ? "HTupleLiteral"
+                                                               : "HSetLiteral");
+      auto node = make_node(kind, expr.span);
       std::vector<std::unique_ptr<Node>> elements;
       if (const ast::ListField *list = list_field(expr, "elements")) {
         for (const std::unique_ptr<ast::Expr> &element : list->values) {

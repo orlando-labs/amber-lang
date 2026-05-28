@@ -674,6 +674,7 @@ PrimaryExpr         ::= Literal
                       | "@@" Name
                       | "(" Expr ")"
                       | ListLiteral
+                      | SetLiteral
                       | MapLiteral
                       | IfExpr
                       | UnlessExpr
@@ -7381,14 +7382,17 @@ Reference v1 treats collection literals as runtime constructor lowerings with st
 ```amber
 [expr1, expr2]       # Array
 (expr1, expr2)       # Tuple expression only when comma is present
+{expr1, expr2}       # Set expression when entries are values, not key/value pairs
 {key: value}         # Map with symbol/string key according to parsed key form
 ```
 
 Rules:
 
-- list/map elements evaluate left-to-right;
+- list/set/map elements evaluate left-to-right;
 - duplicate literal keys in a map literal are allowed only if runtime `Map` semantics replaces earlier value by later value; compiler may warn;
+- duplicate literal values in a set literal evaluate normally and collapse to one member according to runtime `Set` equality semantics;
 - empty `{}` is Map literal in expression context and map pattern in pattern context;
+- non-empty `{expr}` is Set literal unless the top-level contents parse as map entries;
 - tuple expression requires comma. Parenthesized expression without comma is grouping.
 
 ### 12.5. Name resolution, slots, upvalues and initialization

@@ -2356,6 +2356,9 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   if (expr.kind == "HTupleLiteral") {
     return compile_sequence_literal(expr, Opcode::MakeTuple);
   }
+  if (expr.kind == "HSetLiteral") {
+    return compile_sequence_literal(expr, Opcode::MakeSet);
+  }
   if (expr.kind == "HMapLiteral") {
     return compile_map_literal(expr);
   }

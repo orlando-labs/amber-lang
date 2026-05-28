@@ -23,11 +23,12 @@ struct ClosureValue;
 struct InstanceValue;
 struct ListValue;
 struct TupleValue;
+struct SetValue;
 struct MapValue;
 struct MapEntry;
 class RuntimeHeap;
 
-enum class HeapObjectKind { Instance, List, Tuple, Map, Closure };
+enum class HeapObjectKind { Instance, List, Tuple, Set, Map, Closure };
 
 enum class OwnerTokenKind { Shareable, Confined, Sync };
 
@@ -96,7 +97,8 @@ struct Value {
       std::variant<std::monostate, bool, std::int64_t, double, SymbolValue,
                    StringValue, ClassObjectValue, std::shared_ptr<ClosureValue>,
                    std::shared_ptr<InstanceValue>, std::shared_ptr<ListValue>,
-                   std::shared_ptr<TupleValue>, std::shared_ptr<MapValue>>;
+                   std::shared_ptr<TupleValue>, std::shared_ptr<SetValue>,
+                   std::shared_ptr<MapValue>>;
 
   Payload payload;
 
@@ -121,6 +123,7 @@ struct Value {
   bool is_instance_object() const;
   bool is_list() const;
   bool is_tuple() const;
+  bool is_set() const;
   bool is_map() const;
 
   bool as_bool() const;
@@ -133,6 +136,7 @@ struct Value {
   std::shared_ptr<InstanceValue> as_instance_object() const;
   std::shared_ptr<ListValue> as_list() const;
   std::shared_ptr<TupleValue> as_tuple() const;
+  std::shared_ptr<SetValue> as_set() const;
   std::shared_ptr<MapValue> as_map() const;
 };
 
@@ -153,6 +157,12 @@ struct ListValue {
 struct TupleValue {
   ObjHeader header;
   std::vector<Value> items;
+};
+
+struct SetValue {
+  ObjHeader header;
+  std::vector<Value> items;
+  bool frozen = false;
 };
 
 struct MapEntry {
@@ -756,6 +766,7 @@ public:
   std::shared_ptr<ClosureValue> make_closure_value();
   Value make_list_value(std::vector<Value> items, bool frozen = false);
   Value make_tuple_value(std::vector<Value> items);
+  Value make_set_value(std::vector<Value> items, bool frozen = false);
   Value make_symbol_map_value(std::vector<MapEntry> entries,
                               bool frozen = false);
 
@@ -818,6 +829,7 @@ RuntimeHeap &default_runtime_heap();
 
 Value make_list_value(std::vector<Value> items, bool frozen = false);
 Value make_tuple_value(std::vector<Value> items);
+Value make_set_value(std::vector<Value> items, bool frozen = false);
 Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen = false);
 
 enum class MethodTableSide { Instance, Class };

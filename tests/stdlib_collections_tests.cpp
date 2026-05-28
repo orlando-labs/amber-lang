@@ -327,6 +327,9 @@ void assert_sequence_protocol_for(const amber::bytecode::BcModule &module,
   if (source.is_list()) {
     expect(result.value.is_list() && result.value.as_list() == source.as_list(),
            label + " each should return receiver");
+  } else if (source.is_set()) {
+    expect(result.value.is_set() && result.value.as_set() == source.as_set(),
+           label + " each should return receiver");
   } else {
     expect(result.value.is_tuple() &&
                result.value.as_tuple() == source.as_tuple(),
@@ -415,6 +418,8 @@ void test_std001_sequence_protocol_matrix() {
                                "Array");
   assert_sequence_protocol_for(module, amber::runtime::make_tuple_value(items),
                                "Tuple");
+  assert_sequence_protocol_for(module, amber::runtime::make_set_value(items),
+                               "Set");
 }
 
 void test_std001_empty_sequence_edges() {
@@ -423,7 +428,8 @@ void test_std001_empty_sequence_edges() {
 
   for (const auto &entry : {std::pair<std::string, amber::runtime::Value>{
                                 "Array", amber::runtime::make_list_value({})},
-                            {"Tuple", amber::runtime::make_tuple_value({})}}) {
+                            {"Tuple", amber::runtime::make_tuple_value({})},
+                            {"Set", amber::runtime::make_set_value({})}}) {
     const std::string &label = entry.first;
     const amber::runtime::Value &source = entry.second;
 

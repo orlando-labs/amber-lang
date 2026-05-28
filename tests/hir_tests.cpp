@@ -397,6 +397,7 @@ void test_builtin_send_lowering() {
 void test_collection_literal_lowering() {
   const amber::hir::Program program = lower_ok("[1, 2]\n"
                                                "(3, 4)\n"
+                                               "{5}\n"
                                                "{id: :ok}\n");
   const amber::hir::Procedure *init =
       procedure_by_name(program, "__module_init__");
@@ -404,17 +405,22 @@ void test_collection_literal_lowering() {
 
   const amber::ast::Expr *list_stmt = list_item(*init->body, "items", 0);
   const amber::ast::Expr *tuple_stmt = list_item(*init->body, "items", 1);
-  const amber::ast::Expr *map_stmt = list_item(*init->body, "items", 2);
-  expect(list_stmt != nullptr && tuple_stmt != nullptr && map_stmt != nullptr,
+  const amber::ast::Expr *set_stmt = list_item(*init->body, "items", 2);
+  const amber::ast::Expr *map_stmt = list_item(*init->body, "items", 3);
+  expect(list_stmt != nullptr && tuple_stmt != nullptr && set_stmt != nullptr &&
+             map_stmt != nullptr,
          "collection literal statements exist");
 
   const amber::ast::Expr *list_expr = node_field(*list_stmt, "expr");
   const amber::ast::Expr *tuple_expr = node_field(*tuple_stmt, "expr");
+  const amber::ast::Expr *set_expr = node_field(*set_stmt, "expr");
   const amber::ast::Expr *map_expr = node_field(*map_stmt, "expr");
   expect(list_expr != nullptr && list_expr->kind == "HListLiteral",
          "list literal lowers to HListLiteral");
   expect(tuple_expr != nullptr && tuple_expr->kind == "HTupleLiteral",
          "tuple literal lowers to HTupleLiteral");
+  expect(set_expr != nullptr && set_expr->kind == "HSetLiteral",
+         "set literal lowers to HSetLiteral");
   expect(map_expr != nullptr && map_expr->kind == "HMapLiteral",
          "map literal lowers to HMapLiteral");
   expect(contains_kind(*map_expr, "HMapEntry"), "map entry is preserved");

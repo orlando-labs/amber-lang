@@ -701,6 +701,13 @@ private:
       }
       return term;
     }
+    if (expr.kind == "AstSetLiteral") {
+      TypeTerm term;
+      term.kind = "Generic";
+      term.name = "Set";
+      term.args.push_back(named_type("Any"));
+      return term;
+    }
     if (expr.kind == "AstMapLiteral") {
       TypeTerm term;
       term.kind = "Generic";

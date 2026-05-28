@@ -1500,6 +1500,9 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x0B:
     opcode = Opcode::Freeze;
     return true;
+  case 0x0C:
+    opcode = Opcode::MakeSet;
+    return true;
   case 0x10:
     opcode = Opcode::LoadUpval;
     return true;
@@ -3277,6 +3280,7 @@ InstructionFlow verify_instruction_flow(
     break;
   }
   case Opcode::MakeList:
+  case Opcode::MakeSet:
   case Opcode::MakeTuple: {
     if (operand_count_is(instruction, 3, errors)) {
       add_register_write(code, instruction, 0, flow, errors);
@@ -4735,6 +4739,8 @@ std::string opcode_name(Opcode opcode) {
     return "MAKE_TUPLE";
   case Opcode::MakeMap:
     return "MAKE_MAP";
+  case Opcode::MakeSet:
+    return "MAKE_SET";
   case Opcode::Freeze:
     return "FREEZE";
   case Opcode::LoadUpval:

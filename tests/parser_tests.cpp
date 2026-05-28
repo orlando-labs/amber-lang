@@ -177,6 +177,16 @@ void test_collection_literals() {
   std::unique_ptr<Expr> group = parse_ok("(1 + 2)\n");
   expect(group->kind == "AstGroup", "single parenthesized expression groups");
 
+  std::unique_ptr<Expr> set = parse_ok("{1, :ok,}\n");
+  expect(set->kind == "AstSetLiteral", "set literal parses");
+  expect(list_field(*set, "elements").values.size() == 2,
+         "set literal element count");
+  std::unique_ptr<Expr> single_set = parse_ok("{1}\n");
+  expect(single_set->kind == "AstSetLiteral",
+         "single element set does not require comma");
+  expect(list_field(*single_set, "elements").values.size() == 1,
+         "single element set count");
+
   std::unique_ptr<Expr> map = parse_ok("{id: 1, \"name\": :ok, :kind: 3}\n");
   expect(map->kind == "AstMapLiteral", "map literal parses");
   const amber::ast::ListField &entries = list_field(*map, "entries");

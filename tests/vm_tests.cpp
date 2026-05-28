@@ -141,6 +141,24 @@ void test_execute_emitted_collection_literals() {
   expect(tuple->items[1].is_integer() && tuple->items[1].as_integer() == 2,
          "tuple literal second value");
 
+  amber::bytecode::EmitResult set_result = emit_ok("{1, 1, 2}\n");
+  const amber::bytecode::DecodeResult set_decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(set_result.module));
+  expect(set_decoded.ok(),
+         amber::bytecode::verify_errors_to_json(set_decoded.errors));
+  amber::runtime::ExecutionResult set_exec = amber::runtime::execute_code(
+      set_decoded.module, set_decoded.module.init.entry_code_id);
+  expect(set_exec.ok(), "set literal execution failed");
+  expect(set_exec.value.is_set(), "set literal should return set");
+  const std::shared_ptr<amber::runtime::SetValue> set = set_exec.value.as_set();
+  expect(set != nullptr && set->items.size() == 2,
+         "set literal collapses duplicate values");
+  expect(set->items[0].is_integer() && set->items[0].as_integer() == 1,
+         "set literal first value");
+  expect(set->items[1].is_integer() && set->items[1].as_integer() == 2,
+         "set literal second value");
+
   amber::bytecode::EmitResult map_result =
       emit_ok("{id: 1, id: 2, \"name\": :ok}\n");
   amber::runtime::ExecutionResult map_exec = amber::runtime::execute_code(

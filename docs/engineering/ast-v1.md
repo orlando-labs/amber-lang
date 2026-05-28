@@ -32,6 +32,8 @@ lowered into ordinary call/member nodes:
 - `AstTupleLiteral(elements[])` represents `()` and parenthesized expressions
   with a comma, while a single parenthesized expression without a comma remains
   `AstGroup(expr)`;
+- `AstSetLiteral(elements[])` represents non-empty `{expr, ...}` forms that do
+  not parse as map entries;
 - `AstMapLiteral(entries[])` represents `{key: value, ...}` in expression
   context, with each `AstMapEntry(key_kind, key, value)` preserving whether the
   key was written as an identifier/symbol or string key;
