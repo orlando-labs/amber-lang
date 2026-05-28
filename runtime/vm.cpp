@@ -6947,6 +6947,10 @@ private:
       return false;
     };
 
+    auto require_receiver_live_after_block = [&]() -> bool {
+      return ensure_lifecycle_access(frame, receiver);
+    };
+
     const bool builtin_selector =
         selector_in({"==", "==="}) ||
         ((receiver.is_list() || receiver.is_tuple()) &&
@@ -7050,6 +7054,9 @@ private:
             if (!predicate.has_value()) {
               return SendStatus::Faulted;
             }
+            if (!require_receiver_live_after_block()) {
+              return SendStatus::Faulted;
+            }
             if (is_truthy(*predicate)) {
               ++count;
             }
@@ -7079,6 +7086,9 @@ private:
             if (!call_block_to_value(frame, block, {item}).has_value()) {
               return SendStatus::Faulted;
             }
+            if (!require_receiver_live_after_block()) {
+              return SendStatus::Faulted;
+            }
           }
           *out = receiver;
           return SendStatus::Matched;
@@ -7098,6 +7108,9 @@ private:
               if (!value.has_value()) {
                 return SendStatus::Faulted;
               }
+              if (!require_receiver_live_after_block()) {
+                return SendStatus::Faulted;
+              }
               mapped.push_back(*value);
             }
             *out = make_list_value(std::move(mapped));
@@ -7109,6 +7122,9 @@ private:
               const std::optional<Value> value =
                   call_block_to_value(frame, block, {item});
               if (!value.has_value()) {
+                return SendStatus::Faulted;
+              }
+              if (!require_receiver_live_after_block()) {
                 return SendStatus::Faulted;
               }
               bool nested_was_tuple = false;
@@ -7134,6 +7150,9 @@ private:
               if (!predicate.has_value()) {
                 return SendStatus::Faulted;
               }
+              if (!require_receiver_live_after_block()) {
+                return SendStatus::Faulted;
+              }
               if (is_truthy(*predicate)) {
                 *out = item;
                 return SendStatus::Matched;
@@ -7148,6 +7167,9 @@ private:
               const std::optional<Value> key =
                   call_block_to_value(frame, block, {item});
               if (!key.has_value()) {
+                return SendStatus::Faulted;
+              }
+              if (!require_receiver_live_after_block()) {
                 return SendStatus::Faulted;
               }
               std::optional<std::uint32_t> key_symbol_id;
@@ -7195,6 +7217,9 @@ private:
             if (!predicate.has_value()) {
               return SendStatus::Faulted;
             }
+            if (!require_receiver_live_after_block()) {
+              return SendStatus::Faulted;
+            }
             const bool keep = is_truthy(*predicate);
             if ((selector == "select" && keep) ||
                 (selector == "reject" && !keep)) {
@@ -7218,6 +7243,9 @@ private:
               const std::optional<Value> value =
                   call_block_to_value(frame, block, {item});
               if (!value.has_value()) {
+                return SendStatus::Faulted;
+              }
+              if (!require_receiver_live_after_block()) {
                 return SendStatus::Faulted;
               }
               predicate = *value;
@@ -7261,6 +7289,9 @@ private:
             const std::optional<Value> value =
                 call_block_to_value(frame, block, {accumulator, items[index]});
             if (!value.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!require_receiver_live_after_block()) {
               return SendStatus::Faulted;
             }
             accumulator = *value;
@@ -7398,6 +7429,9 @@ private:
                      .has_value()) {
               return SendStatus::Faulted;
             }
+            if (!require_receiver_live_after_block()) {
+              return SendStatus::Faulted;
+            }
           }
           *out = receiver;
           return SendStatus::Matched;
@@ -7412,6 +7446,9 @@ private:
             const std::optional<Value> value = call_block_to_value(
                 frame, block, {Value::symbol(entry.symbol_id), entry.value});
             if (!value.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!require_receiver_live_after_block()) {
               return SendStatus::Faulted;
             }
             mapped.push_back(*value);
@@ -7429,6 +7466,9 @@ private:
             const std::optional<Value> predicate = call_block_to_value(
                 frame, block, {Value::symbol(entry.symbol_id), entry.value});
             if (!predicate.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!require_receiver_live_after_block()) {
               return SendStatus::Faulted;
             }
             const bool keep = is_truthy(*predicate);
@@ -7450,6 +7490,9 @@ private:
             const std::optional<Value> value =
                 call_block_to_value(frame, block, {entry.value});
             if (!value.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!require_receiver_live_after_block()) {
               return SendStatus::Faulted;
             }
             transformed.push_back({entry.symbol_id, *value});

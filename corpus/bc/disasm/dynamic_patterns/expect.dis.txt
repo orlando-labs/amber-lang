@@ -1,19 +1,19 @@
-; amber.bc.v1 sha256=689200d91f3c1a7ae2834e51937e564e8286a9d180233b58d80b2c28cd707e4e
+; amber.bc.v1 sha256=5d178e6646c94f450326efa31a8b83af842b78cdadad63328b5c31c45f84f3d3
 .header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
 .sections
   STRS offset=368 size=95 align=1 flags=0
   SYMS offset=463 size=119 align=1 flags=0
   KONS offset=582 size=62 align=1 flags=0
-  CODE offset=644 size=745 align=1 flags=0
-  METH offset=1389 size=68 align=1 flags=0
-  CLAS offset=1457 size=4 align=1 flags=0
-  DEPS offset=1461 size=4 align=1 flags=0
-  EXPT offset=1465 size=4 align=1 flags=0
-  INIT offset=1469 size=9 align=1 flags=0
-  PATS offset=1478 size=28 align=1 flags=0
-  SPAN offset=1506 size=3739 align=1 flags=0
-  LINE offset=5245 size=544 align=1 flags=0
-  LOCS offset=5789 size=84 align=1 flags=0
+  CODE offset=644 size=736 align=1 flags=0
+  METH offset=1380 size=68 align=1 flags=0
+  CLAS offset=1448 size=4 align=1 flags=0
+  DEPS offset=1452 size=4 align=1 flags=0
+  EXPT offset=1456 size=4 align=1 flags=0
+  INIT offset=1460 size=9 align=1 flags=0
+  PATS offset=1469 size=28 align=1 flags=0
+  SPAN offset=1497 size=3656 align=1 flags=0
+  LINE offset=5153 size=532 align=1 flags=0
+  LOCS offset=5685 size=84 align=1 flags=0
 .strs
   s0 "classify"
   s1 "function"
@@ -49,14 +49,13 @@
 .code
 code c1 kind=module regs=4 flags=0
   local l0 name=s0(classify) role=s1(function) binding=s2(local)
-  0000 MAKE_CLOSURE 1 2 0
-  0001 MOVE 0 1
-  0002 SETLAST 0
-  0003 LOADNULL 2
-  0004 SETLAST 2
-  0005 CLOSE_UPVALUES 0
-  0006 GETLAST 3
-  0007 RETURN 3
+  0000 MAKE_CLOSURE 0 2 0
+  0001 SETLAST 0
+  0002 LOADNULL 2
+  0003 SETLAST 2
+  0004 CLOSE_UPVALUES 0
+  0005 GETLAST 3
+  0006 RETURN 3
   span 0..1 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 1..2 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 2..3 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
@@ -64,7 +63,6 @@ code c1 kind=module regs=4 flags=0
   span 4..5 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 5..6 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 6..7 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
-  span 7..8 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
 code c2 kind=method regs=21 flags=0
   local l0 name=s3(shape) role=s4(param) binding=s2(local)
   local l1 name=s5(limit) role=s4(param) binding=s2(local)
@@ -171,7 +169,6 @@ code c2 kind=method regs=21 flags=0
   c1 pc=4 line=1
   c1 pc=5 line=1
   c1 pc=6 line=1
-  c1 pc=7 line=1
   c2 pc=0 line=1
   c2 pc=1 line=1
   c2 pc=2 line=1
@@ -210,7 +207,7 @@ code c2 kind=method regs=21 flags=0
   c2 pc=35 line=1
   c2 pc=36 line=1
 .locs
-  c1 l0 name=s0(classify) 0..8
+  c1 l0 name=s0(classify) 0..7
   c2 l0 name=s3(shape) 0..37
   c2 l1 name=s5(limit) 0..37
   c2 l2 name=s6(id) 0..37

@@ -46,6 +46,7 @@ FROZEN_IMAGE_TEST_SRCS := tests/frozen_image_tests.cpp $(CORE_SRCS) $(PACKAGE_SR
 BYTECODE_TEST_SRCS := tests/bytecode_tests.cpp $(PROFILE_SRCS) $(BYTECODE_SRCS) $(LEXER_SRCS) $(AST_SRCS)
 EMITTER_TEST_SRCS := tests/emitter_tests.cpp $(CORE_SRCS)
 VM_TEST_SRCS := tests/vm_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
+STDLIB_COLLECTIONS_TEST_SRCS := tests/stdlib_collections_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BUILD_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
 PACKAGE_TEST_SRCS := tests/package_tests.cpp $(PROFILE_SRCS) $(PACKAGE_SRCS) $(LEXER_SRCS)
 
@@ -118,13 +119,14 @@ FORMAT_FILES := \
 	tests/emitter_tests.cpp \
 	tests/module_loader_tests.cpp \
 	tests/package_tests.cpp \
-	tests/vm_tests.cpp
+	tests/vm_tests.cpp \
+	tests/stdlib_collections_tests.cpp
 
 .PHONY: all build test conformance spec-sync-check fmt clean
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -181,6 +183,9 @@ $(BUILD_DIR)/emitter_tests: $(EMITTER_TEST_SRCS) | $(BUILD_DIR)/.dir
 $(BUILD_DIR)/vm_tests: $(VM_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(VM_TEST_SRCS) $(LDFLAGS) -o $@
 
+$(BUILD_DIR)/stdlib_collections_tests: $(STDLIB_COLLECTIONS_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STDLIB_COLLECTIONS_TEST_SRCS) $(LDFLAGS) -o $@
+
 $(BUILD_DIR)/module_loader_tests: $(MODULE_LOADER_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODULE_LOADER_TEST_SRCS) $(LDFLAGS) -o $@
 
@@ -202,6 +207,7 @@ test: build
 	$(BUILD_DIR)/bytecode_tests
 	$(BUILD_DIR)/emitter_tests
 	$(BUILD_DIR)/vm_tests
+	$(BUILD_DIR)/stdlib_collections_tests
 	$(BUILD_DIR)/module_loader_tests
 	$(BUILD_DIR)/package_tests
 	$(BUILD_DIR)/amberc lex corpus/parse/lexer/basic/source.am > $(BUILD_DIR)/lexer-basic.tokens.json
