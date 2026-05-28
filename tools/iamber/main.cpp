@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -30,6 +31,31 @@ struct LocalView {
   bool initialized = false;
 };
 
+struct CodeErrorRange {
+  int start_line = 0;
+  int start_column = 0;
+  int end_line = 0;
+  int end_column = 0;
+  bool whole_line = false;
+};
+
+struct SourceErrorRange {
+  std::string file;
+  std::size_t start_line = 0;
+  std::size_t start_column = 0;
+  std::size_t end_line = 0;
+  std::size_t end_column = 0;
+  std::size_t start_offset = 0;
+  std::size_t end_offset = 0;
+  bool has_offsets = false;
+  bool whole_line = false;
+};
+
+struct CellErrorRange {
+  std::size_t cell_index = 0;
+  CodeErrorRange range;
+};
+
 struct Cell {
   std::string source;
   std::size_t cursor = 0;
@@ -40,6 +66,7 @@ struct Cell {
   std::string result = "not evaluated";
   std::string error;
   std::vector<LocalView> locals;
+  std::vector<CodeErrorRange> error_ranges;
 };
 
 struct Session {
@@ -56,6 +83,7 @@ struct CompileResult {
   bool ok = false;
   amber::bytecode::BcModule module;
   std::string error;
+  std::vector<SourceErrorRange> error_ranges;
 };
 
 struct EvalView {
@@ -63,11 +91,17 @@ struct EvalView {
   std::string result;
   std::string error;
   std::vector<LocalView> locals;
+  std::vector<CellErrorRange> error_ranges;
 };
 
 constexpr short kBorderEditColor = 1;
 constexpr short kBorderErrorColor = 2;
 constexpr short kBorderRunningColor = 3;
+constexpr short kFooterKeyColor = 4;
+constexpr short kFooterLabelColor = 5;
+constexpr short kFooterStatusColor = 6;
+constexpr short kLineNumberColor = 7;
+constexpr short kErrorHighlightColor = 8;
 
 std::string read_file(const std::string &path) {
   std::ifstream input(path, std::ios::binary);
@@ -106,39 +140,158 @@ std::string diagnostics_to_summary(
     }
     out << diagnostic.code << ": " << diagnostic.message;
     if (!diagnostic.span.file.empty() && diagnostic.span.start.line > 0) {
-      out << " at " << diagnostic.span.file << ":"
-          << diagnostic.span.start.line << ":" << diagnostic.span.start.col;
+      out << " at " << diagnostic.span.file << ":" << diagnostic.span.start.line
+          << ":" << diagnostic.span.start.col;
     }
   }
   return out.str();
+}
+
+std::string verify_errors_to_summary(
+    const std::vector<amber::bytecode::VerifyError> &errors) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < errors.size(); ++i) {
+    const amber::bytecode::VerifyError &error = errors[i];
+    if (i != 0U) {
+      out << "\n";
+    }
+    out << error.code << ": " << error.message;
+    if (!error.section.empty()) {
+      out << " in " << error.section;
+      if (error.offset != 0U) {
+        out << " at offset " << error.offset;
+      }
+    }
+  }
+  return out.str();
+}
+
+std::size_t zero_based_column(std::size_t column) {
+  return column == 0U ? 0U : column - 1U;
+}
+
+void normalize_source_error_range(SourceErrorRange *range) {
+  if (range == nullptr || range->start_line == 0U) {
+    return;
+  }
+  if (range->end_line == 0U || range->end_line < range->start_line) {
+    range->end_line = range->start_line;
+  }
+  if (range->end_line == range->start_line &&
+      range->end_column <= range->start_column) {
+    range->end_column = range->start_column + 1U;
+  }
+  if (range->has_offsets && range->end_offset < range->start_offset) {
+    range->end_offset = range->start_offset;
+  }
+}
+
+SourceErrorRange source_error_range_from_span(const amber::lexer::Span &span) {
+  SourceErrorRange range;
+  range.file = span.file;
+  range.start_line = span.start.line;
+  range.start_column = zero_based_column(span.start.col);
+  range.end_line = span.end.line == 0U ? span.start.line : span.end.line;
+  range.end_column = span.end.col == 0U ? range.start_column + 1U
+                                        : zero_based_column(span.end.col);
+  range.start_offset = span.start.offset;
+  range.end_offset = span.end.offset;
+  range.has_offsets = span.start.offset != 0U || span.end.offset != 0U;
+  normalize_source_error_range(&range);
+  return range;
+}
+
+bool same_source_error_range(const SourceErrorRange &left,
+                             const SourceErrorRange &right) {
+  return left.file == right.file && left.start_line == right.start_line &&
+         left.start_column == right.start_column &&
+         left.end_line == right.end_line &&
+         left.end_column == right.end_column &&
+         left.start_offset == right.start_offset &&
+         left.end_offset == right.end_offset &&
+         left.whole_line == right.whole_line;
+}
+
+void push_unique_source_error_range(std::vector<SourceErrorRange> *ranges,
+                                    SourceErrorRange range) {
+  if (ranges == nullptr || range.start_line == 0U) {
+    return;
+  }
+  normalize_source_error_range(&range);
+  for (const SourceErrorRange &existing : *ranges) {
+    if (same_source_error_range(existing, range)) {
+      return;
+    }
+  }
+  ranges->push_back(std::move(range));
+}
+
+std::vector<SourceErrorRange> source_error_ranges_from_diagnostics(
+    const std::vector<amber::lexer::Diagnostic> &diagnostics) {
+  std::vector<SourceErrorRange> ranges;
+  for (const amber::lexer::Diagnostic &diagnostic : diagnostics) {
+    push_unique_source_error_range(
+        &ranges, source_error_range_from_span(diagnostic.span));
+  }
+  return ranges;
+}
+
+std::vector<SourceErrorRange>
+source_error_ranges_from_fault(const amber::runtime::Fault &fault) {
+  std::vector<SourceErrorRange> ranges;
+  for (const amber::runtime::TraceFrame &frame : fault.trace) {
+    SourceErrorRange range;
+    range.file = frame.file;
+    range.start_line = frame.line;
+    range.start_column = zero_based_column(frame.column);
+    range.end_line = frame.line_end == 0U ? frame.line : frame.line_end;
+    range.end_column = frame.column_end == 0U
+                           ? range.start_column + 1U
+                           : zero_based_column(frame.column_end);
+    range.start_offset = frame.byte_start;
+    range.end_offset = frame.byte_end;
+    range.has_offsets = frame.byte_start != 0U || frame.byte_end != 0U;
+    range.whole_line = frame.line != 0U && frame.column == 0U;
+    push_unique_source_error_range(&ranges, std::move(range));
+  }
+  return ranges;
 }
 
 CompileResult compile_source_text(const std::string &source,
                                   const std::string &source_path) {
   amber::lexer::LexResult lex_result = lex_source(source, source_path);
   if (!lex_result.ok()) {
-    return {
-        false, {}, amber::lexer::diagnostics_to_json(lex_result.diagnostics)};
+    return {false,
+            {},
+            diagnostics_to_summary(lex_result.diagnostics),
+            source_error_ranges_from_diagnostics(lex_result.diagnostics)};
   }
 
   amber::parser::Parser parser(lex_result.tokens);
   amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
   if (!parse_result.ok()) {
-    return {
-        false, {}, amber::lexer::diagnostics_to_json(parse_result.diagnostics)};
+    return {false,
+            {},
+            diagnostics_to_summary(parse_result.diagnostics),
+            source_error_ranges_from_diagnostics(parse_result.diagnostics)};
   }
 
   amber::binder::BindResult bind_result =
       amber::binder::bind_module(parse_result.items, parse_result.module_name);
   if (!bind_result.ok()) {
-    return {
-        false, {}, amber::lexer::diagnostics_to_json(bind_result.diagnostics)};
+    return {false,
+            {},
+            diagnostics_to_summary(bind_result.diagnostics),
+            source_error_ranges_from_diagnostics(bind_result.diagnostics)};
   }
   const std::vector<amber::lexer::Diagnostic> unresolved_name_diagnostics =
       amber::binder::unresolved_name_diagnostics(parse_result.items,
                                                  bind_result.graph);
   if (!unresolved_name_diagnostics.empty()) {
-    return {false, {}, diagnostics_to_summary(unresolved_name_diagnostics)};
+    return {false,
+            {},
+            diagnostics_to_summary(unresolved_name_diagnostics),
+            source_error_ranges_from_diagnostics(unresolved_name_diagnostics)};
   }
 
   amber::checker::CheckResult check_result = amber::checker::check_module(
@@ -146,7 +299,10 @@ CompileResult compile_source_text(const std::string &source,
   const std::vector<amber::lexer::Diagnostic> effect_diagnostics =
       effect_diagnostics_only(check_result);
   if (!effect_diagnostics.empty()) {
-    return {false, {}, amber::lexer::diagnostics_to_json(effect_diagnostics)};
+    return {false,
+            {},
+            diagnostics_to_summary(effect_diagnostics),
+            source_error_ranges_from_diagnostics(effect_diagnostics)};
   }
 
   amber::hir::Program program = amber::hir::lower_module(
@@ -154,8 +310,10 @@ CompileResult compile_source_text(const std::string &source,
   amber::bytecode::EmitResult emit_result =
       amber::bytecode::emit_program(program, parse_result.module_name);
   if (!emit_result.ok()) {
-    return {
-        false, {}, amber::lexer::diagnostics_to_json(emit_result.diagnostics)};
+    return {false,
+            {},
+            diagnostics_to_summary(emit_result.diagnostics),
+            source_error_ranges_from_diagnostics(emit_result.diagnostics)};
   }
   emit_result.module.effects = check_result.effect_summaries;
   const std::vector<std::uint8_t> bytes =
@@ -163,17 +321,17 @@ CompileResult compile_source_text(const std::string &source,
   amber::bytecode::DecodeResult decode_result =
       amber::bytecode::deserialize_module(bytes);
   if (!decode_result.ok()) {
-    return {false,
-            {},
-            amber::bytecode::verify_errors_to_json(decode_result.errors)};
+    return {false, {}, verify_errors_to_summary(decode_result.errors), {}};
   }
-  return {true, std::move(decode_result.module), {}};
+  return {true, std::move(decode_result.module), {}, {}};
 }
+
+std::string session_header_source() { return "package iamber.session\n\n"; }
 
 std::string session_source_until(const std::vector<Cell> &cells,
                                  std::size_t end_index) {
   std::ostringstream out;
-  out << "package iamber.session\n\n";
+  out << session_header_source();
   for (std::size_t i = 0; i <= end_index && i < cells.size(); ++i) {
     out << cells[i].source;
     if (cells[i].source.empty() || cells[i].source.back() != '\n') {
@@ -182,6 +340,160 @@ std::string session_source_until(const std::vector<Cell> &cells,
     out << "\n";
   }
   return out.str();
+}
+
+struct CellSourceMap {
+  std::size_t cell_index = 0;
+  std::size_t start_line = 1;
+  std::size_t source_line_count = 1;
+  std::size_t start_offset = 0;
+  std::size_t source_end_offset = 0;
+};
+
+std::size_t generated_cell_source_line_count(const std::string &source) {
+  return static_cast<std::size_t>(
+             std::count(source.begin(), source.end(), '\n')) +
+         ((source.empty() || source.back() != '\n') ? 1U : 0U);
+}
+
+std::size_t generated_cell_source_size(const std::string &source) {
+  return source.size() + ((source.empty() || source.back() != '\n') ? 1U : 0U);
+}
+
+std::vector<CellSourceMap>
+cell_source_maps_until(const std::vector<Cell> &cells, std::size_t end_index) {
+  std::vector<CellSourceMap> maps;
+  const std::string header = session_header_source();
+  std::size_t line = 1U + static_cast<std::size_t>(
+                              std::count(header.begin(), header.end(), '\n'));
+  std::size_t offset = header.size();
+  for (std::size_t i = 0; i <= end_index && i < cells.size(); ++i) {
+    const std::size_t source_line_count =
+        generated_cell_source_line_count(cells[i].source);
+    const std::size_t source_size = generated_cell_source_size(cells[i].source);
+    maps.push_back(
+        {i, line, source_line_count, offset, offset + cells[i].source.size()});
+    line += source_line_count + 1U;
+    offset += source_size + 1U;
+  }
+  return maps;
+}
+
+std::pair<int, int> line_column_for_offset(const std::string &text,
+                                           std::size_t offset) {
+  int line = 0;
+  int column = 0;
+  offset = std::min(offset, text.size());
+  for (std::size_t i = 0; i < offset; ++i) {
+    if (text[i] == '\n') {
+      ++line;
+      column = 0;
+    } else {
+      ++column;
+    }
+  }
+  return {line, column};
+}
+
+bool same_code_error_range(const CodeErrorRange &left,
+                           const CodeErrorRange &right) {
+  return left.start_line == right.start_line &&
+         left.start_column == right.start_column &&
+         left.end_line == right.end_line &&
+         left.end_column == right.end_column &&
+         left.whole_line == right.whole_line;
+}
+
+void push_unique_cell_error_range(std::vector<CellErrorRange> *ranges,
+                                  CellErrorRange range) {
+  if (ranges == nullptr) {
+    return;
+  }
+  for (const CellErrorRange &existing : *ranges) {
+    if (existing.cell_index == range.cell_index &&
+        same_code_error_range(existing.range, range.range)) {
+      return;
+    }
+  }
+  ranges->push_back(std::move(range));
+}
+
+std::optional<CellErrorRange>
+map_source_error_range_to_cell(const std::vector<Cell> &cells,
+                               const CellSourceMap &map,
+                               const SourceErrorRange &source_range) {
+  if (map.cell_index >= cells.size()) {
+    return std::nullopt;
+  }
+
+  CodeErrorRange local;
+  local.whole_line = source_range.whole_line;
+  const std::size_t end_line =
+      map.start_line + std::max<std::size_t>(1U, map.source_line_count) - 1U;
+  if (source_range.start_line >= map.start_line &&
+      source_range.start_line <= end_line) {
+    local.start_line =
+        static_cast<int>(source_range.start_line - map.start_line);
+    local.start_column = static_cast<int>(source_range.start_column);
+    if (source_range.end_line >= map.start_line &&
+        source_range.end_line <= end_line) {
+      local.end_line = static_cast<int>(source_range.end_line - map.start_line);
+      local.end_column = static_cast<int>(source_range.end_column);
+    } else {
+      local.end_line = static_cast<int>(map.source_line_count - 1U);
+      local.end_column = 0;
+      local.whole_line = true;
+    }
+    return CellErrorRange{map.cell_index, local};
+  }
+
+  if (source_range.has_offsets &&
+      source_range.start_offset >= map.start_offset &&
+      source_range.start_offset <= map.source_end_offset) {
+    const std::size_t local_start_offset =
+        std::min(source_range.start_offset - map.start_offset,
+                 cells[map.cell_index].source.size());
+    const std::size_t local_end_offset =
+        source_range.end_offset >= map.start_offset
+            ? std::min(source_range.end_offset - map.start_offset,
+                       cells[map.cell_index].source.size())
+            : local_start_offset;
+    const auto [start_line, start_column] = line_column_for_offset(
+        cells[map.cell_index].source, local_start_offset);
+    const auto [end_line_from_offset, end_column_from_offset] =
+        line_column_for_offset(cells[map.cell_index].source, local_end_offset);
+    local.start_line = start_line;
+    local.start_column = start_column;
+    local.end_line = end_line_from_offset;
+    local.end_column = end_column_from_offset;
+    if (local.end_line == local.start_line &&
+        local.end_column <= local.start_column) {
+      local.end_column = local.start_column + 1;
+    }
+    return CellErrorRange{map.cell_index, local};
+  }
+
+  return std::nullopt;
+}
+
+std::vector<CellErrorRange>
+map_source_error_ranges_to_cells(const std::vector<Cell> &cells,
+                                 std::size_t end_index,
+                                 const std::vector<SourceErrorRange> &ranges) {
+  std::vector<CellErrorRange> mapped;
+  const std::vector<CellSourceMap> maps =
+      cell_source_maps_until(cells, end_index);
+  for (const SourceErrorRange &range : ranges) {
+    for (const CellSourceMap &map : maps) {
+      std::optional<CellErrorRange> cell_range =
+          map_source_error_range_to_cell(cells, map, range);
+      if (cell_range.has_value()) {
+        push_unique_cell_error_range(&mapped, std::move(*cell_range));
+        break;
+      }
+    }
+  }
+  return mapped;
 }
 
 std::string first_line(std::string text) {
@@ -206,6 +518,8 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
   CompileResult compiled = compile_source_text(source, "<iamber>");
   if (!compiled.ok) {
     view.error = compiled.error;
+    view.error_ranges = map_source_error_ranges_to_cells(cells, end_index,
+                                                         compiled.error_ranges);
     return view;
   }
   if (!compiled.module.init.has_entry_code_id) {
@@ -219,6 +533,8 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
     view.error = result.fault->trace_text.empty()
                      ? result.fault->error_name + ": " + result.fault->message
                      : result.fault->trace_text;
+    view.error_ranges = map_source_error_ranges_to_cells(
+        cells, end_index, source_error_ranges_from_fault(*result.fault));
     return view;
   }
 
@@ -242,7 +558,28 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
   return view;
 }
 
-void apply_eval(Cell *cell, EvalView view) {
+void clear_error_ranges_until(Session *session, std::size_t end_index) {
+  if (session == nullptr || session->cells.empty()) {
+    return;
+  }
+  end_index = std::min(end_index, session->cells.size() - 1U);
+  for (std::size_t i = 0; i <= end_index; ++i) {
+    session->cells[i].error_ranges.clear();
+  }
+}
+
+void apply_eval(Session *session, std::size_t index, EvalView view) {
+  if (session == nullptr || index >= session->cells.size()) {
+    return;
+  }
+  clear_error_ranges_until(session, index);
+  for (const CellErrorRange &range : view.error_ranges) {
+    if (range.cell_index < session->cells.size()) {
+      session->cells[range.cell_index].error_ranges.push_back(range.range);
+    }
+  }
+
+  Cell *cell = &session->cells[index];
   cell->dirty = false;
   cell->running = false;
   cell->ok = view.ok;
@@ -275,7 +612,7 @@ void evaluate_cell(Session *session, std::size_t index, bool edit_mode,
   if (show_running) {
     mark_cell_running(session, index, edit_mode);
   }
-  apply_eval(&session->cells[index], evaluate_prefix(session->cells, index));
+  apply_eval(session, index, evaluate_prefix(session->cells, index));
   session->status = session->cells[index].ok ? "cell evaluated" : "cell failed";
 }
 
@@ -293,7 +630,7 @@ void evaluate_from(Session *session, std::size_t start, bool force_all,
     if (show_running) {
       mark_cell_running(session, i, edit_mode);
     }
-    apply_eval(&session->cells[i], evaluate_prefix(session->cells, i));
+    apply_eval(session, i, evaluate_prefix(session->cells, i));
   }
   session->status =
       force_all ? "all cells evaluated" : "watched cells evaluated";
@@ -381,6 +718,9 @@ void mark_edited(Session *session) {
     return;
   }
   session->cells[session->selected].dirty = true;
+  for (std::size_t i = session->selected; i < session->cells.size(); ++i) {
+    session->cells[i].error_ranges.clear();
+  }
   session->status = "cell edited";
 }
 
@@ -519,6 +859,7 @@ void new_cell(Session *session) {
   session->selected = insert_at;
   session->editor_scroll = 0;
   session->preferred_column = 0;
+  clear_error_ranges_until(session, session->cells.size() - 1U);
   session->status = "new cell";
 }
 
@@ -533,6 +874,7 @@ void delete_cell(Session *session) {
   if (session->selected >= session->cells.size()) {
     session->selected = session->cells.size() - 1U;
   }
+  clear_error_ranges_until(session, session->cells.size() - 1U);
   session->status = "cell deleted";
 }
 
@@ -600,6 +942,156 @@ int border_attr_for(const Cell &cell, bool selected, bool edit_mode) {
     return COLOR_PAIR(kBorderEditColor) | A_BOLD;
   }
   return selected ? A_BOLD : A_NORMAL;
+}
+
+std::vector<std::pair<std::string, std::string>>
+footer_actions(bool edit_mode) {
+  if (edit_mode) {
+    return {{"Esc", "Nav"},  {"C-X", "Run"},  {"C-R", "All"}, {"F2", "New"},
+            {"Arw", "Move"}, {"Bksp", "Del"}, {"F10", "Quit"}};
+  }
+  return {{"F2", "New"}, {"Ent", "Run"}, {"R", "All"},  {"E", "Edit"},
+          {"D", "Del"},  {"W", "Watch"}, {"A", "Auto"}, {"F10", "Quit"}};
+}
+
+int footer_key_attr() {
+  return has_colors() ? COLOR_PAIR(kFooterKeyColor) | A_BOLD
+                      : A_REVERSE | A_BOLD;
+}
+
+int footer_label_attr() {
+  return has_colors() ? COLOR_PAIR(kFooterLabelColor) : A_REVERSE;
+}
+
+int footer_status_attr() {
+  return has_colors() ? COLOR_PAIR(kFooterStatusColor) : A_REVERSE;
+}
+
+int line_number_attr() {
+  return has_colors() ? COLOR_PAIR(kLineNumberColor) | A_DIM : A_DIM;
+}
+
+int error_highlight_attr() {
+  return has_colors() ? COLOR_PAIR(kErrorHighlightColor) | A_BOLD
+                      : A_REVERSE | A_BOLD;
+}
+
+std::pair<int, int> highlighted_columns_for_line(const CodeErrorRange &range,
+                                                 int line_index,
+                                                 int line_length) {
+  if (line_index < range.start_line || line_index > range.end_line) {
+    return {0, 0};
+  }
+  if (range.whole_line) {
+    return {0, std::max(1, line_length)};
+  }
+
+  const int start =
+      line_index == range.start_line ? std::max(0, range.start_column) : 0;
+  int end = line_index == range.end_line ? range.end_column : line_length;
+  if (line_index != range.end_line) {
+    end = std::max(1, end);
+  }
+  end = std::max(start + 1, end);
+  return {start, end};
+}
+
+bool is_error_highlighted_column(const std::vector<CodeErrorRange> &ranges,
+                                 int line_index, int column, int line_length) {
+  for (const CodeErrorRange &range : ranges) {
+    const auto [start, end] =
+        highlighted_columns_for_line(range, line_index, line_length);
+    if (column >= start && column < end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void draw_code_text_line(WINDOW *window, int y, int x, int width,
+                         const std::string &text,
+                         const std::vector<CodeErrorRange> &ranges,
+                         int line_index) {
+  if (width <= 0) {
+    return;
+  }
+  const int line_length = static_cast<int>(text.size());
+  int draw_limit = line_length;
+  for (const CodeErrorRange &range : ranges) {
+    const auto [start, end] =
+        highlighted_columns_for_line(range, line_index, line_length);
+    if (end > start) {
+      draw_limit = std::max(draw_limit, end);
+    }
+  }
+  draw_limit = std::min(width, draw_limit);
+
+  for (int column = 0; column < draw_limit; ++column) {
+    const bool highlighted =
+        is_error_highlighted_column(ranges, line_index, column, line_length);
+    if (highlighted) {
+      wattron(window, error_highlight_attr());
+    }
+    const char ch =
+        column < line_length ? text[static_cast<std::size_t>(column)] : ' ';
+    mvwaddch(window, y, x + column, ch);
+    if (highlighted) {
+      wattroff(window, error_highlight_attr());
+    }
+  }
+}
+
+void draw_footer_segment(int y, int *x, int cols, const std::string &key,
+                         const std::string &label) {
+  if (x == nullptr || *x >= cols) {
+    return;
+  }
+  const int needed = static_cast<int>(key.size() + label.size() + 2U);
+  if (*x + needed > cols) {
+    return;
+  }
+
+  attron(footer_key_attr());
+  mvaddnstr(y, *x, key.c_str(), cols - *x);
+  attroff(footer_key_attr());
+  *x += static_cast<int>(key.size());
+
+  attron(footer_label_attr());
+  mvaddch(y, *x, ' ');
+  ++(*x);
+  mvaddnstr(y, *x, label.c_str(), cols - *x);
+  attroff(footer_label_attr());
+  *x += static_cast<int>(label.size());
+
+  if (*x < cols) {
+    mvaddch(y, *x, ' ');
+    ++(*x);
+  }
+}
+
+void draw_footer(const Session &session, bool edit_mode, int rows, int cols) {
+  const int status_y = rows - 2;
+  const int actions_y = rows - 1;
+
+  std::ostringstream status;
+  status << " iamber  mode:" << (edit_mode ? "edit" : "nav")
+         << "  auto-watch:" << (session.auto_watch ? "on" : "off") << "  "
+         << session.status;
+
+  attron(footer_status_attr());
+  for (int x = 0; x < cols; ++x) {
+    mvaddch(status_y, x, ' ');
+  }
+  mvaddnstr(status_y, 0, status.str().c_str(), cols);
+  attroff(footer_status_attr());
+
+  for (int x = 0; x < cols; ++x) {
+    mvaddch(actions_y, x, ' ');
+  }
+  int x = 0;
+  for (const auto &action : footer_actions(edit_mode)) {
+    draw_footer_segment(actions_y, &x, cols, action.first, action.second);
+  }
 }
 
 void draw_double_border(WINDOW *window, int height, int width) {
@@ -694,8 +1186,11 @@ void draw_cell_code(WINDOW *window, Session *session, std::size_t index,
     prefix.width(4);
     prefix << (line_index + 1);
     prefix << " ";
+    wattron(window, line_number_attr());
     mvwaddnstr(window, row + 1, 1, prefix.str().c_str(), code_width - 2);
-    print_clipped(window, row + 1, 6, code_width - 7, lines[line_index]);
+    wattroff(window, line_number_attr());
+    draw_code_text_line(window, row + 1, 6, code_width - 7, lines[line_index],
+                        cell.error_ranges, line_index);
   }
 
   const std::string result_line =
@@ -810,29 +1305,20 @@ void draw(Session *session, bool edit_mode) {
     return;
   }
 
-  std::ostringstream header;
-  header << "iamber  "
-         << "mode:" << (edit_mode ? "edit" : "nav")
-         << "  auto-watch:" << (session->auto_watch ? "on" : "off") << "  "
-         << session->status;
-  mvaddnstr(0, 0, header.str().c_str(), cols);
-  const char *help =
-      "nav: e edit, enter run, r run all, n/F2 new, d delete, w watch, a auto, "
-      "q quit | edit: esc nav, F2/ctrl-n new, ctrl-x run";
-  mvaddnstr(1, 0, help, cols);
-  wnoutrefresh(stdscr);
-
-  const int top = 2;
-  const int body_height = rows - top;
+  const int footer_height = 2;
+  const int body_height = rows - footer_height;
   const int visible_count = visible_cell_count(*session, body_height);
   clamp_cell_scroll(session, visible_count);
   const int base_height =
       visible_count <= 0 ? body_height : body_height / visible_count;
   const int remainder = visible_count <= 0 ? 0 : body_height % visible_count;
 
+  draw_footer(*session, edit_mode, rows, cols);
+  wnoutrefresh(stdscr);
+
   std::vector<WINDOW *> panes;
   WINDOW *active_pane = nullptr;
-  int y = top;
+  int y = 0;
   for (int slot = 0; slot < visible_count; ++slot) {
     const std::size_t index =
         static_cast<std::size_t>(session->cell_scroll + slot);
@@ -850,6 +1336,7 @@ void draw(Session *session, bool edit_mode) {
     y += pane_height;
   }
   if (active_pane != nullptr) {
+    touchwin(active_pane);
     wnoutrefresh(active_pane);
   }
   doupdate();
@@ -862,6 +1349,7 @@ void draw(Session *session, bool edit_mode) {
 bool handle_nav_key(Session *session, int ch, bool *edit_mode) {
   switch (ch) {
   case 'q':
+  case KEY_F(10):
     return false;
   case 'e':
     *edit_mode = true;
@@ -913,6 +1401,8 @@ bool handle_nav_key(Session *session, int ch, bool *edit_mode) {
 
 bool handle_edit_key(Session *session, int ch, bool *edit_mode) {
   switch (ch) {
+  case KEY_F(10):
+    return false;
   case 27:
     evaluate_selected_on_leave(session, true);
     *edit_mode = false;
@@ -1000,6 +1490,11 @@ int run_curses_console() {
     init_pair(kBorderEditColor, COLOR_CYAN, -1);
     init_pair(kBorderErrorColor, COLOR_RED, -1);
     init_pair(kBorderRunningColor, COLOR_YELLOW, -1);
+    init_pair(kFooterKeyColor, COLOR_BLACK, COLOR_CYAN);
+    init_pair(kFooterLabelColor, COLOR_BLACK, COLOR_GREEN);
+    init_pair(kFooterStatusColor, COLOR_BLACK, COLOR_WHITE);
+    init_pair(kLineNumberColor, COLOR_WHITE, -1);
+    init_pair(kErrorHighlightColor, COLOR_WHITE, COLOR_RED);
   }
 
   bool edit_mode = false;
