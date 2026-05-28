@@ -279,6 +279,8 @@ private:
   std::uint32_t compile_lookup_like(const ast::Expr &expr,
                                     const std::string &name);
   std::uint32_t compile_const(const ast::Expr &expr);
+  std::uint32_t compile_sequence_literal(const ast::Expr &expr, Opcode opcode);
+  std::uint32_t compile_map_literal(const ast::Expr &expr);
   std::uint32_t compile_cond_source(const ast::Expr &cond, Opcode *jump_opcode,
                                     bool *jump_to_then_branch);
   std::uint32_t block_reg_operand(const ast::Expr &expr);
@@ -511,6 +513,12 @@ public:
       Constant constant;
       constant.kind = ConstantKind::StringRef;
       constant.ref_id = intern_string(unquote_string_literal(value));
+      return intern_constant(constant);
+    }
+    if (token == "SYMBOL") {
+      Constant constant;
+      constant.kind = ConstantKind::SymbolRef;
+      constant.ref_id = intern_symbol(value);
       return intern_constant(constant);
     }
     Constant constant;
@@ -1269,6 +1277,67 @@ std::uint32_t CodeEmitter::compile_const(const ast::Expr &expr) {
       owner_->intern_literal_constant(token, value);
   emit_instruction(Opcode::LoadK, {{dst, false}, {constant_id, false}},
                    expr.span);
+  return dst;
+}
+
+std::uint32_t CodeEmitter::compile_sequence_literal(const ast::Expr &expr,
+                                                    Opcode opcode) {
+  const ast::ListField *elements = list_field(expr, "elements");
+  const std::uint32_t count =
+      elements == nullptr ? 0U
+                          : static_cast<std::uint32_t>(elements->values.size());
+  const std::uint32_t dst = alloc_temp();
+  std::uint32_t first_reg = 0;
+  if (count != 0U) {
+    first_reg = alloc_temp();
+    for (std::uint32_t i = 1; i < count; ++i) {
+      alloc_temp();
+    }
+    for (std::uint32_t i = 0; i < count; ++i) {
+      const std::uint32_t src = compile_expr(*elements->values[i]);
+      const std::uint32_t target = first_reg + i;
+      if (src != target) {
+        emit_instruction(Opcode::Move, {{target, false}, {src, false}},
+                         elements->values[i]->span);
+      }
+    }
+  }
+  emit_instruction(opcode, {{dst, false}, {first_reg, false}, {count, false}},
+                   expr.span);
+  return dst;
+}
+
+std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
+  const ast::ListField *entries = list_field(expr, "entries");
+  const std::uint32_t dst = alloc_temp();
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> compiled_entries;
+
+  if (entries != nullptr) {
+    for (const std::unique_ptr<ast::Expr> &entry : entries->values) {
+      const ast::Expr *value = node_field(*entry, "value");
+      if (entry->kind != "HMapEntry" || value == nullptr) {
+        diag(entry->span, "BC2001", "invalid map literal entry");
+        continue;
+      }
+      const std::string key =
+          string_field(*entry, "key_kind") == "string"
+              ? unquote_string_literal(string_field(*entry, "key"))
+              : string_field(*entry, "key");
+      compiled_entries.push_back(
+          {owner_->intern_symbol(key), compile_expr(*value)});
+    }
+  }
+
+  std::vector<InstructionOperand> operands;
+  operands.push_back({dst, false});
+  operands.push_back(
+      {static_cast<std::int64_t>(compiled_entries.size()), false});
+  for (const auto &[symbol_id, reg] : compiled_entries) {
+    operands.push_back({symbol_id, false});
+    operands.push_back({reg, false});
+  }
+
+  emit_instruction(Opcode::MakeMap, std::move(operands), expr.span);
   return dst;
 }
 
@@ -2280,6 +2349,15 @@ std::uint32_t CodeEmitter::compile_pattern_assign(const ast::Expr &expr) {
 std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   if (expr.kind == "HConst") {
     return compile_const(expr);
+  }
+  if (expr.kind == "HListLiteral") {
+    return compile_sequence_literal(expr, Opcode::MakeList);
+  }
+  if (expr.kind == "HTupleLiteral") {
+    return compile_sequence_literal(expr, Opcode::MakeTuple);
+  }
+  if (expr.kind == "HMapLiteral") {
+    return compile_map_literal(expr);
   }
   if (expr.kind == "HLoadLocal") {
     return parse_slot(string_field(expr, "slot"), 'l');

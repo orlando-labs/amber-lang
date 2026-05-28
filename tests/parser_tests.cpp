@@ -158,6 +158,39 @@ void test_range_precedence() {
          "range rhs addition op");
 }
 
+void test_collection_literals() {
+  std::unique_ptr<Expr> list = parse_ok("[1, :ok]\n");
+  expect(list->kind == "AstListLiteral", "list literal parses");
+  expect(list_field(*list, "elements").values.size() == 2,
+         "list literal element count");
+  expect(list_field(*list, "elements").values[1]->kind == "AstLiteral",
+         "symbol element parses as literal");
+  expect(string_field(*list_field(*list, "elements").values[1], "token") ==
+             "SYMBOL",
+         "symbol literal token");
+
+  std::unique_ptr<Expr> tuple = parse_ok("(1, 2,)\n");
+  expect(tuple->kind == "AstTupleLiteral", "tuple literal parses");
+  expect(list_field(*tuple, "elements").values.size() == 2,
+         "tuple literal element count");
+
+  std::unique_ptr<Expr> group = parse_ok("(1 + 2)\n");
+  expect(group->kind == "AstGroup", "single parenthesized expression groups");
+
+  std::unique_ptr<Expr> map = parse_ok("{id: 1, \"name\": :ok, :kind: 3}\n");
+  expect(map->kind == "AstMapLiteral", "map literal parses");
+  const amber::ast::ListField &entries = list_field(*map, "entries");
+  expect(entries.values.size() == 3, "map literal entry count");
+  expect(string_field(*entries.values[0], "key_kind") == "symbol",
+         "identifier key is symbol key");
+  expect(string_field(*entries.values[0], "key") == "id",
+         "identifier key text");
+  expect(string_field(*entries.values[1], "key_kind") == "string",
+         "string key is preserved");
+  expect(string_field(*entries.values[2], "key") == "kind",
+         "explicit symbol key text");
+}
+
 void test_clause_def_forms() {
   const std::string source = "def area(shape):\n"
                              "  when Point(x, y):\n"
@@ -432,6 +465,7 @@ int main() {
   test_inline_block_chain_boundary();
   test_unicode_names();
   test_range_precedence();
+  test_collection_literals();
   test_clause_def_forms();
   test_effect_row_signature();
   test_pattern_assignment_and_block_param_patterns();

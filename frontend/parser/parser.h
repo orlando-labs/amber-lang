@@ -107,6 +107,10 @@ private:
                                               StopMode stop_mode);
   std::unique_ptr<ast::Expr> parse_prefix(StopMode stop_mode);
   std::unique_ptr<ast::Expr>
+  parse_paren_or_tuple_literal(const lexer::Token &open, StopMode stop_mode);
+  std::unique_ptr<ast::Expr> parse_map_literal(const lexer::Token &open,
+                                               StopMode stop_mode);
+  std::unique_ptr<ast::Expr>
   parse_string_literal_expr(const lexer::Token &token);
   std::unique_ptr<ast::Expr> parse_postfix(std::unique_ptr<ast::Expr> expr,
                                            StopMode stop_mode);

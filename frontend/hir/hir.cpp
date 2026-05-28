@@ -1289,6 +1289,39 @@ private:
       node->string_field("value", string_value(expr, "value"));
       return node;
     }
+    if (expr.kind == "AstGroup") {
+      return lower_expr(*node_field_required(expr, "expr"));
+    }
+    if (expr.kind == "AstListLiteral" || expr.kind == "AstTupleLiteral") {
+      auto node = make_node(expr.kind == "AstListLiteral" ? "HListLiteral"
+                                                          : "HTupleLiteral",
+                            expr.span);
+      std::vector<std::unique_ptr<Node>> elements;
+      if (const ast::ListField *list = list_field(expr, "elements")) {
+        for (const std::unique_ptr<ast::Expr> &element : list->values) {
+          elements.push_back(lower_expr(*element));
+        }
+      }
+      node->list_field("elements", std::move(elements));
+      return node;
+    }
+    if (expr.kind == "AstMapLiteral") {
+      auto node = make_node("HMapLiteral", expr.span);
+      std::vector<std::unique_ptr<Node>> entries;
+      if (const ast::ListField *list = list_field(expr, "entries")) {
+        for (const std::unique_ptr<ast::Expr> &entry : list->values) {
+          auto lowered = make_node("HMapEntry", entry->span);
+          lowered->string_field("key_kind", string_value(*entry, "key_kind"));
+          lowered->string_field("key", string_value(*entry, "key"));
+          if (const ast::Expr *value = node_field(*entry, "value")) {
+            lowered->node_field("value", lower_expr(*value));
+          }
+          entries.push_back(std::move(lowered));
+        }
+      }
+      node->list_field("entries", std::move(entries));
+      return node;
+    }
     if (expr.kind == "AstName") {
       return lower_name(expr, "name");
     }

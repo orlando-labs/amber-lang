@@ -79,6 +79,8 @@ amber::bytecode::EmitResult emit_ok(const std::string &source) {
 const amber::bytecode::BcMethod *
 method_by_name(const amber::bytecode::BcModule &module,
                const std::string &name);
+std::uint32_t symbol_id_or_die(const amber::bytecode::BcModule &module,
+                               const std::string &name);
 
 void test_execute_emitted_method() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def echo(x):\n"
@@ -111,6 +113,55 @@ void test_execute_module_init_calls_top_level_def() {
   expect(exec.ok(), "module init top-level def call failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 45,
          "module init should return top-level function result");
+}
+
+void test_execute_emitted_collection_literals() {
+  amber::bytecode::EmitResult list_result = emit_ok("[1, 2 + 3]\n");
+  amber::runtime::ExecutionResult list_exec = amber::runtime::execute_code(
+      list_result.module, list_result.module.init.entry_code_id);
+  expect(list_exec.ok(), "list literal execution failed");
+  expect(list_exec.value.is_list(), "list literal should return list");
+  const std::shared_ptr<amber::runtime::ListValue> list =
+      list_exec.value.as_list();
+  expect(list != nullptr && list->items.size() == 2, "list literal item count");
+  expect(list->items[0].is_integer() && list->items[0].as_integer() == 1,
+         "list literal first value");
+  expect(list->items[1].is_integer() && list->items[1].as_integer() == 5,
+         "list literal evaluates nested expression");
+
+  amber::bytecode::EmitResult tuple_result = emit_ok("(1, 2)\n");
+  amber::runtime::ExecutionResult tuple_exec = amber::runtime::execute_code(
+      tuple_result.module, tuple_result.module.init.entry_code_id);
+  expect(tuple_exec.ok(), "tuple literal execution failed");
+  expect(tuple_exec.value.is_tuple(), "tuple literal should return tuple");
+  const std::shared_ptr<amber::runtime::TupleValue> tuple =
+      tuple_exec.value.as_tuple();
+  expect(tuple != nullptr && tuple->items.size() == 2,
+         "tuple literal item count");
+  expect(tuple->items[1].is_integer() && tuple->items[1].as_integer() == 2,
+         "tuple literal second value");
+
+  amber::bytecode::EmitResult map_result =
+      emit_ok("{id: 1, id: 2, \"name\": :ok}\n");
+  amber::runtime::ExecutionResult map_exec = amber::runtime::execute_code(
+      map_result.module, map_result.module.init.entry_code_id);
+  expect(map_exec.ok(), "map literal execution failed");
+  expect(map_exec.value.is_map(), "map literal should return map");
+  const std::shared_ptr<amber::runtime::MapValue> map = map_exec.value.as_map();
+  expect(map != nullptr && map->entries.size() == 2,
+         "duplicate map key is replaced");
+  expect(map->entries[0].symbol_id == symbol_id_or_die(map_result.module, "id"),
+         "map id key");
+  expect(map->entries[0].value.is_integer() &&
+             map->entries[0].value.as_integer() == 2,
+         "later duplicate map key wins");
+  expect(map->entries[1].symbol_id ==
+             symbol_id_or_die(map_result.module, "name"),
+         "string map key becomes symbol-compatible key");
+  expect(map->entries[1].value.is_symbol() &&
+             map->entries[1].value.as_symbol().symbol_id ==
+                 symbol_id_or_die(map_result.module, "ok"),
+         "symbol literal map value");
 }
 
 void test_top_level_function_closure_captures_sibling_function() {
@@ -5915,6 +5966,7 @@ void test_manual_raise_unhandled_fault_trace() {
 int main() {
   test_execute_emitted_method();
   test_execute_module_init_calls_top_level_def();
+  test_execute_emitted_collection_literals();
   test_top_level_function_closure_captures_sibling_function();
   test_top_level_function_self_recursion();
   test_top_level_clause_function_self_recursion();

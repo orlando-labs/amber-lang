@@ -7882,9 +7882,18 @@ private:
             !operand_u32(frame, insn, operand_index++, &reg)) {
           return;
         }
-        entries.push_back({symbol_id, read_reg(frame, reg)});
+        Value value = read_reg(frame, reg);
         if (fault_.has_value()) {
           return;
+        }
+        const auto existing = std::find_if(
+            entries.begin(), entries.end(), [symbol_id](const MapEntry &entry) {
+              return entry.symbol_id == symbol_id;
+            });
+        if (existing == entries.end()) {
+          entries.push_back({symbol_id, std::move(value)});
+        } else {
+          existing->value = std::move(value);
         }
       }
       if (!write_reg(frame, dst, make_symbol_map_value(std::move(entries)))) {

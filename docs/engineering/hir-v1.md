@@ -39,6 +39,9 @@ Currently lowered node families:
   module | instance | class`;
 - clause-style `def` as `HMethod(signature, clauses[], else_body, procedure)`;
 - literals as `HConst`;
+- collection literals as `HListLiteral(elements[])`,
+  `HTupleLiteral(elements[])`, and `HMapLiteral(entries[])` with
+  `HMapEntry(key_kind, key, value)`;
 - local/import/placeholder reads as `HLoadLocal`;
 - closure capture reads and writes as `HLoadCapture` / `HStoreCapture`;
 - explicit safe-nav guards as `HIf(cond = HIsNull(...), ...)`;

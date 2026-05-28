@@ -402,6 +402,28 @@ void test_w13_operator_emission() {
   expect(saw_16, "hex integer canonicalized");
 }
 
+void test_collection_literal_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("[1, 2]\n"
+              "(3, 4)\n"
+              "{id: :ok, \"name\": 5}\n");
+  const amber::bytecode::BcCode *code =
+      code_by_kind(emit_result.module, amber::bytecode::CodeKind::Module);
+  expect(code != nullptr, "module init code exists");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::MakeList),
+         "list literal emits MAKE_LIST");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::MakeTuple),
+         "tuple literal emits MAKE_TUPLE");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::MakeMap),
+         "map literal emits MAKE_MAP");
+  expect(contains_symbol(emit_result.module, "ok"),
+         "symbol literal interns symbol");
+  expect(contains_symbol(emit_result.module, "id"),
+         "identifier map key interns symbol");
+  expect(contains_symbol(emit_result.module, "name"),
+         "string map key interns symbol-compatible key");
+}
+
 void test_block_param_pattern_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("def transform(xs):\n"
@@ -537,6 +559,7 @@ int main() {
   test_dynamic_pattern_emission();
   test_clause_method_emission();
   test_w13_operator_emission();
+  test_collection_literal_emission();
   test_block_param_pattern_emission();
   test_simple_block_param_emission();
   test_object_model_emission();

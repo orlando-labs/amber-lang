@@ -26,6 +26,17 @@ lowered into ordinary call/member nodes:
 - `AstTailDotMember.chain_boundary = true` marks a `CHAIN_DOT` continuation
   after a one-line block suffix.
 
+## Collection Literals
+
+- `AstListLiteral(elements[])` represents `[expr, ...]`;
+- `AstTupleLiteral(elements[])` represents `()` and parenthesized expressions
+  with a comma, while a single parenthesized expression without a comma remains
+  `AstGroup(expr)`;
+- `AstMapLiteral(entries[])` represents `{key: value, ...}` in expression
+  context, with each `AstMapEntry(key_kind, key, value)` preserving whether the
+  key was written as an identifier/symbol or string key;
+- symbol literals are `AstLiteral(token = SYMBOL, value = name)`.
+
 ## Clause defs
 
 - canonical `def ...:` bodies that begin with `when` / `else` are parsed as

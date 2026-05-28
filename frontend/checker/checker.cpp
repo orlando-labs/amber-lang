@@ -646,6 +646,9 @@ private:
       if (token == "STRING") {
         return named_type("Str");
       }
+      if (token == "SYMBOL") {
+        return named_type("Symbol");
+      }
       if (token == "KEYWORD_TRUE") {
         return named_type("True");
       }
@@ -685,6 +688,24 @@ private:
       TypeTerm term;
       term.kind = "Generic";
       term.name = "Array";
+      term.args.push_back(named_type("Any"));
+      return term;
+    }
+    if (expr.kind == "AstTupleLiteral") {
+      TypeTerm term;
+      term.kind = "Tuple";
+      if (const ast::ListField *elements = list_field(expr, "elements")) {
+        for (std::size_t i = 0; i < elements->values.size(); ++i) {
+          term.args.push_back(named_type("Any"));
+        }
+      }
+      return term;
+    }
+    if (expr.kind == "AstMapLiteral") {
+      TypeTerm term;
+      term.kind = "Generic";
+      term.name = "Map";
+      term.args.push_back(named_type("Symbol"));
       term.args.push_back(named_type("Any"));
       return term;
     }

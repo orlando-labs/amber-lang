@@ -1684,6 +1684,15 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   if (token.kind == lexer::TokenKind::LastValue) {
     return ast::make_expr("AstLastValue", token.span);
   }
+  if (token.kind == lexer::TokenKind::Colon) {
+    const lexer::Token name =
+        consume(lexer::TokenKind::Identifier, "expected symbol name after ':'");
+    auto expr =
+        ast::make_expr("AstLiteral", ast::join_spans(token.span, name.span));
+    expr->string_field("token", "SYMBOL");
+    expr->string_field("value", name.lexeme);
+    return expr;
+  }
   if (token.kind == lexer::TokenKind::String) {
     return parse_string_literal_expr(token);
   }
@@ -1708,13 +1717,7 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
     return expr;
   }
   if (token.kind == lexer::TokenKind::LParen) {
-    std::unique_ptr<ast::Expr> inner = parse_expression(1, stop_mode);
-    const lexer::Token close =
-        consume(lexer::TokenKind::RParen, "expected ')' after expression");
-    auto expr =
-        ast::make_expr("AstGroup", ast::join_spans(token.span, close.span));
-    expr->node_field("expr", std::move(inner));
-    return expr;
+    return parse_paren_or_tuple_literal(token, stop_mode);
   }
   if (token.kind == lexer::TokenKind::LBracket) {
     std::vector<std::unique_ptr<ast::Expr>> elements =
@@ -1724,6 +1727,9 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
                                ast::join_spans(token.span, close.span));
     expr->list_field("elements", std::move(elements));
     return expr;
+  }
+  if (token.kind == lexer::TokenKind::LBrace) {
+    return parse_map_literal(token, stop_mode);
   }
   if (token.kind == lexer::TokenKind::Plus ||
       token.kind == lexer::TokenKind::Minus ||
@@ -1739,6 +1745,104 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   error(token, "expected expression");
   auto expr = ast::make_expr("AstError", token.span);
   expr->string_field("token", token.lexeme);
+  return expr;
+}
+
+std::unique_ptr<ast::Expr>
+Parser::parse_paren_or_tuple_literal(const lexer::Token &open,
+                                     StopMode stop_mode) {
+  std::vector<std::unique_ptr<ast::Expr>> elements;
+  bool saw_comma = false;
+
+  if (match(lexer::TokenKind::RParen)) {
+    const lexer::Token close = previous();
+    auto expr = ast::make_expr("AstTupleLiteral",
+                               ast::join_spans(open.span, close.span));
+    expr->list_field("elements", std::move(elements));
+    return expr;
+  }
+
+  elements.push_back(parse_expression(1, stop_mode));
+  while (match(lexer::TokenKind::Comma)) {
+    saw_comma = true;
+    if (check(lexer::TokenKind::RParen)) {
+      break;
+    }
+    elements.push_back(parse_expression(1, stop_mode));
+  }
+
+  const lexer::Token close =
+      consume(lexer::TokenKind::RParen, "expected ')' after expression");
+  if (!saw_comma && elements.size() == 1U) {
+    auto expr =
+        ast::make_expr("AstGroup", ast::join_spans(open.span, close.span));
+    expr->node_field("expr", std::move(elements.front()));
+    return expr;
+  }
+
+  auto expr =
+      ast::make_expr("AstTupleLiteral", ast::join_spans(open.span, close.span));
+  expr->list_field("elements", std::move(elements));
+  return expr;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
+                                                     StopMode stop_mode) {
+  std::vector<std::unique_ptr<ast::Expr>> entries;
+
+  if (match(lexer::TokenKind::RBrace)) {
+    const lexer::Token close = previous();
+    auto expr =
+        ast::make_expr("AstMapLiteral", ast::join_spans(open.span, close.span));
+    expr->list_field("entries", std::move(entries));
+    return expr;
+  }
+
+  while (!check(lexer::TokenKind::RBrace) && !at_end()) {
+    lexer::Token key = current();
+    std::string key_kind = "symbol";
+    std::string key_value;
+    lexer::Span key_span = key.span;
+
+    if (match(lexer::TokenKind::Identifier)) {
+      key_value = key.lexeme;
+    } else if (match(lexer::TokenKind::String)) {
+      key_kind = "string";
+      key_value = key.lexeme;
+    } else if (match(lexer::TokenKind::Colon)) {
+      const lexer::Token name = consume(lexer::TokenKind::Identifier,
+                                        "expected symbol key name after ':'");
+      key_value = name.lexeme;
+      key_span = ast::join_spans(key.span, name.span);
+    } else {
+      error(key, "expected map literal key");
+      advance();
+      continue;
+    }
+
+    consume(lexer::TokenKind::Colon, "expected ':' after map literal key");
+    std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
+    auto entry = ast::make_expr(
+        "AstMapEntry",
+        value == nullptr ? key_span : ast::join_spans(key_span, value->span));
+    entry->string_field("key_kind", key_kind);
+    entry->string_field("key", key_value);
+    entry->node_field("value", std::move(value));
+    entries.push_back(std::move(entry));
+
+    if (!match(lexer::TokenKind::Comma)) {
+      break;
+    }
+    if (check(lexer::TokenKind::RBrace)) {
+      break;
+    }
+  }
+
+  const lexer::Token close =
+      consume(lexer::TokenKind::RBrace, "expected '}' after map literal");
+  auto expr =
+      ast::make_expr("AstMapLiteral", ast::join_spans(open.span, close.span));
+  expr->list_field("entries", std::move(entries));
   return expr;
 }
 
@@ -2108,6 +2212,7 @@ bool Parser::starts_primary() const {
   case lexer::TokenKind::Integer:
   case lexer::TokenKind::Float:
   case lexer::TokenKind::String:
+  case lexer::TokenKind::Colon:
   case lexer::TokenKind::KeywordTrue:
   case lexer::TokenKind::KeywordFalse:
   case lexer::TokenKind::KeywordNull:
@@ -2115,6 +2220,7 @@ bool Parser::starts_primary() const {
   case lexer::TokenKind::AtAt:
   case lexer::TokenKind::LParen:
   case lexer::TokenKind::LBracket:
+  case lexer::TokenKind::LBrace:
   case lexer::TokenKind::Plus:
   case lexer::TokenKind::Minus:
   case lexer::TokenKind::KeywordNot:
@@ -2132,6 +2238,7 @@ bool Parser::starts_bare_arg() const {
   case lexer::TokenKind::Integer:
   case lexer::TokenKind::Float:
   case lexer::TokenKind::String:
+  case lexer::TokenKind::Colon:
   case lexer::TokenKind::KeywordTrue:
   case lexer::TokenKind::KeywordFalse:
   case lexer::TokenKind::KeywordNull:
@@ -2139,6 +2246,7 @@ bool Parser::starts_bare_arg() const {
   case lexer::TokenKind::AtAt:
   case lexer::TokenKind::LParen:
   case lexer::TokenKind::LBracket:
+  case lexer::TokenKind::LBrace:
     return true;
   default:
     return false;

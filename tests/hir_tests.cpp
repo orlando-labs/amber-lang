@@ -394,6 +394,33 @@ void test_builtin_send_lowering() {
          "dynamic send forwards keyword args");
 }
 
+void test_collection_literal_lowering() {
+  const amber::hir::Program program = lower_ok("[1, 2]\n"
+                                               "(3, 4)\n"
+                                               "{id: :ok}\n");
+  const amber::hir::Procedure *init =
+      procedure_by_name(program, "__module_init__");
+  expect(init != nullptr && init->body != nullptr, "module init exists");
+
+  const amber::ast::Expr *list_stmt = list_item(*init->body, "items", 0);
+  const amber::ast::Expr *tuple_stmt = list_item(*init->body, "items", 1);
+  const amber::ast::Expr *map_stmt = list_item(*init->body, "items", 2);
+  expect(list_stmt != nullptr && tuple_stmt != nullptr && map_stmt != nullptr,
+         "collection literal statements exist");
+
+  const amber::ast::Expr *list_expr = node_field(*list_stmt, "expr");
+  const amber::ast::Expr *tuple_expr = node_field(*tuple_stmt, "expr");
+  const amber::ast::Expr *map_expr = node_field(*map_stmt, "expr");
+  expect(list_expr != nullptr && list_expr->kind == "HListLiteral",
+         "list literal lowers to HListLiteral");
+  expect(tuple_expr != nullptr && tuple_expr->kind == "HTupleLiteral",
+         "tuple literal lowers to HTupleLiteral");
+  expect(map_expr != nullptr && map_expr->kind == "HMapLiteral",
+         "map literal lowers to HMapLiteral");
+  expect(contains_kind(*map_expr, "HMapEntry"), "map entry is preserved");
+  expect(contains_kind(*map_expr, "HConst"), "symbol value lowers to HConst");
+}
+
 void test_shadowed_send_stays_call() {
   const amber::hir::Program program =
       lower_ok("def invoke(send, recv, selector):\n"
@@ -1134,6 +1161,7 @@ int main() {
   test_safe_navigation_lowering();
   test_safe_call_and_index_lowering();
   test_builtin_send_lowering();
+  test_collection_literal_lowering();
   test_shadowed_send_stays_call();
   test_w13_operator_lowering();
   test_clause_method_lowering();
