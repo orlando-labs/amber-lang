@@ -8136,6 +8136,7 @@ private:
       closure->code_id = code_id;
       closure->self = frame.self;
       closure->captures.reserve(capture_count);
+      const Value closure_value = Value::closure(closure);
       for (std::uint32_t i = 0; i < capture_count; ++i) {
         std::uint32_t kind = 0;
         std::uint32_t slot = 0;
@@ -8144,7 +8145,8 @@ private:
           return;
         }
         if (kind == 0U) {
-          closure->captures.push_back(read_reg(frame, slot));
+          closure->captures.push_back(slot == dst ? closure_value
+                                                  : read_reg(frame, slot));
         } else {
           if (slot >= frame.captures.size()) {
             set_fault(frame, "VMError", "capture slot out of range");
@@ -8156,7 +8158,7 @@ private:
           return;
         }
       }
-      if (!write_reg(frame, dst, Value::closure(std::move(closure)))) {
+      if (!write_reg(frame, dst, closure_value)) {
         return;
       }
       ++frame.pc;

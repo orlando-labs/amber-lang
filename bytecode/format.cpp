@@ -3414,7 +3414,13 @@ InstructionFlow verify_instruction_flow(
         operand_count_is(instruction,
                          3U + static_cast<std::size_t>(capture_count) * 2U,
                          errors)) {
-      add_register_write(code, instruction, 0, flow, errors);
+      std::uint32_t dst = 0;
+      const bool has_dst = register_operand(
+          code, instruction, 0, "register operand must be unsigned", errors,
+          &dst);
+      if (has_dst) {
+        flow.writes.push_back(dst);
+      }
       std::uint32_t closure_code_id = 0;
       if (read_u32_operand(instruction, 1, "code ref must be unsigned", errors,
                            &closure_code_id)) {
@@ -3439,8 +3445,12 @@ InstructionFlow verify_instruction_flow(
             add_verify_error(errors, "BC1311",
                              "closure capture register is out of range",
                              SectionKind::Code, 0);
-          } else {
+          } else if (!has_dst || slot != dst) {
             flow.reads.push_back(slot);
+          } else {
+            // A closure may capture itself while being written into its own
+            // target register. The VM materializes that capture from the
+            // newly allocated closure instead of reading an initialized reg.
           }
         } else if (kind == 1U) {
           if (slot >= code.capture_layout.size()) {

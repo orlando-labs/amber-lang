@@ -471,7 +471,7 @@ private:
   }
 
   bool is_module_callable_decl(const ast::Expr &item) const {
-    return item.kind == "AstDefStmt";
+    return item.kind == "AstDefStmt" || item.kind == "AstClauseDef";
   }
 
   Procedure *mutable_procedure_by_id(const std::string &id) {
@@ -821,6 +821,11 @@ private:
     ProcedureContext *saved = current_proc_;
     bool has_context = false;
     if (scope_index >= 0) {
+      std::vector<CapturePlan> capture_plans;
+      if (dispatch_side == "module") {
+        capture_plans = build_module_method_capture_plans(scope_index);
+      }
+
       Procedure procedure;
       procedure.id = "p" + std::to_string(procedures_.size());
       procedure.name = string_value(item, "name");
@@ -834,6 +839,7 @@ private:
       context.scope_index = scope_index;
       context.procedure_index = procedures_.size() - 1;
       initialize_locals(&context);
+      initialize_captures(&context, capture_plans);
       current_proc_ = &context;
       lower_signature_defaults(
           procedures_[context.procedure_index].signature.get(),
@@ -850,10 +856,23 @@ private:
         clauses.push_back(lower_clause_node(*clause, signature));
       }
     }
+    std::unique_ptr<Node> else_body =
+        lower_body(list_field(item, "else_body"), item.span);
+    if (has_context) {
+      auto dispatch = make_node("HClauseDispatch", item.span);
+      dispatch->list_field("clauses", clone_node_list(clauses));
+      dispatch->node_field("else_body", clone_node(*else_body));
+
+      std::vector<std::unique_ptr<Node>> body_items;
+      auto last_set = make_node("HLastSet", item.span);
+      last_set->node_field("expr", std::move(dispatch));
+      body_items.push_back(std::move(last_set));
+      procedures_[context.procedure_index].body->list_field(
+          "items", std::move(body_items));
+    }
     node->node_field("signature", std::move(signature_node));
     node->list_field("clauses", std::move(clauses));
-    node->node_field("else_body",
-                     lower_body(list_field(item, "else_body"), item.span));
+    node->node_field("else_body", std::move(else_body));
 
     if (has_context) {
       current_proc_ = saved;
@@ -1070,6 +1089,19 @@ private:
     collect_local_bindings_for_procedure(context->scope_index,
                                          context->scope_index, &bindings);
     std::sort(bindings.begin(), bindings.end(), binding_less);
+    auto add_binding_slot = [&](const binder::Binding *binding_ptr) {
+      if (binding_ptr == nullptr || !binding_has_slot(*binding_ptr) ||
+          context->slot_by_binding_id.count(binding_ptr->id) != 0U) {
+        return false;
+      }
+      const std::string slot = "l" + std::to_string(context->next_slot++);
+      context->slot_by_binding_id.emplace(binding_ptr->id, slot);
+      procedures_[context->procedure_index].locals.push_back(ProcedureLocal{
+          slot, binding_ptr->name, binding_ptr->role, binding_ptr->kind,
+          binding_ptr->span});
+      return true;
+    };
+
     const ast::ListField *signature_params =
         list_field(*procedures_[context->procedure_index].signature, "params");
     if (signature_params != nullptr) {
@@ -1078,14 +1110,15 @@ private:
         if (local_name.empty()) {
           continue;
         }
-        bool has_binding = false;
+        const binder::Binding *param_binding = nullptr;
         for (const binder::Binding *binding_ptr : bindings) {
-          if (binding_ptr != nullptr && binding_ptr->name == local_name) {
-            has_binding = true;
+          if (binding_ptr != nullptr && binding_ptr->name == local_name &&
+              binding_ptr->role == "param") {
+            param_binding = binding_ptr;
             break;
           }
         }
-        if (has_binding) {
+        if (add_binding_slot(param_binding)) {
           continue;
         }
         const std::string slot = "l" + std::to_string(context->next_slot++);
@@ -1094,17 +1127,7 @@ private:
       }
     }
     for (const binder::Binding *binding_ptr : bindings) {
-      if (binding_ptr == nullptr) {
-        continue;
-      }
-      const binder::Binding &binding = *binding_ptr;
-      if (!binding_has_slot(binding)) {
-        continue;
-      }
-      const std::string slot = "l" + std::to_string(context->next_slot++);
-      context->slot_by_binding_id.emplace(binding.id, slot);
-      procedures_[context->procedure_index].locals.push_back(ProcedureLocal{
-          slot, binding.name, binding.role, binding.kind, binding.span});
+      add_binding_slot(binding_ptr);
     }
   }
 

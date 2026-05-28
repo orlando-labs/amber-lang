@@ -271,9 +271,11 @@ private:
   std::uint32_t compile_logical(const ast::Expr &expr);
   std::uint32_t compile_loop(const ast::Expr &expr);
   std::uint32_t compile_match_dispatch(const ast::Expr &expr);
+  std::uint32_t compile_clause_dispatch(const ast::Expr &expr);
   std::uint32_t compile_pattern_assign(const ast::Expr &expr);
   std::uint32_t compile_send_like(const ast::Expr &expr, Opcode opcode);
-  std::uint32_t compile_closure(const ast::Expr &expr);
+  std::uint32_t compile_closure(const ast::Expr &expr,
+                                std::optional<std::uint32_t> target_reg = {});
   std::uint32_t compile_lookup_like(const ast::Expr &expr,
                                     const std::string &name);
   std::uint32_t compile_const(const ast::Expr &expr);
@@ -1886,11 +1888,13 @@ std::uint32_t CodeEmitter::compile_send_like(const ast::Expr &expr,
   return dst;
 }
 
-std::uint32_t CodeEmitter::compile_closure(const ast::Expr &expr) {
+std::uint32_t
+CodeEmitter::compile_closure(const ast::Expr &expr,
+                             std::optional<std::uint32_t> target_reg) {
   const std::string procedure_id = string_field(expr, "procedure");
   const std::optional<std::uint32_t> code_id =
       owner_->code_id_for_procedure(procedure_id);
-  const std::uint32_t dst = alloc_temp();
+  const std::uint32_t dst = target_reg.value_or(alloc_temp());
   if (!code_id.has_value()) {
     diag(expr.span, "BC2003", "missing closure procedure in bytecode emitter");
     return dst;
@@ -2153,6 +2157,81 @@ std::uint32_t CodeEmitter::compile_match_dispatch(const ast::Expr &expr) {
   return dst;
 }
 
+std::uint32_t CodeEmitter::compile_clause_dispatch(const ast::Expr &expr) {
+  const std::uint32_t dst = alloc_temp();
+  std::vector<std::size_t> end_jumps;
+
+  if (const ast::ListField *clauses = list_field(expr, "clauses")) {
+    for (const std::unique_ptr<ast::Expr> &clause : clauses->values) {
+      if (clause == nullptr) {
+        continue;
+      }
+      const ast::Expr *compiled_pattern =
+          node_field(*clause, "compiled_pattern");
+      const ast::Expr *match_program =
+          compiled_pattern == nullptr
+              ? nullptr
+              : node_field(*compiled_pattern, "match_program");
+      const ast::Expr *root =
+          match_program == nullptr ? nullptr : node_field(*match_program,
+                                                          "root");
+      const ast::Expr *body = node_field(*clause, "body");
+      if (compiled_pattern == nullptr || match_program == nullptr ||
+          root == nullptr || body == nullptr) {
+        diag(clause->span, "BC2001",
+             "clause dispatch is missing pattern or body");
+        continue;
+      }
+
+      std::vector<PatchRef> fail_patches;
+      const std::uint32_t subject_reg = compile_clause_subject(*clause);
+      compile_pattern_node(*root, subject_reg, &fail_patches);
+
+      if (bool_field(*match_program, "requires_commit")) {
+        const std::optional<std::pair<std::uint32_t, std::uint32_t>> commit =
+            binding_commit_range(*match_program);
+        if (!commit.has_value()) {
+          diag(clause->span, "BC2001",
+               "clause bindings are not representable as one commit range");
+        } else if (commit->second != 0U) {
+          emit_instruction(Opcode::PCommit,
+                           {{commit->first, false}, {commit->second, false}},
+                           clause->span);
+        }
+      }
+
+      std::vector<PatchRef> next_clause_patches = fail_patches;
+      if (const ast::Expr *guard = node_field(*clause, "guard")) {
+        const std::uint32_t guard_reg = compile_expr(*guard);
+        const std::size_t jump_next =
+            emit_instruction(Opcode::JumpIfFalse,
+                             {{guard_reg, false}, {-1, true}}, guard->span);
+        next_clause_patches.push_back({jump_next, 1});
+      }
+
+      compile_seq(*body);
+      emit_instruction(Opcode::GetLast, {{dst, false}}, body->span);
+      end_jumps.push_back(
+          emit_instruction(Opcode::Jump, {{-1, true}}, clause->span));
+      patch_fail_patches(next_clause_patches, current_pc());
+    }
+  }
+
+  const ast::Expr *else_body = node_field(expr, "else_body");
+  if (else_body != nullptr && !is_empty_seq_expr(else_body)) {
+    compile_seq(*else_body);
+    emit_instruction(Opcode::GetLast, {{dst, false}}, else_body->span);
+  } else {
+    emit_instruction(Opcode::LoadNull, {{dst, false}}, expr.span);
+    emit_instruction(Opcode::SetLast, {{dst, false}}, expr.span);
+  }
+
+  for (std::size_t jump : end_jumps) {
+    patch_operand(jump, 0, current_pc(), false);
+  }
+  return dst;
+}
+
 std::uint32_t CodeEmitter::compile_pattern_assign(const ast::Expr &expr) {
   const ast::Expr *compiled_pattern = node_field(expr, "compiled_pattern");
   const ast::Expr *value = node_field(expr, "value");
@@ -2258,6 +2337,9 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
       diag(expr.span, "BC2001", "HStoreLocal is missing expr");
       return slot;
     }
+    if (value->kind == "HClosure") {
+      return compile_closure(*value, slot);
+    }
     const std::uint32_t src = compile_expr(*value);
     if (src != slot) {
       emit_instruction(Opcode::Move, {{slot, false}, {src, false}}, expr.span);
@@ -2357,6 +2439,9 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   }
   if (expr.kind == "HMatchDispatch") {
     return compile_match_dispatch(expr);
+  }
+  if (expr.kind == "HClauseDispatch") {
+    return compile_clause_dispatch(expr);
   }
   if (expr.kind == "HPatternAssign") {
     return compile_pattern_assign(expr);

@@ -134,6 +134,90 @@ void test_top_level_function_closure_captures_sibling_function() {
          "top-level function should call captured sibling function");
 }
 
+void test_top_level_function_self_recursion() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("def fact(n):\n"
+              "  if n == 0:\n"
+              "    1\n"
+              "  else:\n"
+              "    n * fact(n - 1)\n"
+              "\n"
+              "fact(5)\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(decoded.module,
+                                   decoded.module.init.entry_code_id);
+  expect(exec.ok(), "top-level recursive function failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 120,
+         "top-level recursive function should return factorial");
+}
+
+void test_top_level_clause_function_self_recursion() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("def fact(0): 1\n"
+              "def fact(n) if n > 0: n * fact(n - 1)\n"
+              "\n"
+              "fact(5)\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(decoded.module,
+                                   decoded.module.init.entry_code_id);
+  expect(exec.ok(), "top-level recursive clause function failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 120,
+         "top-level recursive clause function should return factorial");
+}
+
+void test_top_level_plain_def_fallback_clause_recursion() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("def frac(x):\n"
+              "  x * frac(x - 1)\n"
+              "\n"
+              "def frac(2):\n"
+              "  2\n"
+              "\n"
+              "frac(5)\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(decoded.module,
+                                   decoded.module.init.entry_code_id);
+  expect(exec.ok(), "plain def fallback clause recursion failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 120,
+         "plain def fallback clause recursion should return factorial");
+}
+
+void test_top_level_guarded_clause_function_self_recursion() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("def frac(x) if x > 0:\n"
+              "  x * frac(x - 1)\n"
+              "\n"
+              "def frac(0): 1\n"
+              "\n"
+              "frac(5)\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(decoded.module,
+                                   decoded.module.init.entry_code_id);
+  expect(exec.ok(), "guarded recursive clause function failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 120,
+         "guarded recursive clause function should return factorial");
+}
+
 void test_runtime_capability_checks() {
   amber::bytecode::BcModule module;
   module.capabilities.push_back(
@@ -5832,6 +5916,10 @@ int main() {
   test_execute_emitted_method();
   test_execute_module_init_calls_top_level_def();
   test_top_level_function_closure_captures_sibling_function();
+  test_top_level_function_self_recursion();
+  test_top_level_clause_function_self_recursion();
+  test_top_level_plain_def_fallback_clause_recursion();
+  test_top_level_guarded_clause_function_self_recursion();
   test_branching_and_last_result();
   test_manual_closure_call_and_capture();
   test_runtime_uninitialized_register_read_raises_name_error();

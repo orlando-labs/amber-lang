@@ -241,6 +241,68 @@ void test_module_def_closure_captures_prior_function() {
          "describe body reads captured tap");
 }
 
+void test_module_def_closure_captures_self() {
+  const amber::hir::Program program = lower_ok("def f(x):\n"
+                                               "  f(x)\n"
+                                               "\n"
+                                               "f(1)\n");
+  const amber::hir::Procedure *init =
+      procedure_by_name(program, "__module_init__");
+  expect(init != nullptr && init->body != nullptr, "module init exists");
+
+  const amber::ast::Expr *store = list_item(*init->body, "items", 0);
+  const amber::ast::Expr *closure =
+      store == nullptr ? nullptr : node_field(*store, "expr");
+  expect(closure != nullptr && closure->kind == "HClosure",
+         "recursive def stores closure");
+  const amber::ast::Expr *capture = list_item(*closure, "captures", 0);
+  expect(capture != nullptr && capture->kind == "HCapture",
+         "recursive def captures itself");
+  expect(string_field(*capture, "source_slot") == string_field(*store, "slot"),
+         "self capture reads the function slot");
+
+  const amber::hir::Procedure *function =
+      procedure_by_id(program, string_field(*closure, "procedure"));
+  expect(function != nullptr && function->captures.size() == 1,
+         "recursive procedure has capture metadata");
+  expect(contains_kind(*function->body, "HLoadCapture"),
+         "recursive body reads self capture");
+}
+
+void test_module_clause_def_materializes_callable_binding() {
+  const amber::hir::Program program =
+      lower_ok("def fact(0): 1\n"
+               "def fact(n) if n > 0: n * fact(n - 1)\n"
+               "\n"
+               "fact(3)\n");
+  const amber::hir::Procedure *init =
+      procedure_by_name(program, "__module_init__");
+  expect(init != nullptr && init->body != nullptr, "module init exists");
+
+  const amber::ast::Expr *store = list_item(*init->body, "items", 0);
+  expect(store != nullptr && store->kind == "HStoreLocal",
+         "module clause def initializes function binding");
+  const amber::ast::Expr *closure = node_field(*store, "expr");
+  expect(closure != nullptr && closure->kind == "HClosure",
+         "module clause def stores callable closure");
+  const amber::ast::Expr *capture = list_item(*closure, "captures", 0);
+  expect(capture != nullptr && string_field(*capture, "source_kind") == "local",
+         "module clause closure captures itself from local slot");
+  expect(string_field(*capture, "source_slot") == string_field(*store, "slot"),
+         "module clause self capture uses function slot");
+
+  const amber::ast::Expr *call_stmt = list_item(*init->body, "items", 2);
+  expect(call_stmt != nullptr && call_stmt->kind == "HLastSet",
+         "module clause call remains after initialization");
+  const amber::hir::Procedure *function =
+      procedure_by_id(program, string_field(*closure, "procedure"));
+  expect(function != nullptr && function->captures.size() == 1,
+         "module clause procedure has capture metadata");
+  const amber::ast::Expr *method = module_item_by_name(program, "fact");
+  expect(method != nullptr && contains_kind(*method, "HLoadCapture"),
+         "module clause body reads recursive capture");
+}
+
 void test_safe_navigation_lowering() {
   const amber::hir::Program program = lower_ok("def city(user):\n"
                                                "  user.?.address.?.city\n");
@@ -1067,6 +1129,8 @@ int main() {
   test_method_and_send_lowering();
   test_module_def_materializes_callable_binding();
   test_module_def_closure_captures_prior_function();
+  test_module_def_closure_captures_self();
+  test_module_clause_def_materializes_callable_binding();
   test_safe_navigation_lowering();
   test_safe_call_and_index_lowering();
   test_builtin_send_lowering();

@@ -144,6 +144,77 @@ bool clause_defs_mergeable(const ast::Expr &left, const ast::Expr &right) {
   return left_else == nullptr || left_else->values.empty();
 }
 
+bool signatures_compatible_for_fallback_clause(const ast::Expr &left,
+                                               const ast::Expr &right) {
+  if (string_value(left, "return_type_expr") !=
+      string_value(right, "return_type_expr")) {
+    return false;
+  }
+  if (bool_value(left, "has_effect_row") !=
+          bool_value(right, "has_effect_row") ||
+      string_value(left, "effect_row_expr") !=
+          string_value(right, "effect_row_expr")) {
+    return false;
+  }
+  const ast::ListField *left_params = find_list_field(left, "params");
+  const ast::ListField *right_params = find_list_field(right, "params");
+  const std::size_t left_count =
+      left_params == nullptr ? 0 : left_params->values.size();
+  const std::size_t right_count =
+      right_params == nullptr ? 0 : right_params->values.size();
+  if (left_count != right_count) {
+    return false;
+  }
+  for (std::size_t i = 0; i < left_count; ++i) {
+    if (string_value(*left_params->values[i], "param_kind") !=
+        string_value(*right_params->values[i], "param_kind")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool def_stmt_clause_defs_mergeable(const ast::Expr &left,
+                                    const ast::Expr &right) {
+  if (left.kind != "AstDefStmt" || right.kind != "AstClauseDef") {
+    return false;
+  }
+  if (string_value(left, "name") != string_value(right, "name")) {
+    return false;
+  }
+  const ast::NodeField *left_signature = find_node_field(left, "signature");
+  const ast::NodeField *right_signature =
+      find_node_field(right, "base_signature");
+  if (left_signature == nullptr || right_signature == nullptr ||
+      left_signature->value == nullptr || right_signature->value == nullptr) {
+    return false;
+  }
+  const ast::ListField *right_else = find_list_field(right, "else_body");
+  return (right_else == nullptr || right_else->values.empty()) &&
+         signatures_compatible_for_fallback_clause(*left_signature->value,
+                                                   *right_signature->value);
+}
+
+std::unique_ptr<ast::Expr> take_node_field(ast::Expr &expr,
+                                           const std::string &name) {
+  for (ast::NodeField &field : expr.node_fields) {
+    if (field.name == name) {
+      return std::move(field.value);
+    }
+  }
+  return {};
+}
+
+std::vector<std::unique_ptr<ast::Expr>>
+take_list_field(ast::Expr &expr, const std::string &name) {
+  for (ast::ListField &field : expr.list_fields) {
+    if (field.name == name) {
+      return std::move(field.values);
+    }
+  }
+  return {};
+}
+
 void merge_clause_def_into(ast::Expr &left, std::unique_ptr<ast::Expr> right) {
   left.span = ast::join_spans(left.span, right->span);
   ast::ListField *left_clauses = find_list_field(left, "clauses");
@@ -163,6 +234,19 @@ void merge_clause_def_into(ast::Expr &left, std::unique_ptr<ast::Expr> right) {
   }
 }
 
+std::unique_ptr<ast::Expr>
+merge_def_stmt_with_clause_def(std::unique_ptr<ast::Expr> def_stmt,
+                               std::unique_ptr<ast::Expr> clause_def) {
+  auto merged = ast::make_expr(
+      "AstClauseDef", ast::join_spans(def_stmt->span, clause_def->span));
+  merged->string_field("name", string_value(*def_stmt, "name"));
+  merged->node_field("base_signature",
+                     take_node_field(*def_stmt, "signature"));
+  merged->list_field("clauses", take_list_field(*clause_def, "clauses"));
+  merged->list_field("else_body", take_list_field(*def_stmt, "body"));
+  return merged;
+}
+
 void append_item_or_merge_clause_def(
     std::vector<std::unique_ptr<ast::Expr>> *items,
     std::unique_ptr<ast::Expr> item) {
@@ -171,6 +255,11 @@ void append_item_or_merge_clause_def(
   }
   if (!items->empty() && clause_defs_mergeable(*items->back(), *item)) {
     merge_clause_def_into(*items->back(), std::move(item));
+    return;
+  }
+  if (!items->empty() && def_stmt_clause_defs_mergeable(*items->back(), *item)) {
+    items->back() = merge_def_stmt_with_clause_def(std::move(items->back()),
+                                                   std::move(item));
     return;
   }
   items->push_back(std::move(item));
