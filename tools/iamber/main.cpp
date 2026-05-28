@@ -57,6 +57,12 @@ struct CellErrorRange {
   CodeErrorRange range;
 };
 
+struct CellErrorView {
+  std::string message;
+  CodeErrorRange range;
+  bool has_range = false;
+};
+
 struct Cell {
   std::string source;
   std::size_t cursor = 0;
@@ -68,6 +74,8 @@ struct Cell {
   std::string error;
   std::vector<LocalView> locals;
   std::vector<CodeErrorRange> error_ranges;
+  std::vector<CellErrorView> errors;
+  std::size_t selected_error = 0;
 };
 
 struct Session {
@@ -535,6 +543,25 @@ std::string first_line(std::string text) {
   return text;
 }
 
+std::vector<std::string> error_lines(const std::string &text) {
+  std::vector<std::string> lines;
+  std::string line;
+  for (char c : text) {
+    if (c == '\n') {
+      if (!line.empty()) {
+        lines.push_back(line);
+      }
+      line.clear();
+    } else {
+      line.push_back(c);
+    }
+  }
+  if (!line.empty()) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
 bool should_show_local(const LocalView &local) {
   if (local.name.empty() || local.role == "temp") {
     return false;
@@ -612,18 +639,60 @@ void clear_error_ranges_until(Session *session, std::size_t end_index) {
   end_index = std::min(end_index, session->cells.size() - 1U);
   for (std::size_t i = 0; i <= end_index; ++i) {
     session->cells[i].error_ranges.clear();
+    session->cells[i].errors.clear();
+    session->cells[i].selected_error = 0;
   }
 }
+
+std::string error_message_for_index(const std::vector<std::string> &messages,
+                                    std::size_t index,
+                                    const std::string &fallback) {
+  if (messages.empty()) {
+    return fallback.empty() ? "error" : first_line(fallback);
+  }
+  return messages[std::min(index, messages.size() - 1U)];
+}
+
+void push_cell_error(Cell *cell, std::string message,
+                     const CodeErrorRange *range) {
+  if (cell == nullptr) {
+    return;
+  }
+  CellErrorView error;
+  error.message = std::move(message);
+  if (range != nullptr) {
+    error.range = *range;
+    error.has_range = true;
+  }
+  cell->errors.push_back(std::move(error));
+}
+
+void focus_selected_error(Session *session);
 
 void apply_eval(Session *session, std::size_t index, EvalView view) {
   if (session == nullptr || index >= session->cells.size()) {
     return;
   }
+  const std::vector<std::string> messages = error_lines(view.error);
   clear_error_ranges_until(session, index);
-  for (const CellErrorRange &range : view.error_ranges) {
+  for (std::size_t i = 0; i < view.error_ranges.size(); ++i) {
+    const CellErrorRange &range = view.error_ranges[i];
     if (range.cell_index < session->cells.size()) {
       session->cells[range.cell_index].error_ranges.push_back(range.range);
+      push_cell_error(&session->cells[range.cell_index],
+                      error_message_for_index(messages, i, view.error),
+                      &range.range);
     }
+  }
+  const std::size_t unmatched_start =
+      view.error_ranges.empty()
+          ? 0U
+          : std::min(messages.size(), view.error_ranges.size());
+  for (std::size_t i = unmatched_start; i < messages.size(); ++i) {
+    push_cell_error(&session->cells[index], messages[i], nullptr);
+  }
+  if (!view.ok && messages.empty() && view.error_ranges.empty()) {
+    push_cell_error(&session->cells[index], view.error, nullptr);
   }
 
   Cell *cell = &session->cells[index];
@@ -637,6 +706,9 @@ void apply_eval(Session *session, std::size_t index, EvalView view) {
   } else {
     cell->result = "error";
     cell->error = std::move(view.error);
+    if (index == session->selected && !cell->errors.empty()) {
+      focus_selected_error(session);
+    }
   }
 }
 
@@ -767,6 +839,8 @@ void mark_edited(Session *session) {
   session->cells[session->selected].dirty = true;
   for (std::size_t i = session->selected; i < session->cells.size(); ++i) {
     session->cells[i].error_ranges.clear();
+    session->cells[i].errors.clear();
+    session->cells[i].selected_error = 0;
   }
   session->status = "cell edited";
 }
@@ -898,6 +972,57 @@ bool selection_would_change(const Session *session, int delta) {
   return next != selected;
 }
 
+void clamp_selected_error(Cell *cell) {
+  if (cell == nullptr) {
+    return;
+  }
+  if (cell->errors.empty()) {
+    cell->selected_error = 0;
+    return;
+  }
+  cell->selected_error =
+      std::min(cell->selected_error, cell->errors.size() - 1U);
+}
+
+bool selected_cell_has_errors(const Session *session) {
+  return session != nullptr && session->selected < session->cells.size() &&
+         !session->cells[session->selected].errors.empty();
+}
+
+void focus_selected_error(Session *session) {
+  if (!selected_cell_has_errors(session)) {
+    return;
+  }
+  Cell &cell = session->cells[session->selected];
+  clamp_selected_error(&cell);
+  const CellErrorView &error = cell.errors[cell.selected_error];
+  if (error.has_range) {
+    const int line = std::max(0, error.range.start_line);
+    const int column = std::max(0, error.range.start_column);
+    cell.cursor = offset_for_line_column(cell.source, line, column);
+    session->preferred_column = column;
+    if (line < session->editor_scroll) {
+      session->editor_scroll = line;
+    }
+  }
+}
+
+void select_error(Session *session, int delta) {
+  if (!selected_cell_has_errors(session)) {
+    return;
+  }
+  Cell &cell = session->cells[session->selected];
+  clamp_selected_error(&cell);
+  const int current = static_cast<int>(cell.selected_error);
+  const int next = std::max(
+      0, std::min(static_cast<int>(cell.errors.size()) - 1, current + delta));
+  cell.selected_error = static_cast<std::size_t>(next);
+  focus_selected_error(session);
+  std::ostringstream status;
+  status << "error " << (cell.selected_error + 1U) << "/" << cell.errors.size();
+  session->status = status.str();
+}
+
 void new_cell(Session *session) {
   Cell cell;
   const std::size_t insert_at =
@@ -935,6 +1060,51 @@ void print_clipped(WINDOW *window, int y, int x, int width,
     clipped = clipped.substr(0, static_cast<std::size_t>(width));
   }
   mvwaddnstr(window, y, x, clipped.c_str(), width);
+}
+
+void append_wrapped_line(std::vector<std::string> *lines,
+                         const std::string &text, int width) {
+  if (lines == nullptr || width <= 0) {
+    return;
+  }
+  if (text.empty()) {
+    lines->push_back("");
+    return;
+  }
+
+  std::size_t offset = 0;
+  const std::size_t wrap_width = static_cast<std::size_t>(width);
+  while (offset < text.size()) {
+    const std::size_t remaining = text.size() - offset;
+    if (remaining <= wrap_width) {
+      lines->push_back(text.substr(offset));
+      return;
+    }
+
+    std::size_t next = text.rfind(' ', offset + wrap_width);
+    if (next == std::string::npos || next < offset) {
+      next = offset + wrap_width;
+    }
+    lines->push_back(text.substr(offset, next - offset));
+    offset = next;
+    while (offset < text.size() && text[offset] == ' ') {
+      ++offset;
+    }
+  }
+}
+
+std::vector<std::string> wrap_text(const std::string &text, int width) {
+  std::vector<std::string> wrapped;
+  if (width <= 0) {
+    return wrapped;
+  }
+  for (const std::string &line : split_lines(text)) {
+    append_wrapped_line(&wrapped, line, width);
+  }
+  if (wrapped.empty()) {
+    wrapped.push_back("");
+  }
+  return wrapped;
 }
 
 int visible_cell_count(const Session &session, int body_height) {
@@ -975,7 +1145,8 @@ std::string cell_status(const Cell &cell) {
 }
 
 bool cell_has_error(const Cell &cell) {
-  return !cell.running && !cell.dirty && !cell.ok && !cell.error.empty();
+  return !cell.running && !cell.dirty &&
+         ((!cell.ok && !cell.error.empty()) || !cell.errors.empty());
 }
 
 int border_attr_for(const Cell &cell, bool selected, bool edit_mode) {
@@ -997,8 +1168,9 @@ footer_actions(bool edit_mode) {
     return {{"Esc", "Nav"},  {"C-X", "Run"},  {"C-R", "All"}, {"F2", "New"},
             {"Arw", "Move"}, {"Bksp", "Del"}, {"F10", "Quit"}};
   }
-  return {{"F2", "New"}, {"Ent", "Run"}, {"R", "All"},  {"E", "Edit"},
-          {"D", "Del"},  {"W", "Watch"}, {"A", "Auto"}, {"F10", "Quit"}};
+  return {{"F2", "New"},  {"Ent", "Run"}, {"R", "All"},
+          {"E", "Edit"},  {"L/R", "Err"}, {"D", "Del"},
+          {"W", "Watch"}, {"A", "Auto"},  {"F10", "Quit"}};
 }
 
 int footer_key_attr() {
@@ -1023,6 +1195,11 @@ int error_highlight_attr() {
                       : A_REVERSE | A_BOLD;
 }
 
+int error_frame_attr() {
+  return has_colors() ? COLOR_PAIR(kBorderErrorColor) | A_BOLD | A_UNDERLINE
+                      : A_BOLD | A_UNDERLINE;
+}
+
 std::pair<int, int> highlighted_columns_for_line(const CodeErrorRange &range,
                                                  int line_index,
                                                  int line_length) {
@@ -1043,30 +1220,47 @@ std::pair<int, int> highlighted_columns_for_line(const CodeErrorRange &range,
   return {start, end};
 }
 
-bool is_error_highlighted_column(const std::vector<CodeErrorRange> &ranges,
-                                 int line_index, int column, int line_length) {
-  for (const CodeErrorRange &range : ranges) {
+enum class ErrorColumnStyle {
+  None,
+  Framed,
+  Selected,
+};
+
+ErrorColumnStyle error_column_style_for(const Cell &cell, bool selected_cell,
+                                        int line_index, int column,
+                                        int line_length) {
+  bool framed = false;
+  for (std::size_t i = 0; i < cell.errors.size(); ++i) {
+    const CellErrorView &error = cell.errors[i];
+    if (!error.has_range) {
+      continue;
+    }
     const auto [start, end] =
-        highlighted_columns_for_line(range, line_index, line_length);
+        highlighted_columns_for_line(error.range, line_index, line_length);
     if (column >= start && column < end) {
-      return true;
+      if (selected_cell && i == cell.selected_error) {
+        return ErrorColumnStyle::Selected;
+      }
+      framed = true;
     }
   }
-  return false;
+  return framed ? ErrorColumnStyle::Framed : ErrorColumnStyle::None;
 }
 
 void draw_code_text_line(WINDOW *window, int y, int x, int width,
-                         const std::string &text,
-                         const std::vector<CodeErrorRange> &ranges,
-                         int line_index) {
+                         const std::string &text, const Cell &cell,
+                         bool selected_cell, int line_index) {
   if (width <= 0) {
     return;
   }
   const int line_length = static_cast<int>(text.size());
   int draw_limit = line_length;
-  for (const CodeErrorRange &range : ranges) {
+  for (const CellErrorView &error : cell.errors) {
+    if (!error.has_range) {
+      continue;
+    }
     const auto [start, end] =
-        highlighted_columns_for_line(range, line_index, line_length);
+        highlighted_columns_for_line(error.range, line_index, line_length);
     if (end > start) {
       draw_limit = std::max(draw_limit, end);
     }
@@ -1074,16 +1268,20 @@ void draw_code_text_line(WINDOW *window, int y, int x, int width,
   draw_limit = std::min(width, draw_limit);
 
   for (int column = 0; column < draw_limit; ++column) {
-    const bool highlighted =
-        is_error_highlighted_column(ranges, line_index, column, line_length);
-    if (highlighted) {
+    const ErrorColumnStyle style = error_column_style_for(
+        cell, selected_cell, line_index, column, line_length);
+    if (style == ErrorColumnStyle::Selected) {
       wattron(window, error_highlight_attr());
+    } else if (style == ErrorColumnStyle::Framed) {
+      wattron(window, error_frame_attr());
     }
     const char ch =
         column < line_length ? text[static_cast<std::size_t>(column)] : ' ';
     mvwaddch(window, y, x + column, ch);
-    if (highlighted) {
+    if (style == ErrorColumnStyle::Selected) {
       wattroff(window, error_highlight_attr());
+    } else if (style == ErrorColumnStyle::Framed) {
+      wattroff(window, error_frame_attr());
     }
   }
 }
@@ -1202,26 +1400,63 @@ void draw_split_border(WINDOW *window, int height, int split_x,
   }
 }
 
+std::string selected_error_message(const Cell &cell) {
+  if (cell.errors.empty()) {
+    return "";
+  }
+  const std::size_t index =
+      std::min(cell.selected_error, cell.errors.size() - 1U);
+  return cell.errors[index].message;
+}
+
+std::string cell_result_line(const Cell &cell) {
+  return cell.ok ? "=> " + cell.result
+                 : (cell.error.empty() ? "=> not evaluated"
+                                       : "! " + first_line(cell.error));
+}
+
+std::vector<std::string> cell_detail_lines(const Cell &cell, int width) {
+  if (!cell.errors.empty()) {
+    return wrap_text("! " + selected_error_message(cell), width);
+  }
+  return {cell_result_line(cell)};
+}
+
+int cell_detail_row_count(const Cell &cell, int height, int width) {
+  const int content_rows = std::max(0, height - 2);
+  if (content_rows == 0 || width <= 0) {
+    return 0;
+  }
+  const std::vector<std::string> detail_lines = cell_detail_lines(cell, width);
+  return std::min(content_rows, static_cast<int>(detail_lines.size()));
+}
+
 void draw_cell_code(WINDOW *window, Session *session, std::size_t index,
                     bool edit_mode, int height, int code_width) {
   Cell &cell = session->cells[index];
   const bool selected = index == session->selected;
   const std::vector<std::string> lines = split_lines(cell.source);
-  const int result_row = std::max(1, height - 2);
-  const int code_rows = std::max(1, height - 3);
+  const int text_width = code_width - 2;
+  const int detail_rows = cell_detail_row_count(cell, height, text_width);
+  const int detail_start = height - 1 - detail_rows;
+  const int code_rows = std::max(0, detail_start - 1);
   int code_scroll = 0;
 
   const auto [cursor_line, cursor_column] =
       cursor_line_column(cell.source, cell.cursor);
   if (selected) {
-    if (cursor_line < session->editor_scroll) {
-      session->editor_scroll = cursor_line;
+    if (code_rows > 0) {
+      if (cursor_line < session->editor_scroll) {
+        session->editor_scroll = cursor_line;
+      }
+      if (cursor_line >= session->editor_scroll + code_rows) {
+        session->editor_scroll = cursor_line - code_rows + 1;
+      }
+      session->editor_scroll = std::max(0, session->editor_scroll);
+      code_scroll = session->editor_scroll;
+    } else {
+      session->editor_scroll = std::max(0, cursor_line);
     }
-    if (cursor_line >= session->editor_scroll + code_rows) {
-      session->editor_scroll = cursor_line - code_rows + 1;
-    }
-    session->editor_scroll = std::max(0, session->editor_scroll);
-    code_scroll = session->editor_scroll;
   }
 
   for (int row = 0; row < code_rows; ++row) {
@@ -1237,20 +1472,74 @@ void draw_cell_code(WINDOW *window, Session *session, std::size_t index,
     mvwaddnstr(window, row + 1, 1, prefix.str().c_str(), code_width - 2);
     wattroff(window, line_number_attr());
     draw_code_text_line(window, row + 1, 6, code_width - 7, lines[line_index],
-                        cell.error_ranges, line_index);
+                        cell, selected, line_index);
   }
 
-  const std::string result_line =
-      cell.ok ? "=> " + cell.result
-              : (cell.error.empty() ? "=> not evaluated"
-                                    : "! " + first_line(cell.error));
   wattron(window, A_DIM);
-  print_clipped(window, result_row, 1, code_width - 2, result_line);
+  const std::vector<std::string> detail_lines =
+      cell_detail_lines(cell, text_width);
+  for (int row = 0; row < detail_rows; ++row) {
+    const std::string &line = detail_lines[static_cast<std::size_t>(row)];
+    mvwaddnstr(window, detail_start + row, 1, line.c_str(), text_width);
+  }
   wattroff(window, A_DIM);
 
   (void)selected;
   (void)edit_mode;
   (void)cursor_column;
+}
+
+int first_visible_error_index(const Cell &cell, int visible_rows) {
+  if (visible_rows <= 0 || cell.errors.empty()) {
+    return 0;
+  }
+  const int selected =
+      static_cast<int>(std::min(cell.selected_error, cell.errors.size() - 1U));
+  if (selected < visible_rows) {
+    return 0;
+  }
+  return selected - visible_rows + 1;
+}
+
+void draw_cell_errors(WINDOW *window, Cell *cell, int height, int split_x,
+                      int width, bool selected) {
+  const int panel_x = split_x + 1;
+  const int panel_width = width - panel_x - 1;
+  if (cell == nullptr || panel_width <= 0) {
+    return;
+  }
+  clamp_selected_error(cell);
+
+  wattron(window, A_BOLD);
+  std::ostringstream title;
+  title << "errors";
+  if (!cell->errors.empty()) {
+    title << " " << (cell->selected_error + 1U) << "/" << cell->errors.size();
+  }
+  print_clipped(window, 1, panel_x + 1, panel_width - 2, title.str());
+  wattroff(window, A_BOLD);
+
+  const int visible_rows = std::max(0, height - 3);
+  const int first = first_visible_error_index(*cell, visible_rows);
+  int row = 2;
+  for (int shown = 0; shown < visible_rows; ++shown) {
+    const int error_index = first + shown;
+    if (error_index >= static_cast<int>(cell->errors.size())) {
+      break;
+    }
+    const bool active = selected && static_cast<std::size_t>(error_index) ==
+                                        cell->selected_error;
+    std::ostringstream line;
+    line << (active ? "> " : "  ") << (error_index + 1) << ". "
+         << cell->errors[static_cast<std::size_t>(error_index)].message;
+    if (active) {
+      wattron(window, A_BOLD);
+    }
+    print_clipped(window, row++, panel_x + 1, panel_width - 2, line.str());
+    if (active) {
+      wattroff(window, A_BOLD);
+    }
+  }
 }
 
 void draw_cell_locals(WINDOW *window, const Cell &cell, int height, int split_x,
@@ -1298,8 +1587,13 @@ void place_edit_cursor(WINDOW *window, Session *session, std::size_t index,
   const Cell &cell = session->cells[index];
   const auto [cursor_line, cursor_column] =
       cursor_line_column(cell.source, cell.cursor);
-  const int code_rows = std::max(1, height - 3);
+  const int detail_rows = cell_detail_row_count(cell, height, code_width - 2);
+  const int detail_start = height - 1 - detail_rows;
+  const int code_rows = std::max(0, detail_start - 1);
   const int code_scroll = session->editor_scroll;
+  if (code_rows <= 0) {
+    return;
+  }
   if (cursor_line < code_scroll || cursor_line >= code_scroll + code_rows) {
     return;
   }
@@ -1334,7 +1628,11 @@ void draw_cell_pane(WINDOW *window, Session *session, std::size_t index,
   wattroff(window, border_attr);
 
   draw_cell_code(window, session, index, edit_mode, height, split_x);
-  draw_cell_locals(window, cell, height, split_x, width);
+  if (!cell.errors.empty()) {
+    draw_cell_errors(window, &cell, height, split_x, width, selected);
+  } else {
+    draw_cell_locals(window, cell, height, split_x, width);
+  }
   if (selected && edit_mode) {
     place_edit_cursor(window, session, index, height, split_x);
   }
@@ -1413,6 +1711,12 @@ bool handle_nav_key(Session *session, int ch, bool *edit_mode) {
       evaluate_selected_on_leave(session, false);
     }
     select_cell(session, 1);
+    return true;
+  case KEY_LEFT:
+    select_error(session, -1);
+    return true;
+  case KEY_RIGHT:
+    select_error(session, 1);
     return true;
   case '\n':
   case '\r':
