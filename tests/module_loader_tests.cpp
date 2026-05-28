@@ -138,6 +138,10 @@ void test_loader_initializes_dependencies_once_in_order() {
   const amber::runtime::RuntimeModuleLoadResult initialized =
       loader.initialize_module("app.main");
   expect(initialized.ok, "app.main initialization should succeed");
+  expect(initialized.has_execution_result,
+         "root module initialization should expose execution result");
+  expect(initialized.value.is_integer() && initialized.value.as_integer() == 3,
+         "root module initialization should expose init return value");
   expect(initialized.init_order.size() == 3, "expected three init records");
   expect(initialized.init_order[0] == "core.base",
          "base module should initialize first");

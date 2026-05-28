@@ -334,7 +334,8 @@ struct RuntimeModuleLoader::Impl {
 
   RuntimeModuleLoadResult
   result(bool ok = true, std::string error_name = {}, std::string message = {},
-         std::vector<RuntimeLoaderDiagnostic> diagnostics = {}) const {
+         std::vector<RuntimeLoaderDiagnostic> diagnostics = {},
+         const ExecutionResult *execution_result = nullptr) const {
     RuntimeModuleLoadResult out;
     out.ok = ok;
     out.error_name = std::move(error_name);
@@ -345,6 +346,11 @@ struct RuntimeModuleLoader::Impl {
       out.modules.push_back(snapshot_for(record, &modules));
     }
     out.diagnostics = std::move(diagnostics);
+    if (execution_result != nullptr) {
+      out.has_execution_result = true;
+      out.value = execution_result->value;
+      out.locals = execution_result->locals;
+    }
     return out;
   }
 
@@ -618,7 +624,9 @@ struct RuntimeModuleLoader::Impl {
 
   bool initialize_dfs(const std::string &name, std::vector<std::string> *stack,
                       std::string *error_name, std::string *message,
-                      RuntimeLoaderDiagnostic *diagnostic) {
+                      RuntimeLoaderDiagnostic *diagnostic,
+                      std::optional<ExecutionResult> *execution_result =
+                          nullptr) {
     auto found = modules.find(name);
     if (found == modules.end()) {
       *error_name = "ImportError";
@@ -696,7 +704,7 @@ struct RuntimeModuleLoader::Impl {
     }
 
     if (record.module.init.has_entry_code_id) {
-      const ExecutionResult exec =
+      ExecutionResult exec =
           execute_code(record.module, record.module.init.entry_code_id);
       if (!exec.ok()) {
         std::ostringstream init_message;
@@ -721,6 +729,9 @@ struct RuntimeModuleLoader::Impl {
         }
         stack->pop_back();
         return false;
+      }
+      if (execution_result != nullptr) {
+        *execution_result = exec;
       }
       ++record.init_runs;
     }
@@ -819,7 +830,8 @@ RuntimeModuleLoadResult RuntimeModuleLoader::add_serialized_module(
     const std::string &name, const std::vector<std::uint8_t> &bytes) {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
-        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {}};
+        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
+        false, Value::null(), {}};
   }
   if (name.empty()) {
     return impl_->result(false, "ModuleLoadError", "module name is empty");
@@ -854,7 +866,8 @@ RuntimeModuleLoadResult RuntimeModuleLoader::add_import_alias(
     const std::string &dependency_name, const std::string &export_name) {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
-        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {}};
+        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
+        false, Value::null(), {}};
   }
   if (module_name.empty() || local_name.empty() || dependency_name.empty() ||
       export_name.empty()) {
@@ -889,7 +902,8 @@ RuntimeModuleLoadResult RuntimeModuleLoader::add_import_alias(
 RuntimeModuleLoadResult RuntimeModuleLoader::link() {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
-        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {}};
+        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
+        false, Value::null(), {}};
   }
   return impl_->link();
 }
@@ -898,7 +912,8 @@ RuntimeModuleLoadResult
 RuntimeModuleLoader::initialize_module(const std::string &name) {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
-        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {}};
+        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
+        false, Value::null(), {}};
   }
   RuntimeModuleLoadResult linked = impl_->link();
   if (!linked.ok) {
@@ -908,20 +923,24 @@ RuntimeModuleLoader::initialize_module(const std::string &name) {
   std::string error_name;
   std::string message;
   RuntimeLoaderDiagnostic diagnostic;
+  std::optional<ExecutionResult> execution_result;
   if (!impl_->initialize_dfs(name, &stack, &error_name, &message,
-                             &diagnostic)) {
+                             &diagnostic, &execution_result)) {
     if (!diagnostic.error_name.empty()) {
       return impl_->error_result(std::move(diagnostic));
     }
     return impl_->result(false, error_name, message);
   }
-  return impl_->result();
+  return impl_->result(true, {}, {}, {},
+                       execution_result.has_value() ? &*execution_result
+                                                    : nullptr);
 }
 
 RuntimeModuleLoadResult RuntimeModuleLoader::initialize_all() {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
-        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {}};
+        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
+        false, Value::null(), {}};
   }
   RuntimeModuleLoadResult linked = impl_->link();
   if (!linked.ok) {
@@ -949,7 +968,8 @@ RuntimeModuleLoader::read_import_alias(const std::string &module_name,
                                        const std::string &local_name) {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
-        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {}};
+        false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
+        false, Value::null(), {}};
   }
   return impl_->read_import_alias(module_name, local_name);
 }

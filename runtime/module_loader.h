@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bytecode/format.h"
+#include "runtime/vm.h"
 
 #include <cstdint>
 #include <memory>
@@ -90,6 +91,9 @@ struct RuntimeModuleLoadResult {
   std::vector<std::string> init_order;
   std::vector<RuntimeModuleSnapshot> modules;
   std::vector<RuntimeLoaderDiagnostic> diagnostics;
+  bool has_execution_result = false;
+  Value value = Value::null();
+  std::vector<ExecutionLocal> locals;
 };
 
 const char *runtime_module_state_name(RuntimeModuleState state);

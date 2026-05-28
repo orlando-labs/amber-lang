@@ -5,6 +5,7 @@
 #include "frontend/hir/hir.h"
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
+#include "runtime/module_loader.h"
 #include "runtime/vm.h"
 
 #include <algorithm>
@@ -84,6 +85,7 @@ struct CompileResult {
   amber::bytecode::BcModule module;
   std::string error;
   std::vector<SourceErrorRange> error_ranges;
+  std::string module_name;
 };
 
 struct EvalView {
@@ -236,25 +238,47 @@ std::vector<SourceErrorRange> source_error_ranges_from_diagnostics(
   return ranges;
 }
 
-std::vector<SourceErrorRange>
-source_error_ranges_from_fault(const amber::runtime::Fault &fault) {
+std::vector<SourceErrorRange> source_error_ranges_from_loader_result(
+    const amber::runtime::RuntimeModuleLoadResult &result) {
   std::vector<SourceErrorRange> ranges;
-  for (const amber::runtime::TraceFrame &frame : fault.trace) {
+  for (const amber::runtime::RuntimeLoaderDiagnostic &diagnostic :
+       result.diagnostics) {
+    const amber::runtime::RuntimeDebugLocation &location =
+        diagnostic.location;
+    if (location.line == 0U) {
+      continue;
+    }
     SourceErrorRange range;
-    range.file = frame.file;
-    range.start_line = frame.line;
-    range.start_column = zero_based_column(frame.column);
-    range.end_line = frame.line_end == 0U ? frame.line : frame.line_end;
-    range.end_column = frame.column_end == 0U
-                           ? range.start_column + 1U
-                           : zero_based_column(frame.column_end);
-    range.start_offset = frame.byte_start;
-    range.end_offset = frame.byte_end;
-    range.has_offsets = frame.byte_start != 0U || frame.byte_end != 0U;
-    range.whole_line = frame.line != 0U && frame.column == 0U;
+    range.file = location.file;
+    range.start_line = location.line;
+    range.start_column = zero_based_column(location.column);
+    range.end_line = location.line;
+    range.end_column = range.start_column + 1U;
+    range.whole_line = location.column == 0U;
     push_unique_source_error_range(&ranges, std::move(range));
   }
   return ranges;
+}
+
+std::string loader_result_to_summary(
+    const amber::runtime::RuntimeModuleLoadResult &result) {
+  std::ostringstream out;
+  if (!result.error_name.empty()) {
+    out << result.error_name << ": ";
+  }
+  out << (result.message.empty() ? "module load failed" : result.message);
+  for (const amber::runtime::RuntimeLoaderDiagnostic &diagnostic :
+       result.diagnostics) {
+    if (diagnostic.message.empty() || diagnostic.message == result.message) {
+      continue;
+    }
+    out << "\n";
+    if (!diagnostic.error_name.empty()) {
+      out << diagnostic.error_name << ": ";
+    }
+    out << diagnostic.message;
+  }
+  return out.str();
 }
 
 CompileResult compile_source_text(const std::string &source,
@@ -264,7 +288,8 @@ CompileResult compile_source_text(const std::string &source,
     return {false,
             {},
             diagnostics_to_summary(lex_result.diagnostics),
-            source_error_ranges_from_diagnostics(lex_result.diagnostics)};
+            source_error_ranges_from_diagnostics(lex_result.diagnostics),
+            {}};
   }
 
   amber::parser::Parser parser(lex_result.tokens);
@@ -273,7 +298,8 @@ CompileResult compile_source_text(const std::string &source,
     return {false,
             {},
             diagnostics_to_summary(parse_result.diagnostics),
-            source_error_ranges_from_diagnostics(parse_result.diagnostics)};
+            source_error_ranges_from_diagnostics(parse_result.diagnostics),
+            {}};
   }
 
   amber::binder::BindResult bind_result =
@@ -282,7 +308,8 @@ CompileResult compile_source_text(const std::string &source,
     return {false,
             {},
             diagnostics_to_summary(bind_result.diagnostics),
-            source_error_ranges_from_diagnostics(bind_result.diagnostics)};
+            source_error_ranges_from_diagnostics(bind_result.diagnostics),
+            {}};
   }
   const std::vector<amber::lexer::Diagnostic> unresolved_name_diagnostics =
       amber::binder::unresolved_name_diagnostics(parse_result.items,
@@ -291,7 +318,8 @@ CompileResult compile_source_text(const std::string &source,
     return {false,
             {},
             diagnostics_to_summary(unresolved_name_diagnostics),
-            source_error_ranges_from_diagnostics(unresolved_name_diagnostics)};
+            source_error_ranges_from_diagnostics(unresolved_name_diagnostics),
+            {}};
   }
 
   amber::checker::CheckResult check_result = amber::checker::check_module(
@@ -302,7 +330,8 @@ CompileResult compile_source_text(const std::string &source,
     return {false,
             {},
             diagnostics_to_summary(effect_diagnostics),
-            source_error_ranges_from_diagnostics(effect_diagnostics)};
+            source_error_ranges_from_diagnostics(effect_diagnostics),
+            {}};
   }
 
   amber::hir::Program program = amber::hir::lower_module(
@@ -313,7 +342,8 @@ CompileResult compile_source_text(const std::string &source,
     return {false,
             {},
             diagnostics_to_summary(emit_result.diagnostics),
-            source_error_ranges_from_diagnostics(emit_result.diagnostics)};
+            source_error_ranges_from_diagnostics(emit_result.diagnostics),
+            {}};
   }
   emit_result.module.effects = check_result.effect_summaries;
   const std::vector<std::uint8_t> bytes =
@@ -321,9 +351,10 @@ CompileResult compile_source_text(const std::string &source,
   amber::bytecode::DecodeResult decode_result =
       amber::bytecode::deserialize_module(bytes);
   if (!decode_result.ok()) {
-    return {false, {}, verify_errors_to_summary(decode_result.errors), {}};
+    return {false, {}, verify_errors_to_summary(decode_result.errors), {}, {}};
   }
-  return {true, std::move(decode_result.module), {}, {}};
+  return {true, std::move(decode_result.module), {}, {},
+          parse_result.module_name};
 }
 
 std::string session_header_source() { return "package iamber.session\n\n"; }
@@ -527,21 +558,37 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
     return view;
   }
 
-  const amber::runtime::ExecutionResult result = amber::runtime::execute_code(
-      compiled.module, compiled.module.init.entry_code_id);
-  if (!result.ok()) {
-    view.error = result.fault->trace_text.empty()
-                     ? result.fault->error_name + ": " + result.fault->message
-                     : result.fault->trace_text;
+  const std::string module_name =
+      compiled.module_name.empty() ? "iamber.session" : compiled.module_name;
+  amber::runtime::RuntimeModuleLoader loader;
+  const std::vector<std::uint8_t> bytes =
+      amber::bytecode::serialize_module(compiled.module);
+  const amber::runtime::RuntimeModuleLoadResult added =
+      loader.add_serialized_module(module_name, bytes);
+  if (!added.ok) {
+    view.error = loader_result_to_summary(added);
     view.error_ranges = map_source_error_ranges_to_cells(
-        cells, end_index, source_error_ranges_from_fault(*result.fault));
+        cells, end_index, source_error_ranges_from_loader_result(added));
+    return view;
+  }
+
+  const amber::runtime::RuntimeModuleLoadResult initialized =
+      loader.initialize_module(module_name);
+  if (!initialized.ok) {
+    view.error = loader_result_to_summary(initialized);
+    view.error_ranges = map_source_error_ranges_to_cells(
+        cells, end_index, source_error_ranges_from_loader_result(initialized));
+    return view;
+  }
+  if (!initialized.has_execution_result) {
+    view.error = "module init produced no execution result";
     return view;
   }
 
   view.ok = true;
-  view.result =
-      amber::runtime::value_to_debug_string(result.value, &compiled.module);
-  for (const amber::runtime::ExecutionLocal &local : result.locals) {
+  view.result = amber::runtime::value_to_debug_string(initialized.value,
+                                                      &compiled.module);
+  for (const amber::runtime::ExecutionLocal &local : initialized.locals) {
     LocalView local_view;
     local_view.name = local.name;
     local_view.role = local.role;
