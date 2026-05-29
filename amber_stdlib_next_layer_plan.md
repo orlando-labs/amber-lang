@@ -657,7 +657,8 @@ moved = move(value)
 - `STD-002` Array/Tuple/Range/Set eager methods.
 - `STD-003` LazySeq pipeline and materialization.
 - `STD-004` Map iteration and transform contract.
-- `STD-005` Collection error registry and edge cases.
+- `STD-005` Suitable collections operations: intersection, union, difference, left difference, subset, merging, permutation, combination and others
+- `STD-006` Collection error registry and edge cases.
 
 ## Task / sync
 
