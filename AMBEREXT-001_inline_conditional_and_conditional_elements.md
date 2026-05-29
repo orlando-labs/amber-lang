@@ -1,0 +1,969 @@
+# AMBEREXT-001 - Amber Spec Extension: Inline Conditional Expression & Conditional Collection Elements
+
+**Статус:** accepted extension draft  
+**База:** Amber v20.1 consolidated spec + v20.1-project implementation layer  
+**Дата:** 29 мая 2026  
+**Format-impact:** compatible surface-syntax extension with AST/HIR format extension  
+**Затрагивает:** lexer/parser, AST, formatter, HIR lowering, diagnostics, conformance corpus
+
+---
+
+## 0. Краткое решение
+
+В Amber фиксируются две новые core-level surface-возможности:
+
+1. **Inline conditional expression** как современная замена C-style ternary operator.
+2. **Conditional collection element** для литералов `Array`, `Set` и `Map`.
+
+Amber **не вводит** форму:
+
+```amber
+cond ? consequent : alternative
+```
+
+Вместо неё канонической inline-формой условного выражения становится:
+
+```amber
+if condition then consequent else alternative
+```
+
+Для коллекций фиксируется trailing-condition syntax:
+
+```amber
+[
+  base,
+  extra if enabled?,
+]
+
+{
+  :read,
+  :write if can_write?,
+}
+
+{
+  a: 1,
+  b: 2 if x == 3,
+  c: 3,
+}
+```
+
+Trailing condition управляет **наличием элемента в коллекции**, а не значением элемента.
+
+---
+
+## 1. Мотивация
+
+Amber уже использует Ruby-like имена методов с суффиксом `?`:
+
+```amber
+empty?
+present?
+valid?
+question_method?
+```
+
+Поэтому классический тернарный оператор:
+
+```amber
+obj.question_method? ? x : y
+```
+
+создаёт плохую визуальную модель:
+
+- рядом оказываются два `?` с разной семантикой;
+- `?` уже является частью идентификатора метода;
+- safe navigation уже использует отдельную форму `.?.`;
+- C-style ternary выглядит чужеродно относительно expression-oriented `if`.
+
+Так как `if` в Amber уже является выражением, inline conditional должен быть развитием той же модели, а не отдельным оператором из C/JS-семейства.
+
+Conditional collection elements закрывают другой частый кейс: условное включение элемента или map-entry без промежуточного builder-кода.
+
+До расширения приходилось писать:
+
+```amber
+payload = {
+  a: 1,
+  c: 3,
+}
+
+if x == 3:
+  payload[:b] = 2
+
+return payload
+```
+
+После расширения:
+
+```amber
+return {
+  a: 1,
+  b: 2 if x == 3,
+  c: 3,
+}
+```
+
+---
+
+## 2. Inline conditional expression
+
+### 2.1. Каноническая форма
+
+```amber
+if condition then consequent else alternative
+```
+
+Примеры:
+
+```amber
+status = if user.admin? then :admin else :user
+
+label = if item.archived? then "archived" else "active"
+
+price = if discount.present? then discounted_price else base_price
+
+result = if obj.question_method? then x else y
+```
+
+### 2.2. Запрещённая форма
+
+Amber не поддерживает C-style ternary:
+
+```amber
+result = obj.question_method? ? x : y  # invalid
+```
+
+Это должно диагностироваться как syntax error с рекомендацией использовать inline `if ... then ... else ...`.
+
+Suggested diagnostic:
+
+```text
+AMB-SYN-INLINE-TERNARY-CSTYLE
+C-style ternary operator is not supported in Amber; use `if condition then consequent else alternative`.
+```
+
+### 2.3. `then` как contextual keyword
+
+`then` является contextual keyword только внутри inline conditional expression после `if <condition>`.
+
+В обычных identifier-position использование имени `then` не меняется, если это уже разрешено базовыми правилами идентификаторов и не создаёт локального конфликта parser-а.
+
+### 2.4. `else` обязательно
+
+Inline conditional expression всегда обязан иметь `else`.
+
+Валидно:
+
+```amber
+value = if cond then a else b
+```
+
+Невалидно:
+
+```amber
+value = if cond then a
+```
+
+Причина: inline conditional предназначен для value-producing expression. Отсутствие `else` в компактной форме часто скрывает ошибку. Для условного выполнения без альтернативы следует использовать block-form `if`.
+
+### 2.5. Семантика вычисления
+
+```amber
+if condition then consequent else alternative
+```
+
+Вычисляется так:
+
+1. вычисляется `condition`;
+2. если `condition` truthy, вычисляется только `consequent`;
+3. иначе вычисляется только `alternative`;
+4. результатом выражения является значение выбранной ветки.
+
+Truthiness совпадает с общей моделью Amber:
+
+- falsy: только `false` и `null`;
+- всё остальное truthy.
+
+### 2.6. Ассоциативность и приоритет
+
+Inline conditional expression является `PrimaryExpr`/control expression family, как block-form `IfExpr`.
+
+Рекомендуемое parser-правило:
+
+```ebnf
+InlineIfExpr ::= "if" Expr "then" Expr "else" Expr
+```
+
+`InlineIfExpr` не является infix-оператором и не добавляет нового уровня precedence. Он парсится как отдельная expression-form, аналогично другим control expressions.
+
+---
+
+## 3. Conditional collection elements
+
+### 3.1. Общая идея
+
+Conditional collection element — это элемент литерала коллекции с trailing condition:
+
+```amber
+element if condition
+element unless condition
+```
+
+Для `Map` условной единицей является entry:
+
+```amber
+key: value if condition
+key: value unless condition
+```
+
+Если condition не проходит, элемент/entry отсутствует в результирующей коллекции.
+
+---
+
+## 4. Conditional elements в `Array`
+
+### 4.1. Syntax
+
+```amber
+[
+  base,
+  extra if enabled?,
+  fallback,
+]
+```
+
+### 4.2. Семантика
+
+```amber
+[
+  a,
+  b if cond,
+  c,
+]
+```
+
+эквивалентно последовательному построению:
+
+```amber
+tmp = []
+tmp.push(a)
+
+if cond:
+  tmp.push(b)
+
+tmp.push(c)
+tmp
+```
+
+`b` не вычисляется, если `cond` falsy.
+
+### 4.3. Примеры
+
+```amber
+args = [
+  "--verbose" if verbose?,
+  "--dry-run" if dry_run?,
+  input_path,
+]
+
+items = [
+  required_item,
+  optional_item if optional_item.present?,
+]
+```
+
+---
+
+## 5. Conditional elements в `Set`
+
+### 5.1. Syntax
+
+```amber
+{
+  :read,
+  :write if can_write?,
+  :admin unless restricted?,
+}
+```
+
+Эта форма применяется к set-literal, то есть к `{...}`, где top-level элементы не являются `key: value` entries.
+
+### 5.2. Семантика
+
+```amber
+{
+  a,
+  b if cond,
+  c,
+}
+```
+
+эквивалентно:
+
+```amber
+tmp = Set.new()
+tmp.add(a)
+
+if cond:
+  tmp.add(b)
+
+tmp.add(c)
+tmp
+```
+
+`b` не вычисляется, если `cond` falsy.
+
+Повторные элементы схлопываются по обычной runtime-семантике `Set`.
+
+### 5.3. Примеры
+
+```amber
+permissions = {
+  :read,
+  :write if user.editor?,
+  :admin if user.admin?,
+}
+
+features = {
+  :base,
+  :cache unless env.test?,
+}
+```
+
+---
+
+## 6. Conditional entries в `Map`
+
+### 6.1. Syntax
+
+```amber
+{
+  a: 1,
+  b: 2 if x == 3,
+  c: 3,
+}
+```
+
+Допускается также `unless`:
+
+```amber
+{
+  cache: true unless env.test?,
+  debug: true if env.debug?,
+}
+```
+
+### 6.2. Семантика
+
+```amber
+{
+  a: 1,
+  b: 2 if cond,
+  c: 3,
+}
+```
+
+эквивалентно:
+
+```amber
+tmp = {}
+tmp[:a] = 1
+
+if cond:
+  tmp[:b] = 2
+
+tmp[:c] = 3
+tmp
+```
+
+Если `cond` falsy:
+
+- ключ `:b` отсутствует;
+- value expression `2` не вычисляется.
+
+### 6.3. Conditional entry не равен conditional value
+
+Эта форма:
+
+```amber
+{
+  b: 2 if cond,
+}
+```
+
+означает условное наличие key/value-entry.
+
+Она не равна:
+
+```amber
+{
+  b: if cond then 2 else null,
+}
+```
+
+Во второй форме ключ `:b` присутствует всегда.
+
+### 6.4. Duplicate keys
+
+Повторные ключи сохраняют существующее правило `Map`: более поздняя вставка заменяет более раннюю.
+
+```amber
+{
+  mode: :default,
+  mode: :debug if debug?,
+}
+```
+
+Если `debug?` truthy, итоговое значение `mode` — `:debug`.
+
+Если `debug?` falsy, итоговое значение `mode` — `:default`.
+
+---
+
+## 7. `if` и `unless` в conditional elements
+
+Для всех collection literal kinds поддерживаются оба suffix-а:
+
+```amber
+element if condition
+element unless condition
+key: value if condition
+key: value unless condition
+```
+
+Семантика:
+
+```amber
+x unless cond
+```
+
+эквивалентно:
+
+```amber
+x if not cond
+```
+
+Однако AST должен сохранять исходный `kind = if | unless`, чтобы formatter, diagnostics и source maps могли воспроизвести surface-form.
+
+---
+
+## 8. Порядок вычисления
+
+Collection literal вычисляется слева направо.
+
+Для conditional element:
+
+```amber
+[
+  a(),
+  b() if cond(),
+  c(),
+]
+```
+
+порядок такой:
+
+1. вычислить `a()`;
+2. добавить результат `a()`;
+3. вычислить `cond()`;
+4. если `cond()` truthy, вычислить `b()` и добавить результат;
+5. вычислить `c()`;
+6. добавить результат `c()`.
+
+Важно: element/value expression не вычисляется, если condition не прошёл.
+
+Для `Map`:
+
+```amber
+{
+  a: f(),
+  b: g() if cond(),
+  c: h(),
+}
+```
+
+порядок такой:
+
+1. вычислить key `:a`;
+2. вычислить `f()`;
+3. вставить `:a => f()`;
+4. вычислить condition `cond()`;
+5. если condition truthy:
+   - вычислить key `:b`;
+   - вычислить `g()`;
+   - вставить `:b => g()`;
+6. вычислить key `:c`;
+7. вычислить `h()`;
+8. вставить `:c => h()`.
+
+Для literal-symbol keys вида `a:` key construction считается compile-time/literal-level операцией, но наблюдаемый порядок value/condition evaluation остаётся как выше.
+
+---
+
+## 9. Grammar sketch
+
+### 9.1. Inline conditional
+
+```ebnf
+PrimaryExpr ::= Literal
+              | Name
+              | "@" Name
+              | "@@" Name
+              | "(" Expr ")"
+              | ListLiteral
+              | SetLiteral
+              | MapLiteral
+              | IfExpr
+              | InlineIfExpr
+              | UnlessExpr
+              | CaseExpr
+              | WhileExpr
+              | UntilExpr
+              | DoWhileExpr
+              | LoopExpr
+              | DefExpr
+              | ClassExpr
+              | MixinExpr
+
+InlineIfExpr ::= "if" Expr "then" Expr "else" Expr
+```
+
+Implementation note: parser may fold `InlineIfExpr` into existing `IfExpr` AST family with `form = inline`, but AST must preserve that the source used inline spelling.
+
+### 9.2. Collection literals
+
+```ebnf
+ListLiteral        ::= "[" [ CollectionElementList ] "]"
+
+SetLiteral         ::= "{" SetElementList "}"
+
+MapLiteral         ::= "{" [ MapEntryList ] "}"
+
+CollectionElementList
+                   ::= ConditionalElement { "," ConditionalElement } [ "," ]
+
+SetElementList     ::= ConditionalElement { "," ConditionalElement } [ "," ]
+
+ConditionalElement ::= Expr CollectionCondition?
+
+CollectionCondition
+                   ::= "if" Expr
+                    |  "unless" Expr
+
+MapEntryList       ::= ConditionalMapEntry { "," ConditionalMapEntry } [ "," ]
+
+ConditionalMapEntry
+                   ::= MapKey ":" Expr CollectionCondition?
+
+MapKey             ::= Name
+                    |  SymbolLiteral
+                    |  StringLiteral
+                    |  Expr
+```
+
+### 9.3. Disambiguation rule
+
+Inside collection literals, a top-level trailing `if`/`unless` after an element or map value belongs to the collection element/entry.
+
+Therefore:
+
+```amber
+{
+  b: 2 if cond,
+}
+```
+
+means:
+
+```text
+conditional map entry
+```
+
+not:
+
+```text
+map entry with conditional value
+```
+
+To express a conditional value, use explicit inline conditional:
+
+```amber
+{
+  b: if cond then 2 else null,
+}
+```
+
+or parenthesize a nested expression if the grammar later introduces any value-level postfix conditional form.
+
+---
+
+## 10. AST extension
+
+Recommended AST additions:
+
+```text
+AstInlineIfExpr(
+  condition,
+  consequent,
+  alternative,
+  span,
+  form = "inline"
+)
+
+AstCollectionCondition(
+  kind,        # "if" | "unless"
+  expr,
+  span
+)
+
+AstArrayElement(
+  expr,
+  condition?  # null | AstCollectionCondition
+)
+
+AstSetElement(
+  expr,
+  condition?  # null | AstCollectionCondition
+)
+
+AstMapEntry(
+  key_expr,
+  value_expr,
+  condition?, # null | AstCollectionCondition
+  span
+)
+```
+
+AST must remain syntax-faithful:
+
+- inline conditional should not be parsed as a generic method call;
+- conditional elements should not be flattened during parsing;
+- `if` vs `unless` should be preserved;
+- source spans should cover both the element/value and the trailing condition.
+
+---
+
+## 11. HIR lowering
+
+### 11.1. Inline conditional
+
+```amber
+if cond then a else b
+```
+
+lowers to:
+
+```text
+HIfExpr(
+  condition = lower(cond),
+  then_expr = lower(a),
+  else_expr = lower(b)
+)
+```
+
+No new runtime primitive is required.
+
+### 11.2. Array conditional element
+
+```amber
+[
+  a,
+  b if cond,
+  c,
+]
+```
+
+lowers conceptually to:
+
+```text
+tmp = HArrayNew()
+HArrayPush(tmp, lower(a))
+
+HIf(
+  lower(cond),
+  HArrayPush(tmp, lower(b)),
+  HNoop()
+)
+
+HArrayPush(tmp, lower(c))
+tmp
+```
+
+### 11.3. Set conditional element
+
+```amber
+{
+  a,
+  b if cond,
+  c,
+}
+```
+
+lowers conceptually to:
+
+```text
+tmp = HSetNew()
+HSetAdd(tmp, lower(a))
+
+HIf(
+  lower(cond),
+  HSetAdd(tmp, lower(b)),
+  HNoop()
+)
+
+HSetAdd(tmp, lower(c))
+tmp
+```
+
+### 11.4. Map conditional entry
+
+```amber
+{
+  a: 1,
+  b: 2 if cond,
+  c: 3,
+}
+```
+
+lowers conceptually to:
+
+```text
+tmp = HMapNew()
+HMapPut(tmp, :a, lower(1))
+
+HIf(
+  lower(cond),
+  HMapPut(tmp, :b, lower(2)),
+  HNoop()
+)
+
+HMapPut(tmp, :c, lower(3))
+tmp
+```
+
+No dedicated bytecode opcode is required. Existing branch/jump instructions and collection mutation/build instructions are sufficient.
+
+---
+
+## 12. Diagnostics
+
+### 12.1. C-style ternary rejected
+
+```amber
+x = cond ? a : b
+```
+
+Diagnostic:
+
+```text
+AMB-SYN-INLINE-TERNARY-CSTYLE
+C-style ternary operator is not supported; use `if cond then a else b`.
+```
+
+### 12.2. Missing `else` in inline conditional
+
+```amber
+x = if cond then a
+```
+
+Diagnostic:
+
+```text
+AMB-SYN-INLINE-IF-MISSING-ELSE
+Inline conditional expression requires `else`.
+```
+
+### 12.3. Dangling condition without collection element
+
+```amber
+[
+  if cond,
+]
+```
+
+Diagnostic:
+
+```text
+AMB-SYN-CONDITIONAL-ELEMENT-MISSING-VALUE
+Conditional collection element requires a value before `if` or `unless`.
+```
+
+### 12.4. Ambiguous conditional map value
+
+This is not an error:
+
+```amber
+{
+  b: 2 if cond,
+}
+```
+
+It is specified as conditional entry.
+
+Formatter and diagnostics should help users when intent appears to be conditional value:
+
+```amber
+{
+  b: if cond then 2 else null,
+}
+```
+
+---
+
+## 13. Formatter rules
+
+Recommended formatting:
+
+```amber
+value = if cond then a else b
+```
+
+For long branches:
+
+```amber
+value =
+  if cond then
+    a
+  else
+    b
+```
+
+or, if the language formatter does not support multiline inline conditional, it should prefer the existing block-form:
+
+```amber
+value = if cond:
+  a
+else:
+  b
+```
+
+Collection elements preserve trailing condition on the same line when short:
+
+```amber
+[
+  base,
+  extra if enabled?,
+  fallback,
+]
+```
+
+For long conditions, formatter may break after the value:
+
+```amber
+[
+  extra
+    if feature.enabled? and user.allowed?,
+]
+```
+
+But the recommended v1 formatter policy is to keep conditional elements simple and line-local.
+
+---
+
+## 14. Conformance tests
+
+Minimum parser-positive cases:
+
+```amber
+x = if ready? then a else b
+
+arr = [
+  1,
+  2 if include_two?,
+  3,
+]
+
+set = {
+  :read,
+  :write if can_write?,
+}
+
+map = {
+  a: 1,
+  b: 2 if x == 3,
+  c: 3,
+}
+```
+
+Minimum parser-negative cases:
+
+```amber
+x = cond ? a : b
+
+x = if cond then a
+
+arr = [
+  if cond,
+]
+```
+
+Minimum runtime cases:
+
+```amber
+log = []
+
+def mark(x):
+  log.push(x)
+  x
+
+arr = [
+  mark(1),
+  mark(2) if false,
+  mark(3),
+]
+
+# arr == [1, 3]
+# log == [1, 3]
+```
+
+```amber
+m = {
+  a: 1,
+  b: fail() if false,
+  c: 3,
+}
+
+# m == {a: 1, c: 3}
+# fail() is not called
+```
+
+```amber
+m = {
+  mode: :default,
+  mode: :debug if true,
+}
+
+# m[:mode] == :debug
+```
+
+---
+
+## 15. Acceptance decision
+
+This extension is accepted with the following final decisions:
+
+1. C-style ternary `cond ? a : b` is not part of Amber.
+2. Inline conditional expression is fixed as:
+
+   ```amber
+   if condition then consequent else alternative
+   ```
+
+3. `else` is mandatory in inline conditional expression.
+4. Conditional collection element syntax is fixed for all collection literal kinds:
+   - `Array`
+   - `Set`
+   - `Map`
+5. The recommended syntax is trailing `if` / `unless`:
+
+   ```amber
+   element if condition
+   element unless condition
+   key: value if condition
+   key: value unless condition
+   ```
+
+6. Conditional collection syntax controls presence of the element/entry, not conditional value.
+7. Conditional element/value expression is not evaluated if the condition is not satisfied.
+8. AST preserves the surface form; HIR lowers to ordinary branch-based construction.
+9. No new VM or bytecode primitive is required.
