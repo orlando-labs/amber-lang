@@ -101,7 +101,10 @@ map.select |k, v|:
 map.reject |k, v|:
   ...
 
-map.transform_values |v|:
+map.transform |k, v|:
+  (new_key, new_value)
+
+map.transform_values |v, k|:
   ...
 
 map.keys()
@@ -654,19 +657,31 @@ moved = move(value)
 ## Collections
 
 - `STD-001` Collection protocol conformance suite.
-- `STD-002` Array/Tuple/Range/Set eager methods.
-- `STD-003` LazySeq pipeline and materialization.
-- `STD-004` Map iteration and transform contract.
+- `STD-002` Array/Tuple/Range/Set eager methods. Done: finite
+  `Range`, exclusive-end `Range`, and open-ended `Range` edge cases are
+  covered by the VM collection dispatch and stdlib collection tests.
+- `STD-003` LazySeq pipeline and materialization. Done: lazy wrappers now
+  defer `map` / `flat_map` / `select` / `reject`, terminal operations
+  materialize or short-circuit the pipeline, and open-ended `Range.lazy`
+  supports bounded `first(count)` while rejecting unbounded materialization.
+- `STD-004` Map iteration and transform contract. Done: `Map` preserves
+  insertion order for `keys` / `values` / `entries` / `to_a`, supports
+  symbol/string key lookup, passes `k, v` to iteration/filter/map blocks,
+  returns `Array` from `map`, returns `Map` from `select` / `reject`, supports
+  key-changing `transform`, and lets `transform_values` blocks read `k` as an
+  optional second argument while preserving keys.
 - `STD-005` Suitable collections operations: intersection, union, difference, left difference, subset, merging, permutation, combination and others
 - `STD-006` Collection error registry and edge cases.
 
-## Task / sync
+## Task / Async / Threading / Synchronization primitives
 
 - `STD-010` Task module public API.
 - `STD-011` TaskHandle state/result/failure API.
 - `STD-012` Channel API and FIFO corpus.
 - `STD-013` Mutex API plus `synchronize`.
 - `STD-014` Atomic API plus `update`.
+- `STD-015` Inter-thread communication: send/receive, barrier, map-gather/reduce
+- `STD-016` Auto-parallel collections iteration methods: [1, 2, 3].threaded(3).map: ...
 
 ## Watch
 
