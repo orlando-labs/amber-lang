@@ -4230,6 +4230,25 @@ struct CoercedMapState {
   std::vector<MapEntry> entries;
 };
 
+enum class LazySeqOpKind : std::int64_t {
+  Map = 1,
+  FlatMap = 2,
+  Select = 3,
+  Reject = 4,
+};
+
+struct LazySeqOp {
+  LazySeqOpKind kind = LazySeqOpKind::Map;
+  Value block = Value::null();
+};
+
+struct LazySeqState {
+  Value source = Value::null();
+  std::vector<LazySeqOp> ops;
+};
+
+enum class LazySeqVisitStatus { Continue, Stop, Faulted };
+
 struct CallCacheEntry {
   bool valid = false;
   std::uint32_t receiver_class_index = 0;
@@ -5486,6 +5505,10 @@ private:
       *out_source_was_tuple = false;
       return set->items;
     }
+    if (value_is_range_instance(value)) {
+      *out_source_was_tuple = false;
+      return extract_range_items(frame, value);
+    }
     return std::nullopt;
   }
 
@@ -5530,6 +5553,1149 @@ private:
       }
     }
     return make_symbol_map_value(std::move(rest));
+  }
+
+  std::optional<std::uint32_t>
+  map_key_symbol_id_from_value(const Frame &frame, const Value &key,
+                               const std::string &context) {
+    if (key.is_symbol()) {
+      const std::uint32_t symbol_id = key.as_symbol().symbol_id;
+      if (symbol_id >= module_.symbols.size()) {
+        set_fault(frame, "VMError", context + " symbol key ref is invalid");
+        return std::nullopt;
+      }
+      return symbol_id;
+    }
+    if (key.is_string()) {
+      const std::optional<std::string> text =
+          string_text_from_id(key.as_string().string_id);
+      if (!text.has_value()) {
+        set_fault(frame, "VMError", context + " string key ref is invalid");
+        return std::nullopt;
+      }
+      const std::optional<std::uint32_t> symbol_id = symbol_id_for_text(*text);
+      if (!symbol_id.has_value()) {
+        set_fault(frame, "TypeError",
+                  context + " string key must name an interned Symbol");
+        return std::nullopt;
+      }
+      return *symbol_id;
+    }
+    set_fault(frame, "TypeError", context + " key must be Symbol or String");
+    return std::nullopt;
+  }
+
+  std::optional<MapEntry>
+  map_entry_from_transform_result(const Frame &frame, const Value &result) {
+    if (!ensure_lifecycle_access(frame, result)) {
+      return std::nullopt;
+    }
+
+    std::vector<Value> items;
+    if (result.is_tuple()) {
+      const std::shared_ptr<TupleValue> tuple = result.as_tuple();
+      if (tuple == nullptr) {
+        set_fault(frame, "TypeError",
+                  "Map#transform block returned null tuple");
+        return std::nullopt;
+      }
+      items = tuple->items;
+    } else if (result.is_list()) {
+      const std::shared_ptr<ListValue> list = result.as_list();
+      if (list == nullptr) {
+        set_fault(frame, "TypeError", "Map#transform block returned null list");
+        return std::nullopt;
+      }
+      items = list->items;
+    } else {
+      set_fault(frame, "TypeError",
+                "Map#transform block must return key/value tuple or list");
+      return std::nullopt;
+    }
+
+    if (items.size() != 2U) {
+      set_fault(frame, "TypeError",
+                "Map#transform block must return exactly two values");
+      return std::nullopt;
+    }
+    const std::optional<std::uint32_t> symbol_id =
+        map_key_symbol_id_from_value(frame, items[0], "Map#transform");
+    if (!symbol_id.has_value()) {
+      return std::nullopt;
+    }
+    return MapEntry{*symbol_id, items[1]};
+  }
+
+  void upsert_map_entry(std::vector<MapEntry> *entries, MapEntry entry) {
+    auto existing = std::find_if(entries->begin(), entries->end(),
+                                 [&](const MapEntry &candidate) {
+                                   return candidate.symbol_id ==
+                                          entry.symbol_id;
+                                 });
+    if (existing == entries->end()) {
+      entries->push_back(std::move(entry));
+      return;
+    }
+    existing->value = std::move(entry.value);
+  }
+
+  bool sequence_contains_value(const std::vector<Value> &items,
+                               const Value &needle) const {
+    return std::find_if(items.begin(), items.end(), [&](const Value &item) {
+             return value_equals(item, needle);
+           }) != items.end();
+  }
+
+  void append_unique_value(std::vector<Value> *items, const Value &value) {
+    if (!sequence_contains_value(*items, value)) {
+      items->push_back(value);
+    }
+  }
+
+  std::vector<Value> unique_sequence_items(const std::vector<Value> &items) {
+    std::vector<Value> unique;
+    unique.reserve(items.size());
+    for (const Value &item : items) {
+      append_unique_value(&unique, item);
+    }
+    return unique;
+  }
+
+  Value materialize_set_like_result(const Value &receiver,
+                                    std::vector<Value> items) {
+    if (receiver.is_set()) {
+      return make_set_value(std::move(items));
+    }
+    return make_list_value(std::move(items));
+  }
+
+  std::optional<std::vector<Value>>
+  sequence_argument_items(const Frame &frame, const Value &value,
+                          const std::string &context) {
+    bool source_was_tuple = false;
+    const std::optional<std::vector<Value>> items =
+        extract_sequence_items(frame, value, &source_was_tuple);
+    if (fault_.has_value()) {
+      return std::nullopt;
+    }
+    if (!items.has_value()) {
+      set_fault(frame, "TypeError", context + " expects sequence argument");
+      return std::nullopt;
+    }
+    return items;
+  }
+
+  std::vector<Value> sequence_union_items(const std::vector<Value> &left,
+                                          const std::vector<Value> &right) {
+    std::vector<Value> merged;
+    merged.reserve(left.size() + right.size());
+    for (const Value &item : left) {
+      append_unique_value(&merged, item);
+    }
+    for (const Value &item : right) {
+      append_unique_value(&merged, item);
+    }
+    return merged;
+  }
+
+  std::vector<Value>
+  sequence_intersection_items(const std::vector<Value> &left,
+                              const std::vector<Value> &right) {
+    std::vector<Value> intersection;
+    for (const Value &item : left) {
+      if (sequence_contains_value(right, item)) {
+        append_unique_value(&intersection, item);
+      }
+    }
+    return intersection;
+  }
+
+  std::vector<Value> sequence_difference_items(const std::vector<Value> &left,
+                                               const std::vector<Value> &right) {
+    std::vector<Value> difference;
+    for (const Value &item : left) {
+      if (!sequence_contains_value(right, item)) {
+        append_unique_value(&difference, item);
+      }
+    }
+    return difference;
+  }
+
+  std::vector<Value>
+  sequence_symmetric_difference_items(const std::vector<Value> &left,
+                                      const std::vector<Value> &right) {
+    std::vector<Value> difference = sequence_difference_items(left, right);
+    for (const Value &item : sequence_difference_items(right, left)) {
+      append_unique_value(&difference, item);
+    }
+    return difference;
+  }
+
+  bool sequence_is_subset(const std::vector<Value> &left,
+                          const std::vector<Value> &right) {
+    for (const Value &item : unique_sequence_items(left)) {
+      if (!sequence_contains_value(right, item)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::optional<std::int64_t> parse_step_keyword(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      std::int64_t default_step) {
+    std::optional<std::int64_t> step;
+    for (const auto &[symbol_id, value] : kw_args) {
+      if (symbol_id >= module_.symbols.size()) {
+        set_fault(frame, "VMError", "keyword symbol ref is out of range");
+        return std::nullopt;
+      }
+      if (module_.symbols[symbol_id] != "step") {
+        set_fault(frame, "TypeError", "unknown keyword argument");
+        return std::nullopt;
+      }
+      if (step.has_value()) {
+        set_fault(frame, "TypeError", "duplicate keyword argument");
+        return std::nullopt;
+      }
+      if (!value.is_integer()) {
+        set_fault(frame, "TypeError", "each step keyword must be Integer");
+        return std::nullopt;
+      }
+      step = value.as_integer();
+    }
+    return step.value_or(default_step);
+  }
+
+  std::optional<std::vector<Value>> sequence_windows(
+      const Frame &frame, const std::vector<Value> &items,
+      std::int64_t raw_size, std::int64_t raw_step,
+      const std::string &context) {
+    if (raw_size <= 0) {
+      set_fault(frame, "ArgumentError", context + " window size must be > 0");
+      return std::nullopt;
+    }
+    if (raw_step <= 0) {
+      set_fault(frame, "ArgumentError", context + " step must be > 0");
+      return std::nullopt;
+    }
+    const std::size_t size = static_cast<std::size_t>(raw_size);
+    const std::size_t step = static_cast<std::size_t>(raw_step);
+    std::vector<Value> windows;
+    if (size > items.size()) {
+      return windows;
+    }
+    for (std::size_t start = 0; start + size <= items.size(); start += step) {
+      windows.push_back(make_list_value(std::vector<Value>(
+          items.begin() + static_cast<std::ptrdiff_t>(start),
+          items.begin() + static_cast<std::ptrdiff_t>(start + size))));
+      if (items.size() - start <= step) {
+        break;
+      }
+    }
+    return windows;
+  }
+
+  std::vector<Value> permutation_values(const std::vector<Value> &items,
+                                        std::size_t count) {
+    std::vector<Value> permutations;
+    std::vector<Value> current;
+    std::vector<bool> used(items.size(), false);
+    current.reserve(count);
+    std::function<void()> visit = [&]() {
+      if (current.size() == count) {
+        permutations.push_back(make_list_value(current));
+        return;
+      }
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        if (used[i]) {
+          continue;
+        }
+        used[i] = true;
+        current.push_back(items[i]);
+        visit();
+        current.pop_back();
+        used[i] = false;
+      }
+    };
+    visit();
+    return permutations;
+  }
+
+  std::vector<Value> combination_values(const std::vector<Value> &items,
+                                        std::size_t count) {
+    std::vector<Value> combinations;
+    std::vector<Value> current;
+    current.reserve(count);
+    std::function<void(std::size_t)> visit = [&](std::size_t start) {
+      if (current.size() == count) {
+        combinations.push_back(make_list_value(current));
+        return;
+      }
+      const std::size_t remaining = count - current.size();
+      for (std::size_t i = start; i + remaining <= items.size(); ++i) {
+        current.push_back(items[i]);
+        visit(i + 1U);
+        current.pop_back();
+      }
+    };
+    visit(0U);
+    return combinations;
+  }
+
+  std::optional<int> compare_values_for_sort(const Frame &frame,
+                                             const Value &left,
+                                             const Value &right) {
+    if (left.is_integer() && right.is_integer()) {
+      const std::int64_t lhs = left.as_integer();
+      const std::int64_t rhs = right.as_integer();
+      return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
+    }
+    if ((left.is_integer() || left.is_float()) &&
+        (right.is_integer() || right.is_float())) {
+      const double lhs =
+          left.is_integer() ? static_cast<double>(left.as_integer())
+                            : left.as_float();
+      const double rhs =
+          right.is_integer() ? static_cast<double>(right.as_integer())
+                             : right.as_float();
+      return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
+    }
+    if (left.is_bool() && right.is_bool()) {
+      return left.as_bool() == right.as_bool()
+                 ? 0
+                 : (left.as_bool() ? 1 : -1);
+    }
+    if (left.is_string() && right.is_string()) {
+      const std::optional<std::string> lhs =
+          string_text_from_id(left.as_string().string_id);
+      const std::optional<std::string> rhs =
+          string_text_from_id(right.as_string().string_id);
+      if (!lhs.has_value() || !rhs.has_value()) {
+        set_fault(frame, "VMError", "sort string ref is invalid");
+        return std::nullopt;
+      }
+      return *lhs < *rhs ? -1 : (*lhs > *rhs ? 1 : 0);
+    }
+    if (left.is_symbol() && right.is_symbol()) {
+      const std::uint32_t lhs_id = left.as_symbol().symbol_id;
+      const std::uint32_t rhs_id = right.as_symbol().symbol_id;
+      if (lhs_id >= module_.symbols.size() || rhs_id >= module_.symbols.size()) {
+        set_fault(frame, "VMError", "sort symbol ref is invalid");
+        return std::nullopt;
+      }
+      const std::string &lhs = module_.symbols[lhs_id];
+      const std::string &rhs = module_.symbols[rhs_id];
+      return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
+    }
+    set_fault(frame, "TypeError", "sort values are not comparable");
+    return std::nullopt;
+  }
+
+  std::optional<int> compare_values_for_sort(
+      const Frame &frame, const Value &receiver, const Value &block,
+      const Value &left, const Value &right) {
+    if (block.is_null()) {
+      return compare_values_for_sort(frame, left, right);
+    }
+    const std::optional<Value> value =
+        call_block_to_value(frame, block, {left, right});
+    if (!value.has_value()) {
+      return std::nullopt;
+    }
+    if (!ensure_lifecycle_access(frame, receiver)) {
+      return std::nullopt;
+    }
+    if (!value->is_integer()) {
+      set_fault(frame, "TypeError", "sort block must return Integer");
+      return std::nullopt;
+    }
+    const std::int64_t result = value->as_integer();
+    return result < 0 ? -1 : (result > 0 ? 1 : 0);
+  }
+
+  std::optional<std::vector<Value>>
+  sorted_sequence_items(const Frame &frame, const Value &receiver,
+                        const std::vector<Value> &items, const Value &block) {
+    std::vector<Value> sorted = items;
+    for (std::size_t i = 1; i < sorted.size(); ++i) {
+      std::size_t j = i;
+      while (j > 0) {
+        const std::optional<int> order = compare_values_for_sort(
+            frame, receiver, block, sorted[j], sorted[j - 1U]);
+        if (!order.has_value()) {
+          return std::nullopt;
+        }
+        if (*order >= 0) {
+          break;
+        }
+        std::swap(sorted[j], sorted[j - 1U]);
+        --j;
+      }
+    }
+    return sorted;
+  }
+
+  std::optional<Value> apply_sequence_set_operation(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &items, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
+    const bool block_allowed =
+        selector == "take_while" || selector == "sort" || selector == "uniq" ||
+        selector == "each_pair" || selector == "each_cons" ||
+        selector == "each";
+    if (!block.is_null() && !block_allowed) {
+      set_fault(frame, "TypeError",
+                "collection operation does not accept block arguments");
+      return std::nullopt;
+    }
+    const bool keywords_allowed = selector == "each";
+    if (!kw_args.empty() && !keywords_allowed) {
+      set_fault(frame, "TypeError",
+                "collection operation does not accept keyword arguments");
+      return std::nullopt;
+    }
+
+    if (selector == "contains?" || selector == "include?") {
+      if (args.size() != 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      return Value::boolean(sequence_contains_value(items, args[0]));
+    }
+
+    if (selector == "+" || selector == "concat") {
+      if (args.size() != 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      const std::optional<std::vector<Value>> right =
+          sequence_argument_items(frame, args[0], selector);
+      if (!right.has_value()) {
+        return std::nullopt;
+      }
+      std::vector<Value> concatenated = items;
+      concatenated.insert(concatenated.end(), right->begin(), right->end());
+      return make_list_value(std::move(concatenated));
+    }
+
+    if (selector == "*") {
+      if (args.size() != 1U || !args[0].is_integer()) {
+        set_fault(frame, "TypeError", "repeat expects integer count");
+        return std::nullopt;
+      }
+      const std::int64_t count = args[0].as_integer();
+      std::vector<Value> repeated;
+      if (count > 0) {
+        repeated.reserve(items.size() * static_cast<std::size_t>(count));
+        for (std::int64_t i = 0; i < count; ++i) {
+          repeated.insert(repeated.end(), items.begin(), items.end());
+        }
+      }
+      return make_list_value(std::move(repeated));
+    }
+
+    if (selector == "reverse") {
+      if (!args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::vector<Value> reversed(items.rbegin(), items.rend());
+      return make_list_value(std::move(reversed));
+    }
+
+    if (selector == "take_while") {
+      if (!args.empty() || block.is_null()) {
+        set_fault(frame, "TypeError", "take_while requires block");
+        return std::nullopt;
+      }
+      std::vector<Value> taken;
+      for (const Value &item : items) {
+        const std::optional<Value> predicate =
+            call_block_to_value(frame, block, {item});
+        if (!predicate.has_value()) {
+          return std::nullopt;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return std::nullopt;
+        }
+        if (!is_truthy(*predicate)) {
+          break;
+        }
+        taken.push_back(item);
+      }
+      return make_list_value(std::move(taken));
+    }
+
+    if (selector == "sort") {
+      if (!args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      const std::optional<std::vector<Value>> sorted =
+          sorted_sequence_items(frame, receiver, items, block);
+      if (!sorted.has_value()) {
+        return std::nullopt;
+      }
+      return make_list_value(*sorted);
+    }
+
+    if (selector == "uniq") {
+      if (!args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::vector<Value> unique;
+      std::vector<Value> keys;
+      unique.reserve(items.size());
+      keys.reserve(items.size());
+      for (const Value &item : items) {
+        Value key = item;
+        if (!block.is_null()) {
+          const std::optional<Value> value =
+              call_block_to_value(frame, block, {item});
+          if (!value.has_value()) {
+            return std::nullopt;
+          }
+          if (!ensure_lifecycle_access(frame, receiver)) {
+            return std::nullopt;
+          }
+          key = *value;
+        }
+        if (!sequence_contains_value(keys, key)) {
+          keys.push_back(key);
+          unique.push_back(item);
+        }
+      }
+      return materialize_set_like_result(receiver, std::move(unique));
+    }
+
+    if (selector == "each" || selector == "each_pair" ||
+        selector == "each_cons") {
+      std::int64_t raw_size = 0;
+      std::int64_t raw_step = 1;
+      if (selector == "each_pair") {
+        if (!args.empty()) {
+          set_fault(frame, "TypeError", "wrong builtin SEND arity");
+          return std::nullopt;
+        }
+        raw_size = 2;
+      } else {
+        if (args.size() != 1U || !args[0].is_integer()) {
+          set_fault(frame, "TypeError", selector + " expects integer size");
+          return std::nullopt;
+        }
+        raw_size = args[0].as_integer();
+        raw_step = selector == "each" ? raw_size : 1;
+      }
+      const std::optional<std::int64_t> step =
+          parse_step_keyword(frame, kw_args, raw_step);
+      if (!step.has_value()) {
+        return std::nullopt;
+      }
+      const std::optional<std::vector<Value>> windows =
+          sequence_windows(frame, items, raw_size, *step, selector);
+      if (!windows.has_value()) {
+        return std::nullopt;
+      }
+      if (block.is_null()) {
+        return make_list_value(*windows);
+      }
+      for (const Value &window : *windows) {
+        if (!call_block_to_value(frame, block, {window}).has_value()) {
+          return std::nullopt;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return std::nullopt;
+        }
+      }
+      return receiver;
+    }
+
+    if (selector == "permutation") {
+      std::int64_t raw_count = static_cast<std::int64_t>(items.size());
+      if (args.size() > 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      if (!args.empty()) {
+        if (!args[0].is_integer()) {
+          set_fault(frame, "TypeError", "permutation expects integer count");
+          return std::nullopt;
+        }
+        raw_count = args[0].as_integer();
+      }
+      if (raw_count < 0 ||
+          static_cast<std::uint64_t>(raw_count) > items.size()) {
+        return make_list_value({});
+      }
+      return make_list_value(
+          permutation_values(items, static_cast<std::size_t>(raw_count)));
+    }
+
+    if (selector == "combination") {
+      if (args.size() != 1U || !args[0].is_integer()) {
+        set_fault(frame, "TypeError", "combination expects integer count");
+        return std::nullopt;
+      }
+      const std::int64_t raw_count = args[0].as_integer();
+      if (raw_count < 0 ||
+          static_cast<std::uint64_t>(raw_count) > items.size()) {
+        return make_list_value({});
+      }
+      return make_list_value(
+          combination_values(items, static_cast<std::size_t>(raw_count)));
+    }
+
+    if (args.size() != 1U) {
+      set_fault(frame, "TypeError", "wrong builtin SEND arity");
+      return std::nullopt;
+    }
+    const std::optional<std::vector<Value>> right =
+        sequence_argument_items(frame, args[0], selector);
+    if (!right.has_value()) {
+      return std::nullopt;
+    }
+
+    if (selector == "union") {
+      return materialize_set_like_result(receiver,
+                                         sequence_union_items(items, *right));
+    }
+    if (selector == "|") {
+      return materialize_set_like_result(receiver,
+                                         sequence_union_items(items, *right));
+    }
+    if (selector == "intersection") {
+      return materialize_set_like_result(
+          receiver, sequence_intersection_items(items, *right));
+    }
+    if (selector == "&") {
+      return materialize_set_like_result(
+          receiver, sequence_intersection_items(items, *right));
+    }
+    if (selector == "difference" || selector == "left_difference" ||
+        selector == "-") {
+      return materialize_set_like_result(
+          receiver, sequence_difference_items(items, *right));
+    }
+    if (selector == "symmetric_difference" || selector == "^") {
+      return materialize_set_like_result(
+          receiver, sequence_symmetric_difference_items(items, *right));
+    }
+    if (selector == "subset?" || selector == "proper_subset?" ||
+        selector == "<=" || selector == "<") {
+      const bool subset = sequence_is_subset(items, *right);
+      const bool proper = unique_sequence_items(items).size() <
+                          unique_sequence_items(*right).size();
+      return Value::boolean((selector == "subset?" || selector == "<=")
+                                ? subset
+                                : subset && proper);
+    }
+    if (selector == "superset?" || selector == "proper_superset?" ||
+        selector == ">=" || selector == ">") {
+      const bool superset = sequence_is_subset(*right, items);
+      const bool proper = unique_sequence_items(items).size() >
+                          unique_sequence_items(*right).size();
+      return Value::boolean((selector == "superset?" || selector == ">=")
+                                ? superset
+                                : superset && proper);
+    }
+    if (selector == "disjoint?") {
+      return Value::boolean(
+          sequence_intersection_items(items, *right).empty());
+    }
+
+    set_fault(frame, "VMError", "unknown collection operation selector");
+    return std::nullopt;
+  }
+
+  std::optional<Value>
+  merge_map_entries(const Frame &frame, const Value &receiver,
+                    const std::vector<MapEntry> &left, const Value &right_value,
+                    const Value &block) {
+    const std::optional<std::vector<MapEntry>> right =
+        extract_map_entries(frame, right_value);
+    if (fault_.has_value()) {
+      return std::nullopt;
+    }
+    if (!right.has_value()) {
+      set_fault(frame, "TypeError", "Map#merge expects Map argument");
+      return std::nullopt;
+    }
+
+    std::vector<MapEntry> merged = left;
+    for (const MapEntry &entry : *right) {
+      auto existing = std::find_if(merged.begin(), merged.end(),
+                                   [&](const MapEntry &candidate) {
+                                     return candidate.symbol_id ==
+                                            entry.symbol_id;
+                                   });
+      Value value = entry.value;
+      if (existing != merged.end() && !block.is_null()) {
+        const std::optional<Value> merged_value = call_block_to_value(
+            frame, block,
+            {Value::symbol(entry.symbol_id), existing->value, entry.value});
+        if (!merged_value.has_value()) {
+          return std::nullopt;
+        }
+        if (!ensure_lifecycle_access(frame, receiver) ||
+            !ensure_lifecycle_access(frame, right_value)) {
+          return std::nullopt;
+        }
+        value = *merged_value;
+      }
+      if (existing == merged.end()) {
+        merged.push_back({entry.symbol_id, value});
+      } else {
+        existing->value = value;
+      }
+    }
+    return make_symbol_map_value(std::move(merged));
+  }
+
+  bool value_is_range_instance(const Value &value) {
+    if (!value.is_instance_object()) {
+      return false;
+    }
+    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    if (instance == nullptr) {
+      return false;
+    }
+    const std::optional<std::string> class_name =
+        class_name_for_index(instance->class_index);
+    return class_name.has_value() && *class_name == "Range";
+  }
+
+  std::optional<Value>
+  load_instance_ivar_or_null(const Frame &frame,
+                             const std::shared_ptr<InstanceValue> &instance,
+                             const std::string &name) {
+    const std::optional<std::uint32_t> slot =
+        ensure_instance_ivar_slot(frame, instance, name);
+    if (fault_.has_value()) {
+      return std::nullopt;
+    }
+    if (!slot.has_value() || *slot >= instance->ivar_storage.size()) {
+      return Value::null();
+    }
+    return instance->ivar_storage[*slot];
+  }
+
+  struct RangeBounds {
+    std::optional<std::int64_t> start;
+    std::optional<std::int64_t> finish;
+    bool inclusive_end = true;
+  };
+
+  std::optional<RangeBounds> extract_range_bounds(const Frame &frame,
+                                                  const Value &value) {
+    if (!value.is_instance_object()) {
+      return std::nullopt;
+    }
+    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    if (instance == nullptr) {
+      set_fault(frame, "TypeError", "Range value is null");
+      return std::nullopt;
+    }
+    if (!ensure_instance_layout(frame, instance)) {
+      return std::nullopt;
+    }
+
+    const std::optional<Value> start =
+        load_instance_ivar_or_null(frame, instance, "start");
+    const std::optional<Value> finish =
+        load_instance_ivar_or_null(frame, instance, "finish");
+    const std::optional<Value> inclusive_end =
+        load_instance_ivar_or_null(frame, instance, "inclusive_end");
+    if (fault_.has_value()) {
+      return std::nullopt;
+    }
+    if (!start->is_null() && !start->is_integer()) {
+      set_fault(frame, "TypeError", "Range start must be Integer or null");
+      return std::nullopt;
+    }
+    if (!finish->is_null() && !finish->is_integer()) {
+      set_fault(frame, "TypeError", "Range finish must be Integer or null");
+      return std::nullopt;
+    }
+    if (!inclusive_end->is_null() && !inclusive_end->is_bool()) {
+      set_fault(frame, "TypeError", "Range inclusive_end must be Bool");
+      return std::nullopt;
+    }
+    if (start->is_null() && finish->is_null()) {
+      set_fault(frame, "TypeError", "Range bounds must be Integer values");
+      return std::nullopt;
+    }
+    RangeBounds bounds;
+    if (start->is_integer()) {
+      bounds.start = start->as_integer();
+    }
+    if (finish->is_integer()) {
+      bounds.finish = finish->as_integer();
+    }
+    bounds.inclusive_end =
+        inclusive_end->is_null() ? true : inclusive_end->as_bool();
+    return bounds;
+  }
+
+  std::optional<std::vector<Value>> extract_range_items(const Frame &frame,
+                                                        const Value &value) {
+    const std::optional<RangeBounds> bounds = extract_range_bounds(frame, value);
+    if (fault_.has_value() || !bounds.has_value()) {
+      return std::nullopt;
+    }
+
+    std::vector<Value> items;
+    if (!bounds->start.has_value() || !bounds->finish.has_value()) {
+      set_fault(frame, "ArgumentError",
+                "open-ended Range cannot be materialized eagerly");
+      return std::nullopt;
+    }
+    if (*bounds->start > *bounds->finish) {
+      return items;
+    }
+    for (std::int64_t current = *bounds->start; current < *bounds->finish;
+         ++current) {
+      items.push_back(Value::integer(current));
+    }
+    if (bounds->inclusive_end) {
+      items.push_back(Value::integer(*bounds->finish));
+    }
+    return items;
+  }
+
+  bool range_contains_value(const Frame &frame, const Value &range,
+                            const Value &needle, bool *out) {
+    const std::optional<RangeBounds> bounds = extract_range_bounds(frame, range);
+    if (fault_.has_value() || !bounds.has_value()) {
+      return false;
+    }
+    if (!needle.is_integer()) {
+      set_fault(frame, "TypeError", "Range#contains? expects Integer value");
+      return false;
+    }
+    const std::int64_t value = needle.as_integer();
+    const bool above_start =
+        !bounds->start.has_value() || value >= *bounds->start;
+    const bool below_finish =
+        !bounds->finish.has_value() ||
+        (bounds->inclusive_end ? value <= *bounds->finish
+                               : value < *bounds->finish);
+    *out = above_start && below_finish;
+    return true;
+  }
+
+  bool value_is_lazy_seq_instance(const Value &value) {
+    if (!value.is_instance_object()) {
+      return false;
+    }
+    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    if (instance == nullptr) {
+      return false;
+    }
+    const auto marker = instance->ivars.find("__amber_lazy_seq");
+    return marker != instance->ivars.end() && marker->second.is_bool() &&
+           marker->second.as_bool();
+  }
+
+  std::optional<LazySeqOpKind>
+  lazy_seq_op_kind_for_selector(const std::string &selector) const {
+    if (selector == "map") {
+      return LazySeqOpKind::Map;
+    }
+    if (selector == "flat_map") {
+      return LazySeqOpKind::FlatMap;
+    }
+    if (selector == "select") {
+      return LazySeqOpKind::Select;
+    }
+    if (selector == "reject") {
+      return LazySeqOpKind::Reject;
+    }
+    return std::nullopt;
+  }
+
+  Value encode_lazy_seq_ops(const std::vector<LazySeqOp> &ops) {
+    std::vector<Value> encoded;
+    encoded.reserve(ops.size());
+    for (const LazySeqOp &op : ops) {
+      encoded.push_back(make_tuple_value(
+          {Value::integer(static_cast<std::int64_t>(op.kind)), op.block}));
+    }
+    return make_list_value(std::move(encoded));
+  }
+
+  Value make_lazy_seq_value(const Value &source,
+                            const std::vector<LazySeqOp> &ops) {
+    std::shared_ptr<InstanceValue> instance =
+        make_instance_value(std::numeric_limits<std::uint32_t>::max());
+    instance->ivars["__amber_lazy_seq"] = Value::boolean(true);
+    instance->ivars["__amber_lazy_source"] = source;
+    instance->ivars["__amber_lazy_ops"] = encode_lazy_seq_ops(ops);
+    return Value::instance(std::move(instance));
+  }
+
+  std::optional<LazySeqState> extract_lazy_seq_state(const Frame &frame,
+                                                     const Value &value) {
+    if (!value_is_lazy_seq_instance(value)) {
+      return std::nullopt;
+    }
+    if (!ensure_lifecycle_access(frame, value)) {
+      return std::nullopt;
+    }
+    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const auto source_it = instance->ivars.find("__amber_lazy_source");
+    const auto ops_it = instance->ivars.find("__amber_lazy_ops");
+    if (source_it == instance->ivars.end() || ops_it == instance->ivars.end()) {
+      set_fault(frame, "VMError", "LazySeq state is missing");
+      return std::nullopt;
+    }
+    if (!ops_it->second.is_list()) {
+      set_fault(frame, "VMError", "LazySeq ops must be a list");
+      return std::nullopt;
+    }
+    const std::shared_ptr<ListValue> encoded_ops = ops_it->second.as_list();
+    if (encoded_ops == nullptr) {
+      set_fault(frame, "TypeError", "LazySeq ops list is null");
+      return std::nullopt;
+    }
+    if (!ensure_lifecycle_access(frame, ops_it->second)) {
+      return std::nullopt;
+    }
+
+    LazySeqState state;
+    state.source = source_it->second;
+    state.ops.reserve(encoded_ops->items.size());
+    for (const Value &encoded : encoded_ops->items) {
+      if (!encoded.is_tuple()) {
+        set_fault(frame, "VMError", "LazySeq op must be a tuple");
+        return std::nullopt;
+      }
+      const std::shared_ptr<TupleValue> tuple = encoded.as_tuple();
+      if (tuple == nullptr || tuple->items.size() != 2U ||
+          !tuple->items[0].is_integer()) {
+        set_fault(frame, "VMError", "LazySeq op tuple is invalid");
+        return std::nullopt;
+      }
+      const std::int64_t op_code = tuple->items[0].as_integer();
+      if (op_code < static_cast<std::int64_t>(LazySeqOpKind::Map) ||
+          op_code > static_cast<std::int64_t>(LazySeqOpKind::Reject)) {
+        set_fault(frame, "VMError", "LazySeq op code is invalid");
+        return std::nullopt;
+      }
+      if (!tuple->items[1].is_closure()) {
+        set_fault(frame, "TypeError", "LazySeq pipeline block must be closure");
+        return std::nullopt;
+      }
+      state.ops.push_back(
+          {static_cast<LazySeqOpKind>(op_code), tuple->items[1]});
+    }
+    return state;
+  }
+
+  std::optional<Value> append_lazy_seq_op(const Frame &frame,
+                                          const Value &receiver,
+                                          LazySeqOpKind kind,
+                                          const Value &block) {
+    if (block.is_null()) {
+      set_fault(frame, "TypeError", "LazySeq pipeline requires block");
+      return std::nullopt;
+    }
+    if (!block.is_closure()) {
+      set_fault(frame, "TypeError", "LazySeq pipeline block must be closure");
+      return std::nullopt;
+    }
+    if (!ensure_lifecycle_access(frame, block)) {
+      return std::nullopt;
+    }
+    std::optional<LazySeqState> state = extract_lazy_seq_state(frame, receiver);
+    if (fault_.has_value()) {
+      return std::nullopt;
+    }
+    if (!state.has_value()) {
+      state = LazySeqState{receiver, {}};
+    }
+    state->ops.push_back({kind, block});
+    return make_lazy_seq_value(state->source, state->ops);
+  }
+
+  LazySeqVisitStatus emit_lazy_seq_value(
+      const Frame &frame, const LazySeqState &state, const Value &receiver,
+      const Value &item, std::size_t op_index,
+      const std::function<LazySeqVisitStatus(const Value &)> &visitor) {
+    if (op_index >= state.ops.size()) {
+      return visitor(item);
+    }
+
+    const LazySeqOp &op = state.ops[op_index];
+    const std::optional<Value> value =
+        call_block_to_value(frame, op.block, {item});
+    if (!value.has_value()) {
+      return LazySeqVisitStatus::Faulted;
+    }
+    if (!ensure_lifecycle_access(frame, receiver) ||
+        !ensure_lifecycle_access(frame, state.source)) {
+      return LazySeqVisitStatus::Faulted;
+    }
+
+    if (op.kind == LazySeqOpKind::Map) {
+      return emit_lazy_seq_value(frame, state, receiver, *value, op_index + 1U,
+                                 visitor);
+    }
+    if (op.kind == LazySeqOpKind::Select) {
+      if (!is_truthy(*value)) {
+        return LazySeqVisitStatus::Continue;
+      }
+      return emit_lazy_seq_value(frame, state, receiver, item, op_index + 1U,
+                                 visitor);
+    }
+    if (op.kind == LazySeqOpKind::Reject) {
+      if (is_truthy(*value)) {
+        return LazySeqVisitStatus::Continue;
+      }
+      return emit_lazy_seq_value(frame, state, receiver, item, op_index + 1U,
+                                 visitor);
+    }
+
+    bool nested_was_tuple = false;
+    const std::optional<std::vector<Value>> nested =
+        extract_sequence_items(frame, *value, &nested_was_tuple);
+    if (fault_.has_value()) {
+      return LazySeqVisitStatus::Faulted;
+    }
+    if (!nested.has_value()) {
+      set_fault(frame, "TypeError", "flat_map block must return sequence");
+      return LazySeqVisitStatus::Faulted;
+    }
+    for (const Value &nested_item : *nested) {
+      const LazySeqVisitStatus status = emit_lazy_seq_value(
+          frame, state, receiver, nested_item, op_index + 1U, visitor);
+      if (status != LazySeqVisitStatus::Continue) {
+        return status;
+      }
+    }
+    return LazySeqVisitStatus::Continue;
+  }
+
+  LazySeqVisitStatus visit_lazy_seq(
+      const Frame &frame, const LazySeqState &state, const Value &receiver,
+      const std::function<LazySeqVisitStatus(const Value &)> &visitor) {
+    if (value_is_range_instance(state.source)) {
+      const std::optional<RangeBounds> bounds =
+          extract_range_bounds(frame, state.source);
+      if (fault_.has_value() || !bounds.has_value()) {
+        return LazySeqVisitStatus::Faulted;
+      }
+      if (!bounds->start.has_value()) {
+        set_fault(frame, "ArgumentError",
+                  "beginless Range cannot be iterated lazily");
+        return LazySeqVisitStatus::Faulted;
+      }
+      std::int64_t current = *bounds->start;
+      while (true) {
+        if (bounds->finish.has_value()) {
+          if (bounds->inclusive_end) {
+            if (current > *bounds->finish) {
+              return LazySeqVisitStatus::Continue;
+            }
+          } else if (current >= *bounds->finish) {
+            return LazySeqVisitStatus::Continue;
+          }
+        }
+        const LazySeqVisitStatus status = emit_lazy_seq_value(
+            frame, state, receiver, Value::integer(current), 0U, visitor);
+        if (status != LazySeqVisitStatus::Continue) {
+          return status;
+        }
+        if (current == std::numeric_limits<std::int64_t>::max()) {
+          if (!bounds->finish.has_value()) {
+            set_fault(frame, "ArgumentError",
+                      "open-ended Range lazy iteration overflows Integer");
+            return LazySeqVisitStatus::Faulted;
+          }
+          return LazySeqVisitStatus::Continue;
+        }
+        ++current;
+      }
+    }
+
+    bool source_was_tuple = false;
+    const std::optional<std::vector<Value>> source_items =
+        extract_sequence_items(frame, state.source, &source_was_tuple);
+    if (fault_.has_value()) {
+      return LazySeqVisitStatus::Faulted;
+    }
+    if (!source_items.has_value()) {
+      set_fault(frame, "TypeError", "LazySeq source must be a sequence");
+      return LazySeqVisitStatus::Faulted;
+    }
+    for (const Value &item : *source_items) {
+      const LazySeqVisitStatus status =
+          emit_lazy_seq_value(frame, state, receiver, item, 0U, visitor);
+      if (status != LazySeqVisitStatus::Continue) {
+        return status;
+      }
+    }
+    return LazySeqVisitStatus::Continue;
+  }
+
+  bool lazy_seq_source_is_open_ended_range(const Frame &frame,
+                                           const LazySeqState &state,
+                                           bool *out) {
+    *out = false;
+    if (!value_is_range_instance(state.source)) {
+      return true;
+    }
+    const std::optional<RangeBounds> bounds =
+        extract_range_bounds(frame, state.source);
+    if (fault_.has_value() || !bounds.has_value()) {
+      return false;
+    }
+    *out = !bounds->start.has_value() || !bounds->finish.has_value();
+    return true;
+  }
+
+  bool require_lazy_seq_finite_source(const Frame &frame,
+                                      const LazySeqState &state,
+                                      const std::string &operation) {
+    bool open_ended = false;
+    if (!lazy_seq_source_is_open_ended_range(frame, state, &open_ended)) {
+      return false;
+    }
+    if (open_ended) {
+      set_fault(frame, "ArgumentError",
+                "open-ended LazySeq cannot " + operation);
+      return false;
+    }
+    return true;
+  }
+
+  std::optional<std::vector<Value>>
+  materialize_lazy_seq_items(const Frame &frame, const LazySeqState &state,
+                             const Value &receiver,
+                             std::optional<std::size_t> limit) {
+    if (limit.has_value() && *limit == 0U) {
+      return std::vector<Value>{};
+    }
+    if (!limit.has_value() &&
+        !require_lazy_seq_finite_source(frame, state, "materialize all items")) {
+      return std::nullopt;
+    }
+    std::vector<Value> items;
+    const LazySeqVisitStatus status = visit_lazy_seq(
+        frame, state, receiver, [&](const Value &item) -> LazySeqVisitStatus {
+          items.push_back(item);
+          if (limit.has_value() && items.size() >= *limit) {
+            return LazySeqVisitStatus::Stop;
+          }
+          return LazySeqVisitStatus::Continue;
+        });
+    if (status == LazySeqVisitStatus::Faulted) {
+      return std::nullopt;
+    }
+    return items;
   }
 
   bool prepared_map_has_extras(const PreparedMapState &state) const {
@@ -6441,8 +7607,9 @@ private:
                                const std::vector<Value> &args, Value *out,
                                bool *handled) {
     *handled = false;
+    const std::vector<std::pair<std::uint32_t, Value>> no_keywords;
     const SendStatus scalar_status = try_apply_scalar_send(
-        frame, receiver, selector, args, Value::null(), false, out);
+        frame, receiver, selector, args, Value::null(), no_keywords, out);
     if (scalar_status == SendStatus::Faulted) {
       return false;
     }
@@ -7045,7 +8212,10 @@ private:
   SendStatus try_apply_scalar_send(const Frame &frame, const Value &receiver,
                                    const std::string &selector,
                                    const std::vector<Value> &args,
-                                   const Value &block, bool has_keywords,
+                                   const Value &block,
+                                   const std::vector<
+                                       std::pair<std::uint32_t, Value>>
+                                       &kw_args,
                                    Value *out) {
     if (!ensure_lifecycle_access(frame, receiver)) {
       return SendStatus::Faulted;
@@ -7091,20 +8261,45 @@ private:
       return ensure_lifecycle_access(frame, receiver);
     };
 
+    const bool receiver_is_range = value_is_range_instance(receiver);
+    const bool receiver_is_lazy_seq = value_is_lazy_seq_instance(receiver);
+    const bool sequence_set_operation_selector = selector_in(
+        {"contains?", "include?", "union", "intersection", "difference",
+         "left_difference", "symmetric_difference", "subset?",
+         "proper_subset?", "superset?", "proper_superset?", "disjoint?",
+         "permutation", "combination", "&", "|", "-", "^", "<=", "<", ">=",
+         ">"});
+    const bool sequence_extra_operation_selector = selector_in(
+        {"+", "*", "concat", "take_while", "reverse", "sort", "uniq",
+         "each_pair", "each_cons"});
+    const bool sequence_collection_selector = selector_in(
+        {"empty?", "[]", "deconstruct", "first", "count", "to_a", "lazy",
+         "each", "map", "flat_map", "select", "reject", "find", "group_by",
+         "any?", "all?", "none?", "reduce"}) ||
+                                              sequence_set_operation_selector ||
+                                              sequence_extra_operation_selector;
+    const bool range_collection_selector =
+        sequence_collection_selector || selector == "===";
+    const bool lazy_seq_collection_selector = sequence_collection_selector;
     const bool builtin_selector =
         selector_in({"==", "==="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
-         selector_in({"empty?", "[]", "deconstruct", "first", "count", "to_a",
-                      "lazy", "each", "map", "flat_map", "select", "reject",
-                      "find", "group_by", "any?", "all?", "none?",
-                      "reduce"})) ||
+         sequence_collection_selector) ||
+        (receiver_is_range && range_collection_selector) ||
+        (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() &&
          selector_in({"empty?", "[]", "deconstruct_keys", "keys", "values",
                       "entries", "to_a", "each", "map", "select", "reject",
-                      "transform_values"})) ||
+                      "transform", "transform_values", "merge", "each_pair",
+                      "contains?", "include?", "+", "|"})) ||
         (receiver.is_integer() &&
          selector_in({"+", "-", "*", "/", ">", "<", ">=", "<="}));
-    if (has_keywords && builtin_selector) {
+    const bool keyword_compatible_builtin_selector =
+        selector == "each" && (receiver.is_list() || receiver.is_tuple() ||
+                               receiver.is_set() || receiver_is_range ||
+                               receiver_is_lazy_seq);
+    if (!kw_args.empty() && builtin_selector &&
+        !keyword_compatible_builtin_selector) {
       set_fault(frame, "TypeError",
                 "builtin SEND does not accept keyword arguments");
       return SendStatus::Faulted;
@@ -7122,7 +8317,531 @@ private:
       return SendStatus::Matched;
     }
 
-    if (receiver.is_list() || receiver.is_tuple() || receiver.is_set()) {
+    if (receiver_is_lazy_seq && lazy_seq_collection_selector) {
+      if (selector == "lazy") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = receiver;
+        return SendStatus::Matched;
+      }
+
+      const std::optional<LazySeqOpKind> op_kind =
+          lazy_seq_op_kind_for_selector(selector);
+      if (op_kind.has_value()) {
+        if (!require_arity(0)) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<Value> next =
+            append_lazy_seq_op(frame, receiver, *op_kind, block);
+        if (!next.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = *next;
+        return SendStatus::Matched;
+      }
+
+      const std::optional<LazySeqState> state =
+          extract_lazy_seq_state(frame, receiver);
+      if (fault_.has_value() || !state.has_value()) {
+        return SendStatus::Faulted;
+      }
+
+      if (selector == "to_a" || selector == "deconstruct") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::vector<Value>> items =
+            materialize_lazy_seq_items(frame, *state, receiver, std::nullopt);
+        if (!items.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(*items);
+        return SendStatus::Matched;
+      }
+
+      if (selector == "empty?") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        bool saw_item = false;
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              (void)item;
+              saw_item = true;
+              return LazySeqVisitStatus::Stop;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(!saw_item);
+        return SendStatus::Matched;
+      }
+
+      if (selector == "[]") {
+        std::int64_t index = 0;
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &index)) {
+          return SendStatus::Faulted;
+        }
+        if (index < 0) {
+          set_fault(frame, "IndexError", "LazySeq index is out of bounds");
+          return SendStatus::Faulted;
+        }
+        std::int64_t seen = 0;
+        bool found_value = false;
+        Value found = Value::null();
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              if (seen == index) {
+                found_value = true;
+                found = item;
+                return LazySeqVisitStatus::Stop;
+              }
+              ++seen;
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        if (!found_value) {
+          set_fault(frame, "IndexError", "LazySeq index is out of bounds");
+          return SendStatus::Faulted;
+        }
+        *out = found;
+        return SendStatus::Matched;
+      }
+
+      if (selector == "first") {
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args.empty()) {
+          const std::optional<std::vector<Value>> items =
+              materialize_lazy_seq_items(frame, *state, receiver, 1U);
+          if (!items.has_value()) {
+            return SendStatus::Faulted;
+          }
+          *out = items->empty() ? Value::null() : items->front();
+          return SendStatus::Matched;
+        }
+        std::int64_t count = 0;
+        if (!require_arity(1) || !require_integer_arg(0, &count)) {
+          return SendStatus::Faulted;
+        }
+        const std::size_t take = count <= 0
+                                     ? 0U
+                                     : static_cast<std::size_t>(count);
+        const std::optional<std::vector<Value>> items =
+            materialize_lazy_seq_items(frame, *state, receiver, take);
+        if (!items.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(*items);
+        return SendStatus::Matched;
+      }
+
+      if (selector == "each" && args.empty() && kw_args.empty()) {
+        if (!require_arity(0) ||
+            !require_lazy_seq_finite_source(frame, *state, "run each")) {
+          return SendStatus::Faulted;
+        }
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              if (!call_block_to_value(frame, block, {item}).has_value()) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (!ensure_lifecycle_access(frame, receiver) ||
+                  !ensure_lifecycle_access(frame, state->source)) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        *out = receiver;
+        return SendStatus::Matched;
+      }
+
+      if (selector == "count") {
+        if (!require_arity(0) ||
+            !require_lazy_seq_finite_source(frame, *state, "count all items")) {
+          return SendStatus::Faulted;
+        }
+        std::int64_t count = 0;
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              if (block.is_null()) {
+                ++count;
+                return LazySeqVisitStatus::Continue;
+              }
+              const std::optional<Value> predicate =
+                  call_block_to_value(frame, block, {item});
+              if (!predicate.has_value()) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (!ensure_lifecycle_access(frame, receiver) ||
+                  !ensure_lifecycle_access(frame, state->source)) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (is_truthy(*predicate)) {
+                ++count;
+              }
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(count);
+        return SendStatus::Matched;
+      }
+
+      if (selector == "find") {
+        if (!require_arity(0)) {
+          return SendStatus::Faulted;
+        }
+        Value found = Value::null();
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              const std::optional<Value> predicate =
+                  call_block_to_value(frame, block, {item});
+              if (!predicate.has_value()) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (!ensure_lifecycle_access(frame, receiver) ||
+                  !ensure_lifecycle_access(frame, state->source)) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (is_truthy(*predicate)) {
+                found = item;
+                return LazySeqVisitStatus::Stop;
+              }
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        *out = found;
+        return SendStatus::Matched;
+      }
+
+      if (selector == "group_by") {
+        if (!require_arity(0) ||
+            !require_lazy_seq_finite_source(frame, *state,
+                                            "group all items")) {
+          return SendStatus::Faulted;
+        }
+        std::vector<std::pair<std::uint32_t, std::vector<Value>>> groups;
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              const std::optional<Value> key =
+                  call_block_to_value(frame, block, {item});
+              if (!key.has_value()) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (!ensure_lifecycle_access(frame, receiver) ||
+                  !ensure_lifecycle_access(frame, state->source)) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              std::optional<std::uint32_t> key_symbol_id;
+              if (key->is_symbol()) {
+                key_symbol_id = key->as_symbol().symbol_id;
+              } else if (key->is_string()) {
+                const std::optional<std::string> text =
+                    string_text_from_id(key->as_string().string_id);
+                if (!text.has_value()) {
+                  set_fault(frame, "VMError",
+                            "group_by string key ref is invalid");
+                  return LazySeqVisitStatus::Faulted;
+                }
+                key_symbol_id = symbol_id_for_text(*text);
+              }
+              if (!key_symbol_id.has_value()) {
+                set_fault(frame, "TypeError",
+                          "group_by block must return Symbol key");
+                return LazySeqVisitStatus::Faulted;
+              }
+              auto group = std::find_if(groups.begin(), groups.end(),
+                                        [&](const auto &entry) {
+                                          return entry.first == *key_symbol_id;
+                                        });
+              if (group == groups.end()) {
+                groups.push_back({*key_symbol_id, {}});
+                group = groups.end() - 1;
+              }
+              group->second.push_back(item);
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        std::vector<MapEntry> entries;
+        entries.reserve(groups.size());
+        for (auto &group : groups) {
+          entries.push_back(
+              {group.first, make_list_value(std::move(group.second))});
+        }
+        *out = make_symbol_map_value(std::move(entries));
+        return SendStatus::Matched;
+      }
+
+      if (selector == "any?" || selector == "all?" || selector == "none?") {
+        if (!require_arity(0)) {
+          return SendStatus::Faulted;
+        }
+        bool saw_any = false;
+        bool all_match = true;
+        bool any_match = false;
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              saw_any = true;
+              Value predicate = item;
+              if (!block.is_null()) {
+                const std::optional<Value> value =
+                    call_block_to_value(frame, block, {item});
+                if (!value.has_value()) {
+                  return LazySeqVisitStatus::Faulted;
+                }
+                if (!ensure_lifecycle_access(frame, receiver) ||
+                    !ensure_lifecycle_access(frame, state->source)) {
+                  return LazySeqVisitStatus::Faulted;
+                }
+                predicate = *value;
+              }
+              const bool truthy = is_truthy(predicate);
+              any_match = any_match || truthy;
+              all_match = all_match && truthy;
+              if ((selector == "any?" && any_match) ||
+                  (selector == "all?" && !all_match) ||
+                  (selector == "none?" && any_match)) {
+                return LazySeqVisitStatus::Stop;
+              }
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "any?") {
+          *out = Value::boolean(any_match);
+        } else if (selector == "all?") {
+          *out = Value::boolean(!saw_any || all_match);
+        } else {
+          *out = Value::boolean(!any_match);
+        }
+        return SendStatus::Matched;
+      }
+
+      if (selector == "reduce") {
+        if (args.size() > 1U) {
+          set_fault(frame, "TypeError", "wrong builtin SEND arity");
+          return SendStatus::Faulted;
+        }
+        if (block.is_null()) {
+          set_fault(frame, "TypeError", "reduce requires block");
+          return SendStatus::Faulted;
+        }
+        if (!require_lazy_seq_finite_source(frame, *state,
+                                            "reduce all items")) {
+          return SendStatus::Faulted;
+        }
+        bool has_accumulator = !args.empty();
+        Value accumulator = has_accumulator ? args[0] : Value::null();
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              if (!has_accumulator) {
+                accumulator = item;
+                has_accumulator = true;
+                return LazySeqVisitStatus::Continue;
+              }
+              const std::optional<Value> value =
+                  call_block_to_value(frame, block, {accumulator, item});
+              if (!value.has_value()) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (!ensure_lifecycle_access(frame, receiver) ||
+                  !ensure_lifecycle_access(frame, state->source)) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              accumulator = *value;
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        if (!has_accumulator) {
+          set_fault(frame, "EmptyCollectionError",
+                    "reduce without initial value on empty sequence");
+          return SendStatus::Faulted;
+        }
+        *out = accumulator;
+        return SendStatus::Matched;
+      }
+
+      if (selector == "take_while") {
+        if (!args.empty() || block.is_null()) {
+          set_fault(frame, "TypeError", "take_while requires block");
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> taken;
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              const std::optional<Value> predicate =
+                  call_block_to_value(frame, block, {item});
+              if (!predicate.has_value()) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (!ensure_lifecycle_access(frame, receiver) ||
+                  !ensure_lifecycle_access(frame, state->source)) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (!is_truthy(*predicate)) {
+                return LazySeqVisitStatus::Stop;
+              }
+              taken.push_back(item);
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(std::move(taken));
+        return SendStatus::Matched;
+      }
+
+      if (sequence_set_operation_selector || sequence_extra_operation_selector ||
+          (selector == "each" && (!args.empty() || !kw_args.empty()))) {
+        const std::optional<std::vector<Value>> items =
+            materialize_lazy_seq_items(frame, *state, receiver, std::nullopt);
+        if (!items.has_value()) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<Value> value = apply_sequence_set_operation(
+            frame, receiver, selector, *items, args, block, kw_args);
+        if (!value.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = *value;
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
+        (receiver_is_range && range_collection_selector)) {
+      if (receiver_is_range &&
+          (selector == "contains?" || selector == "include?" ||
+           selector == "===")) {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        bool contains = false;
+        if (!range_contains_value(frame, receiver, args[0], &contains)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(contains);
+        return SendStatus::Matched;
+      }
+
+      if (receiver_is_range) {
+        const std::optional<RangeBounds> bounds =
+            extract_range_bounds(frame, receiver);
+        if (fault_.has_value() || !bounds.has_value()) {
+          return SendStatus::Faulted;
+        }
+        const bool open_ended =
+            !bounds->start.has_value() || !bounds->finish.has_value();
+        if (open_ended) {
+          if (selector == "lazy") {
+            if (!require_arity(0) || !require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            *out = make_lazy_seq_value(receiver, {});
+            return SendStatus::Matched;
+          }
+          if (selector == "empty?") {
+            if (!require_arity(0) || !require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::boolean(false);
+            return SendStatus::Matched;
+          }
+          if (selector == "first") {
+            if (!require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            if (!bounds->start.has_value()) {
+              set_fault(frame, "ArgumentError",
+                        "beginless Range has no first element");
+              return SendStatus::Faulted;
+            }
+            if (args.empty()) {
+              *out = Value::integer(*bounds->start);
+              return SendStatus::Matched;
+            }
+            std::int64_t count = 0;
+            if (!require_arity(1) || !require_integer_arg(0, &count)) {
+              return SendStatus::Faulted;
+            }
+            std::vector<Value> taken;
+            if (count > 0) {
+              taken.reserve(static_cast<std::size_t>(count));
+            }
+            std::int64_t current = *bounds->start;
+            for (std::int64_t index = 0; index < count; ++index) {
+              taken.push_back(Value::integer(current));
+              if (index + 1 < count &&
+                  current == std::numeric_limits<std::int64_t>::max()) {
+                set_fault(frame, "ArgumentError",
+                          "open-ended Range first(count) overflows Integer");
+                return SendStatus::Faulted;
+              }
+              ++current;
+            }
+            *out = make_list_value(std::move(taken));
+            return SendStatus::Matched;
+          }
+          if (selector == "[]" && bounds->start.has_value()) {
+            std::int64_t index = 0;
+            if (!require_arity(1) || !require_no_block() ||
+                !require_integer_arg(0, &index)) {
+              return SendStatus::Faulted;
+            }
+            if (index < 0) {
+              set_fault(frame, "IndexError", "Range index is out of bounds");
+              return SendStatus::Faulted;
+            }
+            if (*bounds->start >
+                std::numeric_limits<std::int64_t>::max() - index) {
+              set_fault(frame, "ArgumentError",
+                        "open-ended Range index overflows Integer");
+              return SendStatus::Faulted;
+            }
+            *out = Value::integer(*bounds->start + index);
+            return SendStatus::Matched;
+          }
+          if ((selector == "any?" || selector == "all?" ||
+               selector == "none?") &&
+              block.is_null()) {
+            if (!require_arity(0)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::boolean(selector != "none?");
+            return SendStatus::Matched;
+          }
+          set_fault(frame, "ArgumentError",
+                    "open-ended Range cannot run eager collection method");
+          return SendStatus::Faulted;
+        }
+      }
+
       std::vector<Value> items;
       bool source_was_tuple = false;
       const std::optional<std::vector<Value>> extracted =
@@ -7146,10 +8865,10 @@ private:
             return SendStatus::Faulted;
           }
           if (index < 0 || static_cast<std::size_t>(index) >= items.size()) {
-            *out = Value::null();
-          } else {
-            *out = items[static_cast<std::size_t>(index)];
+            set_fault(frame, "IndexError", "collection index is out of bounds");
+            return SendStatus::Faulted;
           }
+          *out = items[static_cast<std::size_t>(index)];
           return SendStatus::Matched;
         }
         if (selector == "deconstruct") {
@@ -7157,6 +8876,16 @@ private:
             return SendStatus::Faulted;
           }
           *out = receiver;
+          return SendStatus::Matched;
+        }
+        if (sequence_set_operation_selector || sequence_extra_operation_selector ||
+            (selector == "each" && (!args.empty() || !kw_args.empty()))) {
+          const std::optional<Value> value = apply_sequence_set_operation(
+              frame, receiver, selector, items, args, block, kw_args);
+          if (!value.has_value()) {
+            return SendStatus::Faulted;
+          }
+          *out = *value;
           return SendStatus::Matched;
         }
         if (selector == "first") {
@@ -7215,7 +8944,7 @@ private:
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
-          *out = receiver;
+          *out = make_lazy_seq_value(receiver, {});
           return SendStatus::Matched;
         }
         if (selector == "each") {
@@ -7456,6 +9185,38 @@ private:
           *out = Value::boolean(extracted->empty());
           return SendStatus::Matched;
         }
+        if (selector == "contains?" || selector == "include?") {
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::optional<std::uint32_t> key_symbol_id;
+          if (args[0].is_symbol()) {
+            key_symbol_id = args[0].as_symbol().symbol_id;
+          } else if (args[0].is_string()) {
+            const std::optional<std::string> text =
+                string_text_from_id(args[0].as_string().string_id);
+            if (!text.has_value()) {
+              set_fault(frame, "VMError", "map index string ref is invalid");
+              return SendStatus::Faulted;
+            }
+            key_symbol_id = symbol_id_for_text(*text);
+          } else {
+            set_fault(frame, "TypeError",
+                      "map index expects Symbol or String key");
+            return SendStatus::Faulted;
+          }
+          if (!key_symbol_id.has_value()) {
+            *out = Value::boolean(false);
+            return SendStatus::Matched;
+          }
+          const bool found = std::find_if(extracted->begin(), extracted->end(),
+                                          [&](const MapEntry &entry) {
+                                            return entry.symbol_id ==
+                                                   *key_symbol_id;
+                                          }) != extracted->end();
+          *out = Value::boolean(found);
+          return SendStatus::Matched;
+        }
         if (selector == "[]") {
           if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
@@ -7477,15 +9238,21 @@ private:
             return SendStatus::Faulted;
           }
           if (!key_symbol_id.has_value()) {
-            *out = Value::null();
-            return SendStatus::Matched;
+            set_fault(frame, "KeyError", "map key is absent");
+            return SendStatus::Faulted;
           }
           Value found = Value::null();
+          bool found_key = false;
           for (const MapEntry &entry : *extracted) {
             if (entry.symbol_id == *key_symbol_id) {
               found = entry.value;
+              found_key = true;
               break;
             }
+          }
+          if (!found_key) {
+            set_fault(frame, "KeyError", "map key is absent");
+            return SendStatus::Faulted;
           }
           *out = found;
           return SendStatus::Matched;
@@ -7558,9 +9325,19 @@ private:
           *out = make_list_value(std::move(entries));
           return SendStatus::Matched;
         }
-        if (selector == "each") {
+        if (selector == "each" || selector == "each_pair") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
+          }
+          if (block.is_null() && selector == "each_pair") {
+            std::vector<Value> entries;
+            entries.reserve(extracted->size());
+            for (const MapEntry &entry : *extracted) {
+              entries.push_back(make_tuple_value(
+                  {Value::symbol(entry.symbol_id), entry.value}));
+            }
+            *out = make_list_value(std::move(entries));
+            return SendStatus::Matched;
           }
           for (const MapEntry &entry : *extracted) {
             if (!call_block_to_value(
@@ -7620,6 +9397,31 @@ private:
           *out = make_symbol_map_value(std::move(filtered));
           return SendStatus::Matched;
         }
+        if (selector == "transform") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          std::vector<MapEntry> transformed;
+          transformed.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            const std::optional<Value> value = call_block_to_value(
+                frame, block, {Value::symbol(entry.symbol_id), entry.value});
+            if (!value.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!require_receiver_live_after_block()) {
+              return SendStatus::Faulted;
+            }
+            const std::optional<MapEntry> transformed_entry =
+                map_entry_from_transform_result(frame, *value);
+            if (!transformed_entry.has_value()) {
+              return SendStatus::Faulted;
+            }
+            upsert_map_entry(&transformed, *transformed_entry);
+          }
+          *out = make_symbol_map_value(std::move(transformed));
+          return SendStatus::Matched;
+        }
         if (selector == "transform_values") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
@@ -7627,8 +9429,8 @@ private:
           std::vector<MapEntry> transformed;
           transformed.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
-            const std::optional<Value> value =
-                call_block_to_value(frame, block, {entry.value});
+            const std::optional<Value> value = call_block_to_value(
+                frame, block, {entry.value, Value::symbol(entry.symbol_id)});
             if (!value.has_value()) {
               return SendStatus::Faulted;
             }
@@ -7638,6 +9440,18 @@ private:
             transformed.push_back({entry.symbol_id, *value});
           }
           *out = make_symbol_map_value(std::move(transformed));
+          return SendStatus::Matched;
+        }
+        if (selector == "merge" || selector == "+" || selector == "|") {
+          if (!require_arity(1)) {
+            return SendStatus::Faulted;
+          }
+          const std::optional<Value> merged =
+              merge_map_entries(frame, receiver, *extracted, args[0], block);
+          if (!merged.has_value()) {
+            return SendStatus::Faulted;
+          }
+          *out = *merged;
           return SendStatus::Matched;
         }
       }
@@ -7839,16 +9653,11 @@ private:
     }
     Value result = Value::null();
     const SendStatus scalar_status = try_apply_scalar_send(
-        frame, receiver, *selector, args, block, !kw_args.empty(), &result);
+        frame, receiver, *selector, args, block, kw_args, &result);
     if (scalar_status == SendStatus::Faulted) {
       return false;
     }
     if (scalar_status == SendStatus::Matched) {
-      if (!kw_args.empty()) {
-        set_fault(frame, "TypeError",
-                  "builtin SEND does not accept keyword arguments");
-        return false;
-      }
       if (!write_reg(frame, dst, std::move(result))) {
         return false;
       }

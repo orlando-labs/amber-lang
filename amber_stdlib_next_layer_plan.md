@@ -670,10 +670,27 @@ moved = move(value)
   returns `Array` from `map`, returns `Map` from `select` / `reject`, supports
   key-changing `transform`, and lets `transform_values` blocks read `k` as an
   optional second argument while preserving keys.
-- `STD-005` Suitable collections operations: intersection, union, difference, left difference, subset, merging, permutation, combination and others
-- `STD-006` Collection error registry and edge cases.
+- `STD-005` Suitable collections operations. Done: eager finite
+  collections now support `union`, `intersection`, `difference`,
+  `left_difference`, `symmetric_difference`, subset/superset/disjoint
+  predicates, `contains?` / `include?`, `permutation(count)`, and
+  `combination(count)`, plus operator aliases `&`, `|`, `-`, `^`,
+  `<` / `<=` / `>` / `>=`, `+` concatenation, `*` repetition, `concat`,
+  `take_while`, `reverse`, `sort`, and `uniq` with an optional block;
+  `each(size, step:)`, `each_pair`, and `each_cons(size)` provide
+  Ruby-friendly window iteration; `Set` preserves set result shape for
+  set-like operations, finite `LazySeq` materializes these operations, and
+  `Map#merge` / `Map#+` / `Map#|` preserve insertion order with right-wins or
+  block-resolved conflicts.
+- `STD-006` Collection error registry and edge cases. Done: the collection
+  error surface is pinned to `EmptyCollectionError`, `IndexError`, `KeyError`,
+  `ArgumentError`, and `TypeError`; ordinary sequence/range/lazy indexing now
+  reports `IndexError` on out-of-bounds access, `Map#[]` reports `KeyError`
+  for absent keys, `Map#contains?` / `Map#include?` provide non-raising key
+  presence checks, and the stdlib collections suite covers these negative
+  edges.
 
-## Task / Async / Threading / Synchronization primitives
+## Task (Async or Threading) / Synchronization primitives
 
 - `STD-010` Task module public API.
 - `STD-011` TaskHandle state/result/failure API.

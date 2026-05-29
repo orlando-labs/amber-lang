@@ -168,9 +168,14 @@ Current implemented slice:
 - `W8.3` collections baseline in `runtime/vm.{h,cpp}` with closure-block
   execution for eager sequence `each`, `map`, `flat_map`, `select`, `reject`,
   `reduce`, `find`, `any?`, `all?`, `none?`, `first`, `count`, `group_by`,
-  `to_a`, and eager-compatible `lazy`, plus `Map#each`, `Map#map`,
-  `Map#select`, `Map#reject`, `transform_values`, `keys`, `values`, and
-  `entries` with insertion-order-preserving results;
+  `to_a`, membership checks, set-like operations, subset/superset/disjoint
+  predicates, collection operator methods, `each(size, step:)`,
+  `each_pair`, `each_cons`, `take_while`, `reverse`, `sort`, `uniq`,
+  `permutation`, `combination`, and eager-compatible `lazy`, plus `Map#each`,
+  `Map#each_pair`, `Map#map`, `Map#select`, `Map#reject`, `Map#transform`,
+  `transform_values`, `merge`, `contains?`, `include?`, `+` / `|` merge
+  aliases, `keys`, `values`, and `entries` with insertion-order-preserving
+  results and canonical `IndexError` / `KeyError` edge behavior;
 - `W8.4` conformance gate in `tools/ambertest` with deterministic fixture
   discovery, focused mismatch rendering, phase aliases for
   `lower`/`compile`/`disasm`, positive `check`/`run`/`load` lanes, and
@@ -219,8 +224,9 @@ Current implemented slice:
   loader diagnostic coverage, post-W15 live alias export-cell transitions, and
   sticky failed-init/cyclic-init retry coverage, plus W8.3 eager sequence
   chaining, `reduce`
-  empty-error, `flat_map`, `count`, `find`, `group_by`, ordered `Map`
-  projection/transform coverage, and W9.2 open-world transaction coverage for
+  empty-error, indexed-access `IndexError`, map lookup `KeyError`, `flat_map`,
+  `count`, `find`, `group_by`, ordered `Map` projection/transform coverage,
+  and W9.2 open-world transaction coverage for
   rollback, `WorldFrozenError`, `SuperclassMismatchError`, include-cycle
   rejection, mixin method replacement, and late class-side `extend`
   invalidation, plus W9.3 mirror coverage for read-only snapshots,

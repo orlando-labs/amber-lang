@@ -1520,6 +1520,34 @@ def fact(n) if n > 0: n * fact(n - 1)
 
 `case` без совпадения и без `else` в текущей редакции не бросает исключение: он возвращает `null`.
 
+#### `ArgumentError`
+
+Выбрасывается, когда callable или builtin collection operation вызваны с
+недопустимой формой аргументов: неверная arity, неизвестный или повторный
+keyword, отрицательный/нулевой размер окна там, где требуется положительный
+размер, либо eager-операция запрошена у open-ended collection без конечной
+границы.
+
+#### `EmptyCollectionError`
+
+Выбрасывается, когда collection operation нормативно требует хотя бы один
+элемент, но receiver пуст. Минимально обязательный случай: `reduce` без `init`
+на пустой последовательности.
+
+#### `IndexError`
+
+Выбрасывается, когда обычный builtin indexed access (`[]`) обращается за
+границы `Array`, `Tuple`, `Set`, `Range` или `LazySeq`. Safe-navigation
+`expr.?.[key]` может вернуть `null` только из-за `null` receiver; она не
+переименовывает out-of-bounds доступ в успешное значение.
+
+#### `KeyError`
+
+Выбрасывается, когда обычный `Map#[]` требует присутствующий key, но key в map
+отсутствует. Для проверки наличия key используются `Map#contains?` /
+`Map#include?`, которые возвращают `Bool` и не бросают `KeyError` при
+отсутствии key.
+
 #### `TypeError`
 
 Выбрасывается при нарушении протоколов:
@@ -2007,10 +2035,14 @@ Detached / orphan task в v1 не вводятся.
 Для `Array`, `Tuple`, `Range`, `Set` и `LazySeq` обязательны:
 
 - `each`
+- `each(size, step:)`
+- `each_pair`
+- `each_cons`
 - `map`
 - `flat_map`
 - `select`
 - `reject`
+- `take_while`
 - `reduce`
 - `find`
 - `any?`
@@ -2018,6 +2050,24 @@ Detached / orphan task в v1 не вводятся.
 - `none?`
 - `first`
 - `count`
+- `contains?`
+- `include?`
+- `union`
+- `intersection`
+- `difference`
+- `left_difference`
+- `symmetric_difference`
+- `subset?`
+- `proper_subset?`
+- `superset?`
+- `proper_superset?`
+- `disjoint?`
+- `concat`
+- `reverse`
+- `sort`
+- `uniq`
+- `permutation`
+- `combination`
 - `group_by`
 - `to_a`
 - `lazy`
@@ -2025,7 +2075,24 @@ Detached / orphan task в v1 не вводятся.
 Нормативно:
 
 - `each` возвращает receiver;
+- `each(size, step:)` возвращает/yields `Array` окон длины `size` с шагом
+  `step`; без `step:` шаг равен `size`;
+- `each_pair` эквивалентен `each(2, step: 1)`;
+- `each_cons(size)` эквивалентен `each(size, step: 1)`;
 - `map`, `flat_map`, `select`, `reject` и `group_by` по умолчанию eager;
+- `take_while`, `reverse`, `sort` и `uniq` возвращают `Array`, кроме
+  `Set#uniq`, сохраняющего `Set`;
+- `uniq |x|:` использует block как ключ дедупликации;
+- `sort |a, b|:` ожидает integer comparator result;
+- set-like операции возвращают `Set` для receiver-`Set` и `Array` для
+  остальных последовательностей;
+- операторные алиасы: `&` = `intersection`, `|` = `union`, `-` =
+  `difference`, `^` = `symmetric_difference`, `<` / `<=` =
+  proper/non-proper subset, `>` / `>=` = proper/non-proper superset, `+` =
+  `concat`, `*` = repetition;
+- `permutation(count)` и `combination(count)` возвращают `Array` массивов;
+- open-ended `Range` и `LazySeq` не материализуют eager операции без явной
+  конечной границы;
 - `.lazy` переводит дальнейшую цепочку в lazy-profile;
 - `to_a` материализует `LazySeq`.
 
@@ -2048,16 +2115,28 @@ xs.reduce |acc, x|: ...
 - `map |k, v|:`
 - `select |k, v|:`
 - `reject |k, v|:`
-- `transform_values |v|:`
+- `transform |k, v|:` возвращает key/value tuple или list
+- `transform_values |v, k|:` где `k` — опциональный второй аргумент блока
+- `merge(other)` / `merge(other) |k, old, new|:`
 - `keys`
 - `values`
 - `entries`
+- `contains?`
+- `include?`
 
 Нормативно:
 
 - `Map#map` возвращает `Array`;
 - `Map#select` и `Map#reject` возвращают `Map`;
-- `Map#transform_values` возвращает `Map`.
+- `Map#transform` возвращает `Map` и может менять ключи;
+- `Map#transform_values` возвращает `Map`;
+- `Map#merge` возвращает `Map`, сохраняет порядок левого receiver, добавляет
+  новые ключи справа в порядке правого аргумента и при конфликте использует
+  правое значение либо значение, возвращённое block;
+- `Map#+` и `Map#|` являются алиасами `Map#merge`;
+- `Map#each_pair` является алиасом `Map#each`, а без block возвращает
+  `entries`;
+- `Map#contains?` и `Map#include?` проверяют наличие key.
 
 
 ## 14. Что входит в язык по намерению, но ещё не нормализовано до ядра
@@ -2448,9 +2527,16 @@ Richer matcher protocols, typed bindings-map и library-level combinators ост
 
 В v14 обязательный коллекционный профиль нормализован как часть спецификации:
 
-- для `Array`, `Tuple`, `Range`, `Set` и `LazySeq` зафиксирован минимальный `Enumerable`-подобный contract;
-- для `Map` зафиксированы `each/map/select/reject/transform_values/keys/values/entries`;
-- для `reduce` зафиксированы формы с `init` и без `init`, включая `EmptyCollectionError` на пустой коллекции без `init`.
+- для `Array`, `Tuple`, `Range`, `Set` и `LazySeq` зафиксирован минимальный
+  `Enumerable`-подобный contract плюс set-like операции, subset/superset
+  predicates, membership checks, collection operator methods, windowed
+  `each`, `take_while`, `reverse`, `sort`, `uniq`, `permutation` и
+  `combination`;
+- для `Map` зафиксированы `each/each_pair/map/select/reject/transform/transform_values/merge/keys/values/entries/contains?/include?`
+  плюс `+` / `|` merge aliases;
+- для `reduce` зафиксированы формы с `init` и без `init`, включая `EmptyCollectionError` на пустой коллекции без `init`;
+- для обычного collection indexing зафиксированы `IndexError` и `KeyError`
+  вместо неканонических nullable edge results.
 
 Следующая волна может расширять stdlib, но старт reference implementation больше не зависит от незакрытого коллекционного API.
 
