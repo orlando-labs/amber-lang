@@ -681,7 +681,7 @@ moved = move(value)
 - `STD-013` Mutex API plus `synchronize`.
 - `STD-014` Atomic API plus `update`.
 - `STD-015` Inter-thread communication: send/receive, barrier, map-gather/reduce
-- `STD-016` Auto-parallel collections iteration methods: [1, 2, 3].threaded(3).map: ...
+- `STD-016` Auto-parallel collections iteration/combination/permutation methods: [1, 2, 3].threaded(3).map: ...
 
 ## Watch
 
