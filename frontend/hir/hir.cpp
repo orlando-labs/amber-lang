@@ -1089,7 +1089,8 @@ private:
     collect_local_bindings_for_procedure(context->scope_index,
                                          context->scope_index, &bindings);
     std::sort(bindings.begin(), bindings.end(), binding_less);
-    auto add_binding_slot = [&](const binder::Binding *binding_ptr) {
+    auto add_binding_slot = [&](const binder::Binding *binding_ptr,
+                                const std::string &role_override = "") {
       if (binding_ptr == nullptr || !binding_has_slot(*binding_ptr) ||
           context->slot_by_binding_id.count(binding_ptr->id) != 0U) {
         return false;
@@ -1097,7 +1098,9 @@ private:
       const std::string slot = "l" + std::to_string(context->next_slot++);
       context->slot_by_binding_id.emplace(binding_ptr->id, slot);
       procedures_[context->procedure_index].locals.push_back(ProcedureLocal{
-          slot, binding_ptr->name, binding_ptr->role, binding_ptr->kind,
+          slot, binding_ptr->name,
+          role_override.empty() ? binding_ptr->role : role_override,
+          binding_ptr->kind,
           binding_ptr->span});
       return true;
     };
@@ -1113,12 +1116,18 @@ private:
         const binder::Binding *param_binding = nullptr;
         for (const binder::Binding *binding_ptr : bindings) {
           if (binding_ptr != nullptr && binding_ptr->name == local_name &&
-              binding_ptr->role == "param") {
+              (binding_ptr->role == "param" ||
+               binding_ptr->role == "block_param" ||
+               binding_ptr->role == "implicit_block_param")) {
             param_binding = binding_ptr;
             break;
           }
         }
-        if (add_binding_slot(param_binding)) {
+        const std::string role_override =
+            param_binding != nullptr && param_binding->role == "block_param"
+                ? "param"
+                : "";
+        if (add_binding_slot(param_binding, role_override)) {
           continue;
         }
         const std::string slot = "l" + std::to_string(context->next_slot++);
@@ -1302,7 +1311,25 @@ private:
       std::vector<std::unique_ptr<Node>> elements;
       if (const ast::ListField *list = list_field(expr, "elements")) {
         for (const std::unique_ptr<ast::Expr> &element : list->values) {
-          elements.push_back(lower_expr(*element));
+          if (element->kind == "AstArrayElement" ||
+              element->kind == "AstSetElement") {
+            auto lowered = make_node("HConditionalElement", element->span);
+            if (const ast::Expr *condition =
+                    node_field(*element, "condition")) {
+              lowered->string_field("condition_kind",
+                                    string_value(*condition, "kind"));
+              if (const ast::Expr *condition_expr =
+                      node_field(*condition, "expr")) {
+                lowered->node_field("condition", lower_expr(*condition_expr));
+              }
+            }
+            if (const ast::Expr *value = node_field(*element, "expr")) {
+              lowered->node_field("value", lower_expr(*value));
+            }
+            elements.push_back(std::move(lowered));
+          } else {
+            elements.push_back(lower_expr(*element));
+          }
         }
       }
       node->list_field("elements", std::move(elements));
@@ -1318,6 +1345,14 @@ private:
           lowered->string_field("key", string_value(*entry, "key"));
           if (const ast::Expr *value = node_field(*entry, "value")) {
             lowered->node_field("value", lower_expr(*value));
+          }
+          if (const ast::Expr *condition = node_field(*entry, "condition")) {
+            lowered->string_field("condition_kind",
+                                  string_value(*condition, "kind"));
+            if (const ast::Expr *condition_expr =
+                    node_field(*condition, "expr")) {
+              lowered->node_field("condition", lower_expr(*condition_expr));
+            }
           }
           entries.push_back(std::move(lowered));
         }
@@ -1409,6 +1444,31 @@ private:
     }
     if (expr.kind == "AstPatternAssign") {
       return lower_pattern_assign(expr);
+    }
+    if (expr.kind == "AstInlineIfExpr") {
+      auto node = make_node("HIf", expr.span);
+      node->node_field(
+          "cond", lower_expr(*node_field_required(expr, "condition")));
+
+      std::vector<std::unique_ptr<Node>> then_items;
+      auto then_last = make_node("HLastSet", expr.span);
+      then_last->node_field(
+          "expr", lower_expr(*node_field_required(expr, "consequent")));
+      then_items.push_back(std::move(then_last));
+      auto then_body = make_node("HSeq", expr.span);
+      then_body->list_field("items", std::move(then_items));
+
+      std::vector<std::unique_ptr<Node>> else_items;
+      auto else_last = make_node("HLastSet", expr.span);
+      else_last->node_field(
+          "expr", lower_expr(*node_field_required(expr, "alternative")));
+      else_items.push_back(std::move(else_last));
+      auto else_body = make_node("HSeq", expr.span);
+      else_body->list_field("items", std::move(else_items));
+
+      node->node_field("then_body", std::move(then_body));
+      node->node_field("else_body", std::move(else_body));
+      return node;
     }
     if (expr.kind == "AstIf") {
       auto node = make_node("HIf", expr.span);

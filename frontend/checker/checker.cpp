@@ -678,6 +678,19 @@ private:
     if (expr.kind == "AstBinary" || expr.kind == "AstAssign") {
       return infer_binary(expr, env);
     }
+    if (expr.kind == "AstInlineIfExpr") {
+      TypeEnv then_env = env;
+      TypeEnv else_env = env;
+      const ast::Expr *consequent = node_field(expr, "consequent");
+      const ast::Expr *alternative = node_field(expr, "alternative");
+      const TypeTerm then_type = consequent == nullptr
+                                     ? named_type("Any")
+                                     : infer_expr(*consequent, then_env);
+      const TypeTerm else_type = alternative == nullptr
+                                     ? named_type("Any")
+                                     : infer_expr(*alternative, else_env);
+      return union_type({then_type, else_type});
+    }
     if (expr.kind == "AstIf" || expr.kind == "AstUnless") {
       return infer_if(expr, env);
     }

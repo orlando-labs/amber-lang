@@ -100,7 +100,9 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
 - repo/build/test skeleton;
 - deterministic lexer token stream with source spans;
 - `amberc lex <file>` JSON token dump;
-- Pratt expression parser for precedence, assignment, syntax-faithful postfix chains, safe navigation, bare calls, and one-line block suffix chain boundaries;
+- Pratt expression parser for precedence, assignment, inline conditionals,
+  conditional collection elements, syntax-faithful postfix chains, safe
+  navigation, bare calls, and one-line block suffix chain boundaries;
 - module parser for package/import/export, def/class/class_method/mixin,
   clause-style `def`, unambiguous simple many-def sugar, include/extend,
   pass/noop, expression statements, pattern assignment, and control-flow forms

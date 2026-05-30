@@ -427,6 +427,48 @@ void test_collection_literal_lowering() {
   expect(contains_kind(*map_expr, "HConst"), "symbol value lowers to HConst");
 }
 
+void test_inline_conditional_and_conditional_literal_lowering() {
+  const amber::hir::Program program =
+      lower_ok("if true then 1 else 2\n"
+               "[1, 2 if true]\n"
+               "{id: 1 unless false}\n");
+  const amber::hir::Procedure *init =
+      procedure_by_name(program, "__module_init__");
+  expect(init != nullptr && init->body != nullptr, "module init exists");
+
+  const amber::ast::Expr *inline_stmt = list_item(*init->body, "items", 0);
+  const amber::ast::Expr *list_stmt = list_item(*init->body, "items", 1);
+  const amber::ast::Expr *map_stmt = list_item(*init->body, "items", 2);
+  expect(inline_stmt != nullptr && list_stmt != nullptr && map_stmt != nullptr,
+         "conditional lowering statements exist");
+
+  const amber::ast::Expr *inline_expr = node_field(*inline_stmt, "expr");
+  expect(inline_expr != nullptr && inline_expr->kind == "HIf",
+         "inline conditional lowers to HIf");
+
+  const amber::ast::Expr *list_expr = node_field(*list_stmt, "expr");
+  expect(list_expr != nullptr && list_expr->kind == "HListLiteral",
+         "conditional list remains HListLiteral");
+  const amber::ast::Expr *conditional_element =
+      list_item(*list_expr, "elements", 1);
+  expect(conditional_element != nullptr &&
+             conditional_element->kind == "HConditionalElement",
+         "conditional list element lowers");
+  expect(string_field(*conditional_element, "condition_kind") == "if",
+         "conditional list kind preserved");
+
+  const amber::ast::Expr *map_expr = node_field(*map_stmt, "expr");
+  expect(map_expr != nullptr && map_expr->kind == "HMapLiteral",
+         "conditional map remains HMapLiteral");
+  const amber::ast::Expr *entry = list_item(*map_expr, "entries", 0);
+  expect(entry != nullptr && entry->kind == "HMapEntry",
+         "conditional map entry lowers");
+  expect(string_field(*entry, "condition_kind") == "unless",
+         "conditional map kind preserved");
+  expect(node_field(*entry, "condition") != nullptr,
+         "conditional map condition lowers");
+}
+
 void test_shadowed_send_stays_call() {
   const amber::hir::Program program =
       lower_ok("def invoke(send, recv, selector):\n"
@@ -1168,6 +1210,7 @@ int main() {
   test_safe_call_and_index_lowering();
   test_builtin_send_lowering();
   test_collection_literal_lowering();
+  test_inline_conditional_and_conditional_literal_lowering();
   test_shadowed_send_stays_call();
   test_w13_operator_lowering();
   test_clause_method_lowering();

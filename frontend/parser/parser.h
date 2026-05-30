@@ -32,7 +32,7 @@ public:
   ParseModuleResult parse_module_unit();
 
 private:
-  enum class StopMode { Normal, InlineBlock };
+  enum class StopMode { Normal, InlineBlock, InlineIfBranch };
 
   enum class BodyContext { Module, Class, Mixin, Def };
 
@@ -79,7 +79,7 @@ private:
   std::string parse_effect_row_text();
   ClauseBody parse_clause_body();
   std::unique_ptr<ast::Expr> parse_clause();
-  std::unique_ptr<ast::Expr> parse_if_expr();
+  std::unique_ptr<ast::Expr> parse_if_expr(StopMode stop_mode);
   std::vector<std::unique_ptr<ast::Expr>> parse_if_tail();
   std::unique_ptr<ast::Expr> parse_unless_expr();
   std::unique_ptr<ast::Expr> parse_loop_expr(const char *kind);
@@ -110,6 +110,14 @@ private:
   parse_paren_or_tuple_literal(const lexer::Token &open, StopMode stop_mode);
   std::unique_ptr<ast::Expr>
   parse_brace_collection_literal(const lexer::Token &open, StopMode stop_mode);
+  std::vector<std::unique_ptr<ast::Expr>>
+  parse_collection_elements(lexer::TokenKind closing_kind,
+                            const char *conditional_kind,
+                            StopMode stop_mode);
+  std::unique_ptr<ast::Expr> parse_collection_element(
+      lexer::TokenKind closing_kind, const char *conditional_kind,
+      StopMode stop_mode);
+  std::unique_ptr<ast::Expr> parse_collection_condition();
   std::unique_ptr<ast::Expr> parse_set_literal(const lexer::Token &open,
                                                StopMode stop_mode);
   std::unique_ptr<ast::Expr> parse_map_literal(const lexer::Token &open,
@@ -127,7 +135,13 @@ private:
   bool is_stop_token(StopMode stop_mode) const;
   bool starts_primary() const;
   bool starts_bare_arg() const;
+  bool starts_indented_postfix_continuation() const;
+  bool starts_same_indent_postfix_continuation() const;
   bool starts_map_literal_entry() const;
+  bool is_contextual_at(std::size_t index, const char *text) const;
+  bool token_slice_parses_expression(std::size_t begin,
+                                     std::size_t end) const;
+  std::size_t find_inline_then_delimiter(std::size_t begin) const;
   bool can_accept_bare_call(const ast::Expr &expr) const;
   bool can_accept_direct_block_suffix(const ast::Expr &expr) const;
   bool is_assignable(const ast::Expr &expr) const;

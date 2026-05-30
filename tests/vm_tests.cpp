@@ -180,6 +180,79 @@ void test_execute_emitted_collection_literals() {
              map->entries[1].value.as_symbol().symbol_id ==
                  symbol_id_or_die(map_result.module, "ok"),
          "symbol literal map value");
+
+  amber::bytecode::EmitResult inline_if_result =
+      emit_ok("if false then 1 else 2\n");
+  amber::runtime::ExecutionResult inline_if_exec =
+      amber::runtime::execute_code(inline_if_result.module,
+                                   inline_if_result.module.init.entry_code_id);
+  expect(inline_if_exec.ok(), "inline conditional execution failed");
+  expect(inline_if_exec.value.is_integer() &&
+             inline_if_exec.value.as_integer() == 2,
+         "inline conditional returns selected branch");
+
+  amber::bytecode::EmitResult conditional_list_result =
+      emit_ok("x = 0\n"
+              "[1, (x = 1) if false, 3, x]\n");
+  amber::runtime::ExecutionResult conditional_list_exec =
+      amber::runtime::execute_code(
+          conditional_list_result.module,
+          conditional_list_result.module.init.entry_code_id);
+  expect(conditional_list_exec.ok(),
+         "conditional list literal execution failed");
+  const std::shared_ptr<amber::runtime::ListValue> conditional_list =
+      conditional_list_exec.value.as_list();
+  expect(conditional_list != nullptr && conditional_list->items.size() == 3,
+         "conditional list skips false element");
+  expect(conditional_list->items[0].is_integer() &&
+             conditional_list->items[0].as_integer() == 1,
+         "conditional list first value");
+  expect(conditional_list->items[1].is_integer() &&
+             conditional_list->items[1].as_integer() == 3,
+         "conditional list keeps following value");
+  expect(conditional_list->items[2].is_integer() &&
+             conditional_list->items[2].as_integer() == 0,
+         "conditional list does not evaluate skipped value");
+
+  amber::bytecode::EmitResult conditional_set_result =
+      emit_ok("{1, 2 if false, 3 unless false}\n");
+  amber::runtime::ExecutionResult conditional_set_exec =
+      amber::runtime::execute_code(
+          conditional_set_result.module,
+          conditional_set_result.module.init.entry_code_id);
+  expect(conditional_set_exec.ok(), "conditional set literal execution failed");
+  const std::shared_ptr<amber::runtime::SetValue> conditional_set =
+      conditional_set_exec.value.as_set();
+  expect(conditional_set != nullptr && conditional_set->items.size() == 2,
+         "conditional set applies if and unless");
+
+  amber::bytecode::EmitResult conditional_map_result =
+      emit_ok("x = 0\n"
+              "[x, {a: 1, b: (x = 1) if false, c: 3}]\n");
+  amber::runtime::ExecutionResult conditional_map_exec =
+      amber::runtime::execute_code(
+          conditional_map_result.module,
+          conditional_map_result.module.init.entry_code_id);
+  expect(conditional_map_exec.ok(),
+         "conditional map literal execution failed");
+  const std::shared_ptr<amber::runtime::ListValue> conditional_map_pair =
+      conditional_map_exec.value.as_list();
+  expect(conditional_map_pair != nullptr &&
+             conditional_map_pair->items.size() == 2,
+         "conditional map result pair");
+  expect(conditional_map_pair->items[0].is_integer() &&
+             conditional_map_pair->items[0].as_integer() == 0,
+         "conditional map does not evaluate skipped value");
+  const std::shared_ptr<amber::runtime::MapValue> conditional_map =
+      conditional_map_pair->items[1].as_map();
+  expect(conditional_map != nullptr && conditional_map->entries.size() == 2,
+         "conditional map skips false entry");
+  expect(conditional_map->entries[0].symbol_id ==
+             symbol_id_or_die(conditional_map_result.module, "a"),
+         "conditional map first key");
+  expect(conditional_map->entries[1].symbol_id ==
+             symbol_id_or_die(conditional_map_result.module, "c"),
+         "conditional map keeps later key");
 }
 
 void test_top_level_function_closure_captures_sibling_function() {
@@ -1903,6 +1976,29 @@ void expect_integer_list(const amber::runtime::Value &value,
                list->items[i].as_integer() == expected[i],
            message + " item " + std::to_string(i));
   }
+}
+
+amber::runtime::ExecutionResult execute_emitted_init(const std::string &source) {
+  const amber::bytecode::EmitResult emit_result = emit_ok(source);
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  expect(decoded.module.init.has_entry_code_id, "emitted module init exists");
+  return amber::runtime::execute_code(decoded.module,
+                                      decoded.module.init.entry_code_id);
+}
+
+void test_execute_emitted_block_map_suffixes() {
+  const amber::runtime::ExecutionResult implicit =
+      execute_emitted_init("[1,2].map: _1 * 2\n");
+  expect(implicit.ok(), "implicit placeholder map block should execute");
+  expect_integer_list(implicit.value, {2, 4}, "implicit placeholder map block");
+
+  const amber::runtime::ExecutionResult explicit_param =
+      execute_emitted_init("[1,2].map |x|: x * 2\n");
+  expect(explicit_param.ok(), "explicit param map block should execute");
+  expect_integer_list(explicit_param.value, {2, 4}, "explicit param map block");
 }
 
 void test_runtime_sequence_collections_contract() {
@@ -6033,6 +6129,7 @@ int main() {
   test_runtime_wasm_and_accelerator_metadata();
   test_runtime_modern_profile_metadata();
   test_manual_make_map();
+  test_execute_emitted_block_map_suffixes();
   test_runtime_sequence_collections_contract();
   test_runtime_map_collections_contract();
   test_manual_instance_send_dispatch();

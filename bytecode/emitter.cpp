@@ -254,6 +254,11 @@ private:
     std::size_t operand_index = 0;
   };
 
+  struct CompiledMapEntry {
+    std::uint32_t symbol_id = 0;
+    std::uint32_t value_reg = 0;
+  };
+
   std::uint32_t alloc_temp();
   std::uint32_t current_pc() const;
   std::size_t emit_instruction(Opcode opcode,
@@ -280,7 +285,22 @@ private:
                                     const std::string &name);
   std::uint32_t compile_const(const ast::Expr &expr);
   std::uint32_t compile_sequence_literal(const ast::Expr &expr, Opcode opcode);
+  void emit_make_sequence_from_regs(std::uint32_t dst,
+                                    const std::vector<std::uint32_t> &regs,
+                                    Opcode opcode, const lexer::Span &span);
+  void compile_sequence_literal_suffix(
+      const ast::ListField *elements, std::size_t index,
+      std::vector<std::uint32_t> prefix_regs, std::uint32_t dst, Opcode opcode,
+      const lexer::Span &span);
   std::uint32_t compile_map_literal(const ast::Expr &expr);
+  void emit_make_map_from_entries(
+      std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
+      const lexer::Span &span);
+  void compile_map_literal_suffix(const ast::ListField *entries,
+                                  std::size_t index,
+                                  std::vector<CompiledMapEntry> prefix_entries,
+                                  std::uint32_t dst,
+                                  const lexer::Span &span);
   std::uint32_t compile_cond_source(const ast::Expr &cond, Opcode *jump_opcode,
                                     bool *jump_to_then_branch);
   std::uint32_t block_reg_operand(const ast::Expr &expr);
@@ -1283,6 +1303,21 @@ std::uint32_t CodeEmitter::compile_const(const ast::Expr &expr) {
 std::uint32_t CodeEmitter::compile_sequence_literal(const ast::Expr &expr,
                                                     Opcode opcode) {
   const ast::ListField *elements = list_field(expr, "elements");
+  bool has_conditional = false;
+  if (elements != nullptr) {
+    for (const std::unique_ptr<ast::Expr> &element : elements->values) {
+      if (element != nullptr && element->kind == "HConditionalElement") {
+        has_conditional = true;
+        break;
+      }
+    }
+  }
+  if (has_conditional) {
+    const std::uint32_t dst = alloc_temp();
+    compile_sequence_literal_suffix(elements, 0, {}, dst, opcode, expr.span);
+    return dst;
+  }
+
   const std::uint32_t count =
       elements == nullptr ? 0U
                           : static_cast<std::uint32_t>(elements->values.size());
@@ -1307,10 +1342,93 @@ std::uint32_t CodeEmitter::compile_sequence_literal(const ast::Expr &expr,
   return dst;
 }
 
+void CodeEmitter::emit_make_sequence_from_regs(
+    std::uint32_t dst, const std::vector<std::uint32_t> &regs, Opcode opcode,
+    const lexer::Span &span) {
+  std::uint32_t first_reg = 0;
+  if (!regs.empty()) {
+    first_reg = alloc_temp();
+    for (std::size_t i = 1; i < regs.size(); ++i) {
+      alloc_temp();
+    }
+    for (std::size_t i = 0; i < regs.size(); ++i) {
+      const std::uint32_t target = first_reg + static_cast<std::uint32_t>(i);
+      if (regs[i] != target) {
+        emit_instruction(Opcode::Move, {{target, false}, {regs[i], false}},
+                         span);
+      }
+    }
+  }
+  emit_instruction(
+      opcode,
+      {{dst, false}, {first_reg, false},
+       {static_cast<std::int64_t>(regs.size()), false}},
+      span);
+}
+
+void CodeEmitter::compile_sequence_literal_suffix(
+    const ast::ListField *elements, std::size_t index,
+    std::vector<std::uint32_t> prefix_regs, std::uint32_t dst, Opcode opcode,
+    const lexer::Span &span) {
+  if (elements == nullptr || index >= elements->values.size()) {
+    emit_make_sequence_from_regs(dst, prefix_regs, opcode, span);
+    return;
+  }
+
+  const ast::Expr &element = *elements->values[index];
+  if (element.kind != "HConditionalElement") {
+    prefix_regs.push_back(compile_expr(element));
+    compile_sequence_literal_suffix(elements, index + 1, std::move(prefix_regs),
+                                    dst, opcode, span);
+    return;
+  }
+
+  const ast::Expr *condition = node_field(element, "condition");
+  const ast::Expr *value = node_field(element, "value");
+  if (condition == nullptr || value == nullptr) {
+    diag(element.span, "BC2001", "invalid conditional collection element");
+    compile_sequence_literal_suffix(elements, index + 1, std::move(prefix_regs),
+                                    dst, opcode, span);
+    return;
+  }
+
+  const std::uint32_t condition_reg = compile_expr(*condition);
+  const Opcode skip_opcode =
+      string_field(element, "condition_kind") == "unless" ? Opcode::JumpIfTrue
+                                                          : Opcode::JumpIfFalse;
+  const std::size_t jump_skip = emit_instruction(
+      skip_opcode, {{condition_reg, false}, {-1, true}}, condition->span);
+
+  std::vector<std::uint32_t> with_value = prefix_regs;
+  with_value.push_back(compile_expr(*value));
+  compile_sequence_literal_suffix(elements, index + 1, std::move(with_value),
+                                  dst, opcode, span);
+  const std::size_t jump_end =
+      emit_instruction(Opcode::Jump, {{-1, true}}, element.span);
+  patch_operand(jump_skip, 1, current_pc(), false);
+  compile_sequence_literal_suffix(elements, index + 1, std::move(prefix_regs),
+                                  dst, opcode, span);
+  patch_operand(jump_end, 0, current_pc(), false);
+}
+
 std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
   const ast::ListField *entries = list_field(expr, "entries");
   const std::uint32_t dst = alloc_temp();
-  std::vector<std::pair<std::uint32_t, std::uint32_t>> compiled_entries;
+  bool has_conditional = false;
+  if (entries != nullptr) {
+    for (const std::unique_ptr<ast::Expr> &entry : entries->values) {
+      if (entry != nullptr && node_field(*entry, "condition") != nullptr) {
+        has_conditional = true;
+        break;
+      }
+    }
+  }
+  if (has_conditional) {
+    compile_map_literal_suffix(entries, 0, {}, dst, expr.span);
+    return dst;
+  }
+
+  std::vector<CompiledMapEntry> compiled_entries;
 
   if (entries != nullptr) {
     for (const std::unique_ptr<ast::Expr> &entry : entries->values) {
@@ -1324,21 +1442,76 @@ std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
               ? unquote_string_literal(string_field(*entry, "key"))
               : string_field(*entry, "key");
       compiled_entries.push_back(
-          {owner_->intern_symbol(key), compile_expr(*value)});
+          CompiledMapEntry{owner_->intern_symbol(key), compile_expr(*value)});
     }
   }
 
+  emit_make_map_from_entries(dst, compiled_entries, expr.span);
+  return dst;
+}
+
+void CodeEmitter::emit_make_map_from_entries(
+    std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
+    const lexer::Span &span) {
   std::vector<InstructionOperand> operands;
   operands.push_back({dst, false});
-  operands.push_back(
-      {static_cast<std::int64_t>(compiled_entries.size()), false});
-  for (const auto &[symbol_id, reg] : compiled_entries) {
-    operands.push_back({symbol_id, false});
-    operands.push_back({reg, false});
+  operands.push_back({static_cast<std::int64_t>(entries.size()), false});
+  for (const CompiledMapEntry &entry : entries) {
+    operands.push_back({entry.symbol_id, false});
+    operands.push_back({entry.value_reg, false});
   }
 
-  emit_instruction(Opcode::MakeMap, std::move(operands), expr.span);
-  return dst;
+  emit_instruction(Opcode::MakeMap, std::move(operands), span);
+}
+
+void CodeEmitter::compile_map_literal_suffix(
+    const ast::ListField *entries, std::size_t index,
+    std::vector<CompiledMapEntry> prefix_entries, std::uint32_t dst,
+    const lexer::Span &span) {
+  if (entries == nullptr || index >= entries->values.size()) {
+    emit_make_map_from_entries(dst, prefix_entries, span);
+    return;
+  }
+
+  const ast::Expr &entry = *entries->values[index];
+  const ast::Expr *value = node_field(entry, "value");
+  if (entry.kind != "HMapEntry" || value == nullptr) {
+    diag(entry.span, "BC2001", "invalid map literal entry");
+    compile_map_literal_suffix(entries, index + 1, std::move(prefix_entries),
+                               dst, span);
+    return;
+  }
+  const std::string key =
+      string_field(entry, "key_kind") == "string"
+          ? unquote_string_literal(string_field(entry, "key"))
+          : string_field(entry, "key");
+  const std::uint32_t symbol_id = owner_->intern_symbol(key);
+  const ast::Expr *condition = node_field(entry, "condition");
+  if (condition == nullptr) {
+    prefix_entries.push_back(
+        CompiledMapEntry{symbol_id, compile_expr(*value)});
+    compile_map_literal_suffix(entries, index + 1, std::move(prefix_entries),
+                               dst, span);
+    return;
+  }
+
+  const std::uint32_t condition_reg = compile_expr(*condition);
+  const Opcode skip_opcode =
+      string_field(entry, "condition_kind") == "unless" ? Opcode::JumpIfTrue
+                                                        : Opcode::JumpIfFalse;
+  const std::size_t jump_skip = emit_instruction(
+      skip_opcode, {{condition_reg, false}, {-1, true}}, condition->span);
+
+  std::vector<CompiledMapEntry> with_entry = prefix_entries;
+  with_entry.push_back(CompiledMapEntry{symbol_id, compile_expr(*value)});
+  compile_map_literal_suffix(entries, index + 1, std::move(with_entry), dst,
+                             span);
+  const std::size_t jump_end =
+      emit_instruction(Opcode::Jump, {{-1, true}}, entry.span);
+  patch_operand(jump_skip, 1, current_pc(), false);
+  compile_map_literal_suffix(entries, index + 1, std::move(prefix_entries), dst,
+                             span);
+  patch_operand(jump_end, 0, current_pc(), false);
 }
 
 std::uint32_t CodeEmitter::compile_lookup_like(const ast::Expr &expr,

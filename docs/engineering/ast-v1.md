@@ -39,6 +39,26 @@ lowered into ordinary call/member nodes:
   key was written as an identifier/symbol or string key;
 - symbol literals are `AstLiteral(token = SYMBOL, value = name)`.
 
+Conditional collection elements preserve their surface condition in the parser
+AST:
+
+- list elements with trailing `if` / `unless` are wrapped as
+  `AstArrayElement(expr, condition)`;
+- set elements with trailing `if` / `unless` are wrapped as
+  `AstSetElement(expr, condition)`;
+- map entries keep the same `AstMapEntry` shape and add optional `condition`;
+- `condition` is `AstCollectionCondition(kind = if | unless, expr)`.
+
+Unconditional list/set elements remain the expression node itself for backward
+compatibility with existing `elements[]` consumers.
+
+## Inline conditionals
+
+Inline conditional expressions use `if condition then consequent else
+alternative` and parse as `AstInlineIfExpr(form = inline, condition,
+consequent, alternative)`. The parser deliberately rejects C-style
+`cond ? a : b` and missing-`else` inline forms with dedicated diagnostics.
+
 ## Clause defs
 
 - canonical `def ...:` bodies that begin with `when` / `else` are parsed as

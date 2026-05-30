@@ -435,6 +435,7 @@ ParseModuleResult Parser::parse_module_unit() {
   while (match(lexer::TokenKind::Newline)) {
   }
   while (!at_end()) {
+    const std::size_t before = current_;
     std::unique_ptr<ast::Expr> item = parse_statement(BodyContext::Module);
     if (item) {
       if (item->kind == "AstPackageDecl") {
@@ -448,6 +449,14 @@ ParseModuleResult Parser::parse_module_unit() {
       append_item_or_merge_clause_def(&items, std::move(item));
     }
     while (match(lexer::TokenKind::Newline)) {
+    }
+    if (current_ == before && !at_end()) {
+      error(current(), check(lexer::TokenKind::Dedent)
+                           ? "unexpected dedent at module level"
+                           : "unexpected token at module level");
+      advance();
+      while (match(lexer::TokenKind::Newline)) {
+      }
     }
   }
 
@@ -1287,8 +1296,47 @@ bool Parser::is_simple_many_def_header() const {
   return false;
 }
 
-std::unique_ptr<ast::Expr> Parser::parse_if_expr() {
+std::unique_ptr<ast::Expr> Parser::parse_if_expr(StopMode stop_mode) {
   const lexer::Token start = advance();
+  const std::size_t then_index = find_inline_then_delimiter(current_);
+  if (then_index < tokens_.size()) {
+    const std::vector<lexer::Token> cond_tokens =
+        expression_slice_tokens(tokens_, current_, then_index);
+    Parser cond_parser(cond_tokens);
+    ParseResult cond_parse = cond_parser.parse_expression_unit();
+    diagnostics_.insert(diagnostics_.end(), cond_parse.diagnostics.begin(),
+                        cond_parse.diagnostics.end());
+    std::unique_ptr<ast::Expr> cond = std::move(cond_parse.expr);
+    if (cond == nullptr) {
+      cond = ast::make_expr("AstError", start.span);
+    }
+
+    current_ = then_index;
+    match_contextual("then");
+    std::unique_ptr<ast::Expr> consequent =
+        parse_expression(1, StopMode::InlineIfBranch);
+    std::unique_ptr<ast::Expr> alternative;
+    if (match(lexer::TokenKind::KeywordElse)) {
+      alternative = parse_expression(1, stop_mode);
+    } else {
+      error_code(current(), "AMB-SYN-INLINE-IF-MISSING-ELSE",
+                 "Inline conditional expression requires `else`.");
+      alternative = ast::make_expr("AstError", current_zero_width_span());
+    }
+
+    const lexer::Span end_span =
+        alternative != nullptr
+            ? alternative->span
+            : (consequent != nullptr ? consequent->span : cond->span);
+    auto node =
+        ast::make_expr("AstInlineIfExpr", ast::join_spans(start.span, end_span));
+    node->string_field("form", "inline");
+    node->node_field("condition", std::move(cond));
+    node->node_field("consequent", std::move(consequent));
+    node->node_field("alternative", std::move(alternative));
+    return node;
+  }
+
   std::unique_ptr<ast::Expr> cond = parse_expression(1, StopMode::Normal);
   consume(lexer::TokenKind::Colon, "expected ':' after if condition");
   std::vector<std::unique_ptr<ast::Expr>> then_body =
@@ -1310,7 +1358,7 @@ std::vector<std::unique_ptr<ast::Expr>> Parser::parse_if_tail() {
   std::vector<std::unique_ptr<ast::Expr>> else_body;
   if (match(lexer::TokenKind::KeywordElse)) {
     if (check(lexer::TokenKind::KeywordIf)) {
-      else_body.push_back(parse_if_expr());
+      else_body.push_back(parse_if_expr(StopMode::Normal));
     } else {
       consume(lexer::TokenKind::Colon, "expected ':' after else");
       else_body = parse_control_body(BodyContext::Def);
@@ -1590,8 +1638,18 @@ bool Parser::match_contextual(const char *text) {
 std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
                                                     StopMode stop_mode) {
   std::unique_ptr<ast::Expr> left = parse_prefix(stop_mode);
+  int postfix_continuation_depth = 0;
 
   while (true) {
+    if (starts_indented_postfix_continuation()) {
+      advance();
+      advance();
+      ++postfix_continuation_depth;
+    } else if (postfix_continuation_depth > 0 &&
+               starts_same_indent_postfix_continuation()) {
+      advance();
+    }
+
     if (is_stop_token(stop_mode) && !(check(lexer::TokenKind::Colon) &&
                                       can_accept_direct_block_suffix(*left))) {
       break;
@@ -1606,6 +1664,18 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
       if (current_ != before) {
         continue;
       }
+    }
+
+    if (check(lexer::TokenKind::Question)) {
+      const lexer::Token question = advance();
+      error_code(question, "AMB-SYN-INLINE-TERNARY-CSTYLE",
+                 "C-style ternary operator is not supported; use `if cond "
+                 "then a else b`.");
+      parse_expression(1, StopMode::Normal);
+      if (match(lexer::TokenKind::Colon)) {
+        parse_expression(1, stop_mode);
+      }
+      break;
     }
 
     InfixInfo info{};
@@ -1630,6 +1700,15 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
     left = std::move(binary);
   }
 
+  while (postfix_continuation_depth > 0) {
+    match(lexer::TokenKind::Newline);
+    if (match(lexer::TokenKind::Dedent)) {
+      --postfix_continuation_depth;
+      continue;
+    }
+    break;
+  }
+
   return left;
 }
 
@@ -1642,7 +1721,7 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   }
   if (token.kind == lexer::TokenKind::KeywordIf) {
     --current_;
-    return parse_if_expr();
+    return parse_if_expr(stop_mode);
   }
   if (token.kind == lexer::TokenKind::KeywordUnless) {
     --current_;
@@ -1721,7 +1800,8 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   }
   if (token.kind == lexer::TokenKind::LBracket) {
     std::vector<std::unique_ptr<ast::Expr>> elements =
-        parse_expr_list(lexer::TokenKind::RBracket, stop_mode);
+        parse_collection_elements(lexer::TokenKind::RBracket,
+                                  "AstArrayElement", stop_mode);
     const lexer::Token close = previous();
     auto expr = ast::make_expr("AstListLiteral",
                                ast::join_spans(token.span, close.span));
@@ -1795,12 +1875,81 @@ Parser::parse_brace_collection_literal(const lexer::Token &open,
   return parse_set_literal(open, stop_mode);
 }
 
+std::vector<std::unique_ptr<ast::Expr>>
+Parser::parse_collection_elements(lexer::TokenKind closing_kind,
+                                  const char *conditional_kind,
+                                  StopMode stop_mode) {
+  std::vector<std::unique_ptr<ast::Expr>> elements;
+  if (match(closing_kind)) {
+    return elements;
+  }
+  while (!check(closing_kind) && !at_end()) {
+    elements.push_back(
+        parse_collection_element(closing_kind, conditional_kind, stop_mode));
+    if (!match(lexer::TokenKind::Comma)) {
+      break;
+    }
+    if (check(closing_kind)) {
+      break;
+    }
+  }
+  consume(closing_kind, "expected closing delimiter");
+  return elements;
+}
+
+std::unique_ptr<ast::Expr>
+Parser::parse_collection_element(lexer::TokenKind closing_kind,
+                                 const char *conditional_kind,
+                                 StopMode stop_mode) {
+  (void)closing_kind;
+  if (check(lexer::TokenKind::KeywordIf) ||
+      check(lexer::TokenKind::KeywordUnless)) {
+    const lexer::Token token = advance();
+    error_code(token, "AMB-SYN-CONDITIONAL-ELEMENT-MISSING-VALUE",
+               "Conditional collection element requires a value before `if` "
+               "or `unless`.");
+    auto error_node = ast::make_expr("AstError", token.span);
+    error_node->string_field("token", token.lexeme);
+    return error_node;
+  }
+
+  std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
+  std::unique_ptr<ast::Expr> condition = parse_collection_condition();
+  if (condition == nullptr) {
+    return value;
+  }
+
+  auto element = ast::make_expr(
+      conditional_kind, value == nullptr
+                            ? condition->span
+                            : ast::join_spans(value->span, condition->span));
+  element->node_field("expr", std::move(value));
+  element->node_field("condition", std::move(condition));
+  return element;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_collection_condition() {
+  if (!check(lexer::TokenKind::KeywordIf) &&
+      !check(lexer::TokenKind::KeywordUnless)) {
+    return nullptr;
+  }
+  const lexer::Token token = advance();
+  std::unique_ptr<ast::Expr> expr = parse_expression(1, StopMode::Normal);
+  auto condition = ast::make_expr(
+      "AstCollectionCondition",
+      expr == nullptr ? token.span : ast::join_spans(token.span, expr->span));
+  condition->string_field("kind", token.lexeme);
+  condition->node_field("expr", std::move(expr));
+  return condition;
+}
+
 std::unique_ptr<ast::Expr> Parser::parse_set_literal(const lexer::Token &open,
                                                      StopMode stop_mode) {
   std::vector<std::unique_ptr<ast::Expr>> elements;
 
   while (!check(lexer::TokenKind::RBrace) && !at_end()) {
-    elements.push_back(parse_expression(1, stop_mode));
+    elements.push_back(parse_collection_element(lexer::TokenKind::RBrace,
+                                                "AstSetElement", stop_mode));
     if (!match(lexer::TokenKind::Comma)) {
       break;
     }
@@ -1853,12 +2002,19 @@ std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
 
     consume(lexer::TokenKind::Colon, "expected ':' after map literal key");
     std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
+    std::unique_ptr<ast::Expr> condition = parse_collection_condition();
     auto entry = ast::make_expr(
         "AstMapEntry",
-        value == nullptr ? key_span : ast::join_spans(key_span, value->span));
+        condition != nullptr
+            ? ast::join_spans(key_span, condition->span)
+            : (value == nullptr ? key_span
+                                : ast::join_spans(key_span, value->span)));
     entry->string_field("key_kind", key_kind);
     entry->string_field("key", key_value);
     entry->node_field("value", std::move(value));
+    if (condition != nullptr) {
+      entry->node_field("condition", std::move(condition));
+    }
     entries.push_back(std::move(entry));
 
     if (!match(lexer::TokenKind::Comma)) {
@@ -2230,6 +2386,8 @@ bool Parser::is_stop_token(StopMode stop_mode) const {
     return true;
   case lexer::TokenKind::ChainDot:
     return stop_mode == StopMode::InlineBlock;
+  case lexer::TokenKind::KeywordElse:
+    return stop_mode == StopMode::InlineIfBranch;
   default:
     return false;
   }
@@ -2284,6 +2442,27 @@ bool Parser::starts_bare_arg() const {
   }
 }
 
+bool Parser::starts_indented_postfix_continuation() const {
+  if (!check(lexer::TokenKind::Newline) ||
+      peek().kind != lexer::TokenKind::Indent) {
+    return false;
+  }
+  const lexer::TokenKind next = peek(2).kind;
+  return next == lexer::TokenKind::Dot ||
+         next == lexer::TokenKind::ChainDot ||
+         next == lexer::TokenKind::SafeDot;
+}
+
+bool Parser::starts_same_indent_postfix_continuation() const {
+  if (!check(lexer::TokenKind::Newline)) {
+    return false;
+  }
+  const lexer::TokenKind next = peek().kind;
+  return next == lexer::TokenKind::Dot ||
+         next == lexer::TokenKind::ChainDot ||
+         next == lexer::TokenKind::SafeDot;
+}
+
 bool Parser::starts_map_literal_entry() const {
   if (current().kind == lexer::TokenKind::Identifier ||
       current().kind == lexer::TokenKind::String) {
@@ -2294,6 +2473,59 @@ bool Parser::starts_map_literal_entry() const {
     return peek(2).kind == lexer::TokenKind::Colon;
   }
   return false;
+}
+
+bool Parser::is_contextual_at(std::size_t index, const char *text) const {
+  return index < tokens_.size() &&
+         tokens_[index].kind == lexer::TokenKind::Identifier &&
+         tokens_[index].lexeme == text;
+}
+
+bool Parser::token_slice_parses_expression(std::size_t begin,
+                                           std::size_t end) const {
+  if (end <= begin) {
+    return false;
+  }
+  const std::vector<lexer::Token> slice =
+      expression_slice_tokens(tokens_, begin, end);
+  Parser parser(slice);
+  ParseResult result = parser.parse_expression_unit();
+  return result.ok();
+}
+
+std::size_t Parser::find_inline_then_delimiter(std::size_t begin) const {
+  int bracket_depth = 0;
+  for (std::size_t index = begin; index < tokens_.size(); ++index) {
+    const lexer::TokenKind kind = tokens_[index].kind;
+    if (bracket_depth == 0) {
+      if (kind == lexer::TokenKind::Colon ||
+          kind == lexer::TokenKind::Newline ||
+          kind == lexer::TokenKind::Dedent ||
+          kind == lexer::TokenKind::Comma ||
+          kind == lexer::TokenKind::RParen ||
+          kind == lexer::TokenKind::RBracket ||
+          kind == lexer::TokenKind::RBrace ||
+          kind == lexer::TokenKind::Eof) {
+        break;
+      }
+      if (is_contextual_at(index, "then") &&
+          token_slice_parses_expression(begin, index)) {
+        return index;
+      }
+    }
+
+    if (kind == lexer::TokenKind::LParen ||
+        kind == lexer::TokenKind::LBracket ||
+        kind == lexer::TokenKind::LBrace) {
+      ++bracket_depth;
+    } else if ((kind == lexer::TokenKind::RParen ||
+                kind == lexer::TokenKind::RBracket ||
+                kind == lexer::TokenKind::RBrace) &&
+               bracket_depth > 0) {
+      --bracket_depth;
+    }
+  }
+  return tokens_.size();
 }
 
 bool Parser::can_accept_bare_call(const ast::Expr &expr) const {

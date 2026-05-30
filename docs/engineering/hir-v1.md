@@ -42,6 +42,9 @@ Currently lowered node families:
 - collection literals as `HListLiteral(elements[])`,
   `HTupleLiteral(elements[])`, `HSetLiteral(elements[])`, and
   `HMapLiteral(entries[])` with `HMapEntry(key_kind, key, value)`;
+- conditional list/set elements as `HConditionalElement(condition_kind,
+  condition, value)` inside the enclosing list/set literal, and conditional map
+  entries as `HMapEntry(..., condition_kind, condition)`;
 - local/import/placeholder reads as `HLoadLocal`;
 - closure capture reads and writes as `HLoadCapture` / `HStoreCapture`;
 - explicit safe-nav guards as `HIf(cond = HIsNull(...), ...)`;
@@ -58,7 +61,7 @@ Currently lowered node families:
 - unary operators as `HSend(receiver, selector = not | u+ | u-, ...)`;
 - reflective builtin `send(recv, selector, ...)` as `HSend` for static string
   selectors or `HSendDyn(receiver, selector_expr, ...)` otherwise;
-- `if` / `unless` as `HIf`;
+- `if` / `unless` block forms and inline `if ... then ... else ...` as `HIf`;
 - `while` / `until` / `loop` / `do while` as `HLoop(kind, ...)`;
 - `break` as `HBreak`;
 - `case` / `case!` as `HMatchDispatch` with `HMatchArm`;

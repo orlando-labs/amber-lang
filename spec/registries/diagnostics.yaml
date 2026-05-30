@@ -3,6 +3,9 @@ spec_anchor: amber_spec_consolidated_v20_1_main.md
 diagnostics:
   - { code: L0001, severity: error, phase: lexer, condition: lexer cannot produce a valid token stream }
   - { code: P0001, severity: error, phase: parser, condition: parser cannot produce a valid syntax-faithful AST }
+  - { code: AMB-SYN-INLINE-TERNARY-CSTYLE, severity: error, phase: parser, condition: C-style ternary operator is not supported }
+  - { code: AMB-SYN-INLINE-IF-MISSING-ELSE, severity: error, phase: parser, condition: inline conditional expression is missing required else branch }
+  - { code: AMB-SYN-CONDITIONAL-ELEMENT-MISSING-VALUE, severity: error, phase: parser, condition: conditional collection element has if or unless without a preceding value }
   - { code: B0001, severity: error, phase: binder, condition: duplicate lexical binding in one scope }
   - { code: B0002, severity: error, phase: binder, condition: wildcard underscore used as an ordinary binding or reference }
   - { code: E1001, severity: error, phase: pattern, condition: duplicate binding names in one pattern }

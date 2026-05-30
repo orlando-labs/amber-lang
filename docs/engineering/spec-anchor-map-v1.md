@@ -12,7 +12,7 @@ Check with `make spec-sync-check`.
 | `README.md` | 1 |
 | `amber_spec_consolidated_v20_1_main.md` | 91 |
 | `amber_compilable_project_layer_v20_1_complete.md` | 157 |
-| `docs/engineering/ast-v1.md` | 4 |
+| `docs/engineering/ast-v1.md` | 5 |
 | `docs/engineering/bc-v1.md` | 4 |
 | `docs/engineering/bind-v1.md` | 1 |
 | `docs/engineering/build-v1.md` | 4 |
@@ -34,14 +34,14 @@ Check with `make spec-sync-check`.
 | `docs/engineering/runtime-v1.md` | 1 |
 | `docs/engineering/typed-v1.md` | 1 |
 | `docs/engineering/wasm-accelerator-v1.md` | 1 |
-| `spec/changelog/v20.1.md` | 9 |
+| `spec/changelog/v20.1.md` | 10 |
 
 ## Registry Inventory
 
 | Registry | Lines | SHA-256 |
 | --- | ---: | --- |
 | `spec/registries/bytecode_sections.yaml` | 88 | `beb53d82556008ef1c60bfa9955722b05b2b87b9c2df74110484a93224dec7e9` |
-| `spec/registries/diagnostics.yaml` | 52 | `e1c1bdc034dcf1e426acb2b330129633003fef114e9b880f844d3db67afd83ac` |
+| `spec/registries/diagnostics.yaml` | 55 | `1d427f0b3a4a79deea46d2336ea9047d64e6f564163a97d39f2e8351bc63f2b9` |
 | `spec/registries/opcodes.yaml` | 100 | `809f8a89a1da015b0aef01890ed2e8f8f2be7139eac314f14c714208cafe2431` |
 | `spec/registries/prelude.yaml` | 239 | `d1fc19408d070c1cacc9de2d0c7bc66cd305b3b9aef49337fb5fc5c8b2b0e254` |
 | `spec/registries/runtime_errors.yaml` | 33 | `66a45177057ccf8ebc699d6fa5b25a8ecbf506ab4ce59157cbe6a1811ab9705d` |
@@ -303,7 +303,8 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/ast-v1.md`](../../docs/engineering/ast-v1.md) | 1 | 1 | [`amberastv1`](../../docs/engineering/ast-v1.md#amberastv1) | amber.ast.v1 |
 | [`docs/engineering/ast-v1.md`](../../docs/engineering/ast-v1.md) | 14 | 2 | [`postfix-chains`](../../docs/engineering/ast-v1.md#postfix-chains) | Postfix chains |
 | [`docs/engineering/ast-v1.md`](../../docs/engineering/ast-v1.md) | 29 | 2 | [`collection-literals`](../../docs/engineering/ast-v1.md#collection-literals) | Collection Literals |
-| [`docs/engineering/ast-v1.md`](../../docs/engineering/ast-v1.md) | 42 | 2 | [`clause-defs`](../../docs/engineering/ast-v1.md#clause-defs) | Clause defs |
+| [`docs/engineering/ast-v1.md`](../../docs/engineering/ast-v1.md) | 55 | 2 | [`inline-conditionals`](../../docs/engineering/ast-v1.md#inline-conditionals) | Inline conditionals |
+| [`docs/engineering/ast-v1.md`](../../docs/engineering/ast-v1.md) | 62 | 2 | [`clause-defs`](../../docs/engineering/ast-v1.md#clause-defs) | Clause defs |
 | [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 1 | 1 | [`amberbcv1`](../../docs/engineering/bc-v1.md#amberbcv1) | amber.bc.v1 |
 | [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 22 | 2 | [`container`](../../docs/engineering/bc-v1.md#container) | Container |
 | [`docs/engineering/bc-v1.md`](../../docs/engineering/bc-v1.md) | 55 | 2 | [`record-encoding`](../../docs/engineering/bc-v1.md#record-encoding) | Record Encoding |
@@ -348,11 +349,12 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/typed-v1.md`](../../docs/engineering/typed-v1.md) | 1 | 1 | [`ambertypedv1`](../../docs/engineering/typed-v1.md#ambertypedv1) | amber.typed.v1 |
 | [`docs/engineering/wasm-accelerator-v1.md`](../../docs/engineering/wasm-accelerator-v1.md) | 1 | 1 | [`amberwasmacceleratorv1`](../../docs/engineering/wasm-accelerator-v1.md#amberwasmacceleratorv1) | amber.wasm/accelerator.v1 |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 1 | 1 | [`amber-v201-changelog`](../../spec/changelog/v20.1.md#amber-v201-changelog) | Amber v20.1 Changelog |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 5 | 2 | [`w12-documentationspec-sync`](../../spec/changelog/v20.1.md#w12-documentationspec-sync) | W12 Documentation/Spec Sync |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 17 | 2 | [`w11-modern-profile-baseline`](../../spec/changelog/v20.1.md#w11-modern-profile-baseline) | W11 Modern Profile Baseline |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 27 | 2 | [`w13-compiler-contract-closure-slice`](../../spec/changelog/v20.1.md#w13-compiler-contract-closure-slice) | W13 Compiler-Contract Closure Slice |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 51 | 2 | [`w14-buildbootstrapconformance-closure`](../../spec/changelog/v20.1.md#w14-buildbootstrapconformance-closure) | W14 Build/Bootstrap/Conformance Closure |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 67 | 2 | [`w15-native-readiness-metadata-closure`](../../spec/changelog/v20.1.md#w15-native-readiness-metadata-closure) | W15 Native-Readiness Metadata Closure |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 78 | 2 | [`post-w15-artifact-cli-surface`](../../spec/changelog/v20.1.md#post-w15-artifact-cli-surface) | Post-W15 Artifact CLI Surface |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 99 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 112 | 2 | [`closure-work-status`](../../spec/changelog/v20.1.md#closure-work-status) | Closure Work Status |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 5 | 2 | [`amberext-001-inline-conditionals-and-conditional-collections`](../../spec/changelog/v20.1.md#amberext-001-inline-conditionals-and-conditional-collections) | AMBEREXT-001 Inline Conditionals and Conditional Collections |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 17 | 2 | [`w12-documentationspec-sync`](../../spec/changelog/v20.1.md#w12-documentationspec-sync) | W12 Documentation/Spec Sync |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 29 | 2 | [`w11-modern-profile-baseline`](../../spec/changelog/v20.1.md#w11-modern-profile-baseline) | W11 Modern Profile Baseline |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 39 | 2 | [`w13-compiler-contract-closure-slice`](../../spec/changelog/v20.1.md#w13-compiler-contract-closure-slice) | W13 Compiler-Contract Closure Slice |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 63 | 2 | [`w14-buildbootstrapconformance-closure`](../../spec/changelog/v20.1.md#w14-buildbootstrapconformance-closure) | W14 Build/Bootstrap/Conformance Closure |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 79 | 2 | [`w15-native-readiness-metadata-closure`](../../spec/changelog/v20.1.md#w15-native-readiness-metadata-closure) | W15 Native-Readiness Metadata Closure |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 90 | 2 | [`post-w15-artifact-cli-surface`](../../spec/changelog/v20.1.md#post-w15-artifact-cli-surface) | Post-W15 Artifact CLI Surface |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 111 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 124 | 2 | [`closure-work-status`](../../spec/changelog/v20.1.md#closure-work-status) | Closure Work Status |

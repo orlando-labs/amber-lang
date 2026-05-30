@@ -27,6 +27,30 @@ std::unique_ptr<Expr> parse_ok(const std::string &source) {
   return std::move(parse_result.expr);
 }
 
+amber::parser::ParseResult parse_raw(const std::string &source) {
+  amber::lexer::Lexer lexer(source, "<test>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  return parser.parse_expression_unit();
+}
+
+amber::parser::ParseModuleResult parse_module_raw(const std::string &source) {
+  amber::lexer::Lexer lexer(source, "<test>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  return parser.parse_module_unit();
+}
+
 const Expr &node_field(const Expr &expr, const std::string &name) {
   for (const amber::ast::NodeField &field : expr.node_fields) {
     if (field.name == name) {
@@ -73,6 +97,16 @@ void expect(bool condition, const std::string &message) {
     std::cerr << "parser test failed: " << message << "\n";
     std::exit(1);
   }
+}
+
+bool has_diagnostic(const amber::parser::ParseResult &result,
+                    const std::string &code) {
+  for (const amber::lexer::Diagnostic &diagnostic : result.diagnostics) {
+    if (diagnostic.code == code) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void test_precedence() {
@@ -127,6 +161,36 @@ void test_inline_block_chain_boundary() {
   expect(bool_field(*tails.values[2], "chain_boundary"),
          "uniq continues outer chain");
   expect(tails.values[3]->kind == "AstTailCall", "uniq call tail");
+}
+
+void test_indented_postfix_continuation() {
+  amber::parser::ParseModuleResult result =
+      parse_module_raw("[1, 2]\n"
+                       "  .each _1 * 2\n");
+  if (!result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
+    std::exit(1);
+  }
+
+  expect(result.items.size() == 1, "continued postfix item count");
+  const Expr &stmt = *result.items[0];
+  expect(stmt.kind == "AstExprStmt", "continued postfix statement");
+  const Expr &expr = node_field(stmt, "expr");
+  expect(expr.kind == "AstPostfixChain", "continued postfix chain");
+  const amber::ast::ListField &tails = list_field(expr, "tails");
+  expect(tails.values.size() == 2, "continued postfix tail count");
+  expect(tails.values[0]->kind == "AstTailDotMember", "continued member");
+  expect(string_field(*tails.values[0], "name") == "each",
+         "continued member name");
+  expect(tails.values[1]->kind == "AstTailCall", "continued bare call");
+}
+
+void test_module_stray_indent_progresses() {
+  amber::parser::ParseModuleResult result =
+      parse_module_raw("value\n"
+                       "  stray\n");
+  expect(!result.ok(), "stray top-level indent is rejected");
+  expect(!result.diagnostics.empty(), "stray indent emits diagnostic");
 }
 
 void test_unicode_names() {
@@ -199,6 +263,79 @@ void test_collection_literals() {
          "string key is preserved");
   expect(string_field(*entries.values[2], "key") == "kind",
          "explicit symbol key text");
+}
+
+void test_inline_conditional_expression() {
+  std::unique_ptr<Expr> expr = parse_ok("if ready? then :ready else :idle\n");
+  expect(expr->kind == "AstInlineIfExpr", "inline if expression parses");
+  expect(string_field(*expr, "form") == "inline", "inline if form preserved");
+  expect(node_field(*expr, "condition").kind == "AstName",
+         "inline if condition");
+  expect(string_field(node_field(*expr, "condition"), "name") == "ready?",
+         "question-mark method name stays intact");
+  expect(node_field(*expr, "consequent").kind == "AstLiteral",
+         "inline if consequent");
+  expect(node_field(*expr, "alternative").kind == "AstLiteral",
+         "inline if alternative");
+
+  std::unique_ptr<Expr> nested =
+      parse_ok("if if a then b else c then d else e\n");
+  expect(nested->kind == "AstInlineIfExpr", "nested inline if parses");
+  expect(node_field(*nested, "condition").kind == "AstInlineIfExpr",
+         "nested inline if condition preserved");
+}
+
+void test_conditional_collection_elements() {
+  std::unique_ptr<Expr> list =
+      parse_ok("[1, 2 if include_two?, 3 unless skip_three?]\n");
+  expect(list->kind == "AstListLiteral", "conditional list parses");
+  const amber::ast::ListField &list_elements = list_field(*list, "elements");
+  expect(list_elements.values.size() == 3, "conditional list element count");
+  expect(list_elements.values[1]->kind == "AstArrayElement",
+         "conditional list element wraps value");
+  expect(string_field(node_field(*list_elements.values[1], "condition"),
+                      "kind") == "if",
+         "list condition kind");
+  expect(node_field(*list_elements.values[1], "expr").kind == "AstLiteral",
+         "list conditional element value");
+  expect(list_elements.values[2]->kind == "AstArrayElement",
+         "unless list element wraps value");
+  expect(string_field(node_field(*list_elements.values[2], "condition"),
+                      "kind") == "unless",
+         "list unless condition kind");
+
+  std::unique_ptr<Expr> set = parse_ok("{:read, :write if can_write?}\n");
+  expect(set->kind == "AstSetLiteral", "conditional set parses");
+  const amber::ast::ListField &set_elements = list_field(*set, "elements");
+  expect(set_elements.values[1]->kind == "AstSetElement",
+         "conditional set element wraps value");
+
+  std::unique_ptr<Expr> map =
+      parse_ok("{a: 1, b: 2 if x == 3, c: 3 unless disabled?}\n");
+  expect(map->kind == "AstMapLiteral", "conditional map parses");
+  const amber::ast::ListField &entries = list_field(*map, "entries");
+  expect(entries.values.size() == 3, "conditional map entry count");
+  expect(node_field(*entries.values[1], "condition").kind ==
+             "AstCollectionCondition",
+         "map condition node preserved");
+  expect(string_field(node_field(*entries.values[2], "condition"), "kind") ==
+             "unless",
+         "map unless condition kind");
+}
+
+void test_inline_conditional_diagnostics() {
+  amber::parser::ParseResult ternary = parse_raw("cond ? a : b\n");
+  expect(has_diagnostic(ternary, "AMB-SYN-INLINE-TERNARY-CSTYLE"),
+         "C-style ternary diagnostic");
+
+  amber::parser::ParseResult missing_else = parse_raw("if cond then a\n");
+  expect(has_diagnostic(missing_else, "AMB-SYN-INLINE-IF-MISSING-ELSE"),
+         "inline if missing else diagnostic");
+
+  amber::parser::ParseResult missing_value = parse_raw("[if cond,]\n");
+  expect(has_diagnostic(missing_value,
+                        "AMB-SYN-CONDITIONAL-ELEMENT-MISSING-VALUE"),
+         "conditional element missing value diagnostic");
 }
 
 void test_clause_def_forms() {
@@ -473,9 +610,14 @@ int main() {
   test_bare_call();
   test_safe_nav_and_index();
   test_inline_block_chain_boundary();
+  test_indented_postfix_continuation();
+  test_module_stray_indent_progresses();
   test_unicode_names();
   test_range_precedence();
   test_collection_literals();
+  test_inline_conditional_expression();
+  test_conditional_collection_elements();
+  test_inline_conditional_diagnostics();
   test_clause_def_forms();
   test_effect_row_signature();
   test_pattern_assignment_and_block_param_patterns();
