@@ -495,8 +495,8 @@ private:
     return "";
   }
 
-  std::string module_local_slot_for_binding(
-      const binder::Binding &binding) const {
+  std::string
+  module_local_slot_for_binding(const binder::Binding &binding) const {
     for (const Procedure &procedure : procedures_) {
       if (procedure.id != module_procedure_id_) {
         continue;
@@ -510,8 +510,7 @@ private:
     return "";
   }
 
-  std::vector<CapturePlan>
-  build_module_method_capture_plans(int scope_index) {
+  std::vector<CapturePlan> build_module_method_capture_plans(int scope_index) {
     std::vector<CapturePlan> plans;
     if (scope_index < 0) {
       return plans;
@@ -568,9 +567,9 @@ private:
     return nodes;
   }
 
-  std::unique_ptr<Node> make_function_binding_init(
-      const ast::Expr &item, const std::string &slot,
-      const std::string &procedure_id) {
+  std::unique_ptr<Node>
+  make_function_binding_init(const ast::Expr &item, const std::string &slot,
+                             const std::string &procedure_id) {
     auto closure = make_node("HClosure", item.span);
     closure->string_field("procedure", procedure_id);
     closure->list_field("captures",
@@ -787,11 +786,11 @@ private:
       if (dispatch_side == "module") {
         capture_plans = build_module_method_capture_plans(scope_index);
       }
-      const std::string procedure_id = lower_procedure(
-          scope_index, string_value(item, "name"), "method",
-          procedure_name_for_owner(string_value(item, "name")), signature,
-          body_items, item.span, capture_plans, nullptr,
-          node_field(item, "signature"));
+      const std::string procedure_id =
+          lower_procedure(scope_index, string_value(item, "name"), "method",
+                          procedure_name_for_owner(string_value(item, "name")),
+                          signature, body_items, item.span, capture_plans,
+                          nullptr, node_field(item, "signature"));
       node->string_field("procedure", procedure_id);
       for (const Procedure &procedure : procedures_) {
         if (procedure.id == procedure_id && procedure.signature != nullptr) {
@@ -1100,8 +1099,7 @@ private:
       procedures_[context->procedure_index].locals.push_back(ProcedureLocal{
           slot, binding_ptr->name,
           role_override.empty() ? binding_ptr->role : role_override,
-          binding_ptr->kind,
-          binding_ptr->span});
+          binding_ptr->kind, binding_ptr->span});
       return true;
     };
 
@@ -1447,8 +1445,8 @@ private:
     }
     if (expr.kind == "AstInlineIfExpr") {
       auto node = make_node("HIf", expr.span);
-      node->node_field(
-          "cond", lower_expr(*node_field_required(expr, "condition")));
+      node->node_field("cond",
+                       lower_expr(*node_field_required(expr, "condition")));
 
       std::vector<std::unique_ptr<Node>> then_items;
       auto then_last = make_node("HLastSet", expr.span);
@@ -1608,6 +1606,15 @@ private:
       auto node = make_node("HLoadConst", expr.span);
       node->string_field("path", binding.name);
       return node;
+    }
+    if (binding.kind == "import_alias") {
+      const std::string stdlib_path =
+          stdlib_import_alias_constant_path(binding);
+      if (!stdlib_path.empty()) {
+        auto node = make_node("HLoadConst", expr.span);
+        node->string_field("path", stdlib_path);
+        return node;
+      }
     }
     const std::string slot = slot_for_binding(binding.id);
     if (!slot.empty()) {
@@ -2095,6 +2102,38 @@ private:
       return path;
     }
     return path.substr(dot + 1);
+  }
+
+  static std::string
+  stdlib_import_alias_constant_path(const binder::Binding &binding) {
+    if (binding.role == "module_import" && binding.source == "task") {
+      return "task";
+    }
+    if (binding.role == "module_import" && binding.source == "task.flow") {
+      return "task.flow";
+    }
+    if (binding.role != "from_import") {
+      return "";
+    }
+    if (binding.source == "sync:Channel") {
+      return "sync.Channel";
+    }
+    if (binding.source == "sync:Mutex") {
+      return "sync.Mutex";
+    }
+    if (binding.source == "sync:Atomic") {
+      return "sync.Atomic";
+    }
+    if (binding.source == "sync:Barrier") {
+      return "sync.Barrier";
+    }
+    if (binding.source == "task.flow:Flow") {
+      return "Flow";
+    }
+    if (binding.source == "task.flow:ThreadedCollection") {
+      return "ThreadedCollection";
+    }
+    return "";
   }
 
   static std::string map_unary_selector(const std::string &op) {

@@ -176,6 +176,47 @@ Current implemented slice:
   `transform_values`, `merge`, `contains?`, `include?`, `+` / `|` merge
   aliases, `keys`, `values`, and `entries` with insertion-order-preserving
   results and canonical `IndexError` / `KeyError` edge behavior;
+- `STD-010` task module runtime-facing surface in `runtime/vm.{h,cpp}` with
+  `RuntimeTaskModule::{async,spawn,sync,sleep,yield_current}` and
+  `RuntimeTaskHandle` task/strand ids, `wait(timeout)`, non-blocking `result`,
+  `failure`, cancellation, resume, and state predicates backed by the existing
+  W7 scheduler; `sync` installs a sync-depth guard for future `sync:` /
+  `task.sync:` lowering and suppresses cooperative yielding inside that block;
+- `STD-011` `RuntimeTaskHandle` state/result/failure contract with
+  `RuntimeTaskHandleState`, `RuntimeTaskHandleSnapshot`, `state()`,
+  `snapshot()`, state-bearing `wait` / `result` / `failure` responses, and
+  canonical task error names for inactive, unfinished, timed-out, failed, and
+  cancelled handles;
+- `STD-012` Channel API and FIFO corpus with `RuntimeChannel` construction,
+  `send`, move-aware `send`, `recv`, `close`, `closed`, and `stats`; checked
+  payload shareability rejection, `ChannelClosedError` close edges,
+  buffered/rendezvous FIFO, waiting sender/receiver FIFO, timeout, and receive
+  cancellation behavior are covered by `stdlib_task_tests`;
+- `STD-013` Mutex API and synchronize guard with `RuntimeMutex` construction,
+  `lock`, `unlock`, `locked`, `owned`, `synchronize`, and `stats`;
+  non-reentrant `DeadlockError`, non-owner/unlocked `OwnershipError`, waiter
+  FIFO acquisition, block return propagation, exception-unwind unlock, and lock
+  cancellation behavior are covered by `stdlib_task_tests`;
+- `STD-014` Atomic API with `RuntimeAtomic` integer compatibility facade plus
+  value-level `get_value`, `set_value`, `compare_and_set_value`, and `update`;
+  atomic payload writes reject incompatible confined values with
+  `AtomicCompatibilityError`, heap CAS compares by identity, update uses a
+  seq-cst CAS loop that may re-run its block, and cross-strand counter behavior
+  is covered by `stdlib_task_tests`;
+- `STD-015` inter-thread flow surface with `RuntimeBarrier` reusable generation
+  barriers and `RuntimeFlowModule::{gather,scatter,scatter_map,scatter_reduce,
+  broadcast}`; flow workers reuse `RuntimeTaskHandle`, preserve ordered gather
+  by default, validate checked-mode partitions/results with `IsolationError`,
+  expose collect/ignore/first failure policies, and cover barrier release,
+  timeout/cancellation, ordered gather, map, reduce, broadcast, failure
+  collection, and checked/unchecked isolation in `stdlib_task_tests`;
+- `STD-016` auto-parallel collection facade with `RuntimeThreadedCollection`
+  over `RuntimeFlowModule`, covering ordered `each`, `map`, `select`, `reject`,
+  `flat_map`, `combination(count)`, and `permutation(count)` for future
+  `[...].threaded(workers)` lowering; checked mode validates inputs and worker
+  results with `IsolationError`, unchecked mode delegates responsibility to the
+  caller, flow failure policies are preserved, and `stdlib_task_tests` covers
+  ordered transforms, generated rows, failure collection, and isolation edges;
 - `W8.4` conformance gate in `tools/ambertest` with deterministic fixture
   discovery, focused mismatch rendering, phase aliases for
   `lower`/`compile`/`disasm`, positive `check`/`run`/`load` lanes, and
@@ -251,4 +292,5 @@ Current implemented slice:
 
 Still intentionally missing in later layers:
 
-- stdlib/language surfacing for the W10.1-W10.2 runtime primitives.
+- stdlib/language surfacing for W10.1-W10.2 advanced runtime primitives outside
+  the closed task/sync/flow/threaded stdlib slice.

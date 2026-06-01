@@ -1622,6 +1622,18 @@ keyword, отрицательный/нулевой размер окна там,
 
 Выбрасывается, когда non-reentrant `Mutex` наблюдает повторный `lock()` тем же владельцем без промежуточного `unlock()`.
 
+#### `OwnershipError`
+
+Выбрасывается, когда владелец синхронизационного объекта не совпадает с вызывающим контекстом: например, при `Mutex.unlock()` на незахваченном mutex или при unlock не-владельцем.
+
+#### `AtomicError`
+
+Базовый класс ошибок atomic API.
+
+#### `AtomicCompatibilityError`
+
+Выбрасывается, когда `Atomic.new`, `Atomic.set`, `Atomic.compare_and_set` или `Atomic.update` пытается записать значение, не входящее в v1 atomic-compatible payload set.
+
 #### `CapabilityError`
 
 Выбрасывается в Amber/Capabilities & Sandbox Profile, когда код пытается выполнить host-resource operation без выданной capability: filesystem, network, environment, process, clock, random, FFI, GPU/device, database, secret store или другой host-gated ресурс.
@@ -1866,11 +1878,17 @@ ch.close()
 m = Mutex.new()
 m.lock()
 m.unlock()
+m.locked?()
+m.owned?()
+m.synchronize:
+  critical_section()
 
 a = Atomic.new(0)
 a.get()
 a.set(1)
 a.compare_and_set(1, 2)
+a.update |x|:
+  x + 1
 ```
 
 Нормативно:
@@ -1883,7 +1901,12 @@ a.compare_and_set(1, 2)
 - `recv()` из закрытого buffered-channel обязан вернуть уже поставленные элементы; `recv()` из закрытого и пустого channel обязан бросать `ChannelClosedError`;
 - порядок элементов в одном channel — FIFO; очереди ожидающих `send`/`recv` на одном channel normative FIFO; более сильная глобальная fairness не гарантируется;
 - `Mutex` в v1 non-reentrant; повторный `lock()` тем же владельцем без промежуточного `unlock()` обязан завершаться `DeadlockError`;
-- `Atomic.get()`, `Atomic.set(...)` и `Atomic.compare_and_set(...)` в v1 обладают seq-cst semantics.
+- `Mutex.unlock()` на незахваченном mutex или из не-владеющего task/strand/thread обязан завершаться `OwnershipError`;
+- `Mutex.synchronize` эквивалентен `lock(); try body; finally unlock()`, возвращает результат блока и освобождает mutex при exception/cancellation unwind;
+- atomic-compatible payload set v1: `null`, `Bool`, `Integer`, `Symbol`, константные метаобъекты языка и shareable heap references; попытка записать non-compatible replacement обязана завершаться `AtomicCompatibilityError`;
+- `Atomic.compare_and_set(expected, replacement)` сравнивает primitive значения по значению, а heap references по identity; user code не исполняется внутри CAS comparison;
+- `Atomic.update` эквивалентен CAS-loop `old = get(); replacement = block(old); compare_and_set(old, replacement)` до успешной записи, возвращает новое значение, abort/propagate при exception из блока и обязан предупреждать, что block может быть выполнен больше одного раза;
+- `Atomic.get()`, `Atomic.set(...)`, `Atomic.compare_and_set(...)` и `Atomic.update(...)` в v1 обладают seq-cst semantics.
 
 Эти решения сознательно выбирают простой reference contract для реализации и corpus; более слабые memory orders и альтернативные closed-channel profiles не являются частью v1.
 

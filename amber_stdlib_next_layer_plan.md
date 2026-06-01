@@ -692,13 +692,66 @@ moved = move(value)
 
 ## Task (Async or Threading) / Synchronization primitives
 
-- `STD-010` Task module public API.
-- `STD-011` TaskHandle state/result/failure API.
-- `STD-012` Channel API and FIFO corpus.
-- `STD-013` Mutex API plus `synchronize`.
-- `STD-014` Atomic API plus `update`.
-- `STD-015` Inter-thread communication: send/receive, barrier, map-gather/reduce
-- `STD-016` Auto-parallel collections iteration/combination/permutation methods: [1, 2, 3].threaded(3).map: ...
+Detailed project see in amber_threading_async_api_project_v1.md
+
+- `STD-010` Task module public API. Done: `RuntimeTaskModule` exposes
+  `async`, `spawn`, `sync`, `sleep`, and `yield_current` over the existing
+  scheduler, returning `RuntimeTaskHandle` values with task/strand ids,
+  `wait(timeout)`, non-blocking `result`, `failure`, `cancel`, `resume`, and
+  state predicates;
+  `sync` creates a non-yielding synchronous block for future `sync:` /
+  `task.sync:` lowering inside async scopes; `stdlib_task_tests` covers success,
+  timeout without auto-cancel, cooperative cancellation, sync-block yield
+  suppression, and failure surfacing.
+- `STD-011` TaskHandle state/result/failure API. Done:
+  `RuntimeTaskHandleState`, `RuntimeTaskHandleSnapshot`, `state()`, and
+  `snapshot()` expose inactive/running/terminal states; `wait`, `result`, and
+  `failure` carry state and canonical `TaskNotDoneError`, `TaskFailedError`,
+  `CancelledError`, `TimeoutError`, and `LifetimeError` surfaces; task tests
+  cover inactive handles, unfinished non-blocking reads, success, failure, and
+  cancellation.
+- `STD-012` Channel API and FIFO corpus. Done: `RuntimeChannel` exposes
+  bounded buffered and rendezvous construction, `send`, move-aware `send`,
+  `recv`, `close`, `closed`, and `stats`; checked sends reject non-shareable
+  payloads with `IsolationError`; close/empty recv and send-after-close report
+  `ChannelClosedError`; `stdlib_task_tests` covers buffered FIFO, waiting
+  sender FIFO, waiting receiver FIFO, close idempotency, closed-channel drain
+  semantics, send/recv timeouts, receive cancellation, and isolation
+  rejection.
+- `STD-013` Mutex API plus `synchronize`. Done: `RuntimeMutex` exposes
+  `lock`, `unlock`, `locked`, `owned`, `synchronize`, and `stats`; same-owner
+  double lock reports `DeadlockError`, unlocked/non-owner unlock reports
+  `OwnershipError`, waiting lockers acquire FIFO, `synchronize` returns the
+  block value and unlocks on exception unwind, and cancellation-aware lock waits
+  are covered by `stdlib_task_tests`.
+- `STD-014` Atomic API plus `update`. Done: `RuntimeAtomic` keeps the existing
+  integer `get` / `set` / `compare_and_set` facade and adds value-level
+  `get_value`, `set_value`, `compare_and_set_value`, and `update`; atomic
+  payload writes reject non-compatible confined values with
+  `AtomicCompatibilityError`, heap CAS compares by identity, `update` returns
+  the replacement value after a seq-cst CAS loop and can re-run the block on
+  contention, and `stdlib_task_tests` covers guard failures, deterministic
+  retry, and a cross-strand counter.
+- `STD-015` Inter-thread communication: send/receive, barrier,
+  scatter-gather/map-reduce. Done: `RuntimeBarrier` adds reusable generation
+  barriers with timeout/cancellation-aware waits and stats;
+  `RuntimeFlowModule` adds ordered `gather`, `scatter`, `scatter_map`,
+  `scatter_reduce`, and `broadcast` over `RuntimeTaskHandle` workers with
+  checked/unchecked isolation modes, default first-failure cancellation,
+  collect/ignore failure policies, shareability validation for partitions and
+  worker results, flow stats, and `stdlib_task_tests` coverage for ordered
+  gather, reduce, broadcast, failure collection, and isolation edges.
+- `STD-016` Auto-parallel collections iteration/combination/permutation
+  methods. Done: `RuntimeThreadedCollection` provides the runtime-facing
+  facade for `[1, 2, 3].threaded(3).map: ...` style lowering, backed by
+  `RuntimeFlowModule`; it supports ordered `each`, `map`, `select`, `reject`,
+  `flat_map`, `combination(count)`, and `permutation(count)`, preserves checked
+  isolation by default, supports explicit unchecked mode via `RuntimeFlowOptions`,
+  surfaces worker failures through the existing flow failure policies, records
+  threaded collection and flow stats, and `stdlib_task_tests` covers ordered
+  transforms, auto-parallel each, generated combinations/permutations,
+  checked/unchecked isolation, result shareability rejection, and failure
+  collection.
 
 ## Watch
 

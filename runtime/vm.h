@@ -26,7 +26,15 @@ struct TupleValue;
 struct SetValue;
 struct MapValue;
 struct MapEntry;
+class RuntimeAtomic;
+class RuntimeBarrier;
+class RuntimeChannel;
+class RuntimeFlowModule;
 class RuntimeHeap;
+class RuntimeMutex;
+class RuntimeTaskHandle;
+class RuntimeTaskModule;
+class RuntimeThreadedCollection;
 
 enum class HeapObjectKind { Instance, List, Tuple, Set, Map, Closure };
 
@@ -92,13 +100,32 @@ struct ClassObjectValue {
   std::uint32_t class_index = 0;
 };
 
+enum class RuntimeNativeTypeKind {
+  TaskModule,
+  Channel,
+  Mutex,
+  Atomic,
+  Barrier,
+  Flow,
+  ThreadedCollection
+};
+
+struct NativeTypeValue {
+  RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
+};
+
 struct Value {
-  using Payload =
-      std::variant<std::monostate, bool, std::int64_t, double, SymbolValue,
-                   StringValue, ClassObjectValue, std::shared_ptr<ClosureValue>,
-                   std::shared_ptr<InstanceValue>, std::shared_ptr<ListValue>,
-                   std::shared_ptr<TupleValue>, std::shared_ptr<SetValue>,
-                   std::shared_ptr<MapValue>>;
+  using Payload = std::variant<
+      std::monostate, bool, std::int64_t, double, SymbolValue, StringValue,
+      ClassObjectValue, std::shared_ptr<ClosureValue>,
+      std::shared_ptr<InstanceValue>, std::shared_ptr<ListValue>,
+      std::shared_ptr<TupleValue>, std::shared_ptr<SetValue>,
+      std::shared_ptr<MapValue>, NativeTypeValue,
+      std::shared_ptr<RuntimeTaskModule>, std::shared_ptr<RuntimeTaskHandle>,
+      std::shared_ptr<RuntimeChannel>, std::shared_ptr<RuntimeMutex>,
+      std::shared_ptr<RuntimeAtomic>, std::shared_ptr<RuntimeBarrier>,
+      std::shared_ptr<RuntimeFlowModule>,
+      std::shared_ptr<RuntimeThreadedCollection>>;
 
   Payload payload;
 
@@ -111,6 +138,16 @@ struct Value {
   static Value class_object(std::uint32_t class_index);
   static Value closure(std::shared_ptr<ClosureValue> value);
   static Value instance(std::shared_ptr<InstanceValue> value);
+  static Value native_type(RuntimeNativeTypeKind kind);
+  static Value task_module(std::shared_ptr<RuntimeTaskModule> value);
+  static Value task_handle(std::shared_ptr<RuntimeTaskHandle> value);
+  static Value channel(std::shared_ptr<RuntimeChannel> value);
+  static Value mutex(std::shared_ptr<RuntimeMutex> value);
+  static Value atomic(std::shared_ptr<RuntimeAtomic> value);
+  static Value barrier(std::shared_ptr<RuntimeBarrier> value);
+  static Value flow_module(std::shared_ptr<RuntimeFlowModule> value);
+  static Value
+  threaded_collection(std::shared_ptr<RuntimeThreadedCollection> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -125,6 +162,15 @@ struct Value {
   bool is_tuple() const;
   bool is_set() const;
   bool is_map() const;
+  bool is_native_type() const;
+  bool is_task_module() const;
+  bool is_task_handle() const;
+  bool is_channel() const;
+  bool is_mutex() const;
+  bool is_atomic() const;
+  bool is_barrier() const;
+  bool is_flow_module() const;
+  bool is_threaded_collection() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -138,6 +184,15 @@ struct Value {
   std::shared_ptr<TupleValue> as_tuple() const;
   std::shared_ptr<SetValue> as_set() const;
   std::shared_ptr<MapValue> as_map() const;
+  NativeTypeValue as_native_type() const;
+  std::shared_ptr<RuntimeTaskModule> as_task_module() const;
+  std::shared_ptr<RuntimeTaskHandle> as_task_handle() const;
+  std::shared_ptr<RuntimeChannel> as_channel() const;
+  std::shared_ptr<RuntimeMutex> as_mutex() const;
+  std::shared_ptr<RuntimeAtomic> as_atomic() const;
+  std::shared_ptr<RuntimeBarrier> as_barrier() const;
+  std::shared_ptr<RuntimeFlowModule> as_flow_module() const;
+  std::shared_ptr<RuntimeThreadedCollection> as_threaded_collection() const;
 };
 
 struct InstanceValue {
@@ -330,6 +385,7 @@ std::uint64_t current_runtime_worker_id();
 std::uint64_t current_runtime_strand_id();
 std::uint64_t current_runtime_task_id();
 bool current_runtime_task_cancel_requested();
+bool current_runtime_task_sync_active();
 
 class RuntimeTaskFailure : public std::exception {
 public:
@@ -657,6 +713,7 @@ struct RuntimeMutexResult {
   bool unlocked = false;
   bool timed_out = false;
   bool cancelled = false;
+  Value value = Value::null();
   std::string error_name;
   std::string message;
 };
@@ -686,7 +743,11 @@ public:
   RuntimeMutexResult
   lock(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
   RuntimeMutexResult unlock();
+  RuntimeMutexResult synchronize(
+      std::function<Value()> function,
+      std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
   bool locked() const;
+  bool owned() const;
   RuntimeMutexStats stats() const;
 
 private:
@@ -697,15 +758,71 @@ private:
 class RuntimeAtomic {
 public:
   explicit RuntimeAtomic(std::int64_t value = 0);
+  explicit RuntimeAtomic(Value value);
   RuntimeAtomic(const RuntimeAtomic &) = delete;
   RuntimeAtomic &operator=(const RuntimeAtomic &) = delete;
   RuntimeAtomic(RuntimeAtomic &&) noexcept;
   RuntimeAtomic &operator=(RuntimeAtomic &&) noexcept;
   ~RuntimeAtomic();
 
+  struct Result {
+    bool ok = false;
+    bool matched = false;
+    bool updated = false;
+    Value value = Value::null();
+    std::uint64_t attempts = 0;
+    std::string error_name;
+    std::string message;
+  };
+
   std::int64_t get() const;
   void set(std::int64_t value);
   bool compare_and_set(std::int64_t expected, std::int64_t desired);
+  Value get_value() const;
+  Result set_value(Value value);
+  Result compare_and_set_value(const Value &expected, Value desired);
+  Result update(std::function<Value(const Value &)> function);
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+struct RuntimeBarrierResult {
+  bool ok = false;
+  bool passed = false;
+  bool last = false;
+  bool timed_out = false;
+  bool cancelled = false;
+  std::uint64_t generation = 0;
+  std::uint64_t parties = 0;
+  std::uint64_t waiting = 0;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeBarrierStats {
+  std::uint64_t parties = 0;
+  std::uint64_t waiting = 0;
+  std::uint64_t generation = 0;
+  std::uint64_t arrivals = 0;
+  std::uint64_t passes = 0;
+  std::uint64_t timeouts = 0;
+  std::uint64_t cancellations = 0;
+};
+
+class RuntimeBarrier {
+public:
+  explicit RuntimeBarrier(std::size_t parties);
+  RuntimeBarrier(const RuntimeBarrier &) = delete;
+  RuntimeBarrier &operator=(const RuntimeBarrier &) = delete;
+  RuntimeBarrier(RuntimeBarrier &&) noexcept;
+  RuntimeBarrier &operator=(RuntimeBarrier &&) noexcept;
+  ~RuntimeBarrier();
+
+  RuntimeBarrierResult
+  wait(std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
+  RuntimeBarrierStats stats() const;
 
 private:
   class Impl;
@@ -750,6 +867,252 @@ public:
   std::optional<RuntimeStrandSnapshot>
   strand_snapshot(std::uint64_t strand_id) const;
   std::optional<RuntimeTaskSnapshot> task_snapshot(std::uint64_t task_id) const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+enum class RuntimeTaskHandleState {
+  Inactive,
+  New,
+  Runnable,
+  Running,
+  Sleeping,
+  Waiting,
+  Done,
+  Failed,
+  Cancelled
+};
+
+struct RuntimeTaskHandleSnapshot {
+  bool active = false;
+  std::uint64_t task_id = 0;
+  std::uint64_t strand_id = 0;
+  RuntimeTaskHandleState state = RuntimeTaskHandleState::Inactive;
+  bool ready = false;
+  bool succeeded = false;
+  bool cancelled = false;
+  bool failed = false;
+  bool running = false;
+  bool cancellation_requested = false;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeTaskPublicResult {
+  bool ok = false;
+  bool ready = false;
+  bool timed_out = false;
+  bool cancelled = false;
+  bool failed = false;
+  RuntimeTaskHandleState state = RuntimeTaskHandleState::Inactive;
+  Value value = Value::null();
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeTaskFailureInfo {
+  bool ready = false;
+  bool failed = false;
+  bool cancelled = false;
+  RuntimeTaskHandleState state = RuntimeTaskHandleState::Inactive;
+  std::string error_name;
+  std::string message;
+};
+
+class RuntimeTaskHandle {
+public:
+  RuntimeTaskHandle();
+
+  bool active() const;
+  std::uint64_t task_id() const;
+  std::uint64_t strand_id() const;
+  RuntimeTaskHandleState state() const;
+  RuntimeTaskHandleSnapshot snapshot() const;
+
+  RuntimeTaskPublicResult wait(std::chrono::milliseconds timeout =
+                                   std::chrono::milliseconds::max()) const;
+  RuntimeTaskPublicResult result() const;
+  RuntimeTaskFailureInfo failure() const;
+
+  bool cancel() const;
+  bool resume() const;
+  bool cancelled() const;
+  bool done() const;
+  bool running() const;
+  bool failed() const;
+
+private:
+  struct State;
+
+  RuntimeTaskHandle(std::shared_ptr<RuntimeScheduler> scheduler,
+                    std::uint64_t task_id, std::shared_ptr<State> state);
+
+  std::shared_ptr<RuntimeScheduler> scheduler_;
+  std::uint64_t task_id_ = 0;
+  std::shared_ptr<State> state_;
+
+  friend class RuntimeTaskModule;
+};
+
+class RuntimeTaskModule {
+public:
+  using TaskFunction = std::function<Value()>;
+
+  explicit RuntimeTaskModule(std::size_t worker_count = 0);
+  explicit RuntimeTaskModule(RuntimeSchedulerConfig config);
+
+  RuntimeTaskHandle async(TaskFunction function);
+  RuntimeTaskHandle spawn(TaskFunction function);
+
+  Value sync(TaskFunction function) const;
+  bool sync_active() const;
+  void sleep(std::chrono::milliseconds duration) const;
+  void yield_current() const;
+
+  RuntimeScheduler &scheduler();
+  const RuntimeScheduler &scheduler() const;
+
+private:
+  enum class SpawnKind { SameStrand, NewStrand };
+
+  RuntimeTaskHandle spawn_with_kind(SpawnKind kind, TaskFunction function);
+
+  std::shared_ptr<RuntimeScheduler> scheduler_;
+};
+
+enum class RuntimeFlowFailurePolicy { First, Collect, Ignore };
+
+enum class RuntimeFlowIsolationMode { Checked, Unchecked };
+
+enum class RuntimeFlowPartitionPolicy { Items, Chunks, Stride };
+
+struct RuntimeFlowOptions {
+  std::size_t workers = 0;
+  bool ordered = true;
+  RuntimeFlowFailurePolicy failure_policy = RuntimeFlowFailurePolicy::First;
+  RuntimeFlowIsolationMode isolation = RuntimeFlowIsolationMode::Checked;
+  RuntimeFlowPartitionPolicy partition_policy =
+      RuntimeFlowPartitionPolicy::Items;
+  std::chrono::milliseconds timeout = std::chrono::milliseconds::max();
+};
+
+struct RuntimeFlowFailure {
+  std::size_t index = 0;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeFlowGatherResult {
+  bool ok = false;
+  bool failed = false;
+  bool timed_out = false;
+  bool cancelled = false;
+  std::vector<Value> values;
+  std::vector<RuntimeFlowFailure> failures;
+  std::uint64_t completed_count = 0;
+  std::uint64_t failed_count = 0;
+  std::uint64_t cancelled_count = 0;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeFlowReduceResult {
+  bool ok = false;
+  bool failed = false;
+  Value value = Value::null();
+  RuntimeFlowGatherResult gather;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeFlowStats {
+  std::uint64_t flows = 0;
+  std::uint64_t gathers = 0;
+  std::uint64_t worker_tasks = 0;
+  std::uint64_t completed_workers = 0;
+  std::uint64_t failed_workers = 0;
+  std::uint64_t cancelled_workers = 0;
+  std::uint64_t timeouts = 0;
+  std::uint64_t reductions = 0;
+  std::uint64_t broadcasts = 0;
+  std::uint64_t isolation_rejections = 0;
+};
+
+class RuntimeFlowModule {
+public:
+  using MapFunction = std::function<Value(const Value &, std::size_t)>;
+  using ReduceFunction = std::function<Value(const Value &, const Value &)>;
+  using BroadcastFunction = std::function<Value(const Value &, std::size_t)>;
+
+  explicit RuntimeFlowModule(std::size_t worker_count = 0);
+  explicit RuntimeFlowModule(RuntimeSchedulerConfig config);
+  RuntimeFlowModule(const RuntimeFlowModule &) = delete;
+  RuntimeFlowModule &operator=(const RuntimeFlowModule &) = delete;
+  RuntimeFlowModule(RuntimeFlowModule &&) noexcept;
+  RuntimeFlowModule &operator=(RuntimeFlowModule &&) noexcept;
+  ~RuntimeFlowModule();
+
+  RuntimeFlowGatherResult gather(std::vector<RuntimeTaskHandle> handles,
+                                 RuntimeFlowOptions options = {});
+  RuntimeFlowGatherResult scatter(std::vector<Value> partitions,
+                                  MapFunction function,
+                                  RuntimeFlowOptions options = {});
+  RuntimeFlowGatherResult scatter_map(std::vector<Value> items,
+                                      MapFunction function,
+                                      RuntimeFlowOptions options = {});
+  RuntimeFlowReduceResult scatter_reduce(std::vector<Value> items, Value init,
+                                         MapFunction map, ReduceFunction reduce,
+                                         RuntimeFlowOptions options = {});
+  RuntimeFlowGatherResult broadcast(Value value, std::size_t workers,
+                                    BroadcastFunction function,
+                                    RuntimeFlowOptions options = {});
+  RuntimeFlowStats stats() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+struct RuntimeThreadedCollectionStats {
+  std::uint64_t operations = 0;
+  std::uint64_t each_operations = 0;
+  std::uint64_t map_operations = 0;
+  std::uint64_t filter_operations = 0;
+  std::uint64_t flat_map_operations = 0;
+  std::uint64_t combination_operations = 0;
+  std::uint64_t permutation_operations = 0;
+  std::uint64_t generated_values = 0;
+  RuntimeFlowStats flow;
+};
+
+class RuntimeThreadedCollection {
+public:
+  using EachFunction = std::function<void(const Value &, std::size_t)>;
+  using MapFunction = std::function<Value(const Value &, std::size_t)>;
+  using PredicateFunction = std::function<bool(const Value &, std::size_t)>;
+  using FlatMapFunction =
+      std::function<std::vector<Value>(const Value &, std::size_t)>;
+
+  explicit RuntimeThreadedCollection(std::vector<Value> items,
+                                     std::size_t workers = 0,
+                                     RuntimeFlowOptions options = {});
+  RuntimeThreadedCollection(const RuntimeThreadedCollection &) = delete;
+  RuntimeThreadedCollection &
+  operator=(const RuntimeThreadedCollection &) = delete;
+  RuntimeThreadedCollection(RuntimeThreadedCollection &&) noexcept;
+  RuntimeThreadedCollection &operator=(RuntimeThreadedCollection &&) noexcept;
+  ~RuntimeThreadedCollection();
+
+  RuntimeFlowGatherResult each(EachFunction function);
+  RuntimeFlowGatherResult map(MapFunction function);
+  RuntimeFlowGatherResult select(PredicateFunction function);
+  RuntimeFlowGatherResult reject(PredicateFunction function);
+  RuntimeFlowGatherResult flat_map(FlatMapFunction function);
+  RuntimeFlowGatherResult combination(std::size_t count);
+  RuntimeFlowGatherResult permutation(std::size_t count);
+  RuntimeThreadedCollectionStats stats() const;
 
 private:
   class Impl;

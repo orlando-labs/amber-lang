@@ -122,6 +122,31 @@ entries:
     intrinsic_id: amber.prelude.Atomic.v1
     dispatch: type_object
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: Barrier
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Barrier.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: task.flow
+    kind: prelude_module
+    intrinsic_id: amber.prelude.task.flow.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Flow
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Flow.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: GatherResult
+    kind: prelude_class
+    intrinsic_id: amber.prelude.GatherResult.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ThreadedCollection
+    kind: prelude_class
+    intrinsic_id: amber.prelude.ThreadedCollection.v1
+    dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: MatchError
     kind: error_class
     intrinsic_id: amber.error.MatchError.v1
@@ -177,6 +202,21 @@ entries:
     intrinsic_id: amber.error.LifetimeError.v1
     dispatch: exception_class
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: TaskError
+    kind: error_class
+    intrinsic_id: amber.error.TaskError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: TaskNotDoneError
+    kind: error_class
+    intrinsic_id: amber.error.TaskNotDoneError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: TaskFailedError
+    kind: error_class
+    intrinsic_id: amber.error.TaskFailedError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: IncludeCycleError
     kind: error_class
     intrinsic_id: amber.error.IncludeCycleError.v1
@@ -210,6 +250,41 @@ entries:
   - name: DeadlockError
     kind: error_class
     intrinsic_id: amber.error.DeadlockError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: OwnershipError
+    kind: error_class
+    intrinsic_id: amber.error.OwnershipError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: AtomicError
+    kind: error_class
+    intrinsic_id: amber.error.AtomicError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: AtomicCompatibilityError
+    kind: error_class
+    intrinsic_id: amber.error.AtomicCompatibilityError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: FlowError
+    kind: error_class
+    intrinsic_id: amber.error.FlowError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: FlowCancelledError
+    kind: error_class
+    intrinsic_id: amber.error.FlowCancelledError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: FlowPartitionError
+    kind: error_class
+    intrinsic_id: amber.error.FlowPartitionError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: FlowGatherError
+    kind: error_class
+    intrinsic_id: amber.error.FlowGatherError.v1
     dispatch: exception_class
     shadowing: local_binding_disables_intrinsic_lowering
   - name: EmptyCollectionError

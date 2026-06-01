@@ -24,6 +24,7 @@ thread_local std::uint64_t tls_runtime_worker_id = 0;
 thread_local std::uint64_t tls_runtime_strand_id = 0;
 thread_local std::uint64_t tls_runtime_task_id = 0;
 thread_local const std::atomic<bool> *tls_runtime_task_cancel_flag = nullptr;
+thread_local std::uint32_t tls_runtime_task_sync_depth = 0;
 
 class RuntimeTaskScope {
 public:
@@ -45,6 +46,18 @@ public:
 private:
   std::uint64_t previous_task_id_ = 0;
   const std::atomic<bool> *previous_cancel_flag_ = nullptr;
+};
+
+class RuntimeTaskSyncScope {
+public:
+  RuntimeTaskSyncScope() { ++tls_runtime_task_sync_depth; }
+  RuntimeTaskSyncScope(const RuntimeTaskSyncScope &) = delete;
+  RuntimeTaskSyncScope &operator=(const RuntimeTaskSyncScope &) = delete;
+  ~RuntimeTaskSyncScope() {
+    if (tls_runtime_task_sync_depth > 0) {
+      --tls_runtime_task_sync_depth;
+    }
+  }
 };
 
 std::uint64_t current_runtime_owner_strand_id() {
@@ -99,6 +112,10 @@ std::uint64_t current_runtime_task_id() { return tls_runtime_task_id; }
 bool current_runtime_task_cancel_requested() {
   return tls_runtime_task_cancel_flag != nullptr &&
          tls_runtime_task_cancel_flag->load();
+}
+
+bool current_runtime_task_sync_active() {
+  return tls_runtime_task_sync_depth != 0;
 }
 
 RuntimeTaskFailure::RuntimeTaskFailure(std::string error_name,
@@ -1609,12 +1626,12 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     RuntimeMutexResult result;
     if (!locked_) {
-      result.error_name = "RuntimeError";
+      result.error_name = "OwnershipError";
       result.message = "mutex is not locked";
       return result;
     }
     if (owner_id_ != owner_id) {
-      result.error_name = "RuntimeError";
+      result.error_name = "OwnershipError";
       result.message = "mutex unlock by non-owner";
       return result;
     }
@@ -1627,9 +1644,51 @@ public:
     return result;
   }
 
+  RuntimeMutexResult synchronize(std::function<Value()> function,
+                                 std::chrono::milliseconds timeout) {
+    RuntimeMutexResult acquired = lock(timeout);
+    if (!acquired.ok) {
+      return acquired;
+    }
+
+    if (!function) {
+      RuntimeMutexResult released = unlock();
+      RuntimeMutexResult result;
+      result.error_name = released.ok ? "ArgumentError" : released.error_name;
+      result.message =
+          released.ok ? "mutex synchronize block is missing" : released.message;
+      return result;
+    }
+
+    try {
+      Value value = function();
+      RuntimeMutexResult released = unlock();
+      if (!released.ok) {
+        released.value = std::move(value);
+        return released;
+      }
+
+      RuntimeMutexResult result;
+      result.ok = true;
+      result.locked = true;
+      result.unlocked = true;
+      result.value = std::move(value);
+      return result;
+    } catch (...) {
+      (void)unlock();
+      throw;
+    }
+  }
+
   bool locked() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return locked_;
+  }
+
+  bool owned() const {
+    const std::uint64_t owner_id = runtime_sync_owner_id();
+    std::lock_guard<std::mutex> lock(mutex_);
+    return locked_ && owner_id_ == owner_id;
   }
 
   RuntimeMutexStats stats() const {
@@ -1672,28 +1731,210 @@ RuntimeMutexResult RuntimeMutex::lock(std::chrono::milliseconds timeout) {
 
 RuntimeMutexResult RuntimeMutex::unlock() { return impl_->unlock(); }
 
+RuntimeMutexResult
+RuntimeMutex::synchronize(std::function<Value()> function,
+                          std::chrono::milliseconds timeout) {
+  return impl_->synchronize(std::move(function), timeout);
+}
+
 bool RuntimeMutex::locked() const { return impl_->locked(); }
+
+bool RuntimeMutex::owned() const { return impl_->owned(); }
 
 RuntimeMutexStats RuntimeMutex::stats() const { return impl_->stats(); }
 
 class RuntimeAtomic::Impl {
 public:
-  explicit Impl(std::int64_t value) : value_(value) {}
+  explicit Impl(Value value) : value_(std::move(value)) {
+    RuntimeAtomic::Result compatibility = validate_payload(value_);
+    if (!compatibility.ok) {
+      throw RuntimeTaskFailure(compatibility.error_name, compatibility.message);
+    }
+  }
 
-  std::int64_t get() const { return value_.load(); }
+  Value get() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    Value value = value_;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return value;
+  }
 
-  void set(std::int64_t value) { value_.store(value); }
+  RuntimeAtomic::Result set(Value value) {
+    RuntimeAtomic::Result compatibility = validate_payload(value);
+    if (!compatibility.ok) {
+      return compatibility;
+    }
 
-  bool compare_and_set(std::int64_t expected, std::int64_t desired) {
-    return value_.compare_exchange_strong(expected, desired);
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    value_ = std::move(value);
+    RuntimeAtomic::Result result;
+    result.ok = true;
+    result.updated = true;
+    result.value = value_;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return result;
+  }
+
+  RuntimeAtomic::Result compare_and_set(const Value &expected, Value desired) {
+    RuntimeAtomic::Result compatibility = validate_payload(desired);
+    if (!compatibility.ok) {
+      return compatibility;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    RuntimeAtomic::Result result;
+    result.ok = true;
+    if (atomic_value_equals(value_, expected)) {
+      value_ = std::move(desired);
+      result.matched = true;
+      result.updated = true;
+    }
+    result.value = value_;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return result;
+  }
+
+  RuntimeAtomic::Result
+  update(const std::function<Value(const Value &)> &function) {
+    if (!function) {
+      RuntimeAtomic::Result result;
+      result.error_name = "ArgumentError";
+      result.message = "atomic update block is missing";
+      return result;
+    }
+
+    std::uint64_t attempts = 0;
+    while (true) {
+      ++attempts;
+      Value current = get();
+      Value replacement = function(current);
+      RuntimeAtomic::Result result =
+          compare_and_set(current, std::move(replacement));
+      result.attempts = attempts;
+      if (!result.ok || result.matched) {
+        return result;
+      }
+      std::this_thread::yield();
+    }
   }
 
 private:
-  std::atomic<std::int64_t> value_;
+  static RuntimeAtomic::Result atomic_compatibility_error(
+      const std::string &message = "atomic payload must be atomic-compatible") {
+    RuntimeAtomic::Result result;
+    result.error_name = "AtomicCompatibilityError";
+    result.message = message;
+    return result;
+  }
+
+  static RuntimeAtomic::Result validate_payload(const Value &value) {
+    if (value.is_null() || value.is_bool() || value.is_integer() ||
+        value.is_symbol() || value.is_class_object()) {
+      RuntimeAtomic::Result result;
+      result.ok = true;
+      return result;
+    }
+    if (value.is_float() || value.is_string()) {
+      return atomic_compatibility_error();
+    }
+
+    const std::optional<RuntimeSyncBoundaryError> shareability_error =
+        runtime_value_shareability_error(value);
+    if (shareability_error.has_value()) {
+      return atomic_compatibility_error();
+    }
+
+    RuntimeAtomic::Result result;
+    result.ok = true;
+    return result;
+  }
+
+  static bool atomic_value_equals(const Value &lhs, const Value &rhs) {
+    if (lhs.payload.index() != rhs.payload.index()) {
+      return false;
+    }
+    if (lhs.is_null()) {
+      return true;
+    }
+    if (lhs.is_bool()) {
+      return lhs.as_bool() == rhs.as_bool();
+    }
+    if (lhs.is_integer()) {
+      return lhs.as_integer() == rhs.as_integer();
+    }
+    if (lhs.is_float()) {
+      return lhs.as_float() == rhs.as_float();
+    }
+    if (lhs.is_symbol()) {
+      return lhs.as_symbol().symbol_id == rhs.as_symbol().symbol_id;
+    }
+    if (lhs.is_string()) {
+      return lhs.as_string().string_id == rhs.as_string().string_id;
+    }
+    if (lhs.is_class_object()) {
+      return lhs.as_class_object().class_index ==
+             rhs.as_class_object().class_index;
+    }
+    if (lhs.is_native_type()) {
+      return lhs.as_native_type().kind == rhs.as_native_type().kind;
+    }
+    if (lhs.is_closure()) {
+      return lhs.as_closure() == rhs.as_closure();
+    }
+    if (lhs.is_task_module()) {
+      return lhs.as_task_module() == rhs.as_task_module();
+    }
+    if (lhs.is_task_handle()) {
+      return lhs.as_task_handle() == rhs.as_task_handle();
+    }
+    if (lhs.is_channel()) {
+      return lhs.as_channel() == rhs.as_channel();
+    }
+    if (lhs.is_mutex()) {
+      return lhs.as_mutex() == rhs.as_mutex();
+    }
+    if (lhs.is_atomic()) {
+      return lhs.as_atomic() == rhs.as_atomic();
+    }
+    if (lhs.is_barrier()) {
+      return lhs.as_barrier() == rhs.as_barrier();
+    }
+    if (lhs.is_flow_module()) {
+      return lhs.as_flow_module() == rhs.as_flow_module();
+    }
+    if (lhs.is_threaded_collection()) {
+      return lhs.as_threaded_collection() == rhs.as_threaded_collection();
+    }
+    if (lhs.is_instance_object()) {
+      return lhs.as_instance_object() == rhs.as_instance_object();
+    }
+    if (lhs.is_list()) {
+      return lhs.as_list() == rhs.as_list();
+    }
+    if (lhs.is_tuple()) {
+      return lhs.as_tuple() == rhs.as_tuple();
+    }
+    if (lhs.is_set()) {
+      return lhs.as_set() == rhs.as_set();
+    }
+    if (lhs.is_map()) {
+      return lhs.as_map() == rhs.as_map();
+    }
+    return false;
+  }
+
+  mutable std::mutex mutex_;
+  Value value_;
 };
 
 RuntimeAtomic::RuntimeAtomic(std::int64_t value)
-    : impl_(std::make_shared<Impl>(value)) {}
+    : impl_(std::make_shared<Impl>(Value::integer(value))) {}
+
+RuntimeAtomic::RuntimeAtomic(Value value)
+    : impl_(std::make_shared<Impl>(std::move(value))) {}
 
 RuntimeAtomic::RuntimeAtomic(RuntimeAtomic &&) noexcept = default;
 
@@ -1701,14 +1942,161 @@ RuntimeAtomic &RuntimeAtomic::operator=(RuntimeAtomic &&) noexcept = default;
 
 RuntimeAtomic::~RuntimeAtomic() = default;
 
-std::int64_t RuntimeAtomic::get() const { return impl_->get(); }
+std::int64_t RuntimeAtomic::get() const { return get_value().as_integer(); }
 
-void RuntimeAtomic::set(std::int64_t value) { impl_->set(value); }
+void RuntimeAtomic::set(std::int64_t value) {
+  (void)impl_->set(Value::integer(value));
+}
 
 bool RuntimeAtomic::compare_and_set(std::int64_t expected,
                                     std::int64_t desired) {
-  return impl_->compare_and_set(expected, desired);
+  return impl_
+      ->compare_and_set(Value::integer(expected), Value::integer(desired))
+      .matched;
 }
+
+Value RuntimeAtomic::get_value() const { return impl_->get(); }
+
+RuntimeAtomic::Result RuntimeAtomic::set_value(Value value) {
+  return impl_->set(std::move(value));
+}
+
+RuntimeAtomic::Result
+RuntimeAtomic::compare_and_set_value(const Value &expected, Value desired) {
+  return impl_->compare_and_set(expected, std::move(desired));
+}
+
+RuntimeAtomic::Result
+RuntimeAtomic::update(std::function<Value(const Value &)> function) {
+  return impl_->update(function);
+}
+
+class RuntimeBarrier::Impl {
+public:
+  explicit Impl(std::size_t parties) : parties_(parties) {
+    if (parties_ == 0) {
+      throw RuntimeTaskFailure("ArgumentError",
+                               "barrier parties must be positive");
+    }
+    stats_.parties = static_cast<std::uint64_t>(parties_);
+  }
+
+  RuntimeBarrierResult wait(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    const std::uint64_t generation = generation_;
+    ++waiting_;
+    ++stats_.arrivals;
+    stats_.waiting = static_cast<std::uint64_t>(waiting_);
+
+    if (waiting_ == parties_) {
+      return release_generation_locked(generation, true);
+    }
+
+    const std::optional<std::chrono::steady_clock::time_point> deadline =
+        runtime_sync_deadline(timeout);
+    while (generation_ == generation) {
+      if (current_runtime_task_cancel_requested()) {
+        remove_waiter_locked();
+        ++stats_.cancellations;
+        cv_.notify_all();
+
+        RuntimeBarrierResult result = base_result_locked();
+        result.cancelled = true;
+        result.error_name = "CancelledError";
+        result.message = "barrier wait cancelled";
+        return result;
+      }
+      if (runtime_sync_deadline_expired(deadline)) {
+        remove_waiter_locked();
+        ++stats_.timeouts;
+        cv_.notify_all();
+
+        RuntimeBarrierResult result = base_result_locked();
+        result.timed_out = true;
+        result.error_name = "TimeoutError";
+        result.message = "barrier wait timed out";
+        return result;
+      }
+
+      const std::chrono::steady_clock::duration wait_duration =
+          runtime_sync_wait_duration(deadline);
+      if (wait_duration <= std::chrono::steady_clock::duration::zero()) {
+        continue;
+      }
+      cv_.wait_for(lock, wait_duration);
+    }
+
+    RuntimeBarrierResult result = base_result_locked();
+    result.ok = true;
+    result.passed = true;
+    result.generation = generation_ - 1;
+    return result;
+  }
+
+  RuntimeBarrierStats stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RuntimeBarrierStats out = stats_;
+    out.parties = static_cast<std::uint64_t>(parties_);
+    out.waiting = static_cast<std::uint64_t>(waiting_);
+    out.generation = generation_;
+    return out;
+  }
+
+private:
+  RuntimeBarrierResult release_generation_locked(std::uint64_t generation,
+                                                 bool last) {
+    waiting_ = 0;
+    ++generation_;
+    ++stats_.passes;
+    stats_.waiting = 0;
+    stats_.generation = generation_;
+    cv_.notify_all();
+
+    RuntimeBarrierResult result = base_result_locked();
+    result.ok = true;
+    result.passed = true;
+    result.last = last;
+    result.generation = generation;
+    return result;
+  }
+
+  RuntimeBarrierResult base_result_locked() const {
+    RuntimeBarrierResult result;
+    result.parties = static_cast<std::uint64_t>(parties_);
+    result.waiting = static_cast<std::uint64_t>(waiting_);
+    result.generation = generation_;
+    return result;
+  }
+
+  void remove_waiter_locked() {
+    if (waiting_ > 0) {
+      --waiting_;
+    }
+    stats_.waiting = static_cast<std::uint64_t>(waiting_);
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::size_t parties_ = 0;
+  std::size_t waiting_ = 0;
+  std::uint64_t generation_ = 0;
+  RuntimeBarrierStats stats_;
+};
+
+RuntimeBarrier::RuntimeBarrier(std::size_t parties)
+    : impl_(std::make_shared<Impl>(parties)) {}
+
+RuntimeBarrier::RuntimeBarrier(RuntimeBarrier &&) noexcept = default;
+
+RuntimeBarrier &RuntimeBarrier::operator=(RuntimeBarrier &&) noexcept = default;
+
+RuntimeBarrier::~RuntimeBarrier() = default;
+
+RuntimeBarrierResult RuntimeBarrier::wait(std::chrono::milliseconds timeout) {
+  return impl_->wait(timeout);
+}
+
+RuntimeBarrierStats RuntimeBarrier::stats() const { return impl_->stats(); }
 
 class RuntimeScheduler::Impl {
 public:
@@ -2587,6 +2975,1169 @@ RuntimeScheduler::strand_snapshot(std::uint64_t strand_id) const {
 std::optional<RuntimeTaskSnapshot>
 RuntimeScheduler::task_snapshot(std::uint64_t task_id) const {
   return impl_->task_snapshot(task_id);
+}
+
+namespace {
+
+RuntimeTaskHandleState
+task_handle_state_from_strand_state(RuntimeStrandState state) {
+  switch (state) {
+  case RuntimeStrandState::New:
+    return RuntimeTaskHandleState::New;
+  case RuntimeStrandState::Runnable:
+    return RuntimeTaskHandleState::Runnable;
+  case RuntimeStrandState::Running:
+    return RuntimeTaskHandleState::Running;
+  case RuntimeStrandState::Sleeping:
+    return RuntimeTaskHandleState::Sleeping;
+  case RuntimeStrandState::Waiting:
+    return RuntimeTaskHandleState::Waiting;
+  case RuntimeStrandState::Done:
+    return RuntimeTaskHandleState::Done;
+  case RuntimeStrandState::Failed:
+    return RuntimeTaskHandleState::Failed;
+  case RuntimeStrandState::Cancelled:
+    return RuntimeTaskHandleState::Cancelled;
+  }
+  return RuntimeTaskHandleState::Inactive;
+}
+
+bool task_handle_state_is_ready(RuntimeTaskHandleState state) {
+  return state == RuntimeTaskHandleState::Done ||
+         state == RuntimeTaskHandleState::Failed ||
+         state == RuntimeTaskHandleState::Cancelled;
+}
+
+} // namespace
+
+struct RuntimeTaskHandle::State {
+  mutable std::mutex mutex;
+  Value value = Value::null();
+  bool has_value = false;
+  std::string error_name;
+  std::string message;
+};
+
+RuntimeTaskHandle::RuntimeTaskHandle() = default;
+
+RuntimeTaskHandle::RuntimeTaskHandle(
+    std::shared_ptr<RuntimeScheduler> scheduler, std::uint64_t task_id,
+    std::shared_ptr<State> state)
+    : scheduler_(std::move(scheduler)), task_id_(task_id),
+      state_(std::move(state)) {}
+
+bool RuntimeTaskHandle::active() const {
+  return scheduler_ != nullptr && task_id_ != 0;
+}
+
+std::uint64_t RuntimeTaskHandle::task_id() const { return task_id_; }
+
+std::uint64_t RuntimeTaskHandle::strand_id() const { return task_id_; }
+
+RuntimeTaskHandleState RuntimeTaskHandle::state() const {
+  return snapshot().state;
+}
+
+RuntimeTaskHandleSnapshot RuntimeTaskHandle::snapshot() const {
+  RuntimeTaskHandleSnapshot out;
+  out.task_id = task_id_;
+  out.strand_id = strand_id();
+  if (!active()) {
+    out.error_name = "LifetimeError";
+    out.message = "task handle is not active";
+    return out;
+  }
+
+  const std::optional<RuntimeTaskSnapshot> current =
+      scheduler_->task_snapshot(task_id_);
+  if (!current.has_value()) {
+    out.error_name = "LifetimeError";
+    out.message = "task handle is not active";
+    return out;
+  }
+
+  out.active = true;
+  out.task_id = current->task_id;
+  out.strand_id = current->task_id;
+  out.state = task_handle_state_from_strand_state(current->state);
+  out.ready = task_handle_state_is_ready(out.state);
+  out.succeeded = out.state == RuntimeTaskHandleState::Done;
+  out.failed = out.state == RuntimeTaskHandleState::Failed;
+  out.cancelled = out.state == RuntimeTaskHandleState::Cancelled;
+  out.running = out.state == RuntimeTaskHandleState::Running;
+  out.cancellation_requested = current->cancellation_requested;
+  out.error_name = current->error_name;
+  out.message = current->message;
+  return out;
+}
+
+RuntimeTaskPublicResult
+RuntimeTaskHandle::wait(std::chrono::milliseconds timeout) const {
+  RuntimeTaskPublicResult out;
+  if (!active()) {
+    out.error_name = "LifetimeError";
+    out.message = "task handle is not active";
+    return out;
+  }
+
+  const RuntimeTaskJoinResult joined = scheduler_->join_task(task_id_, timeout);
+  out.ready = joined.joined;
+  out.timed_out = joined.timed_out;
+  out.cancelled = joined.cancelled;
+  out.failed = joined.joined && !joined.ok && !joined.cancelled;
+  out.state = task_handle_state_from_strand_state(joined.state);
+  out.error_name = joined.error_name;
+  out.message = joined.message;
+  if (!joined.ok) {
+    return out;
+  }
+
+  out.ok = true;
+  out.ready = true;
+  if (state_ != nullptr) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    out.value = state_->has_value ? state_->value : Value::null();
+  }
+  return out;
+}
+
+RuntimeTaskPublicResult RuntimeTaskHandle::result() const {
+  RuntimeTaskPublicResult out;
+  const RuntimeTaskHandleSnapshot current = snapshot();
+  out.state = current.state;
+  if (!current.active) {
+    out.error_name =
+        current.error_name.empty() ? "LifetimeError" : current.error_name;
+    out.message =
+        current.message.empty() ? "task handle is not active" : current.message;
+    return out;
+  }
+
+  if (current.state == RuntimeTaskHandleState::Done) {
+    out.ok = true;
+    out.ready = true;
+    if (state_ != nullptr) {
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      out.value = state_->has_value ? state_->value : Value::null();
+    }
+    return out;
+  }
+
+  if (current.state == RuntimeTaskHandleState::Failed) {
+    out.ready = true;
+    out.failed = true;
+    out.error_name =
+        current.error_name.empty() ? "TaskFailedError" : current.error_name;
+    out.message = current.message.empty() ? "task failed" : current.message;
+    return out;
+  }
+
+  if (current.state == RuntimeTaskHandleState::Cancelled) {
+    out.ready = true;
+    out.cancelled = true;
+    out.error_name = "CancelledError";
+    out.message = current.message.empty() ? "task cancelled" : current.message;
+    return out;
+  }
+
+  out.error_name = "TaskNotDoneError";
+  out.message = "task is not done";
+  return out;
+}
+
+RuntimeTaskFailureInfo RuntimeTaskHandle::failure() const {
+  RuntimeTaskFailureInfo out;
+  const RuntimeTaskHandleSnapshot current = snapshot();
+  out.state = current.state;
+  if (!current.active) {
+    out.ready = true;
+    out.failed = true;
+    out.error_name =
+        current.error_name.empty() ? "LifetimeError" : current.error_name;
+    out.message =
+        current.message.empty() ? "task handle is not active" : current.message;
+    return out;
+  }
+
+  if (current.state == RuntimeTaskHandleState::Failed) {
+    out.ready = true;
+    out.failed = true;
+    out.error_name =
+        current.error_name.empty() ? "RuntimeError" : current.error_name;
+    out.message = current.message.empty() ? "task failed" : current.message;
+    return out;
+  }
+  if (current.state == RuntimeTaskHandleState::Cancelled) {
+    out.ready = true;
+    out.cancelled = true;
+    out.error_name = "CancelledError";
+    out.message = current.message.empty() ? "task cancelled" : current.message;
+    return out;
+  }
+  if (current.state == RuntimeTaskHandleState::Done) {
+    out.ready = true;
+    return out;
+  }
+  out.error_name = "TaskNotDoneError";
+  out.message = "task is not done";
+  return out;
+}
+
+bool RuntimeTaskHandle::cancel() const {
+  return active() && scheduler_->cancel_task(task_id_);
+}
+
+bool RuntimeTaskHandle::resume() const {
+  return active() && scheduler_->wake_strand(task_id_);
+}
+
+bool RuntimeTaskHandle::cancelled() const {
+  if (!active()) {
+    return false;
+  }
+  const std::optional<RuntimeTaskSnapshot> snapshot =
+      scheduler_->task_snapshot(task_id_);
+  return snapshot.has_value() &&
+         (snapshot->state == RuntimeStrandState::Cancelled ||
+          snapshot->cancellation_requested);
+}
+
+bool RuntimeTaskHandle::done() const {
+  if (!active()) {
+    return false;
+  }
+  const std::optional<RuntimeTaskSnapshot> snapshot =
+      scheduler_->task_snapshot(task_id_);
+  return snapshot.has_value() &&
+         (snapshot->state == RuntimeStrandState::Done ||
+          snapshot->state == RuntimeStrandState::Failed ||
+          snapshot->state == RuntimeStrandState::Cancelled);
+}
+
+bool RuntimeTaskHandle::running() const {
+  if (!active()) {
+    return false;
+  }
+  const std::optional<RuntimeTaskSnapshot> snapshot =
+      scheduler_->task_snapshot(task_id_);
+  return snapshot.has_value() && snapshot->state == RuntimeStrandState::Running;
+}
+
+bool RuntimeTaskHandle::failed() const {
+  if (!active()) {
+    return false;
+  }
+  const std::optional<RuntimeTaskSnapshot> snapshot =
+      scheduler_->task_snapshot(task_id_);
+  return snapshot.has_value() && snapshot->state == RuntimeStrandState::Failed;
+}
+
+RuntimeTaskModule::RuntimeTaskModule(std::size_t worker_count)
+    : RuntimeTaskModule(RuntimeSchedulerConfig{worker_count, 1}) {}
+
+RuntimeTaskModule::RuntimeTaskModule(RuntimeSchedulerConfig config)
+    : scheduler_(std::make_shared<RuntimeScheduler>(config)) {}
+
+RuntimeTaskHandle RuntimeTaskModule::async(TaskFunction function) {
+  return spawn_with_kind(SpawnKind::SameStrand, std::move(function));
+}
+
+RuntimeTaskHandle RuntimeTaskModule::spawn(TaskFunction function) {
+  return spawn_with_kind(SpawnKind::NewStrand, std::move(function));
+}
+
+Value RuntimeTaskModule::sync(TaskFunction function) const {
+  if (!function) {
+    throw RuntimeTaskFailure("ArgumentError", "task sync block is missing");
+  }
+  throw_if_runtime_task_cancelled();
+  RuntimeTaskSyncScope sync_scope;
+  Value value = function();
+  throw_if_runtime_task_cancelled();
+  return value;
+}
+
+bool RuntimeTaskModule::sync_active() const {
+  return current_runtime_task_sync_active();
+}
+
+void RuntimeTaskModule::sleep(std::chrono::milliseconds duration) const {
+  throw_if_runtime_task_cancelled();
+  if (duration.count() > 0) {
+    std::this_thread::sleep_for(duration);
+  } else if (!current_runtime_task_sync_active()) {
+    std::this_thread::yield();
+  }
+  throw_if_runtime_task_cancelled();
+}
+
+void RuntimeTaskModule::yield_current() const {
+  if (!current_runtime_task_sync_active()) {
+    std::this_thread::yield();
+  }
+  throw_if_runtime_task_cancelled();
+}
+
+RuntimeScheduler &RuntimeTaskModule::scheduler() { return *scheduler_; }
+
+const RuntimeScheduler &RuntimeTaskModule::scheduler() const {
+  return *scheduler_;
+}
+
+RuntimeTaskHandle RuntimeTaskModule::spawn_with_kind(SpawnKind kind,
+                                                     TaskFunction function) {
+  auto state = std::make_shared<RuntimeTaskHandle::State>();
+  auto task_body = [state, function = std::move(function)]() mutable {
+    try {
+      const Value value = function ? function() : Value::null();
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->value = value;
+      state->has_value = true;
+    } catch (const RuntimeTaskFailure &failure) {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->error_name = failure.error_name();
+      state->message = failure.message();
+      throw;
+    } catch (const RuntimeTaskCancelled &) {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->error_name = "CancelledError";
+      state->message = "task cancelled";
+      throw;
+    } catch (const std::exception &error) {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->error_name = "RuntimeError";
+      state->message = error.what();
+      throw;
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->error_name = "RuntimeError";
+      state->message = "task failed";
+      throw;
+    }
+  };
+
+  const std::uint64_t task_id =
+      kind == SpawnKind::SameStrand
+          ? scheduler_->spawn_task(std::move(task_body))
+          : scheduler_->spawn_strand(std::move(task_body));
+  return RuntimeTaskHandle(scheduler_, task_id, std::move(state));
+}
+
+class RuntimeFlowModule::Impl {
+public:
+  explicit Impl(std::size_t worker_count) : task_(worker_count) {}
+
+  explicit Impl(RuntimeSchedulerConfig config) : task_(config) {}
+
+  RuntimeFlowGatherResult gather(std::vector<RuntimeTaskHandle> handles,
+                                 RuntimeFlowOptions options) {
+    RuntimeFlowOptions normalized = normalize_options(options, handles.size());
+    RuntimeFlowGatherResult result;
+    result.values.resize(handles.size(), Value::null());
+    record_gather_started();
+
+    if (handles.empty()) {
+      result.ok = true;
+      return result;
+    }
+
+    const std::optional<std::chrono::steady_clock::time_point> deadline =
+        runtime_sync_deadline(normalized.timeout);
+    std::vector<bool> done(handles.size(), false);
+    std::vector<Value> completion_order;
+    std::uint64_t remaining = static_cast<std::uint64_t>(handles.size());
+
+    while (remaining != 0) {
+      if (current_runtime_task_cancel_requested()) {
+        cancel_unfinished(handles, done);
+        result.cancelled = true;
+        result.error_name = "CancelledError";
+        result.message = "flow gather cancelled";
+        record_gather_finished(result);
+        return result;
+      }
+      if (runtime_sync_deadline_expired(deadline)) {
+        cancel_unfinished(handles, done);
+        result.timed_out = true;
+        result.error_name = "TimeoutError";
+        result.message = "flow gather timed out";
+        record_gather_finished(result);
+        return result;
+      }
+
+      bool progressed = false;
+      for (std::size_t index = 0; index < handles.size(); ++index) {
+        if (done[index]) {
+          continue;
+        }
+
+        RuntimeTaskPublicResult task_result = handles[index].result();
+        if (task_result.error_name == "TaskNotDoneError") {
+          continue;
+        }
+
+        done[index] = true;
+        --remaining;
+        progressed = true;
+        if (!accept_task_result(index, std::move(task_result), normalized,
+                                &result, &completion_order)) {
+          cancel_unfinished(handles, done);
+          record_gather_finished(result);
+          return result;
+        }
+      }
+
+      if (!progressed) {
+        const std::chrono::steady_clock::duration wait_duration =
+            runtime_sync_wait_duration(deadline);
+        if (wait_duration > std::chrono::steady_clock::duration::zero()) {
+          std::this_thread::sleep_for(wait_duration);
+        } else {
+          std::this_thread::yield();
+        }
+      }
+    }
+
+    if (!normalized.ordered) {
+      result.values = std::move(completion_order);
+    } else if (normalized.failure_policy == RuntimeFlowFailurePolicy::Ignore) {
+      std::vector<Value> compacted;
+      compacted.reserve(static_cast<std::size_t>(result.completed_count));
+      for (std::size_t index = 0; index < done.size(); ++index) {
+        if (result_value_completed(index, result.failures)) {
+          compacted.push_back(result.values[index]);
+        }
+      }
+      result.values = std::move(compacted);
+    }
+
+    result.ok = true;
+    result.failed = !result.failures.empty();
+    result.failed_count = static_cast<std::uint64_t>(result.failures.size());
+    record_gather_finished(result);
+    return result;
+  }
+
+  RuntimeFlowGatherResult scatter(std::vector<Value> partitions,
+                                  MapFunction function,
+                                  RuntimeFlowOptions options) {
+    return scatter_map(std::move(partitions), std::move(function), options);
+  }
+
+  RuntimeFlowGatherResult scatter_map(std::vector<Value> items,
+                                      MapFunction function,
+                                      RuntimeFlowOptions options) {
+    RuntimeFlowOptions normalized = normalize_options(options, items.size());
+    if (!function) {
+      return argument_error("flow scatter_map block is missing");
+    }
+
+    RuntimeFlowGatherResult validation =
+        validate_boundary_values(items, normalized, "flow partition");
+    if (!validation.ok && !validation.error_name.empty()) {
+      record_gather_finished(validation);
+      return validation;
+    }
+
+    std::vector<RuntimeTaskHandle> handles;
+    handles.reserve(items.size());
+    record_flow_started(items.size());
+    for (std::size_t index = 0; index < items.size(); ++index) {
+      Value item = items[index];
+      handles.push_back(task_.spawn(
+          [function, item, index]() { return function(item, index); }));
+    }
+    return gather(std::move(handles), normalized);
+  }
+
+  RuntimeFlowReduceResult scatter_reduce(std::vector<Value> items, Value init,
+                                         MapFunction map, ReduceFunction reduce,
+                                         RuntimeFlowOptions options) {
+    RuntimeFlowReduceResult reduced;
+    if (!map) {
+      reduced.error_name = "ArgumentError";
+      reduced.message = "flow scatter_reduce map block is missing";
+      return reduced;
+    }
+    if (!reduce) {
+      reduced.error_name = "ArgumentError";
+      reduced.message = "flow scatter_reduce reduce block is missing";
+      return reduced;
+    }
+
+    RuntimeFlowGatherResult gathered =
+        scatter_map(std::move(items), std::move(map), options);
+    reduced.gather = gathered;
+    if (!gathered.ok || gathered.failed) {
+      reduced.failed = true;
+      reduced.error_name =
+          gathered.error_name.empty() ? "FlowGatherError" : gathered.error_name;
+      reduced.message =
+          gathered.message.empty() ? "flow gather failed" : gathered.message;
+      record_reduction();
+      return reduced;
+    }
+
+    Value accumulator = std::move(init);
+    for (const Value &value : gathered.values) {
+      accumulator = reduce(accumulator, value);
+    }
+
+    reduced.ok = true;
+    reduced.value = std::move(accumulator);
+    record_reduction();
+    return reduced;
+  }
+
+  RuntimeFlowGatherResult broadcast(Value value, std::size_t workers,
+                                    BroadcastFunction function,
+                                    RuntimeFlowOptions options) {
+    if (workers == 0) {
+      return argument_error("flow broadcast workers must be positive");
+    }
+    if (!function) {
+      return argument_error("flow broadcast block is missing");
+    }
+
+    RuntimeFlowOptions normalized = options;
+    normalized.workers = workers;
+    std::vector<Value> values(workers, value);
+    RuntimeFlowGatherResult validation =
+        validate_boundary_values(values, normalized, "flow broadcast value");
+    if (!validation.ok && !validation.error_name.empty()) {
+      record_gather_finished(validation);
+      return validation;
+    }
+
+    std::vector<RuntimeTaskHandle> handles;
+    handles.reserve(workers);
+    record_broadcast_started(workers);
+    for (std::size_t index = 0; index < workers; ++index) {
+      Value worker_value = value;
+      handles.push_back(task_.spawn([function, worker_value, index]() {
+        return function(worker_value, index);
+      }));
+    }
+    return gather(std::move(handles), normalized);
+  }
+
+  RuntimeFlowStats stats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return stats_;
+  }
+
+private:
+  static RuntimeFlowOptions normalize_options(RuntimeFlowOptions options,
+                                              std::size_t item_count) {
+    if (options.workers == 0) {
+      const unsigned int hardware = std::thread::hardware_concurrency();
+      options.workers = hardware == 0 ? 2 : static_cast<std::size_t>(hardware);
+    }
+    if (item_count != 0 && options.workers > item_count) {
+      options.workers = item_count;
+    }
+    (void)options.partition_policy;
+    return options;
+  }
+
+  static RuntimeFlowGatherResult argument_error(std::string message) {
+    RuntimeFlowGatherResult result;
+    result.error_name = "ArgumentError";
+    result.message = std::move(message);
+    return result;
+  }
+
+  static RuntimeFlowGatherResult isolation_error(std::size_t index,
+                                                 std::string boundary,
+                                                 std::string error_name,
+                                                 std::string message) {
+    RuntimeFlowGatherResult result;
+    result.failed = true;
+    result.error_name = std::move(error_name);
+    result.message = std::move(message);
+    result.failures.push_back(
+        RuntimeFlowFailure{index, result.error_name, boundary + " rejected"});
+    result.failed_count = 1;
+    return result;
+  }
+
+  RuntimeFlowGatherResult
+  validate_boundary_values(const std::vector<Value> &values,
+                           const RuntimeFlowOptions &options,
+                           const std::string &boundary) {
+    RuntimeFlowGatherResult ok;
+    ok.ok = true;
+    if (options.isolation == RuntimeFlowIsolationMode::Unchecked) {
+      return ok;
+    }
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      std::optional<RuntimeSyncBoundaryError> shareability_error =
+          runtime_value_shareability_error(values[index]);
+      if (shareability_error.has_value()) {
+        record_isolation_rejection();
+        return isolation_error(index, boundary, shareability_error->error_name,
+                               shareability_error->message);
+      }
+    }
+    return ok;
+  }
+
+  bool accept_task_result(std::size_t index,
+                          RuntimeTaskPublicResult task_result,
+                          const RuntimeFlowOptions &options,
+                          RuntimeFlowGatherResult *result,
+                          std::vector<Value> *completion_order) {
+    if (task_result.ok) {
+      if (options.isolation == RuntimeFlowIsolationMode::Checked) {
+        std::optional<RuntimeSyncBoundaryError> shareability_error =
+            runtime_value_shareability_error(task_result.value);
+        if (shareability_error.has_value()) {
+          record_isolation_rejection();
+          RuntimeFlowFailure failure{index, shareability_error->error_name,
+                                     shareability_error->message};
+          result->failures.push_back(failure);
+          result->failed = true;
+          result->error_name = failure.error_name;
+          result->message = failure.message;
+          result->failed_count =
+              static_cast<std::uint64_t>(result->failures.size());
+          return options.failure_policy != RuntimeFlowFailurePolicy::First;
+        }
+      }
+
+      ++result->completed_count;
+      if (options.ordered) {
+        result->values[index] = std::move(task_result.value);
+      } else if (completion_order != nullptr) {
+        completion_order->push_back(std::move(task_result.value));
+      }
+      return true;
+    }
+
+    RuntimeFlowFailure failure;
+    failure.index = index;
+    failure.error_name = task_result.error_name.empty()
+                             ? "FlowGatherError"
+                             : task_result.error_name;
+    failure.message = task_result.message.empty() ? "flow worker failed"
+                                                  : task_result.message;
+    result->failures.push_back(failure);
+    result->failed = true;
+    if (task_result.cancelled) {
+      ++result->cancelled_count;
+    }
+    if (options.failure_policy == RuntimeFlowFailurePolicy::First) {
+      result->error_name = failure.error_name;
+      result->message = failure.message;
+      result->failed_count =
+          static_cast<std::uint64_t>(result->failures.size());
+      return false;
+    }
+    return true;
+  }
+
+  static bool
+  result_value_completed(std::size_t index,
+                         const std::vector<RuntimeFlowFailure> &failures) {
+    return std::none_of(failures.begin(), failures.end(),
+                        [index](const RuntimeFlowFailure &failure) {
+                          return failure.index == index;
+                        });
+  }
+
+  static void cancel_unfinished(const std::vector<RuntimeTaskHandle> &handles,
+                                const std::vector<bool> &done) {
+    for (std::size_t index = 0; index < handles.size(); ++index) {
+      if (!done[index]) {
+        (void)handles[index].cancel();
+      }
+    }
+  }
+
+  void record_flow_started(std::size_t worker_count) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.flows;
+    stats_.worker_tasks += static_cast<std::uint64_t>(worker_count);
+  }
+
+  void record_broadcast_started(std::size_t worker_count) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.flows;
+    ++stats_.broadcasts;
+    stats_.worker_tasks += static_cast<std::uint64_t>(worker_count);
+  }
+
+  void record_gather_started() {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.gathers;
+  }
+
+  void record_gather_finished(const RuntimeFlowGatherResult &result) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.completed_workers += result.completed_count;
+    stats_.failed_workers += static_cast<std::uint64_t>(result.failures.size());
+    stats_.cancelled_workers += result.cancelled_count;
+    if (result.timed_out) {
+      ++stats_.timeouts;
+    }
+  }
+
+  void record_reduction() {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.reductions;
+  }
+
+  void record_isolation_rejection() {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.isolation_rejections;
+  }
+
+  RuntimeTaskModule task_;
+  mutable std::mutex stats_mutex_;
+  RuntimeFlowStats stats_;
+};
+
+RuntimeFlowModule::RuntimeFlowModule(std::size_t worker_count)
+    : impl_(std::make_shared<Impl>(worker_count)) {}
+
+RuntimeFlowModule::RuntimeFlowModule(RuntimeSchedulerConfig config)
+    : impl_(std::make_shared<Impl>(config)) {}
+
+RuntimeFlowModule::RuntimeFlowModule(RuntimeFlowModule &&) noexcept = default;
+
+RuntimeFlowModule &
+RuntimeFlowModule::operator=(RuntimeFlowModule &&) noexcept = default;
+
+RuntimeFlowModule::~RuntimeFlowModule() = default;
+
+RuntimeFlowGatherResult
+RuntimeFlowModule::gather(std::vector<RuntimeTaskHandle> handles,
+                          RuntimeFlowOptions options) {
+  return impl_->gather(std::move(handles), options);
+}
+
+RuntimeFlowGatherResult
+RuntimeFlowModule::scatter(std::vector<Value> partitions, MapFunction function,
+                           RuntimeFlowOptions options) {
+  return impl_->scatter(std::move(partitions), std::move(function), options);
+}
+
+RuntimeFlowGatherResult
+RuntimeFlowModule::scatter_map(std::vector<Value> items, MapFunction function,
+                               RuntimeFlowOptions options) {
+  return impl_->scatter_map(std::move(items), std::move(function), options);
+}
+
+RuntimeFlowReduceResult
+RuntimeFlowModule::scatter_reduce(std::vector<Value> items, Value init,
+                                  MapFunction map, ReduceFunction reduce,
+                                  RuntimeFlowOptions options) {
+  return impl_->scatter_reduce(std::move(items), std::move(init),
+                               std::move(map), std::move(reduce), options);
+}
+
+RuntimeFlowGatherResult
+RuntimeFlowModule::broadcast(Value value, std::size_t workers,
+                             BroadcastFunction function,
+                             RuntimeFlowOptions options) {
+  return impl_->broadcast(std::move(value), workers, std::move(function),
+                          options);
+}
+
+RuntimeFlowStats RuntimeFlowModule::stats() const { return impl_->stats(); }
+
+class RuntimeThreadedCollection::Impl {
+public:
+  Impl(std::vector<Value> items, std::size_t workers,
+       RuntimeFlowOptions options)
+      : items_(std::move(items)),
+        flow_(RuntimeSchedulerConfig{workers == 0 ? options.workers : workers,
+                                     1}),
+        options_(options) {
+    if (workers != 0) {
+      options_.workers = workers;
+    }
+  }
+
+  RuntimeFlowGatherResult each(EachFunction function) {
+    if (!function) {
+      return argument_error("threaded each block is missing");
+    }
+    RuntimeFlowGatherResult result = flow_.scatter_map(
+        items_,
+        [function](const Value &value, std::size_t index) {
+          function(value, index);
+          return Value::null();
+        },
+        options_);
+    record([&](RuntimeThreadedCollectionStats *stats) {
+      ++stats->each_operations;
+      stats->generated_values += result.completed_count;
+    });
+    return result;
+  }
+
+  RuntimeFlowGatherResult map(MapFunction function) {
+    if (!function) {
+      return argument_error("threaded map block is missing");
+    }
+    RuntimeFlowGatherResult result =
+        flow_.scatter_map(items_, std::move(function), options_);
+    record([&](RuntimeThreadedCollectionStats *stats) {
+      ++stats->map_operations;
+      stats->generated_values +=
+          static_cast<std::uint64_t>(result.values.size());
+    });
+    return result;
+  }
+
+  RuntimeFlowGatherResult select(PredicateFunction function) {
+    return filter(std::move(function), false);
+  }
+
+  RuntimeFlowGatherResult reject(PredicateFunction function) {
+    return filter(std::move(function), true);
+  }
+
+  RuntimeFlowGatherResult flat_map(FlatMapFunction function) {
+    if (!function) {
+      return argument_error("threaded flat_map block is missing");
+    }
+
+    RuntimeFlowGatherResult gathered = flow_.scatter_map(
+        items_,
+        [function](const Value &value, std::size_t index) {
+          return make_list_value(function(value, index), true);
+        },
+        options_);
+    if (!gathered.ok || gathered.failed) {
+      record([&](RuntimeThreadedCollectionStats *stats) {
+        ++stats->flat_map_operations;
+      });
+      return gathered;
+    }
+
+    RuntimeFlowGatherResult result = gathered;
+    result.values.clear();
+    for (const Value &value : gathered.values) {
+      if (!value.is_list() || value.as_list() == nullptr) {
+        result.ok = false;
+        result.failed = true;
+        result.error_name = "TypeError";
+        result.message = "threaded flat_map worker returned non-list value";
+        result.failures.push_back(RuntimeFlowFailure{
+            result.values.size(), result.error_name, result.message});
+        result.failed_count =
+            static_cast<std::uint64_t>(result.failures.size());
+        record([&](RuntimeThreadedCollectionStats *stats) {
+          ++stats->flat_map_operations;
+          stats->generated_values +=
+              static_cast<std::uint64_t>(result.values.size());
+        });
+        return result;
+      }
+      const std::shared_ptr<ListValue> list = value.as_list();
+      result.values.insert(result.values.end(), list->items.begin(),
+                           list->items.end());
+    }
+    result.completed_count = static_cast<std::uint64_t>(result.values.size());
+    record([&](RuntimeThreadedCollectionStats *stats) {
+      ++stats->flat_map_operations;
+      stats->generated_values +=
+          static_cast<std::uint64_t>(result.values.size());
+    });
+    return result;
+  }
+
+  RuntimeFlowGatherResult combination(std::size_t count) {
+    std::vector<std::vector<std::size_t>> indexes =
+        combination_indexes(items_.size(), count);
+    RuntimeFlowGatherResult result =
+        map_index_rows(std::move(indexes), "threaded combination");
+    record([&](RuntimeThreadedCollectionStats *stats) {
+      ++stats->combination_operations;
+      stats->generated_values +=
+          static_cast<std::uint64_t>(result.values.size());
+    });
+    return result;
+  }
+
+  RuntimeFlowGatherResult permutation(std::size_t count) {
+    std::vector<std::vector<std::size_t>> indexes =
+        permutation_indexes(items_.size(), count);
+    RuntimeFlowGatherResult result =
+        map_index_rows(std::move(indexes), "threaded permutation");
+    record([&](RuntimeThreadedCollectionStats *stats) {
+      ++stats->permutation_operations;
+      stats->generated_values +=
+          static_cast<std::uint64_t>(result.values.size());
+    });
+    return result;
+  }
+
+  RuntimeThreadedCollectionStats stats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    RuntimeThreadedCollectionStats out = stats_;
+    out.flow = flow_.stats();
+    return out;
+  }
+
+private:
+  static RuntimeFlowGatherResult argument_error(std::string message) {
+    RuntimeFlowGatherResult result;
+    result.error_name = "ArgumentError";
+    result.message = std::move(message);
+    return result;
+  }
+
+  RuntimeFlowGatherResult filter(PredicateFunction function, bool invert) {
+    if (!function) {
+      return argument_error(invert ? "threaded reject block is missing"
+                                   : "threaded select block is missing");
+    }
+
+    RuntimeFlowGatherResult gathered = flow_.scatter_map(
+        items_,
+        [function, invert](const Value &value, std::size_t index) {
+          const bool matched = function(value, index);
+          const bool keep = invert ? !matched : matched;
+          return make_tuple_value({Value::boolean(keep), value});
+        },
+        options_);
+    if (!gathered.ok || gathered.failed) {
+      record([&](RuntimeThreadedCollectionStats *stats) {
+        ++stats->filter_operations;
+      });
+      return gathered;
+    }
+
+    RuntimeFlowGatherResult result = gathered;
+    result.values.clear();
+    for (std::size_t index = 0; index < gathered.values.size(); ++index) {
+      const Value &value = gathered.values[index];
+      if (!value.is_tuple() || value.as_tuple() == nullptr ||
+          value.as_tuple()->items.size() != 2U ||
+          !value.as_tuple()->items[0].is_bool()) {
+        result.ok = false;
+        result.failed = true;
+        result.error_name = "TypeError";
+        result.message = "threaded filter worker returned invalid marker";
+        result.failures.push_back(
+            RuntimeFlowFailure{index, result.error_name, result.message});
+        result.failed_count =
+            static_cast<std::uint64_t>(result.failures.size());
+        record([&](RuntimeThreadedCollectionStats *stats) {
+          ++stats->filter_operations;
+          stats->generated_values +=
+              static_cast<std::uint64_t>(result.values.size());
+        });
+        return result;
+      }
+      const std::vector<Value> &tuple_items = value.as_tuple()->items;
+      if (tuple_items[0].as_bool()) {
+        result.values.push_back(tuple_items[1]);
+      }
+    }
+    result.completed_count = static_cast<std::uint64_t>(result.values.size());
+    record([&](RuntimeThreadedCollectionStats *stats) {
+      ++stats->filter_operations;
+      stats->generated_values +=
+          static_cast<std::uint64_t>(result.values.size());
+    });
+    return result;
+  }
+
+  RuntimeFlowGatherResult
+  map_index_rows(std::vector<std::vector<std::size_t>> rows,
+                 const std::string &context) {
+    RuntimeFlowGatherResult source_validation = validate_source_items(context);
+    if (!source_validation.ok && !source_validation.error_name.empty()) {
+      return source_validation;
+    }
+
+    std::vector<Value> row_values;
+    row_values.reserve(rows.size());
+    for (const std::vector<std::size_t> &row : rows) {
+      std::vector<Value> index_values;
+      index_values.reserve(row.size());
+      for (std::size_t index : row) {
+        index_values.push_back(
+            Value::integer(static_cast<std::int64_t>(index)));
+      }
+      row_values.push_back(make_list_value(std::move(index_values), true));
+    }
+
+    RuntimeFlowGatherResult result = flow_.scatter_map(
+        std::move(row_values),
+        [this, context](const Value &value, std::size_t index) {
+          if (!value.is_list() || value.as_list() == nullptr) {
+            throw RuntimeTaskFailure("TypeError",
+                                     context + " index row is invalid");
+          }
+          std::vector<Value> values;
+          values.reserve(value.as_list()->items.size());
+          for (const Value &item : value.as_list()->items) {
+            if (!item.is_integer()) {
+              throw RuntimeTaskFailure("TypeError",
+                                       context + " index row is invalid");
+            }
+            const std::int64_t raw_index = item.as_integer();
+            if (raw_index < 0 ||
+                static_cast<std::uint64_t>(raw_index) >= items_.size()) {
+              throw RuntimeTaskFailure("IndexError",
+                                       context + " index is out of bounds");
+            }
+            values.push_back(items_[static_cast<std::size_t>(raw_index)]);
+          }
+          (void)index;
+          return make_list_value(std::move(values), true);
+        },
+        options_);
+    return result;
+  }
+
+  RuntimeFlowGatherResult validate_source_items(const std::string &context) {
+    RuntimeFlowGatherResult ok;
+    ok.ok = true;
+    if (options_.isolation == RuntimeFlowIsolationMode::Unchecked) {
+      return ok;
+    }
+    for (std::size_t index = 0; index < items_.size(); ++index) {
+      std::optional<RuntimeSyncBoundaryError> shareability_error =
+          runtime_value_shareability_error(items_[index]);
+      if (shareability_error.has_value()) {
+        RuntimeFlowGatherResult result;
+        result.failed = true;
+        result.error_name = shareability_error->error_name;
+        result.message = shareability_error->message;
+        result.failures.push_back(RuntimeFlowFailure{
+            index, result.error_name, context + " source rejected"});
+        result.failed_count = 1;
+        return result;
+      }
+    }
+    return ok;
+  }
+
+  static std::vector<std::vector<std::size_t>>
+  combination_indexes(std::size_t size, std::size_t count) {
+    std::vector<std::vector<std::size_t>> rows;
+    if (count > size) {
+      return rows;
+    }
+
+    std::vector<std::size_t> current;
+    current.reserve(count);
+    std::function<void(std::size_t)> visit = [&](std::size_t start) {
+      if (current.size() == count) {
+        rows.push_back(current);
+        return;
+      }
+      const std::size_t remaining = count - current.size();
+      for (std::size_t index = start; index + remaining <= size; ++index) {
+        current.push_back(index);
+        visit(index + 1U);
+        current.pop_back();
+      }
+    };
+    visit(0U);
+    return rows;
+  }
+
+  static std::vector<std::vector<std::size_t>>
+  permutation_indexes(std::size_t size, std::size_t count) {
+    std::vector<std::vector<std::size_t>> rows;
+    if (count > size) {
+      return rows;
+    }
+
+    std::vector<std::size_t> current;
+    std::vector<bool> used(size, false);
+    current.reserve(count);
+    std::function<void()> visit = [&]() {
+      if (current.size() == count) {
+        rows.push_back(current);
+        return;
+      }
+      for (std::size_t index = 0; index < size; ++index) {
+        if (used[index]) {
+          continue;
+        }
+        used[index] = true;
+        current.push_back(index);
+        visit();
+        current.pop_back();
+        used[index] = false;
+      }
+    };
+    visit();
+    return rows;
+  }
+
+  void
+  record(const std::function<void(RuntimeThreadedCollectionStats *)> &update) {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    ++stats_.operations;
+    if (update) {
+      update(&stats_);
+    }
+  }
+
+  std::vector<Value> items_;
+  RuntimeFlowModule flow_;
+  RuntimeFlowOptions options_;
+  mutable std::mutex stats_mutex_;
+  RuntimeThreadedCollectionStats stats_;
+};
+
+RuntimeThreadedCollection::RuntimeThreadedCollection(std::vector<Value> items,
+                                                     std::size_t workers,
+                                                     RuntimeFlowOptions options)
+    : impl_(std::make_shared<Impl>(std::move(items), workers, options)) {}
+
+RuntimeThreadedCollection::RuntimeThreadedCollection(
+    RuntimeThreadedCollection &&) noexcept = default;
+
+RuntimeThreadedCollection &RuntimeThreadedCollection::operator=(
+    RuntimeThreadedCollection &&) noexcept = default;
+
+RuntimeThreadedCollection::~RuntimeThreadedCollection() = default;
+
+RuntimeFlowGatherResult RuntimeThreadedCollection::each(EachFunction function) {
+  return impl_->each(std::move(function));
+}
+
+RuntimeFlowGatherResult RuntimeThreadedCollection::map(MapFunction function) {
+  return impl_->map(std::move(function));
+}
+
+RuntimeFlowGatherResult
+RuntimeThreadedCollection::select(PredicateFunction function) {
+  return impl_->select(std::move(function));
+}
+
+RuntimeFlowGatherResult
+RuntimeThreadedCollection::reject(PredicateFunction function) {
+  return impl_->reject(std::move(function));
+}
+
+RuntimeFlowGatherResult
+RuntimeThreadedCollection::flat_map(FlatMapFunction function) {
+  return impl_->flat_map(std::move(function));
+}
+
+RuntimeFlowGatherResult
+RuntimeThreadedCollection::combination(std::size_t count) {
+  return impl_->combination(count);
+}
+
+RuntimeFlowGatherResult
+RuntimeThreadedCollection::permutation(std::size_t count) {
+  return impl_->permutation(count);
+}
+
+RuntimeThreadedCollectionStats RuntimeThreadedCollection::stats() const {
+  return impl_->stats();
 }
 
 class RuntimeHeap::Impl
@@ -3777,11 +5328,10 @@ Value RuntimeHeap::make_set_value(std::vector<Value> items, bool frozen) {
   std::vector<Value> unique_items;
   unique_items.reserve(items.size());
   for (Value &item : items) {
-    const bool exists =
-        std::find_if(unique_items.begin(), unique_items.end(),
-                     [&](const Value &seen) {
-                       return value_equals(seen, item);
-                     }) != unique_items.end();
+    const bool exists = std::find_if(unique_items.begin(), unique_items.end(),
+                                     [&](const Value &seen) {
+                                       return value_equals(seen, item);
+                                     }) != unique_items.end();
     if (!exists) {
       unique_items.push_back(std::move(item));
     }
@@ -3983,6 +5533,43 @@ Value Value::instance(std::shared_ptr<InstanceValue> value) {
   return {std::move(value)};
 }
 
+Value Value::native_type(RuntimeNativeTypeKind kind) {
+  return {NativeTypeValue{kind}};
+}
+
+Value Value::task_module(std::shared_ptr<RuntimeTaskModule> value) {
+  return {std::move(value)};
+}
+
+Value Value::task_handle(std::shared_ptr<RuntimeTaskHandle> value) {
+  return {std::move(value)};
+}
+
+Value Value::channel(std::shared_ptr<RuntimeChannel> value) {
+  return {std::move(value)};
+}
+
+Value Value::mutex(std::shared_ptr<RuntimeMutex> value) {
+  return {std::move(value)};
+}
+
+Value Value::atomic(std::shared_ptr<RuntimeAtomic> value) {
+  return {std::move(value)};
+}
+
+Value Value::barrier(std::shared_ptr<RuntimeBarrier> value) {
+  return {std::move(value)};
+}
+
+Value Value::flow_module(std::shared_ptr<RuntimeFlowModule> value) {
+  return {std::move(value)};
+}
+
+Value Value::threaded_collection(
+    std::shared_ptr<RuntimeThreadedCollection> value) {
+  return {std::move(value)};
+}
+
 bool Value::is_null() const {
   return std::holds_alternative<std::monostate>(payload);
 }
@@ -4031,6 +5618,43 @@ bool Value::is_map() const {
   return std::holds_alternative<std::shared_ptr<MapValue>>(payload);
 }
 
+bool Value::is_native_type() const {
+  return std::holds_alternative<NativeTypeValue>(payload);
+}
+
+bool Value::is_task_module() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeTaskModule>>(payload);
+}
+
+bool Value::is_task_handle() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeTaskHandle>>(payload);
+}
+
+bool Value::is_channel() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeChannel>>(payload);
+}
+
+bool Value::is_mutex() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeMutex>>(payload);
+}
+
+bool Value::is_atomic() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeAtomic>>(payload);
+}
+
+bool Value::is_barrier() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeBarrier>>(payload);
+}
+
+bool Value::is_flow_module() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeFlowModule>>(payload);
+}
+
+bool Value::is_threaded_collection() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeThreadedCollection>>(
+      payload);
+}
+
 bool Value::as_bool() const { return std::get<bool>(payload); }
 
 std::int64_t Value::as_integer() const {
@@ -4069,6 +5693,43 @@ std::shared_ptr<SetValue> Value::as_set() const {
 
 std::shared_ptr<MapValue> Value::as_map() const {
   return std::get<std::shared_ptr<MapValue>>(payload);
+}
+
+NativeTypeValue Value::as_native_type() const {
+  return std::get<NativeTypeValue>(payload);
+}
+
+std::shared_ptr<RuntimeTaskModule> Value::as_task_module() const {
+  return std::get<std::shared_ptr<RuntimeTaskModule>>(payload);
+}
+
+std::shared_ptr<RuntimeTaskHandle> Value::as_task_handle() const {
+  return std::get<std::shared_ptr<RuntimeTaskHandle>>(payload);
+}
+
+std::shared_ptr<RuntimeChannel> Value::as_channel() const {
+  return std::get<std::shared_ptr<RuntimeChannel>>(payload);
+}
+
+std::shared_ptr<RuntimeMutex> Value::as_mutex() const {
+  return std::get<std::shared_ptr<RuntimeMutex>>(payload);
+}
+
+std::shared_ptr<RuntimeAtomic> Value::as_atomic() const {
+  return std::get<std::shared_ptr<RuntimeAtomic>>(payload);
+}
+
+std::shared_ptr<RuntimeBarrier> Value::as_barrier() const {
+  return std::get<std::shared_ptr<RuntimeBarrier>>(payload);
+}
+
+std::shared_ptr<RuntimeFlowModule> Value::as_flow_module() const {
+  return std::get<std::shared_ptr<RuntimeFlowModule>>(payload);
+}
+
+std::shared_ptr<RuntimeThreadedCollection>
+Value::as_threaded_collection() const {
+  return std::get<std::shared_ptr<RuntimeThreadedCollection>>(payload);
 }
 
 Value make_list_value(std::vector<Value> items, bool frozen) {
@@ -4506,8 +6167,35 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return lhs.as_class_object().class_index ==
            rhs.as_class_object().class_index;
   }
+  if (lhs.is_native_type()) {
+    return lhs.as_native_type().kind == rhs.as_native_type().kind;
+  }
   if (lhs.is_closure()) {
     return lhs.as_closure() == rhs.as_closure();
+  }
+  if (lhs.is_task_module()) {
+    return lhs.as_task_module() == rhs.as_task_module();
+  }
+  if (lhs.is_task_handle()) {
+    return lhs.as_task_handle() == rhs.as_task_handle();
+  }
+  if (lhs.is_channel()) {
+    return lhs.as_channel() == rhs.as_channel();
+  }
+  if (lhs.is_mutex()) {
+    return lhs.as_mutex() == rhs.as_mutex();
+  }
+  if (lhs.is_atomic()) {
+    return lhs.as_atomic() == rhs.as_atomic();
+  }
+  if (lhs.is_barrier()) {
+    return lhs.as_barrier() == rhs.as_barrier();
+  }
+  if (lhs.is_flow_module()) {
+    return lhs.as_flow_module() == rhs.as_flow_module();
+  }
+  if (lhs.is_threaded_collection()) {
+    return lhs.as_threaded_collection() == rhs.as_threaded_collection();
   }
   if (lhs.is_instance_object()) {
     return lhs.as_instance_object() == rhs.as_instance_object();
@@ -4674,10 +6362,9 @@ private:
       local.name = string_or_empty(entry.name_str_id);
       local.role = string_or_empty(entry.role_str_id);
       local.binding_kind = string_or_empty(entry.binding_kind_str_id);
-      local.initialized =
-          entry.slot < last_completed_initialized_.size() &&
-          last_completed_initialized_[entry.slot] != 0U &&
-          entry.slot < last_completed_regs_.size();
+      local.initialized = entry.slot < last_completed_initialized_.size() &&
+                          last_completed_initialized_[entry.slot] != 0U &&
+                          entry.slot < last_completed_regs_.size();
       if (local.initialized) {
         local.value = last_completed_regs_[entry.slot];
       }
@@ -5362,6 +7049,37 @@ private:
     return out;
   }
 
+  std::optional<Value>
+  lookup_native_prelude_constant(const std::vector<std::string> &segments) {
+    const std::string path = join_path_segments(segments);
+    if (path == "task") {
+      return Value::task_module(std::make_shared<RuntimeTaskModule>());
+    }
+    if (path == "task.flow") {
+      return Value::flow_module(std::make_shared<RuntimeFlowModule>());
+    }
+    if (path == "Flow" || path == "task.flow.Flow") {
+      return Value::native_type(RuntimeNativeTypeKind::Flow);
+    }
+    if (path == "Channel" || path == "sync.Channel") {
+      return Value::native_type(RuntimeNativeTypeKind::Channel);
+    }
+    if (path == "Mutex" || path == "sync.Mutex") {
+      return Value::native_type(RuntimeNativeTypeKind::Mutex);
+    }
+    if (path == "Atomic" || path == "sync.Atomic") {
+      return Value::native_type(RuntimeNativeTypeKind::Atomic);
+    }
+    if (path == "Barrier" || path == "sync.Barrier") {
+      return Value::native_type(RuntimeNativeTypeKind::Barrier);
+    }
+    if (path == "ThreadedCollection" ||
+        path == "task.flow.ThreadedCollection") {
+      return Value::native_type(RuntimeNativeTypeKind::ThreadedCollection);
+    }
+    return std::nullopt;
+  }
+
   bool find_class_by_path_segments(const Frame &frame,
                                    const std::vector<std::string> &segments,
                                    std::uint32_t *out_class_index) {
@@ -5418,6 +7136,10 @@ private:
     std::vector<std::string> segments;
     if (!path_segments_from_constant(frame, constant, &segments)) {
       return Value::null();
+    }
+    if (std::optional<Value> native_value =
+            lookup_native_prelude_constant(segments)) {
+      return *native_value;
     }
     std::uint32_t class_index = 0;
     if (find_class_by_path_segments(frame, segments, &class_index)) {
@@ -5585,8 +7307,8 @@ private:
     return std::nullopt;
   }
 
-  std::optional<MapEntry>
-  map_entry_from_transform_result(const Frame &frame, const Value &result) {
+  std::optional<MapEntry> map_entry_from_transform_result(const Frame &frame,
+                                                          const Value &result) {
     if (!ensure_lifecycle_access(frame, result)) {
       return std::nullopt;
     }
@@ -5627,11 +7349,10 @@ private:
   }
 
   void upsert_map_entry(std::vector<MapEntry> *entries, MapEntry entry) {
-    auto existing = std::find_if(entries->begin(), entries->end(),
-                                 [&](const MapEntry &candidate) {
-                                   return candidate.symbol_id ==
-                                          entry.symbol_id;
-                                 });
+    auto existing = std::find_if(
+        entries->begin(), entries->end(), [&](const MapEntry &candidate) {
+          return candidate.symbol_id == entry.symbol_id;
+        });
     if (existing == entries->end()) {
       entries->push_back(std::move(entry));
       return;
@@ -5710,8 +7431,9 @@ private:
     return intersection;
   }
 
-  std::vector<Value> sequence_difference_items(const std::vector<Value> &left,
-                                               const std::vector<Value> &right) {
+  std::vector<Value>
+  sequence_difference_items(const std::vector<Value> &left,
+                            const std::vector<Value> &right) {
     std::vector<Value> difference;
     for (const Value &item : left) {
       if (!sequence_contains_value(right, item)) {
@@ -5768,10 +7490,10 @@ private:
     return step.value_or(default_step);
   }
 
-  std::optional<std::vector<Value>> sequence_windows(
-      const Frame &frame, const std::vector<Value> &items,
-      std::int64_t raw_size, std::int64_t raw_step,
-      const std::string &context) {
+  std::optional<std::vector<Value>>
+  sequence_windows(const Frame &frame, const std::vector<Value> &items,
+                   std::int64_t raw_size, std::int64_t raw_step,
+                   const std::string &context) {
     if (raw_size <= 0) {
       set_fault(frame, "ArgumentError", context + " window size must be > 0");
       return std::nullopt;
@@ -5854,18 +7576,16 @@ private:
     }
     if ((left.is_integer() || left.is_float()) &&
         (right.is_integer() || right.is_float())) {
-      const double lhs =
-          left.is_integer() ? static_cast<double>(left.as_integer())
-                            : left.as_float();
-      const double rhs =
-          right.is_integer() ? static_cast<double>(right.as_integer())
+      const double lhs = left.is_integer()
+                             ? static_cast<double>(left.as_integer())
+                             : left.as_float();
+      const double rhs = right.is_integer()
+                             ? static_cast<double>(right.as_integer())
                              : right.as_float();
       return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
     }
     if (left.is_bool() && right.is_bool()) {
-      return left.as_bool() == right.as_bool()
-                 ? 0
-                 : (left.as_bool() ? 1 : -1);
+      return left.as_bool() == right.as_bool() ? 0 : (left.as_bool() ? 1 : -1);
     }
     if (left.is_string() && right.is_string()) {
       const std::optional<std::string> lhs =
@@ -5881,7 +7601,8 @@ private:
     if (left.is_symbol() && right.is_symbol()) {
       const std::uint32_t lhs_id = left.as_symbol().symbol_id;
       const std::uint32_t rhs_id = right.as_symbol().symbol_id;
-      if (lhs_id >= module_.symbols.size() || rhs_id >= module_.symbols.size()) {
+      if (lhs_id >= module_.symbols.size() ||
+          rhs_id >= module_.symbols.size()) {
         set_fault(frame, "VMError", "sort symbol ref is invalid");
         return std::nullopt;
       }
@@ -5893,9 +7614,11 @@ private:
     return std::nullopt;
   }
 
-  std::optional<int> compare_values_for_sort(
-      const Frame &frame, const Value &receiver, const Value &block,
-      const Value &left, const Value &right) {
+  std::optional<int> compare_values_for_sort(const Frame &frame,
+                                             const Value &receiver,
+                                             const Value &block,
+                                             const Value &left,
+                                             const Value &right) {
     if (block.is_null()) {
       return compare_values_for_sort(frame, left, right);
     }
@@ -5942,10 +7665,9 @@ private:
       const std::vector<Value> &items, const std::vector<Value> &args,
       const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
-    const bool block_allowed =
-        selector == "take_while" || selector == "sort" || selector == "uniq" ||
-        selector == "each_pair" || selector == "each_cons" ||
-        selector == "each";
+    const bool block_allowed = selector == "take_while" || selector == "sort" ||
+                               selector == "uniq" || selector == "each_pair" ||
+                               selector == "each_cons" || selector == "each";
     if (!block.is_null() && !block_allowed) {
       set_fault(frame, "TypeError",
                 "collection operation does not accept block arguments");
@@ -6203,18 +7925,18 @@ private:
                                 : superset && proper);
     }
     if (selector == "disjoint?") {
-      return Value::boolean(
-          sequence_intersection_items(items, *right).empty());
+      return Value::boolean(sequence_intersection_items(items, *right).empty());
     }
 
     set_fault(frame, "VMError", "unknown collection operation selector");
     return std::nullopt;
   }
 
-  std::optional<Value>
-  merge_map_entries(const Frame &frame, const Value &receiver,
-                    const std::vector<MapEntry> &left, const Value &right_value,
-                    const Value &block) {
+  std::optional<Value> merge_map_entries(const Frame &frame,
+                                         const Value &receiver,
+                                         const std::vector<MapEntry> &left,
+                                         const Value &right_value,
+                                         const Value &block) {
     const std::optional<std::vector<MapEntry>> right =
         extract_map_entries(frame, right_value);
     if (fault_.has_value()) {
@@ -6227,11 +7949,10 @@ private:
 
     std::vector<MapEntry> merged = left;
     for (const MapEntry &entry : *right) {
-      auto existing = std::find_if(merged.begin(), merged.end(),
-                                   [&](const MapEntry &candidate) {
-                                     return candidate.symbol_id ==
-                                            entry.symbol_id;
-                                   });
+      auto existing = std::find_if(
+          merged.begin(), merged.end(), [&](const MapEntry &candidate) {
+            return candidate.symbol_id == entry.symbol_id;
+          });
       Value value = entry.value;
       if (existing != merged.end() && !block.is_null()) {
         const std::optional<Value> merged_value = call_block_to_value(
@@ -6342,7 +8063,8 @@ private:
 
   std::optional<std::vector<Value>> extract_range_items(const Frame &frame,
                                                         const Value &value) {
-    const std::optional<RangeBounds> bounds = extract_range_bounds(frame, value);
+    const std::optional<RangeBounds> bounds =
+        extract_range_bounds(frame, value);
     if (fault_.has_value() || !bounds.has_value()) {
       return std::nullopt;
     }
@@ -6368,7 +8090,8 @@ private:
 
   bool range_contains_value(const Frame &frame, const Value &range,
                             const Value &needle, bool *out) {
-    const std::optional<RangeBounds> bounds = extract_range_bounds(frame, range);
+    const std::optional<RangeBounds> bounds =
+        extract_range_bounds(frame, range);
     if (fault_.has_value() || !bounds.has_value()) {
       return false;
     }
@@ -6379,10 +8102,9 @@ private:
     const std::int64_t value = needle.as_integer();
     const bool above_start =
         !bounds->start.has_value() || value >= *bounds->start;
-    const bool below_finish =
-        !bounds->finish.has_value() ||
-        (bounds->inclusive_end ? value <= *bounds->finish
-                               : value < *bounds->finish);
+    const bool below_finish = !bounds->finish.has_value() ||
+                              (bounds->inclusive_end ? value <= *bounds->finish
+                                                     : value < *bounds->finish);
     *out = above_start && below_finish;
     return true;
   }
@@ -6679,8 +8401,8 @@ private:
     if (limit.has_value() && *limit == 0U) {
       return std::vector<Value>{};
     }
-    if (!limit.has_value() &&
-        !require_lazy_seq_finite_source(frame, state, "materialize all items")) {
+    if (!limit.has_value() && !require_lazy_seq_finite_source(
+                                  frame, state, "materialize all items")) {
       return std::nullopt;
     }
     std::vector<Value> items;
@@ -7192,8 +8914,8 @@ private:
     }
   }
 
-  bool pattern_triple_eq(Frame &frame, const Value &matcher,
-                         const Value &value, bool *out) {
+  bool pattern_triple_eq(Frame &frame, const Value &matcher, const Value &value,
+                         bool *out) {
     if (matcher.is_class_object()) {
       const std::uint32_t target_class_index =
           matcher.as_class_object().class_index;
@@ -8209,16 +9931,1064 @@ private:
     }
   }
 
-  SendStatus try_apply_scalar_send(const Frame &frame, const Value &receiver,
-                                   const std::string &selector,
-                                   const std::vector<Value> &args,
-                                   const Value &block,
-                                   const std::vector<
-                                       std::pair<std::uint32_t, Value>>
-                                       &kw_args,
-                                   Value *out) {
+  using NativeBlockInvoker =
+      std::function<Value(const std::vector<Value> &args)>;
+
+  std::optional<NativeBlockInvoker>
+  make_native_block_invoker(const Frame &frame, const Value &block,
+                            const std::string &context) {
+    if (block.is_null()) {
+      set_fault(frame, "TypeError", context + " requires block");
+      return std::nullopt;
+    }
+    if (!block.is_closure()) {
+      set_fault(frame, "TypeError", context + " block must be closure");
+      return std::nullopt;
+    }
+    if (!ensure_lifecycle_access(frame, block)) {
+      return std::nullopt;
+    }
+    const std::shared_ptr<ClosureValue> closure = block.as_closure();
+    if (closure == nullptr) {
+      set_fault(frame, "TypeError", "closure value is null");
+      return std::nullopt;
+    }
+
+    BcModule module_copy = module_;
+    std::shared_ptr<RuntimeState> runtime_state = state_;
+    std::string module_id = module_id_;
+    const std::uint32_t code_id = closure->code_id;
+    std::vector<Value> captures = closure->captures;
+    Value self = closure->self;
+    return [module_copy = std::move(module_copy),
+            runtime_state = std::move(runtime_state),
+            module_id = std::move(module_id), code_id,
+            captures = std::move(captures),
+            self = std::move(self)](const std::vector<Value> &args) mutable {
+      const BcCode *code = find_code(module_copy, code_id);
+      if (code == nullptr) {
+        throw RuntimeTaskFailure("VMError", "closure code id is unknown");
+      }
+      Vm nested(module_copy, runtime_state, module_id);
+      nested.push_frame(*code, args, captures, self, Value::null(),
+                        std::nullopt);
+      while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
+        nested.step();
+      }
+      if (nested.fault_.has_value()) {
+        throw RuntimeTaskFailure(nested.fault_->error_name,
+                                 nested.fault_->message);
+      }
+      return nested.final_value_;
+    };
+  }
+
+  std::optional<Value>
+  keyword_arg_value(const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+                    const std::string &name) {
+    for (const auto &[symbol_id, value] : kw_args) {
+      const std::optional<std::string> key =
+          selector_text_from_symbol(symbol_id);
+      if (key.has_value() && *key == name) {
+        return value;
+      }
+    }
+    return std::nullopt;
+  }
+
+  bool reject_unknown_keywords(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      std::initializer_list<const char *> allowed) {
+    for (const auto &[symbol_id, value] : kw_args) {
+      (void)value;
+      const std::optional<std::string> key =
+          selector_text_from_symbol(symbol_id);
+      bool matched = false;
+      if (key.has_value()) {
+        for (const char *candidate : allowed) {
+          if (*key == candidate) {
+            matched = true;
+            break;
+          }
+        }
+      }
+      if (!matched) {
+        set_fault(frame, "TypeError", "unknown keyword argument");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool duration_from_value(const Frame &frame, const Value &value,
+                           std::chrono::milliseconds *out) {
+    if (value.is_integer()) {
+      *out = std::chrono::milliseconds(value.as_integer());
+      return true;
+    }
+    if (value.is_float()) {
+      *out = std::chrono::milliseconds(
+          static_cast<std::int64_t>(value.as_float() * 1000.0));
+      return true;
+    }
+    set_fault(frame, "TypeError",
+              "duration must be Integer milliseconds or Float seconds");
+    return false;
+  }
+
+  bool timeout_from_keywords(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      std::chrono::milliseconds *out) {
+    *out = std::chrono::milliseconds::max();
+    std::optional<Value> timeout = keyword_arg_value(kw_args, "timeout");
+    if (!timeout.has_value()) {
+      return true;
+    }
+    return duration_from_value(frame, *timeout, out);
+  }
+
+  bool capacity_from_args(
+      const Frame &frame, const std::vector<Value> &args,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      std::size_t *out) {
+    *out = 0;
+    if (!args.empty()) {
+      if (args.size() != 1 || !args[0].is_integer() ||
+          args[0].as_integer() < 0) {
+        set_fault(frame, "TypeError",
+                  "capacity must be a non-negative Integer");
+        return false;
+      }
+      *out = static_cast<std::size_t>(args[0].as_integer());
+    }
+    std::optional<Value> capacity = keyword_arg_value(kw_args, "capacity");
+    if (capacity.has_value()) {
+      if (!capacity->is_integer() || capacity->as_integer() < 0) {
+        set_fault(frame, "TypeError",
+                  "capacity must be a non-negative Integer");
+        return false;
+      }
+      *out = static_cast<std::size_t>(capacity->as_integer());
+    }
+    return true;
+  }
+
+  bool workers_from_optional_arg(const Frame &frame,
+                                 const std::vector<Value> &args,
+                                 std::size_t *out) {
+    *out = 0;
+    if (args.empty()) {
+      return true;
+    }
+    if (args.size() != 1 || !args[0].is_integer() || args[0].as_integer() < 0) {
+      set_fault(frame, "TypeError",
+                "worker count must be a non-negative Integer");
+      return false;
+    }
+    *out = static_cast<std::size_t>(args[0].as_integer());
+    return true;
+  }
+
+  static std::vector<Value>
+  native_sequence_items_or_throw(const Value &value,
+                                 const std::string &context) {
+    if (value.is_list()) {
+      const std::shared_ptr<ListValue> list = value.as_list();
+      if (list == nullptr) {
+        throw RuntimeTaskFailure("TypeError", context + " list value is null");
+      }
+      return list->items;
+    }
+    if (value.is_tuple()) {
+      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      if (tuple == nullptr) {
+        throw RuntimeTaskFailure("TypeError", context + " tuple value is null");
+      }
+      return tuple->items;
+    }
+    if (value.is_set()) {
+      const std::shared_ptr<SetValue> set = value.as_set();
+      if (set == nullptr) {
+        throw RuntimeTaskFailure("TypeError", context + " set value is null");
+      }
+      return set->items;
+    }
+    throw RuntimeTaskFailure("TypeError", context + " must return sequence");
+  }
+
+  bool set_fault_from_task_result(const Frame &frame,
+                                  const RuntimeTaskPublicResult &result) {
+    set_fault(
+        frame, result.error_name.empty() ? "TaskError" : result.error_name,
+        result.message.empty() ? "task operation failed" : result.message);
+    return false;
+  }
+
+  bool set_fault_from_channel_result(const Frame &frame,
+                                     const RuntimeChannelResult &result) {
+    set_fault(
+        frame, result.error_name.empty() ? "ChannelError" : result.error_name,
+        result.message.empty() ? "channel operation failed" : result.message);
+    return false;
+  }
+
+  bool set_fault_from_mutex_result(const Frame &frame,
+                                   const RuntimeMutexResult &result) {
+    set_fault(
+        frame, result.error_name.empty() ? "RuntimeError" : result.error_name,
+        result.message.empty() ? "mutex operation failed" : result.message);
+    return false;
+  }
+
+  bool set_fault_from_atomic_result(const Frame &frame,
+                                    const RuntimeAtomic::Result &result) {
+    set_fault(
+        frame, result.error_name.empty() ? "AtomicError" : result.error_name,
+        result.message.empty() ? "atomic operation failed" : result.message);
+    return false;
+  }
+
+  bool set_fault_from_barrier_result(const Frame &frame,
+                                     const RuntimeBarrierResult &result) {
+    set_fault(
+        frame, result.error_name.empty() ? "RuntimeError" : result.error_name,
+        result.message.empty() ? "barrier operation failed" : result.message);
+    return false;
+  }
+
+  bool set_fault_from_flow_result(const Frame &frame,
+                                  const RuntimeFlowGatherResult &result) {
+    std::string error_name = result.error_name;
+    std::string message = result.message;
+    if (error_name.empty() && !result.failures.empty()) {
+      error_name = result.failures.front().error_name;
+      message = result.failures.front().message;
+    }
+    set_fault(frame, error_name.empty() ? "FlowError" : error_name,
+              message.empty() ? "flow operation failed" : message);
+    return false;
+  }
+
+  SendStatus try_apply_native_stdlib_send(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    auto require_arity = [&](std::size_t expected) -> bool {
+      if (args.size() != expected) {
+        set_fault(frame, "TypeError", "wrong native stdlib SEND arity");
+        return false;
+      }
+      return true;
+    };
+    auto require_no_block = [&]() -> bool {
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError",
+                  "native stdlib selector does not accept block arguments");
+        return false;
+      }
+      return true;
+    };
+
+    if (receiver.is_native_type()) {
+      const RuntimeNativeTypeKind kind = receiver.as_native_type().kind;
+      if (selector != "new") {
+        return SendStatus::NotHandled;
+      }
+      if (kind == RuntimeNativeTypeKind::Channel) {
+        if (!reject_unknown_keywords(frame, kw_args, {"capacity"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::size_t capacity = 0;
+        if (!capacity_from_args(frame, args, kw_args, &capacity)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::channel(std::make_shared<RuntimeChannel>(capacity));
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Mutex) {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "Mutex.new does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::mutex(std::make_shared<RuntimeMutex>());
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Atomic) {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Atomic.new does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        try {
+          *out = Value::atomic(std::make_shared<RuntimeAtomic>(args[0]));
+        } catch (const RuntimeTaskFailure &failure) {
+          set_fault(frame, failure.error_name(), failure.message());
+          return SendStatus::Faulted;
+        }
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Barrier) {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Barrier.new does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!args[0].is_integer() || args[0].as_integer() <= 0) {
+          set_fault(frame, "TypeError", "barrier parties must be positive");
+          return SendStatus::Faulted;
+        }
+        try {
+          *out = Value::barrier(std::make_shared<RuntimeBarrier>(
+              static_cast<std::size_t>(args[0].as_integer())));
+        } catch (const RuntimeTaskFailure &failure) {
+          set_fault(frame, failure.error_name(), failure.message());
+          return SendStatus::Faulted;
+        }
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Flow) {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "Flow.new does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::flow_module(std::make_shared<RuntimeFlowModule>());
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::ThreadedCollection) {
+        if ((args.size() < 1 || args.size() > 2) || !kw_args.empty() ||
+            !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "ThreadedCollection.new does not accept keywords");
+          } else {
+            set_fault(frame, "TypeError",
+                      "ThreadedCollection.new expects items and workers");
+          }
+          return SendStatus::Faulted;
+        }
+        bool source_was_tuple = false;
+        std::optional<std::vector<Value>> items =
+            extract_sequence_items(frame, args[0], &source_was_tuple);
+        if (!items.has_value()) {
+          set_fault(frame, "TypeError",
+                    "ThreadedCollection.new expects sequence items");
+          return SendStatus::Faulted;
+        }
+        std::size_t workers = 0;
+        if (args.size() == 2) {
+          if (!args[1].is_integer() || args[1].as_integer() < 0) {
+            set_fault(frame, "TypeError",
+                      "ThreadedCollection workers must be non-negative");
+            return SendStatus::Faulted;
+          }
+          workers = static_cast<std::size_t>(args[1].as_integer());
+        }
+        *out = Value::threaded_collection(
+            std::make_shared<RuntimeThreadedCollection>(*items, workers));
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_task_module()) {
+      const std::shared_ptr<RuntimeTaskModule> task = receiver.as_task_module();
+      if (task == nullptr) {
+        set_fault(frame, "TypeError", "task module is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "flow") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "task.flow does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::flow_module(std::make_shared<RuntimeFlowModule>());
+        return SendStatus::Matched;
+      }
+      if (selector == "async" || selector == "spawn") {
+        if (!require_arity(0) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task async/spawn does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "task " + selector);
+        if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        RuntimeTaskHandle handle =
+            selector == "async" ? task->async([invoker = *invoker]() mutable {
+              return invoker(std::vector<Value>{});
+            })
+                                : task->spawn([invoker = *invoker]() mutable {
+                                    return invoker(std::vector<Value>{});
+                                  });
+        *out = Value::task_handle(
+            std::make_shared<RuntimeTaskHandle>(std::move(handle)));
+        return SendStatus::Matched;
+      }
+      if (selector == "sleep") {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task.sleep does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        std::chrono::milliseconds duration;
+        if (!duration_from_value(frame, args[0], &duration)) {
+          return SendStatus::Faulted;
+        }
+        try {
+          task->sleep(duration);
+        } catch (const RuntimeTaskCancelled &cancelled) {
+          (void)cancelled;
+          set_fault(frame, "CancelledError", "task cancelled");
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "yield") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task.yield does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        try {
+          task->yield_current();
+        } catch (const RuntimeTaskCancelled &cancelled) {
+          (void)cancelled;
+          set_fault(frame, "CancelledError", "task cancelled");
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "sync") {
+        if (!require_arity(0) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "task.sync does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "task.sync");
+        if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        try {
+          *out = task->sync([invoker = *invoker]() mutable {
+            return invoker(std::vector<Value>{});
+          });
+        } catch (const RuntimeTaskFailure &failure) {
+          set_fault(frame, failure.error_name(), failure.message());
+          return SendStatus::Faulted;
+        } catch (const RuntimeTaskCancelled &cancelled) {
+          (void)cancelled;
+          set_fault(frame, "CancelledError", "task cancelled");
+          return SendStatus::Faulted;
+        }
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_task_handle()) {
+      const std::shared_ptr<RuntimeTaskHandle> handle =
+          receiver.as_task_handle();
+      if (handle == nullptr) {
+        set_fault(frame, "TypeError", "task handle is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "wait") {
+        if (!require_arity(0) ||
+            !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::chrono::milliseconds timeout;
+        if (!timeout_from_keywords(frame, kw_args, &timeout)) {
+          return SendStatus::Faulted;
+        }
+        const RuntimeTaskPublicResult waited = handle->wait(timeout);
+        if (!waited.ok) {
+          set_fault_from_task_result(frame, waited);
+          return SendStatus::Faulted;
+        }
+        *out = waited.value;
+        return SendStatus::Matched;
+      }
+      if (selector == "result") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "TaskHandle.result does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        const RuntimeTaskPublicResult result = handle->result();
+        if (!result.ok) {
+          set_fault_from_task_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = result.value;
+        return SendStatus::Matched;
+      }
+      if (selector == "cancel") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "TaskHandle.cancel does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(handle->cancel());
+        return SendStatus::Matched;
+      }
+      if (selector == "resume") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "TaskHandle.resume does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(handle->resume());
+        return SendStatus::Matched;
+      }
+      if (selector == "cancelled?" || selector == "done?" ||
+          selector == "running?" || selector == "failed?") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "TaskHandle predicate does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (selector == "cancelled?") {
+          *out = Value::boolean(handle->cancelled());
+        } else if (selector == "done?") {
+          *out = Value::boolean(handle->done());
+        } else if (selector == "running?") {
+          *out = Value::boolean(handle->running());
+        } else {
+          *out = Value::boolean(handle->failed());
+        }
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_channel()) {
+      const std::shared_ptr<RuntimeChannel> channel = receiver.as_channel();
+      if (channel == nullptr) {
+        set_fault(frame, "TypeError", "channel is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "send") {
+        if (!require_arity(1) ||
+            !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::chrono::milliseconds timeout;
+        if (!timeout_from_keywords(frame, kw_args, &timeout)) {
+          return SendStatus::Faulted;
+        }
+        const RuntimeChannelResult sent = channel->send(args[0], timeout);
+        if (!sent.ok) {
+          set_fault_from_channel_result(frame, sent);
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(sent.sent);
+        return SendStatus::Matched;
+      }
+      if (selector == "recv") {
+        if (!require_arity(0) ||
+            !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::chrono::milliseconds timeout;
+        if (!timeout_from_keywords(frame, kw_args, &timeout)) {
+          return SendStatus::Faulted;
+        }
+        const RuntimeChannelResult received = channel->recv(timeout);
+        if (!received.ok) {
+          set_fault_from_channel_result(frame, received);
+          return SendStatus::Faulted;
+        }
+        *out = received.value;
+        return SendStatus::Matched;
+      }
+      if (selector == "close") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Channel.close does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(channel->close());
+        return SendStatus::Matched;
+      }
+      if (selector == "closed?") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Channel.closed? does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(channel->closed());
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_mutex()) {
+      const std::shared_ptr<RuntimeMutex> mutex = receiver.as_mutex();
+      if (mutex == nullptr) {
+        set_fault(frame, "TypeError", "mutex is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "lock") {
+        if (!require_arity(0) ||
+            !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::chrono::milliseconds timeout;
+        if (!timeout_from_keywords(frame, kw_args, &timeout)) {
+          return SendStatus::Faulted;
+        }
+        const RuntimeMutexResult locked = mutex->lock(timeout);
+        if (!locked.ok) {
+          set_fault_from_mutex_result(frame, locked);
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(locked.locked);
+        return SendStatus::Matched;
+      }
+      if (selector == "unlock") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Mutex.unlock does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        const RuntimeMutexResult unlocked = mutex->unlock();
+        if (!unlocked.ok) {
+          set_fault_from_mutex_result(frame, unlocked);
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(unlocked.unlocked);
+        return SendStatus::Matched;
+      }
+      if (selector == "synchronize") {
+        if (!require_arity(0) ||
+            !reject_unknown_keywords(frame, kw_args, {"timeout"})) {
+          return SendStatus::Faulted;
+        }
+        std::chrono::milliseconds timeout;
+        if (!timeout_from_keywords(frame, kw_args, &timeout)) {
+          return SendStatus::Faulted;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "Mutex.synchronize");
+        if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        try {
+          const RuntimeMutexResult synchronized = mutex->synchronize(
+              [invoker = *invoker]() mutable {
+                return invoker(std::vector<Value>{});
+              },
+              timeout);
+          if (!synchronized.ok) {
+            set_fault_from_mutex_result(frame, synchronized);
+            return SendStatus::Faulted;
+          }
+          *out = synchronized.value;
+        } catch (const RuntimeTaskFailure &failure) {
+          set_fault(frame, failure.error_name(), failure.message());
+          return SendStatus::Faulted;
+        }
+        return SendStatus::Matched;
+      }
+      if (selector == "locked?" || selector == "owned?") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Mutex predicate does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(selector == "locked?" ? mutex->locked()
+                                                    : mutex->owned());
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_atomic()) {
+      const std::shared_ptr<RuntimeAtomic> atomic = receiver.as_atomic();
+      if (atomic == nullptr) {
+        set_fault(frame, "TypeError", "atomic is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "get") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Atomic.get does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = atomic->get_value();
+        return SendStatus::Matched;
+      }
+      if (selector == "set") {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Atomic.set does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        const RuntimeAtomic::Result result = atomic->set_value(args[0]);
+        if (!result.ok) {
+          set_fault_from_atomic_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = result.value;
+        return SendStatus::Matched;
+      }
+      if (selector == "compare_and_set") {
+        if (!require_arity(2) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Atomic.compare_and_set does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        const RuntimeAtomic::Result result =
+            atomic->compare_and_set_value(args[0], args[1]);
+        if (!result.ok) {
+          set_fault_from_atomic_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(result.matched);
+        return SendStatus::Matched;
+      }
+      if (selector == "update") {
+        if (!require_arity(0) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Atomic.update does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "Atomic.update");
+        if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        const RuntimeAtomic::Result result =
+            atomic->update([invoker = *invoker](const Value &current) mutable {
+              return invoker(std::vector<Value>{current});
+            });
+        if (!result.ok) {
+          set_fault_from_atomic_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = result.value;
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_barrier()) {
+      const std::shared_ptr<RuntimeBarrier> barrier = receiver.as_barrier();
+      if (barrier == nullptr) {
+        set_fault(frame, "TypeError", "barrier is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "wait") {
+        if (!require_arity(0) ||
+            !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::chrono::milliseconds timeout;
+        if (!timeout_from_keywords(frame, kw_args, &timeout)) {
+          return SendStatus::Faulted;
+        }
+        const RuntimeBarrierResult waited = barrier->wait(timeout);
+        if (!waited.ok) {
+          set_fault_from_barrier_result(frame, waited);
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(waited.passed);
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_flow_module()) {
+      const std::shared_ptr<RuntimeFlowModule> flow = receiver.as_flow_module();
+      if (flow == nullptr) {
+        set_fault(frame, "TypeError", "flow module is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "scatter_map" || selector == "scatter") {
+        if (!require_arity(1) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "flow scatter_map does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        bool source_was_tuple = false;
+        std::optional<std::vector<Value>> items =
+            extract_sequence_items(frame, args[0], &source_was_tuple);
+        if (!items.has_value()) {
+          set_fault(frame, "TypeError", "flow scatter_map expects sequence");
+          return SendStatus::Faulted;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "flow scatter_map");
+        if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        RuntimeFlowGatherResult result = flow->scatter_map(
+            *items, [invoker = *invoker](const Value &value,
+                                         std::size_t index) mutable {
+              return invoker(std::vector<Value>{
+                  value, Value::integer(static_cast<std::int64_t>(index))});
+            });
+        if (!result.ok || result.failed) {
+          set_fault_from_flow_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(std::move(result.values));
+        return SendStatus::Matched;
+      }
+      if (selector == "broadcast") {
+        if (!require_arity(2) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "flow broadcast does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!args[1].is_integer() || args[1].as_integer() < 0) {
+          set_fault(frame, "TypeError",
+                    "flow broadcast workers must be non-negative");
+          return SendStatus::Faulted;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "flow broadcast");
+        if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        RuntimeFlowGatherResult result = flow->broadcast(
+            args[0], static_cast<std::size_t>(args[1].as_integer()),
+            [invoker = *invoker](const Value &value,
+                                 std::size_t index) mutable {
+              return invoker(std::vector<Value>{
+                  value, Value::integer(static_cast<std::int64_t>(index))});
+            });
+        if (!result.ok || result.failed) {
+          set_fault_from_flow_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(std::move(result.values));
+        return SendStatus::Matched;
+      }
+      if (selector == "gather") {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "flow gather does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        bool source_was_tuple = false;
+        std::optional<std::vector<Value>> values =
+            extract_sequence_items(frame, args[0], &source_was_tuple);
+        if (!values.has_value()) {
+          set_fault(frame, "TypeError", "flow gather expects sequence");
+          return SendStatus::Faulted;
+        }
+        std::vector<RuntimeTaskHandle> handles;
+        handles.reserve(values->size());
+        for (const Value &value : *values) {
+          if (!value.is_task_handle() || value.as_task_handle() == nullptr) {
+            set_fault(frame, "TypeError",
+                      "flow gather expects TaskHandle values");
+            return SendStatus::Faulted;
+          }
+          handles.push_back(*value.as_task_handle());
+        }
+        RuntimeFlowGatherResult result = flow->gather(std::move(handles));
+        if (!result.ok || result.failed) {
+          set_fault_from_flow_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(std::move(result.values));
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_threaded_collection()) {
+      const std::shared_ptr<RuntimeThreadedCollection> threaded =
+          receiver.as_threaded_collection();
+      if (threaded == nullptr) {
+        set_fault(frame, "TypeError", "threaded collection is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "map" || selector == "select" || selector == "reject" ||
+          selector == "flat_map" || selector == "each") {
+        if (!require_arity(0) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "threaded collection operation does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        std::optional<NativeBlockInvoker> invoker = make_native_block_invoker(
+            frame, block, "threaded collection " + selector);
+        if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        RuntimeFlowGatherResult result;
+        if (selector == "map") {
+          result =
+              threaded->map([invoker = *invoker](const Value &value,
+                                                 std::size_t index) mutable {
+                return invoker(std::vector<Value>{
+                    value, Value::integer(static_cast<std::int64_t>(index))});
+              });
+        } else if (selector == "select") {
+          result =
+              threaded->select([invoker = *invoker](const Value &value,
+                                                    std::size_t index) mutable {
+                const Value kept = invoker(std::vector<Value>{
+                    value, Value::integer(static_cast<std::int64_t>(index))});
+                return is_truthy(kept);
+              });
+        } else if (selector == "reject") {
+          result =
+              threaded->reject([invoker = *invoker](const Value &value,
+                                                    std::size_t index) mutable {
+                const Value rejected = invoker(std::vector<Value>{
+                    value, Value::integer(static_cast<std::int64_t>(index))});
+                return is_truthy(rejected);
+              });
+        } else if (selector == "flat_map") {
+          result = threaded->flat_map(
+              [invoker = *invoker](const Value &value,
+                                   std::size_t index) mutable {
+                const Value mapped = invoker(std::vector<Value>{
+                    value, Value::integer(static_cast<std::int64_t>(index))});
+                return native_sequence_items_or_throw(
+                    mapped, "threaded flat_map block");
+              });
+        } else {
+          result =
+              threaded->each([invoker = *invoker](const Value &value,
+                                                  std::size_t index) mutable {
+                (void)invoker(std::vector<Value>{
+                    value, Value::integer(static_cast<std::int64_t>(index))});
+              });
+        }
+        if (!result.ok || result.failed) {
+          set_fault_from_flow_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(std::move(result.values));
+        return SendStatus::Matched;
+      }
+      if (selector == "combination" || selector == "permutation") {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "threaded generated operation does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!args[0].is_integer() || args[0].as_integer() < 0) {
+          set_fault(frame, "TypeError", "generated count must be non-negative");
+          return SendStatus::Faulted;
+        }
+        RuntimeFlowGatherResult result =
+            selector == "combination"
+                ? threaded->combination(
+                      static_cast<std::size_t>(args[0].as_integer()))
+                : threaded->permutation(
+                      static_cast<std::size_t>(args[0].as_integer()));
+        if (!result.ok || result.failed) {
+          set_fault_from_flow_result(frame, result);
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(std::move(result.values));
+        return SendStatus::Matched;
+      }
+    }
+
+    if ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
+        selector == "threaded") {
+      if (!kw_args.empty() || !block.is_null()) {
+        set_fault(frame, "TypeError",
+                  "threaded does not accept keywords or block arguments");
+        return SendStatus::Faulted;
+      }
+      std::size_t workers = 0;
+      if (!workers_from_optional_arg(frame, args, &workers)) {
+        return SendStatus::Faulted;
+      }
+      bool source_was_tuple = false;
+      std::optional<std::vector<Value>> items =
+          extract_sequence_items(frame, receiver, &source_was_tuple);
+      if (!items.has_value()) {
+        return SendStatus::Faulted;
+      }
+      *out = Value::threaded_collection(
+          std::make_shared<RuntimeThreadedCollection>(*items, workers));
+      return SendStatus::Matched;
+    }
+
+    return SendStatus::NotHandled;
+  }
+
+  SendStatus try_apply_scalar_send(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
     if (!ensure_lifecycle_access(frame, receiver)) {
       return SendStatus::Faulted;
+    }
+
+    Value native_result = Value::null();
+    const SendStatus native_status = try_apply_native_stdlib_send(
+        frame, receiver, selector, args, block, kw_args, &native_result);
+    if (native_status != SendStatus::NotHandled) {
+      if (native_status == SendStatus::Matched) {
+        *out = std::move(native_result);
+      }
+      return native_status;
     }
 
     auto require_arity = [&](std::size_t expected) -> bool {
@@ -8263,21 +11033,37 @@ private:
 
     const bool receiver_is_range = value_is_range_instance(receiver);
     const bool receiver_is_lazy_seq = value_is_lazy_seq_instance(receiver);
-    const bool sequence_set_operation_selector = selector_in(
-        {"contains?", "include?", "union", "intersection", "difference",
-         "left_difference", "symmetric_difference", "subset?",
-         "proper_subset?", "superset?", "proper_superset?", "disjoint?",
-         "permutation", "combination", "&", "|", "-", "^", "<=", "<", ">=",
-         ">"});
-    const bool sequence_extra_operation_selector = selector_in(
-        {"+", "*", "concat", "take_while", "reverse", "sort", "uniq",
-         "each_pair", "each_cons"});
-    const bool sequence_collection_selector = selector_in(
-        {"empty?", "[]", "deconstruct", "first", "count", "to_a", "lazy",
-         "each", "map", "flat_map", "select", "reject", "find", "group_by",
-         "any?", "all?", "none?", "reduce"}) ||
-                                              sequence_set_operation_selector ||
-                                              sequence_extra_operation_selector;
+    const bool sequence_set_operation_selector =
+        selector_in({"contains?",
+                     "include?",
+                     "union",
+                     "intersection",
+                     "difference",
+                     "left_difference",
+                     "symmetric_difference",
+                     "subset?",
+                     "proper_subset?",
+                     "superset?",
+                     "proper_superset?",
+                     "disjoint?",
+                     "permutation",
+                     "combination",
+                     "&",
+                     "|",
+                     "-",
+                     "^",
+                     "<=",
+                     "<",
+                     ">=",
+                     ">"});
+    const bool sequence_extra_operation_selector =
+        selector_in({"+", "*", "concat", "take_while", "reverse", "sort",
+                     "uniq", "each_pair", "each_cons"});
+    const bool sequence_collection_selector =
+        selector_in({"empty?", "[]", "deconstruct", "first", "count", "to_a",
+                     "lazy", "each", "map", "flat_map", "select", "reject",
+                     "find", "group_by", "any?", "all?", "none?", "reduce"}) ||
+        sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
         sequence_collection_selector || selector == "===";
     const bool lazy_seq_collection_selector = sequence_collection_selector;
@@ -8295,9 +11081,9 @@ private:
         (receiver.is_integer() &&
          selector_in({"+", "-", "*", "/", ">", "<", ">=", "<="}));
     const bool keyword_compatible_builtin_selector =
-        selector == "each" && (receiver.is_list() || receiver.is_tuple() ||
-                               receiver.is_set() || receiver_is_range ||
-                               receiver_is_lazy_seq);
+        selector == "each" &&
+        (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
+         receiver_is_range || receiver_is_lazy_seq);
     if (!kw_args.empty() && builtin_selector &&
         !keyword_compatible_builtin_selector) {
       set_fault(frame, "TypeError",
@@ -8365,13 +11151,13 @@ private:
           return SendStatus::Faulted;
         }
         bool saw_item = false;
-        const LazySeqVisitStatus status = visit_lazy_seq(
-            frame, *state, receiver,
-            [&](const Value &item) -> LazySeqVisitStatus {
-              (void)item;
-              saw_item = true;
-              return LazySeqVisitStatus::Stop;
-            });
+        const LazySeqVisitStatus status =
+            visit_lazy_seq(frame, *state, receiver,
+                           [&](const Value &item) -> LazySeqVisitStatus {
+                             (void)item;
+                             saw_item = true;
+                             return LazySeqVisitStatus::Stop;
+                           });
         if (status == LazySeqVisitStatus::Faulted) {
           return SendStatus::Faulted;
         }
@@ -8392,17 +11178,17 @@ private:
         std::int64_t seen = 0;
         bool found_value = false;
         Value found = Value::null();
-        const LazySeqVisitStatus status = visit_lazy_seq(
-            frame, *state, receiver,
-            [&](const Value &item) -> LazySeqVisitStatus {
-              if (seen == index) {
-                found_value = true;
-                found = item;
-                return LazySeqVisitStatus::Stop;
-              }
-              ++seen;
-              return LazySeqVisitStatus::Continue;
-            });
+        const LazySeqVisitStatus status =
+            visit_lazy_seq(frame, *state, receiver,
+                           [&](const Value &item) -> LazySeqVisitStatus {
+                             if (seen == index) {
+                               found_value = true;
+                               found = item;
+                               return LazySeqVisitStatus::Stop;
+                             }
+                             ++seen;
+                             return LazySeqVisitStatus::Continue;
+                           });
         if (status == LazySeqVisitStatus::Faulted) {
           return SendStatus::Faulted;
         }
@@ -8431,9 +11217,8 @@ private:
         if (!require_arity(1) || !require_integer_arg(0, &count)) {
           return SendStatus::Faulted;
         }
-        const std::size_t take = count <= 0
-                                     ? 0U
-                                     : static_cast<std::size_t>(count);
+        const std::size_t take =
+            count <= 0 ? 0U : static_cast<std::size_t>(count);
         const std::optional<std::vector<Value>> items =
             materialize_lazy_seq_items(frame, *state, receiver, take);
         if (!items.has_value()) {
@@ -8533,8 +11318,7 @@ private:
 
       if (selector == "group_by") {
         if (!require_arity(0) ||
-            !require_lazy_seq_finite_source(frame, *state,
-                                            "group all items")) {
+            !require_lazy_seq_finite_source(frame, *state, "group all items")) {
           return SendStatus::Faulted;
         }
         std::vector<std::pair<std::uint32_t, std::vector<Value>>> groups;
@@ -8717,7 +11501,8 @@ private:
         return SendStatus::Matched;
       }
 
-      if (sequence_set_operation_selector || sequence_extra_operation_selector ||
+      if (sequence_set_operation_selector ||
+          sequence_extra_operation_selector ||
           (selector == "each" && (!args.empty() || !kw_args.empty()))) {
         const std::optional<std::vector<Value>> items =
             materialize_lazy_seq_items(frame, *state, receiver, std::nullopt);
@@ -8736,9 +11521,8 @@ private:
 
     if (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
         (receiver_is_range && range_collection_selector)) {
-      if (receiver_is_range &&
-          (selector == "contains?" || selector == "include?" ||
-           selector == "===")) {
+      if (receiver_is_range && (selector == "contains?" ||
+                                selector == "include?" || selector == "===")) {
         if (!require_arity(1) || !require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -8878,7 +11662,8 @@ private:
           *out = receiver;
           return SendStatus::Matched;
         }
-        if (sequence_set_operation_selector || sequence_extra_operation_selector ||
+        if (sequence_set_operation_selector ||
+            sequence_extra_operation_selector ||
             (selector == "each" && (!args.empty() || !kw_args.empty()))) {
           const std::optional<Value> value = apply_sequence_set_operation(
               frame, receiver, selector, items, args, block, kw_args);
@@ -9209,11 +11994,11 @@ private:
             *out = Value::boolean(false);
             return SendStatus::Matched;
           }
-          const bool found = std::find_if(extracted->begin(), extracted->end(),
-                                          [&](const MapEntry &entry) {
-                                            return entry.symbol_id ==
-                                                   *key_symbol_id;
-                                          }) != extracted->end();
+          const bool found =
+              std::find_if(extracted->begin(), extracted->end(),
+                           [&](const MapEntry &entry) {
+                             return entry.symbol_id == *key_symbol_id;
+                           }) != extracted->end();
           *out = Value::boolean(found);
           return SendStatus::Matched;
         }
@@ -9806,12 +12591,11 @@ private:
           return;
         }
       }
-      const Value value =
-          insn.opcode == Opcode::MakeTuple
-              ? make_tuple_value(std::move(items))
-              : (insn.opcode == Opcode::MakeSet
-                     ? make_set_value(std::move(items))
-                     : make_list_value(std::move(items)));
+      const Value value = insn.opcode == Opcode::MakeTuple
+                              ? make_tuple_value(std::move(items))
+                              : (insn.opcode == Opcode::MakeSet
+                                     ? make_set_value(std::move(items))
+                                     : make_list_value(std::move(items)));
       if (!write_reg(frame, dst, value)) {
         return;
       }

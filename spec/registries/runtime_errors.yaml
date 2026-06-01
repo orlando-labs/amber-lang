@@ -17,6 +17,9 @@ errors:
   - UseAfterFreeError
   - PinnedObjectError
   - LifetimeError
+  - TaskError
+  - TaskNotDoneError
+  - TaskFailedError
   - IncludeCycleError
   - WorldFrozenError
   - SuperclassMismatchError
@@ -24,6 +27,13 @@ errors:
   - CancelledError
   - ChannelClosedError
   - DeadlockError
+  - OwnershipError
+  - AtomicError
+  - AtomicCompatibilityError
+  - FlowError
+  - FlowCancelledError
+  - FlowPartitionError
+  - FlowGatherError
   - MoveError
   - MovedValueError
   - CapabilityError

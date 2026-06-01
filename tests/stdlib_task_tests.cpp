@@ -1,0 +1,1414 @@
+#include "bytecode/emitter.h"
+#include "frontend/binder/binder.h"
+#include "frontend/hir/hir.h"
+#include "frontend/lexer/lexer.h"
+#include "frontend/parser/parser.h"
+#include "runtime/vm.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <vector>
+
+namespace {
+
+void expect(bool condition, const std::string &message) {
+  if (!condition) {
+    std::cerr << "stdlib task test failed: " << message << "\n";
+    std::exit(1);
+  }
+}
+
+bool wait_for_condition(const std::function<bool()> &condition,
+                        std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (condition()) {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+  return condition();
+}
+
+amber::bytecode::BcModule compile_source_or_die(const std::string &source) {
+  amber::lexer::Lexer lexer(source, "<stdlib-task-source-test>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(parse_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(bind_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::hir::Program program = amber::hir::lower_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  amber::bytecode::EmitResult emit_result =
+      amber::bytecode::emit_program(program, parse_result.module_name);
+  if (!emit_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(emit_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::bytecode::DecodeResult decoded = amber::bytecode::deserialize_module(
+      amber::bytecode::serialize_module(emit_result.module));
+  if (!decoded.ok()) {
+    std::cerr << amber::bytecode::verify_errors_to_json(decoded.errors);
+    std::exit(1);
+  }
+  return std::move(decoded.module);
+}
+
+amber::runtime::ExecutionResult
+execute_source_or_die(const std::string &source) {
+  amber::bytecode::BcModule module = compile_source_or_die(source);
+  expect(module.init.has_entry_code_id, "source module should have init code");
+  return amber::runtime::execute_code(module, module.init.entry_code_id);
+}
+
+void expect_integer(const amber::runtime::Value &value, std::int64_t expected,
+                    const std::string &message) {
+  expect(value.is_integer(), message + " should be integer");
+  expect(value.as_integer() == expected, message + " value");
+}
+
+void expect_bool(const amber::runtime::Value &value, bool expected,
+                 const std::string &message) {
+  expect(value.is_bool(), message + " should be bool");
+  expect(value.as_bool() == expected, message + " value");
+}
+
+void expect_channel_integer(const amber::runtime::RuntimeChannelResult &result,
+                            std::int64_t expected, const std::string &message) {
+  expect(result.ok && result.received, message + " should receive");
+  expect_integer(result.value, expected, message);
+}
+
+void expect_integer_values(const std::vector<amber::runtime::Value> &values,
+                           const std::vector<std::int64_t> &expected,
+                           const std::string &message) {
+  expect(values.size() == expected.size(), message + " size");
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    expect_integer(values[index], expected[index],
+                   message + " item " + std::to_string(index));
+  }
+}
+
+void expect_integer_list_value(const amber::runtime::Value &value,
+                               const std::vector<std::int64_t> &expected,
+                               const std::string &message) {
+  expect(value.is_list() && value.as_list() != nullptr,
+         message + " should be list");
+  expect_integer_values(value.as_list()->items, expected, message);
+}
+
+void expect_integer_list_values(
+    const std::vector<amber::runtime::Value> &values,
+    const std::vector<std::vector<std::int64_t>> &expected,
+    const std::string &message) {
+  expect(values.size() == expected.size(), message + " size");
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    expect_integer_list_value(values[index], expected[index],
+                              message + " item " + std::to_string(index));
+  }
+}
+
+void expect_state(amber::runtime::RuntimeTaskHandleState actual,
+                  amber::runtime::RuntimeTaskHandleState expected,
+                  const std::string &message) {
+  expect(actual == expected, message);
+}
+
+void test_std010_task_async_spawn_and_wait_return_values() {
+  amber::runtime::RuntimeTaskModule task(2);
+
+  const amber::runtime::RuntimeTaskHandle same_strand =
+      task.async([]() { return amber::runtime::Value::integer(21); });
+  const amber::runtime::RuntimeTaskHandle new_strand =
+      task.spawn([]() { return amber::runtime::Value::integer(42); });
+
+  expect(same_strand.active(), "task.async should return active handle");
+  expect(new_strand.active(), "task.spawn should return active handle");
+  expect(same_strand.task_id() != 0 && new_strand.task_id() != 0,
+         "task handles should expose stable task ids");
+  expect(same_strand.strand_id() == same_strand.task_id(),
+         "same-strand handle should expose runtime strand id");
+
+  const amber::runtime::RuntimeTaskPublicResult same_result =
+      same_strand.wait(std::chrono::milliseconds(1000));
+  const amber::runtime::RuntimeTaskPublicResult spawn_result =
+      new_strand.wait(std::chrono::milliseconds(1000));
+
+  expect(same_result.ok && same_result.ready, "task.async wait should succeed");
+  expect(spawn_result.ok && spawn_result.ready,
+         "task.spawn wait should succeed");
+  expect_integer(same_result.value, 21, "task.async wait result");
+  expect_integer(spawn_result.value, 42, "task.spawn wait result");
+  expect(same_strand.done() && new_strand.done(),
+         "completed handles should report done");
+  expect(!same_strand.failed() && !new_strand.cancelled(),
+         "successful handles should not report failure/cancellation");
+
+  const amber::runtime::RuntimeTaskPublicResult nonblocking =
+      new_strand.result();
+  expect(nonblocking.ok && nonblocking.ready,
+         "result() should read completed task without blocking");
+  expect_state(nonblocking.state, amber::runtime::RuntimeTaskHandleState::Done,
+               "result() should expose done state");
+  expect_integer(nonblocking.value, 42, "task.spawn result()");
+}
+
+void test_std010_task_wait_timeout_does_not_cancel_child() {
+  amber::runtime::RuntimeTaskModule task(2);
+
+  const amber::runtime::RuntimeTaskHandle handle = task.spawn([]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    return amber::runtime::Value::integer(7);
+  });
+
+  const amber::runtime::RuntimeTaskPublicResult timed_out =
+      handle.wait(std::chrono::milliseconds(1));
+  expect(!timed_out.ok && timed_out.timed_out &&
+             timed_out.error_name == "TimeoutError",
+         "wait(timeout) should report TimeoutError");
+  const bool timeout_state_is_current =
+      timed_out.state == amber::runtime::RuntimeTaskHandleState::Runnable ||
+      timed_out.state == amber::runtime::RuntimeTaskHandleState::Running ||
+      timed_out.state == amber::runtime::RuntimeTaskHandleState::Done;
+  expect(timeout_state_is_current,
+         "timed-out wait should expose current task state");
+  expect(!handle.cancelled(), "wait timeout should not cancel child task");
+
+  const amber::runtime::RuntimeTaskPublicResult joined =
+      handle.wait(std::chrono::milliseconds(1000));
+  expect(joined.ok && joined.ready, "timed-out child should still be joinable");
+  expect_integer(joined.value, 7, "timed-out child eventual result");
+}
+
+void test_std010_task_yield_sleep_and_cancel_surface() {
+  amber::runtime::RuntimeTaskModule task(2);
+  std::atomic<bool> entered{false};
+
+  const amber::runtime::RuntimeTaskHandle handle =
+      task.spawn([&task, &entered]() {
+        entered = true;
+        while (!amber::runtime::current_runtime_task_cancel_requested()) {
+          task.yield_current();
+        }
+        task.sleep(std::chrono::milliseconds(0));
+        return amber::runtime::Value::integer(99);
+      });
+
+  expect(wait_for_condition([&entered]() { return entered.load(); },
+                            std::chrono::milliseconds(1000)),
+         "spawned task should enter cancellation loop");
+  expect(handle.cancel(), "cancel should request child cancellation");
+
+  const amber::runtime::RuntimeTaskPublicResult cancelled =
+      handle.wait(std::chrono::milliseconds(1000));
+  expect(!cancelled.ok && cancelled.cancelled &&
+             cancelled.error_name == "CancelledError",
+         "cancelled child wait should report CancelledError");
+  expect_state(cancelled.state,
+               amber::runtime::RuntimeTaskHandleState::Cancelled,
+               "cancelled child wait should expose cancelled state");
+  expect(handle.cancelled(), "cancelled handle should report cancellation");
+
+  const amber::runtime::RuntimeTaskFailureInfo failure = handle.failure();
+  expect(failure.ready && failure.cancelled &&
+             failure.error_name == "CancelledError",
+         "failure() should expose cancellation state");
+  expect_state(failure.state, amber::runtime::RuntimeTaskHandleState::Cancelled,
+               "failure() should expose cancelled state");
+
+  const amber::runtime::RuntimeTaskPublicResult result = handle.result();
+  expect(result.ready && result.cancelled &&
+             result.error_name == "CancelledError",
+         "result() should expose cancelled state");
+  expect_state(result.state, amber::runtime::RuntimeTaskHandleState::Cancelled,
+               "result() should expose cancelled state");
+}
+
+void test_std010_task_sync_block_suppresses_cooperative_yield() {
+  amber::runtime::RuntimeTaskModule task(1);
+  std::atomic<int> marker{0};
+  std::atomic<bool> release{false};
+
+  const amber::runtime::RuntimeTaskHandle guarded =
+      task.spawn([&task, &marker, &release]() {
+        return task.sync([&task, &marker, &release]() {
+          expect(task.sync_active() &&
+                     amber::runtime::current_runtime_task_sync_active(),
+                 "task sync block should expose active sync state");
+          marker = 1;
+
+          const amber::runtime::Value nested = task.sync([&task]() {
+            expect(task.sync_active(),
+                   "nested task sync block should keep sync active");
+            return amber::runtime::Value::integer(5);
+          });
+          expect_integer(nested, 5, "nested task sync return value");
+
+          for (int iteration = 0; iteration < 1000; ++iteration) {
+            task.yield_current();
+            task.sleep(std::chrono::milliseconds(0));
+            expect(marker.load() == 1,
+                   "task sync yield should not switch to sibling task");
+          }
+
+          while (!release.load()) {
+            task.yield_current();
+          }
+          expect(marker.load() == 1,
+                 "sibling task should not run until sync block exits");
+          return amber::runtime::Value::integer(11);
+        });
+      });
+
+  expect(wait_for_condition([&marker]() { return marker.load() == 1; },
+                            std::chrono::milliseconds(1000)),
+         "sync guard task should enter sync block");
+
+  const amber::runtime::RuntimeTaskHandle sibling = task.spawn([&marker]() {
+    marker = 2;
+    return amber::runtime::Value::integer(22);
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  expect(marker.load() == 1,
+         "queued sibling should wait while sync block is active");
+
+  release = true;
+  const amber::runtime::RuntimeTaskPublicResult guarded_result =
+      guarded.wait(std::chrono::milliseconds(1000));
+  expect(guarded_result.ok && guarded_result.ready,
+         "sync guard task should finish");
+  expect_integer(guarded_result.value, 11, "task sync return value");
+
+  const amber::runtime::RuntimeTaskPublicResult sibling_result =
+      sibling.wait(std::chrono::milliseconds(1000));
+  expect(sibling_result.ok && sibling_result.ready,
+         "sibling task should run after sync block exits");
+  expect_integer(sibling_result.value, 22, "sibling task result");
+  expect(marker.load() == 2,
+         "sibling task should update marker after sync block exits");
+}
+
+void test_std010_task_failure_is_reported_by_handle() {
+  amber::runtime::RuntimeTaskModule task(2);
+
+  const amber::runtime::RuntimeTaskHandle handle = task.spawn([]() {
+    throw amber::runtime::RuntimeTaskFailure("BoomError", "boom");
+    return amber::runtime::Value::null();
+  });
+
+  const amber::runtime::RuntimeTaskPublicResult waited =
+      handle.wait(std::chrono::milliseconds(1000));
+  expect(!waited.ok && waited.failed && waited.error_name == "BoomError",
+         "failed child wait should surface original error");
+  expect_state(waited.state, amber::runtime::RuntimeTaskHandleState::Failed,
+               "failed child wait should expose failed state");
+  expect(handle.failed(), "failed handle should report failed state");
+
+  const amber::runtime::RuntimeTaskFailureInfo failure = handle.failure();
+  expect(failure.ready && failure.failed && failure.error_name == "BoomError",
+         "failure() should expose failed state");
+  expect_state(failure.state, amber::runtime::RuntimeTaskHandleState::Failed,
+               "failure() should expose failed state");
+
+  const amber::runtime::RuntimeTaskPublicResult result = handle.result();
+  expect(result.ready && result.failed && result.error_name == "BoomError",
+         "result() should expose original failed state");
+  expect_state(result.state, amber::runtime::RuntimeTaskHandleState::Failed,
+               "result() should expose failed state");
+}
+
+void test_std011_task_handle_state_result_failure_contract() {
+  amber::runtime::RuntimeTaskHandle inactive;
+  const amber::runtime::RuntimeTaskHandleSnapshot inactive_snapshot =
+      inactive.snapshot();
+  expect(!inactive_snapshot.active,
+         "default task handle snapshot should be inactive");
+  expect_state(inactive_snapshot.state,
+               amber::runtime::RuntimeTaskHandleState::Inactive,
+               "default task handle should expose inactive state");
+  expect(inactive.result().error_name == "LifetimeError",
+         "inactive result() should report LifetimeError");
+  expect(inactive.failure().error_name == "LifetimeError",
+         "inactive failure() should report LifetimeError");
+
+  amber::runtime::RuntimeTaskModule task(2);
+  std::atomic<bool> entered{false};
+  std::atomic<bool> release{false};
+
+  const amber::runtime::RuntimeTaskHandle handle =
+      task.spawn([&entered, &release]() {
+        entered = true;
+        while (!release.load()) {
+          std::this_thread::yield();
+        }
+        return amber::runtime::Value::integer(123);
+      });
+
+  expect(wait_for_condition([&entered]() { return entered.load(); },
+                            std::chrono::milliseconds(1000)),
+         "state contract task should enter running loop");
+
+  const amber::runtime::RuntimeTaskHandleSnapshot running_snapshot =
+      handle.snapshot();
+  expect(running_snapshot.active, "running snapshot should be active");
+  expect(!running_snapshot.ready, "running snapshot should not be ready");
+  expect(running_snapshot.running,
+         "running snapshot should expose running state");
+  expect_state(handle.state(), amber::runtime::RuntimeTaskHandleState::Running,
+               "state() should expose running state");
+
+  const amber::runtime::RuntimeTaskPublicResult early_result = handle.result();
+  expect(!early_result.ok && !early_result.ready &&
+             early_result.error_name == "TaskNotDoneError",
+         "result() should be non-blocking for unfinished tasks");
+  expect_state(early_result.state,
+               amber::runtime::RuntimeTaskHandleState::Running,
+               "unfinished result() should expose running state");
+
+  const amber::runtime::RuntimeTaskFailureInfo early_failure = handle.failure();
+  expect(!early_failure.ready && early_failure.error_name == "TaskNotDoneError",
+         "failure() should be non-blocking for unfinished tasks");
+  expect_state(early_failure.state,
+               amber::runtime::RuntimeTaskHandleState::Running,
+               "unfinished failure() should expose running state");
+
+  release = true;
+  const amber::runtime::RuntimeTaskPublicResult joined =
+      handle.wait(std::chrono::milliseconds(1000));
+  expect(joined.ok && joined.ready, "released task should join successfully");
+  expect_state(joined.state, amber::runtime::RuntimeTaskHandleState::Done,
+               "joined task should expose done state");
+
+  const amber::runtime::RuntimeTaskHandleSnapshot done_snapshot =
+      handle.snapshot();
+  expect(done_snapshot.ready && done_snapshot.succeeded,
+         "done snapshot should expose success");
+  expect_state(done_snapshot.state,
+               amber::runtime::RuntimeTaskHandleState::Done,
+               "done snapshot should expose done state");
+
+  const amber::runtime::RuntimeTaskFailureInfo done_failure = handle.failure();
+  expect(done_failure.ready && !done_failure.failed &&
+             !done_failure.cancelled && done_failure.error_name.empty(),
+         "failure() should return a ready empty failure for successful tasks");
+  expect_state(done_failure.state, amber::runtime::RuntimeTaskHandleState::Done,
+               "successful failure() should expose done state");
+}
+
+void test_std012_channel_buffered_fifo_close_and_isolation() {
+  amber::runtime::RuntimeHeap heap;
+  amber::runtime::RuntimeChannel channel(3);
+
+  expect(channel.send(amber::runtime::Value::integer(1)).ok,
+         "buffered channel should accept first value");
+  expect(channel.send(amber::runtime::Value::integer(2)).ok,
+         "buffered channel should accept second value");
+  expect(channel.send(amber::runtime::Value::integer(3)).ok,
+         "buffered channel should accept third value");
+
+  const amber::runtime::RuntimeChannelStats filled_stats = channel.stats();
+  expect(filled_stats.capacity == 3 && filled_stats.buffered_values == 3,
+         "channel stats should expose capacity and buffered count");
+
+  const amber::runtime::Value confined = heap.make_list_value({});
+  const amber::runtime::RuntimeChannelResult rejected =
+      channel.send(confined, std::chrono::milliseconds(0));
+  expect(!rejected.ok && rejected.error_name == "IsolationError",
+         "checked channel send should reject confined payload");
+
+  const amber::runtime::Value transitively_confined =
+      heap.make_list_value({confined}, true);
+  const amber::runtime::RuntimeChannelResult nested_rejected =
+      channel.send(transitively_confined, std::chrono::milliseconds(0));
+  expect(!nested_rejected.ok && nested_rejected.error_name == "IsolationError",
+         "checked channel send should reject transitively confined payload");
+
+  expect(channel.close(), "channel close should mark open channel closed");
+  expect(!channel.close(), "channel close should be idempotent");
+  expect(channel.closed(), "closed? should report closed channel");
+
+  const amber::runtime::RuntimeChannelResult send_after_close =
+      channel.send(amber::runtime::Value::integer(4));
+  expect(!send_after_close.ok && send_after_close.closed &&
+             send_after_close.error_name == "ChannelClosedError",
+         "send after close should report ChannelClosedError");
+
+  expect_channel_integer(channel.recv(), 1,
+                         "closed buffered channel first FIFO recv");
+  expect_channel_integer(channel.recv(), 2,
+                         "closed buffered channel second FIFO recv");
+  expect_channel_integer(channel.recv(), 3,
+                         "closed buffered channel third FIFO recv");
+
+  const amber::runtime::RuntimeChannelResult closed_empty = channel.recv();
+  expect(!closed_empty.ok && closed_empty.closed &&
+             closed_empty.error_name == "ChannelClosedError",
+         "closed empty channel recv should report ChannelClosedError");
+
+  const amber::runtime::RuntimeChannelStats stats = channel.stats();
+  expect(stats.sends == 3 && stats.receives == 3 && stats.closes == 1,
+         "channel stats should count successful sends, receives, and close");
+  expect(stats.isolation_rejections == 2,
+         "channel stats should count isolation rejections");
+}
+
+void test_std012_channel_waiting_senders_fifo_and_send_timeout() {
+  amber::runtime::RuntimeTaskModule task(4);
+  amber::runtime::RuntimeChannel channel(0);
+  std::atomic<int> released_senders{0};
+  std::vector<amber::runtime::RuntimeTaskHandle> senders;
+
+  for (int value = 1; value <= 3; ++value) {
+    senders.push_back(task.spawn([&channel, &released_senders, value]() {
+      const amber::runtime::RuntimeChannelResult sent =
+          channel.send(amber::runtime::Value::integer(value),
+                       std::chrono::milliseconds(1000));
+      expect(sent.ok && sent.sent, "waiting sender should complete");
+      released_senders.fetch_add(1);
+      return amber::runtime::Value::integer(value);
+    }));
+    expect(wait_for_condition(
+               [&channel, value]() {
+                 return channel.stats().pending_senders ==
+                        static_cast<std::uint64_t>(value);
+               },
+               std::chrono::milliseconds(1000)),
+           "sender should enter FIFO wait queue");
+  }
+
+  expect(released_senders.load() == 0,
+         "rendezvous senders should wait until receivers arrive");
+
+  for (int expected = 1; expected <= 3; ++expected) {
+    const amber::runtime::RuntimeChannelResult received =
+        channel.recv(std::chrono::milliseconds(1000));
+    expect_channel_integer(received, expected,
+                           "rendezvous channel waiting-sender FIFO recv");
+  }
+
+  for (const amber::runtime::RuntimeTaskHandle &sender : senders) {
+    const amber::runtime::RuntimeTaskPublicResult joined =
+        sender.wait(std::chrono::milliseconds(1000));
+    expect(joined.ok && joined.ready, "sender task should join");
+  }
+  expect(released_senders.load() == 3,
+         "all waiting senders should be released by receives");
+
+  const amber::runtime::RuntimeChannelResult timed_out = channel.send(
+      amber::runtime::Value::integer(99), std::chrono::milliseconds(5));
+  expect(!timed_out.ok && timed_out.timed_out &&
+             timed_out.error_name == "TimeoutError",
+         "unmatched rendezvous send should support timeout");
+
+  const amber::runtime::RuntimeChannelStats stats = channel.stats();
+  expect(stats.sends == 3 && stats.receives == 3 && stats.send_timeouts == 1,
+         "channel stats should count waiting sends and send timeout");
+}
+
+void test_std012_channel_waiting_receivers_fifo_timeout_and_cancellation() {
+  amber::runtime::RuntimeTaskModule task(4);
+  amber::runtime::RuntimeChannel channel(0);
+  std::mutex received_mutex;
+  std::vector<std::int64_t> received_by_receiver(3, 0);
+  std::vector<amber::runtime::RuntimeTaskHandle> receivers;
+
+  for (int receiver_id = 1; receiver_id <= 3; ++receiver_id) {
+    receivers.push_back(task.spawn([&channel, &received_mutex,
+                                    &received_by_receiver, receiver_id]() {
+      const amber::runtime::RuntimeChannelResult received =
+          channel.recv(std::chrono::milliseconds(1000));
+      expect(received.ok && received.received && received.value.is_integer(),
+             "waiting receiver should receive value");
+      {
+        std::lock_guard<std::mutex> lock(received_mutex);
+        received_by_receiver[static_cast<std::size_t>(receiver_id - 1)] =
+            received.value.as_integer();
+      }
+      return amber::runtime::Value::integer(received.value.as_integer());
+    }));
+    expect(wait_for_condition(
+               [&channel, receiver_id]() {
+                 return channel.stats().pending_receivers ==
+                        static_cast<std::uint64_t>(receiver_id);
+               },
+               std::chrono::milliseconds(1000)),
+           "receiver should enter FIFO wait queue");
+  }
+
+  for (int value = 10; value <= 12; ++value) {
+    const amber::runtime::RuntimeChannelResult sent = channel.send(
+        amber::runtime::Value::integer(value), std::chrono::milliseconds(1000));
+    expect(sent.ok && sent.sent, "send should release waiting receiver");
+  }
+
+  for (const amber::runtime::RuntimeTaskHandle &receiver : receivers) {
+    const amber::runtime::RuntimeTaskPublicResult joined =
+        receiver.wait(std::chrono::milliseconds(1000));
+    expect(joined.ok && joined.ready, "receiver task should join");
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(received_mutex);
+    expect(received_by_receiver[0] == 10 && received_by_receiver[1] == 11 &&
+               received_by_receiver[2] == 12,
+           "waiting receivers should be served FIFO");
+  }
+
+  amber::runtime::RuntimeChannel timeout_channel(0);
+  const amber::runtime::RuntimeChannelResult timed_out =
+      timeout_channel.recv(std::chrono::milliseconds(5));
+  expect(!timed_out.ok && timed_out.timed_out &&
+             timed_out.error_name == "TimeoutError",
+         "empty open channel recv should support timeout");
+
+  amber::runtime::RuntimeTaskModule cancel_task(2);
+  amber::runtime::RuntimeChannel cancellation_channel(0);
+  std::atomic<bool> cancellation_waiter_entered{false};
+  const amber::runtime::RuntimeTaskHandle waiting_receiver = cancel_task.spawn(
+      [&cancellation_channel, &cancellation_waiter_entered]() {
+        cancellation_waiter_entered = true;
+        const amber::runtime::RuntimeChannelResult received =
+            cancellation_channel.recv(std::chrono::milliseconds(50));
+        if (received.cancelled && received.error_name == "CancelledError") {
+          return amber::runtime::Value::integer(1);
+        }
+        if (received.timed_out) {
+          return amber::runtime::Value::integer(2);
+        }
+        return amber::runtime::Value::integer(3);
+      });
+
+  expect(wait_for_condition(
+             [&cancellation_waiter_entered, &cancellation_channel]() {
+               return cancellation_waiter_entered.load() &&
+                      cancellation_channel.stats().pending_receivers == 1;
+             },
+             std::chrono::milliseconds(1000)),
+         "cancellable receiver should enter wait queue");
+  expect(waiting_receiver.cancel(),
+         "cancelling receiver task should request cancellation");
+  const amber::runtime::RuntimeTaskPublicResult cancelled =
+      waiting_receiver.wait(std::chrono::milliseconds(1000));
+  expect(cancelled.ok && cancelled.ready,
+         "channel cancellation observer should finish task");
+  expect_integer(cancelled.value, 1,
+                 "channel recv should report CancelledError before timeout");
+}
+
+void test_std013_mutex_lock_unlock_owned_and_errors() {
+  amber::runtime::RuntimeMutex mutex;
+
+  const amber::runtime::RuntimeMutexResult locked = mutex.lock();
+  expect(locked.ok && locked.locked,
+         "mutex lock should acquire unlocked mutex");
+  expect(mutex.locked(), "locked? should report held mutex");
+  expect(mutex.owned(), "owned? should report current owner");
+
+  std::string non_owner_error;
+  std::thread other_thread([&mutex, &non_owner_error]() {
+    const amber::runtime::RuntimeMutexResult result = mutex.unlock();
+    non_owner_error = result.error_name;
+  });
+  other_thread.join();
+  expect(non_owner_error == "OwnershipError",
+         "mutex unlock by non-owner should report OwnershipError");
+  expect(mutex.locked() && mutex.owned(),
+         "failed non-owner unlock should keep mutex held by owner");
+
+  const amber::runtime::RuntimeMutexResult reentrant =
+      mutex.lock(std::chrono::milliseconds(0));
+  expect(!reentrant.ok && reentrant.error_name == "DeadlockError",
+         "same owner double lock should report DeadlockError");
+
+  const amber::runtime::RuntimeMutexResult unlocked = mutex.unlock();
+  expect(unlocked.ok && unlocked.unlocked, "mutex unlock should release owner");
+  expect(!mutex.locked() && !mutex.owned(),
+         "released mutex should not be locked or owned");
+
+  const amber::runtime::RuntimeMutexResult unlocked_again = mutex.unlock();
+  expect(!unlocked_again.ok && unlocked_again.error_name == "OwnershipError",
+         "unlocking an unlocked mutex should report OwnershipError");
+}
+
+void test_std013_mutex_waiter_fifo() {
+  amber::runtime::RuntimeTaskModule task(4);
+  amber::runtime::RuntimeMutex mutex;
+  std::mutex order_mutex;
+  std::vector<std::int64_t> acquisition_order;
+  std::vector<amber::runtime::RuntimeTaskHandle> waiters;
+
+  expect(mutex.lock().ok, "main task should hold mutex before waiter setup");
+
+  for (int value = 1; value <= 3; ++value) {
+    waiters.push_back(task.spawn([&mutex, &order_mutex, &acquisition_order,
+                                  value]() {
+      const amber::runtime::RuntimeMutexResult locked =
+          mutex.lock(std::chrono::milliseconds(1000));
+      expect(locked.ok && locked.locked, "waiting locker should acquire mutex");
+      expect(mutex.owned(), "waiting locker should become mutex owner");
+      {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        acquisition_order.push_back(value);
+      }
+      const amber::runtime::RuntimeMutexResult unlocked = mutex.unlock();
+      expect(unlocked.ok && unlocked.unlocked,
+             "waiting locker should release mutex");
+      return amber::runtime::Value::integer(value);
+    }));
+    expect(wait_for_condition(
+               [&mutex, value]() {
+                 return mutex.stats().waiting_lockers ==
+                        static_cast<std::uint64_t>(value);
+               },
+               std::chrono::milliseconds(1000)),
+           "mutex waiter should enter FIFO queue");
+  }
+
+  expect(mutex.unlock().ok, "main task should release mutex to waiters");
+  for (const amber::runtime::RuntimeTaskHandle &waiter : waiters) {
+    const amber::runtime::RuntimeTaskPublicResult joined =
+        waiter.wait(std::chrono::milliseconds(1000));
+    expect(joined.ok && joined.ready, "mutex waiter task should join");
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(order_mutex);
+    expect(acquisition_order.size() == 3 && acquisition_order[0] == 1 &&
+               acquisition_order[1] == 2 && acquisition_order[2] == 3,
+           "mutex waiters should acquire lock FIFO");
+  }
+
+  const amber::runtime::RuntimeMutexStats stats = mutex.stats();
+  expect(stats.locks == 4 && stats.unlocks == 4 && stats.contentions == 3,
+         "mutex stats should count owner lock and FIFO waiter locks");
+}
+
+void test_std013_mutex_synchronize_return_and_unwind() {
+  amber::runtime::RuntimeMutex mutex;
+
+  const amber::runtime::RuntimeMutexResult synchronized =
+      mutex.synchronize([&mutex]() {
+        expect(mutex.locked() && mutex.owned(),
+               "synchronize block should run while mutex is owned");
+        return amber::runtime::Value::integer(314);
+      });
+  expect(synchronized.ok && synchronized.locked && synchronized.unlocked,
+         "synchronize should acquire and release mutex");
+  expect_integer(synchronized.value, 314, "synchronize return value");
+  expect(!mutex.locked(), "synchronize should leave mutex unlocked");
+
+  bool caught = false;
+  try {
+    (void)mutex.synchronize([&mutex]() {
+      expect(mutex.locked() && mutex.owned(),
+             "throwing synchronize block should run while mutex is owned");
+      throw std::runtime_error("boom");
+      return amber::runtime::Value::null();
+    });
+  } catch (const std::runtime_error &) {
+    caught = true;
+  }
+
+  expect(caught, "synchronize should propagate block exception");
+  expect(!mutex.locked(), "synchronize should unlock during exception unwind");
+  expect(mutex.lock().ok,
+         "mutex should be reusable after synchronize exception unwind");
+  expect(mutex.unlock().ok,
+         "reused mutex should unlock after synchronize exception unwind");
+}
+
+void test_std013_mutex_lock_wait_cancellation() {
+  amber::runtime::RuntimeTaskModule task(2);
+  amber::runtime::RuntimeMutex mutex;
+  std::atomic<bool> waiter_entered{false};
+
+  expect(mutex.lock().ok, "main task should hold mutex before cancellation");
+  const amber::runtime::RuntimeTaskHandle waiter =
+      task.spawn([&mutex, &waiter_entered]() {
+        waiter_entered = true;
+        const amber::runtime::RuntimeMutexResult locked =
+            mutex.lock(std::chrono::milliseconds(1000));
+        if (locked.cancelled && locked.error_name == "CancelledError") {
+          return amber::runtime::Value::integer(1);
+        }
+        if (locked.timed_out) {
+          return amber::runtime::Value::integer(2);
+        }
+        if (locked.ok) {
+          (void)mutex.unlock();
+          return amber::runtime::Value::integer(3);
+        }
+        return amber::runtime::Value::integer(4);
+      });
+
+  expect(wait_for_condition(
+             [&waiter_entered, &mutex]() {
+               return waiter_entered.load() &&
+                      mutex.stats().waiting_lockers == 1;
+             },
+             std::chrono::milliseconds(1000)),
+         "cancellable mutex locker should enter wait queue");
+  expect(waiter.cancel(),
+         "cancelling mutex locker task should request cancellation");
+
+  const amber::runtime::RuntimeTaskPublicResult cancelled =
+      waiter.wait(std::chrono::milliseconds(1000));
+  expect(cancelled.ok && cancelled.ready,
+         "mutex cancellation observer should finish task");
+  expect_integer(cancelled.value, 1,
+                 "mutex lock should report CancelledError before timeout");
+  expect(mutex.stats().lock_cancellations == 1 &&
+             mutex.stats().waiting_lockers == 0,
+         "mutex stats should count cancellation and remove waiter");
+  expect(mutex.unlock().ok,
+         "main task should release mutex after cancellation test");
+}
+
+void test_std014_atomic_get_set_compare_and_set_and_guard() {
+  amber::runtime::RuntimeAtomic atomic(0);
+  expect(atomic.get() == 0, "atomic get should read initial integer");
+  atomic.set(5);
+  expect(atomic.get() == 5, "atomic set should publish integer value");
+  expect(atomic.compare_and_set(5, 6),
+         "atomic compare_and_set should update matching integer");
+  expect(!atomic.compare_and_set(5, 7),
+         "atomic compare_and_set should reject stale integer expected value");
+  expect(atomic.get() == 6, "failed integer CAS should leave value unchanged");
+
+  const amber::runtime::RuntimeAtomic::Result bool_set =
+      atomic.set_value(amber::runtime::Value::boolean(true));
+  expect(bool_set.ok && bool_set.updated && bool_set.value.as_bool(),
+         "atomic set_value should accept bool payload");
+  expect(atomic.get_value().as_bool(),
+         "atomic get_value should return latest bool payload");
+
+  amber::runtime::RuntimeHeap heap;
+  const amber::runtime::Value frozen_tuple =
+      heap.make_tuple_value({amber::runtime::Value::integer(7)});
+  const amber::runtime::RuntimeAtomic::Result tuple_set =
+      atomic.set_value(frozen_tuple);
+  expect(tuple_set.ok && tuple_set.updated,
+         "atomic set_value should accept shareable heap payload");
+
+  const amber::runtime::Value equal_but_distinct_tuple =
+      heap.make_tuple_value({amber::runtime::Value::integer(7)});
+  const amber::runtime::RuntimeAtomic::Result identity_miss =
+      atomic.compare_and_set_value(equal_but_distinct_tuple,
+                                   amber::runtime::Value::integer(8));
+  expect(identity_miss.ok && !identity_miss.matched,
+         "atomic CAS should compare heap payloads by identity");
+  expect(atomic.get_value().as_tuple() == frozen_tuple.as_tuple(),
+         "failed identity CAS should leave heap value unchanged");
+
+  const amber::runtime::RuntimeAtomic::Result identity_hit =
+      atomic.compare_and_set_value(frozen_tuple,
+                                   amber::runtime::Value::integer(9));
+  expect(identity_hit.ok && identity_hit.matched && identity_hit.updated,
+         "atomic CAS should update matching heap identity");
+  expect(atomic.get() == 9, "matching heap CAS should publish replacement");
+
+  const amber::runtime::Value confined = heap.make_list_value({});
+  bool constructor_rejected = false;
+  try {
+    amber::runtime::RuntimeAtomic rejected_atomic(confined);
+    (void)rejected_atomic;
+  } catch (const amber::runtime::RuntimeTaskFailure &failure) {
+    constructor_rejected = failure.error_name() == "AtomicCompatibilityError";
+  }
+  expect(constructor_rejected,
+         "atomic constructor should reject incompatible initial payload");
+
+  const amber::runtime::RuntimeAtomic::Result rejected_set =
+      atomic.set_value(confined);
+  expect(!rejected_set.ok &&
+             rejected_set.error_name == "AtomicCompatibilityError",
+         "atomic set_value should reject confined mutable payload");
+  expect(atomic.get() == 9,
+         "rejected atomic set_value should leave value unchanged");
+
+  const amber::runtime::RuntimeAtomic::Result rejected_cas =
+      atomic.compare_and_set_value(amber::runtime::Value::integer(9), confined);
+  expect(!rejected_cas.ok &&
+             rejected_cas.error_name == "AtomicCompatibilityError",
+         "atomic CAS should reject incompatible replacement payload");
+  expect(atomic.get() == 9, "rejected atomic CAS should leave value unchanged");
+}
+
+void test_std014_atomic_update_value_retry_and_guard() {
+  amber::runtime::RuntimeAtomic atomic(1);
+  const amber::runtime::RuntimeAtomic::Result incremented =
+      atomic.update([](const amber::runtime::Value &current) {
+        expect(current.is_integer(), "atomic update should read integer");
+        return amber::runtime::Value::integer(current.as_integer() + 1);
+      });
+  expect(incremented.ok && incremented.matched && incremented.updated,
+         "atomic update should publish replacement");
+  expect_integer(incremented.value, 2, "atomic update return value");
+  expect(incremented.attempts == 1,
+         "uncontended atomic update should run block once");
+  expect(atomic.get() == 2, "atomic update should store return value");
+
+  amber::runtime::RuntimeAtomic retried(0);
+  int calls = 0;
+  const amber::runtime::RuntimeAtomic::Result retry_result =
+      retried.update([&retried, &calls](const amber::runtime::Value &current) {
+        ++calls;
+        expect(current.is_integer(), "retrying atomic update should read int");
+        if (calls == 1) {
+          expect(retried.compare_and_set(current.as_integer(),
+                                         current.as_integer() + 1),
+                 "test CAS should create an update retry");
+        }
+        return amber::runtime::Value::integer(current.as_integer() + 1);
+      });
+  expect(retry_result.ok && retry_result.matched && retry_result.updated,
+         "atomic update should eventually publish after retry");
+  expect(retry_result.attempts == 2 && calls == 2,
+         "atomic update should re-run block after failed CAS");
+  expect_integer(retry_result.value, 2, "retrying atomic update return value");
+  expect(retried.get() == 2, "retrying atomic update final value");
+
+  amber::runtime::RuntimeHeap heap;
+  const amber::runtime::Value confined = heap.make_list_value({});
+  const amber::runtime::RuntimeAtomic::Result rejected = retried.update(
+      [&confined](const amber::runtime::Value &) { return confined; });
+  expect(!rejected.ok && rejected.attempts == 1 &&
+             rejected.error_name == "AtomicCompatibilityError",
+         "atomic update should reject incompatible replacement");
+  expect(retried.get() == 2,
+         "rejected atomic update should leave value unchanged");
+}
+
+void test_std014_atomic_cross_strand_counter() {
+  amber::runtime::RuntimeTaskModule task(4);
+  amber::runtime::RuntimeAtomic counter(0);
+  std::vector<amber::runtime::RuntimeTaskHandle> workers;
+  constexpr int kWorkers = 4;
+  constexpr int kIterations = 250;
+
+  for (int worker = 0; worker < kWorkers; ++worker) {
+    workers.push_back(task.spawn([&counter]() {
+      for (int iteration = 0; iteration < kIterations; ++iteration) {
+        const amber::runtime::RuntimeAtomic::Result incremented =
+            counter.update([](const amber::runtime::Value &current) {
+              expect(current.is_integer(),
+                     "cross-strand atomic update should read integer");
+              return amber::runtime::Value::integer(current.as_integer() + 1);
+            });
+        expect(incremented.ok && incremented.matched,
+               "cross-strand atomic update should succeed");
+      }
+      return amber::runtime::Value::integer(1);
+    }));
+  }
+
+  for (const amber::runtime::RuntimeTaskHandle &worker : workers) {
+    const amber::runtime::RuntimeTaskPublicResult joined =
+        worker.wait(std::chrono::milliseconds(3000));
+    expect(joined.ok && joined.ready,
+           "atomic counter worker should finish successfully");
+  }
+
+  expect(counter.get() == kWorkers * kIterations,
+         "atomic update should preserve all cross-strand increments");
+}
+
+void test_std015_barrier_release_timeout_and_cancellation() {
+  amber::runtime::RuntimeTaskModule task(4);
+  amber::runtime::RuntimeBarrier barrier(3);
+  std::atomic<int> arrived{0};
+  std::vector<amber::runtime::RuntimeTaskHandle> waiters;
+
+  for (int worker = 0; worker < 3; ++worker) {
+    waiters.push_back(task.spawn([&barrier, &arrived]() {
+      arrived.fetch_add(1);
+      const amber::runtime::RuntimeBarrierResult passed =
+          barrier.wait(std::chrono::milliseconds(1000));
+      expect(passed.ok && passed.passed,
+             "barrier worker should pass released generation");
+      return amber::runtime::Value::integer(passed.last ? 1 : 0);
+    }));
+  }
+
+  for (const amber::runtime::RuntimeTaskHandle &waiter : waiters) {
+    const amber::runtime::RuntimeTaskPublicResult joined =
+        waiter.wait(std::chrono::milliseconds(1000));
+    expect(joined.ok && joined.ready, "barrier waiter should join");
+  }
+  expect(arrived.load() == 3, "all barrier workers should arrive");
+
+  const amber::runtime::RuntimeBarrierStats released_stats = barrier.stats();
+  expect(released_stats.arrivals == 3 && released_stats.passes == 1 &&
+             released_stats.waiting == 0 && released_stats.generation == 1,
+         "barrier stats should count released generation");
+
+  amber::runtime::RuntimeBarrier timeout_barrier(2);
+  const amber::runtime::RuntimeBarrierResult timed_out =
+      timeout_barrier.wait(std::chrono::milliseconds(5));
+  expect(!timed_out.ok && timed_out.timed_out &&
+             timed_out.error_name == "TimeoutError",
+         "barrier wait should support timeout");
+  expect(timeout_barrier.stats().timeouts == 1 &&
+             timeout_barrier.stats().waiting == 0,
+         "barrier timeout should remove waiter");
+
+  amber::runtime::RuntimeBarrier cancellation_barrier(2);
+  amber::runtime::RuntimeTaskModule cancel_task(2);
+  std::atomic<bool> waiter_entered{false};
+  const amber::runtime::RuntimeTaskHandle cancellable =
+      cancel_task.spawn([&cancellation_barrier, &waiter_entered]() {
+        waiter_entered = true;
+        const amber::runtime::RuntimeBarrierResult cancelled =
+            cancellation_barrier.wait(std::chrono::milliseconds(1000));
+        if (cancelled.cancelled && cancelled.error_name == "CancelledError") {
+          return amber::runtime::Value::integer(1);
+        }
+        if (cancelled.timed_out) {
+          return amber::runtime::Value::integer(2);
+        }
+        return amber::runtime::Value::integer(3);
+      });
+
+  expect(wait_for_condition(
+             [&cancellation_barrier, &waiter_entered]() {
+               return waiter_entered.load() &&
+                      cancellation_barrier.stats().waiting == 1;
+             },
+             std::chrono::milliseconds(1000)),
+         "cancellable barrier waiter should enter wait set");
+  expect(cancellable.cancel(),
+         "cancelling barrier waiter should request cancellation");
+  const amber::runtime::RuntimeTaskPublicResult cancelled =
+      cancellable.wait(std::chrono::milliseconds(1000));
+  expect(cancelled.ok && cancelled.ready,
+         "barrier cancellation observer should finish task");
+  expect_integer(cancelled.value, 1,
+                 "barrier wait should report CancelledError before timeout");
+  expect(cancellation_barrier.stats().cancellations == 1 &&
+             cancellation_barrier.stats().waiting == 0,
+         "barrier stats should count cancellation and remove waiter");
+}
+
+void test_std015_flow_gather_and_scatter_map_ordered_results() {
+  amber::runtime::RuntimeTaskModule task(3);
+  std::vector<amber::runtime::RuntimeTaskHandle> handles;
+  handles.push_back(task.spawn([]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return amber::runtime::Value::integer(1);
+  }));
+  handles.push_back(
+      task.spawn([]() { return amber::runtime::Value::integer(2); }));
+  handles.push_back(task.spawn([]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return amber::runtime::Value::integer(3);
+  }));
+
+  amber::runtime::RuntimeFlowModule flow(4);
+  const amber::runtime::RuntimeFlowGatherResult gathered =
+      flow.gather(std::move(handles));
+  expect(gathered.ok && !gathered.failed && gathered.values.size() == 3,
+         "flow gather should return ordered successful values");
+  expect_integer(gathered.values[0], 1, "flow gather first value");
+  expect_integer(gathered.values[1], 2, "flow gather second value");
+  expect_integer(gathered.values[2], 3, "flow gather third value");
+
+  std::vector<amber::runtime::Value> items = {
+      amber::runtime::Value::integer(3), amber::runtime::Value::integer(1),
+      amber::runtime::Value::integer(2)};
+  const amber::runtime::RuntimeFlowGatherResult mapped = flow.scatter_map(
+      items, [](const amber::runtime::Value &value, std::size_t index) {
+        return amber::runtime::Value::integer(value.as_integer() * 10 +
+                                              static_cast<std::int64_t>(index));
+      });
+  expect(mapped.ok && !mapped.failed && mapped.values.size() == 3,
+         "flow scatter_map should complete successfully");
+  expect_integer(mapped.values[0], 30, "flow scatter_map first value");
+  expect_integer(mapped.values[1], 11, "flow scatter_map second value");
+  expect_integer(mapped.values[2], 22, "flow scatter_map third value");
+
+  const amber::runtime::RuntimeFlowStats stats = flow.stats();
+  expect(stats.gathers >= 2 && stats.flows >= 1 && stats.completed_workers >= 6,
+         "flow stats should count gather and scatter workers");
+}
+
+void test_std015_flow_reduce_broadcast_and_failure_collection() {
+  amber::runtime::RuntimeFlowModule flow(4);
+  std::vector<amber::runtime::Value> items = {
+      amber::runtime::Value::integer(1), amber::runtime::Value::integer(2),
+      amber::runtime::Value::integer(3), amber::runtime::Value::integer(4)};
+
+  const amber::runtime::RuntimeFlowReduceResult reduced = flow.scatter_reduce(
+      items, amber::runtime::Value::integer(0),
+      [](const amber::runtime::Value &value, std::size_t) {
+        return amber::runtime::Value::integer(value.as_integer() *
+                                              value.as_integer());
+      },
+      [](const amber::runtime::Value &acc, const amber::runtime::Value &value) {
+        return amber::runtime::Value::integer(acc.as_integer() +
+                                              value.as_integer());
+      });
+  expect(reduced.ok, "flow scatter_reduce should complete successfully");
+  expect_integer(reduced.value, 30, "flow scatter_reduce sum of squares");
+
+  const amber::runtime::RuntimeFlowGatherResult broadcast = flow.broadcast(
+      amber::runtime::Value::integer(5), 3,
+      [](const amber::runtime::Value &value, std::size_t worker) {
+        return amber::runtime::Value::integer(
+            value.as_integer() + static_cast<std::int64_t>(worker));
+      });
+  expect(broadcast.ok && broadcast.values.size() == 3,
+         "flow broadcast should gather all worker values");
+  expect_integer(broadcast.values[0], 5, "flow broadcast first value");
+  expect_integer(broadcast.values[1], 6, "flow broadcast second value");
+  expect_integer(broadcast.values[2], 7, "flow broadcast third value");
+
+  amber::runtime::RuntimeFlowOptions collect_failures;
+  collect_failures.failure_policy =
+      amber::runtime::RuntimeFlowFailurePolicy::Collect;
+  const amber::runtime::RuntimeFlowGatherResult collected = flow.scatter_map(
+      items,
+      [](const amber::runtime::Value &value, std::size_t) {
+        if (value.as_integer() == 2) {
+          throw amber::runtime::RuntimeTaskFailure("FlowPartitionError",
+                                                   "bad partition");
+        }
+        return amber::runtime::Value::integer(value.as_integer() * 10);
+      },
+      collect_failures);
+  expect(collected.ok && collected.failed && collected.failures.size() == 1,
+         "flow collect failure policy should return failures");
+  expect(collected.failures[0].index == 1 &&
+             collected.failures[0].error_name == "FlowPartitionError",
+         "flow collect failure should preserve worker index and error");
+  expect_integer(collected.values[0], 10, "flow collect failure first success");
+  expect_integer(collected.values[2], 30, "flow collect failure later success");
+
+  const amber::runtime::RuntimeFlowStats stats = flow.stats();
+  expect(stats.reductions == 1 && stats.broadcasts == 1 &&
+             stats.failed_workers >= 1,
+         "flow stats should count reduce, broadcast, and failed workers");
+}
+
+void test_std015_flow_isolation_checked_and_unchecked() {
+  amber::runtime::RuntimeFlowModule flow(2);
+  amber::runtime::RuntimeHeap heap;
+  const amber::runtime::Value confined = heap.make_list_value({});
+
+  const amber::runtime::RuntimeFlowGatherResult rejected_partition =
+      flow.scatter_map({confined},
+                       [](const amber::runtime::Value &, std::size_t) {
+                         return amber::runtime::Value::integer(0);
+                       });
+  expect(!rejected_partition.ok &&
+             rejected_partition.error_name == "IsolationError",
+         "checked flow should reject non-shareable partitions");
+
+  amber::runtime::RuntimeFlowOptions unchecked;
+  unchecked.isolation = amber::runtime::RuntimeFlowIsolationMode::Unchecked;
+  const amber::runtime::RuntimeFlowGatherResult unchecked_result =
+      flow.scatter_map(
+          {confined},
+          [](const amber::runtime::Value &value, std::size_t) {
+            return amber::runtime::Value::integer(value.is_list() ? 1 : 0);
+          },
+          unchecked);
+  expect(unchecked_result.ok && unchecked_result.values.size() == 1,
+         "unchecked flow should accept confined partition");
+  expect_integer(unchecked_result.values[0], 1,
+                 "unchecked flow confined partition result");
+
+  const amber::runtime::RuntimeFlowGatherResult rejected_result =
+      flow.scatter_map({amber::runtime::Value::integer(1)},
+                       [](const amber::runtime::Value &, std::size_t) {
+                         return amber::runtime::make_list_value({});
+                       });
+  expect(!rejected_result.ok && rejected_result.failed &&
+             rejected_result.error_name == "IsolationError",
+         "checked flow should reject non-shareable worker results");
+  expect(flow.stats().isolation_rejections >= 2,
+         "flow stats should count partition and result isolation failures");
+}
+
+void test_std016_threaded_collection_iteration_and_transforms() {
+  std::vector<amber::runtime::Value> items = {
+      amber::runtime::Value::integer(1), amber::runtime::Value::integer(2),
+      amber::runtime::Value::integer(3), amber::runtime::Value::integer(4)};
+  amber::runtime::RuntimeThreadedCollection threaded(items, 2);
+
+  const amber::runtime::RuntimeFlowGatherResult mapped =
+      threaded.map([](const amber::runtime::Value &value, std::size_t index) {
+        return amber::runtime::Value::integer(value.as_integer() * 10 +
+                                              static_cast<std::int64_t>(index));
+      });
+  expect(mapped.ok && !mapped.failed,
+         "threaded map should complete successfully");
+  expect_integer_values(mapped.values, {10, 21, 32, 43},
+                        "threaded map ordered results");
+
+  const amber::runtime::RuntimeFlowGatherResult selected =
+      threaded.select([](const amber::runtime::Value &value, std::size_t) {
+        return value.as_integer() % 2 == 1;
+      });
+  expect(selected.ok && !selected.failed,
+         "threaded select should complete successfully");
+  expect_integer_values(selected.values, {1, 3},
+                        "threaded select ordered results");
+
+  const amber::runtime::RuntimeFlowGatherResult rejected =
+      threaded.reject([](const amber::runtime::Value &value, std::size_t) {
+        return value.as_integer() % 2 == 1;
+      });
+  expect(rejected.ok && !rejected.failed,
+         "threaded reject should complete successfully");
+  expect_integer_values(rejected.values, {2, 4},
+                        "threaded reject ordered results");
+
+  const amber::runtime::RuntimeFlowGatherResult flat_mapped =
+      threaded.flat_map([](const amber::runtime::Value &value, std::size_t) {
+        return std::vector<amber::runtime::Value>{
+            value, amber::runtime::Value::integer(value.as_integer() + 10)};
+      });
+  expect(flat_mapped.ok && !flat_mapped.failed,
+         "threaded flat_map should complete successfully");
+  expect_integer_values(flat_mapped.values, {1, 11, 2, 12, 3, 13, 4, 14},
+                        "threaded flat_map ordered results");
+
+  amber::runtime::RuntimeAtomic sum(0);
+  const amber::runtime::RuntimeFlowGatherResult each =
+      threaded.each([&sum](const amber::runtime::Value &value, std::size_t) {
+        const amber::runtime::RuntimeAtomic::Result updated =
+            sum.update([&value](const amber::runtime::Value &current) {
+              return amber::runtime::Value::integer(current.as_integer() +
+                                                    value.as_integer());
+            });
+        expect(updated.ok && updated.updated,
+               "threaded each atomic update should succeed");
+      });
+  expect(each.ok && !each.failed, "threaded each should complete successfully");
+  expect(sum.get() == 10, "threaded each should visit every item once");
+
+  const amber::runtime::RuntimeThreadedCollectionStats stats = threaded.stats();
+  expect(stats.operations == 5 && stats.map_operations == 1 &&
+             stats.filter_operations == 2 && stats.flat_map_operations == 1 &&
+             stats.each_operations == 1,
+         "threaded collection stats should count iteration operations");
+  expect(stats.flow.gathers >= 5 && stats.flow.completed_workers >= 20,
+         "threaded collection stats should include flow stats");
+}
+
+void test_std016_threaded_collection_combination_and_permutation() {
+  std::vector<amber::runtime::Value> items = {
+      amber::runtime::Value::integer(1), amber::runtime::Value::integer(2),
+      amber::runtime::Value::integer(3)};
+  amber::runtime::RuntimeThreadedCollection threaded(items, 3);
+
+  const amber::runtime::RuntimeFlowGatherResult combinations =
+      threaded.combination(2);
+  expect(combinations.ok && !combinations.failed,
+         "threaded combination should complete successfully");
+  expect_integer_list_values(combinations.values, {{1, 2}, {1, 3}, {2, 3}},
+                             "threaded combination ordered results");
+
+  const amber::runtime::RuntimeFlowGatherResult permutations =
+      threaded.permutation(2);
+  expect(permutations.ok && !permutations.failed,
+         "threaded permutation should complete successfully");
+  expect_integer_list_values(permutations.values,
+                             {{1, 2}, {1, 3}, {2, 1}, {2, 3}, {3, 1}, {3, 2}},
+                             "threaded permutation ordered results");
+
+  const amber::runtime::RuntimeFlowGatherResult too_large =
+      threaded.combination(4);
+  expect(too_large.ok && too_large.values.empty(),
+         "threaded combination should return empty result for too-large count");
+
+  const amber::runtime::RuntimeThreadedCollectionStats stats = threaded.stats();
+  expect(stats.combination_operations == 2 &&
+             stats.permutation_operations == 1 && stats.generated_values == 9,
+         "threaded collection stats should count generated rows");
+}
+
+void test_std016_threaded_collection_failure_and_isolation() {
+  amber::runtime::RuntimeHeap heap;
+  const amber::runtime::Value confined = heap.make_list_value({});
+
+  amber::runtime::RuntimeThreadedCollection checked({confined}, 2);
+  const amber::runtime::RuntimeFlowGatherResult rejected_partition =
+      checked.map([](const amber::runtime::Value &, std::size_t) {
+        return amber::runtime::Value::integer(0);
+      });
+  expect(!rejected_partition.ok &&
+             rejected_partition.error_name == "IsolationError",
+         "threaded collection should reject confined checked input");
+  const amber::runtime::RuntimeFlowGatherResult rejected_generated =
+      checked.permutation(1);
+  expect(!rejected_generated.ok &&
+             rejected_generated.error_name == "IsolationError",
+         "threaded generated rows should reject confined checked source");
+
+  amber::runtime::RuntimeFlowOptions unchecked_options;
+  unchecked_options.isolation =
+      amber::runtime::RuntimeFlowIsolationMode::Unchecked;
+  amber::runtime::RuntimeThreadedCollection unchecked({confined}, 2,
+                                                      unchecked_options);
+  const amber::runtime::RuntimeFlowGatherResult unchecked_result =
+      unchecked.map([](const amber::runtime::Value &value, std::size_t) {
+        return amber::runtime::Value::integer(value.is_list() ? 1 : 0);
+      });
+  expect(unchecked_result.ok && unchecked_result.values.size() == 1,
+         "threaded unchecked mode should accept confined input");
+  expect_integer(unchecked_result.values[0], 1,
+                 "threaded unchecked mode result");
+
+  amber::runtime::RuntimeThreadedCollection result_guard(
+      {amber::runtime::Value::integer(1)}, 2);
+  const amber::runtime::RuntimeFlowGatherResult rejected_result =
+      result_guard.map([&heap](const amber::runtime::Value &, std::size_t) {
+        return heap.make_list_value({});
+      });
+  expect(!rejected_result.ok && rejected_result.failed &&
+             rejected_result.error_name == "IsolationError",
+         "threaded collection should reject confined checked result");
+
+  amber::runtime::RuntimeFlowOptions collect_failures;
+  collect_failures.failure_policy =
+      amber::runtime::RuntimeFlowFailurePolicy::Collect;
+  amber::runtime::RuntimeThreadedCollection failures(
+      {amber::runtime::Value::integer(1), amber::runtime::Value::integer(2),
+       amber::runtime::Value::integer(3)},
+      2, collect_failures);
+  const amber::runtime::RuntimeFlowGatherResult collected =
+      failures.map([](const amber::runtime::Value &value, std::size_t) {
+        if (value.as_integer() == 2) {
+          throw amber::runtime::RuntimeTaskFailure("ThreadedError",
+                                                   "bad threaded item");
+        }
+        return amber::runtime::Value::integer(value.as_integer() * 10);
+      });
+  expect(collected.ok && collected.failed && collected.failures.size() == 1,
+         "threaded collection should support collect failure policy");
+  expect(collected.failures[0].index == 1 &&
+             collected.failures[0].error_name == "ThreadedError",
+         "threaded collection failure should preserve item index and error");
+  expect_integer(collected.values[0], 10,
+                 "threaded collection collected first success");
+  expect_integer(collected.values[2], 30,
+                 "threaded collection collected later success");
+}
+
+void test_std017_source_level_task_sync_stack_compiles_and_runs() {
+  const amber::runtime::ExecutionResult exec =
+      execute_source_or_die("import task\n"
+                            "from sync import Channel, Mutex, Atomic, Barrier\n"
+                            "\n"
+                            "ch = Channel.new(capacity: 2)\n"
+                            "ch.send(10)\n"
+                            "ch.send(20)\n"
+                            "first = ch.recv()\n"
+                            "second = ch.recv()\n"
+                            "ch.close()\n"
+                            "\n"
+                            "m = Mutex.new()\n"
+                            "guarded = m.synchronize: first + second\n"
+                            "\n"
+                            "a = Atomic.new(guarded)\n"
+                            "a.update: _1 + 1\n"
+                            "cas = a.compare_and_set(31, 40)\n"
+                            "\n"
+                            "barrier = Barrier.new(1)\n"
+                            "passed = barrier.wait()\n"
+                            "\n"
+                            "h = task.spawn: a.get() + 1\n"
+                            "\n"
+                            "[h.wait(), cas, passed, ch.closed?()]\n");
+
+  expect(exec.ok(), "source-level task/sync stack should execute");
+  expect(exec.value.is_list(), "source-level task/sync result should be list");
+  const std::shared_ptr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 4,
+         "source-level task/sync result shape");
+  expect_integer(values->items[0], 41, "source-level task.spawn/Atomic result");
+  expect_bool(values->items[1], true,
+              "source-level Atomic.compare_and_set result");
+  expect_bool(values->items[2], true, "source-level Barrier.wait result");
+  expect_bool(values->items[3], true, "source-level Channel.closed? result");
+}
+
+void test_std017_source_level_flow_and_threaded_collection_compile_and_run() {
+  const amber::runtime::ExecutionResult exec = execute_source_or_die(
+      "from task.flow import Flow\n"
+      "\n"
+      "flowed = Flow.new().scatter_map([1, 2, 3]): _1 * 10 + _2\n"
+      "threaded = [1, 2, 3].threaded(2).map: _1 + 5\n"
+      "pairs = [1, 2, 3].threaded(2).combination(2)\n"
+      "[flowed, threaded, pairs]\n");
+
+  expect(exec.ok(), "source-level flow/threaded stack should execute");
+  expect(exec.value.is_list(), "source-level flow result should be list");
+  const std::shared_ptr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 3,
+         "source-level flow result shape");
+  expect_integer_list_value(values->items[0], {10, 21, 32},
+                            "source-level Flow.scatter_map");
+  expect_integer_list_value(values->items[1], {6, 7, 8},
+                            "source-level threaded map");
+  expect_integer_list_values(values->items[2].as_list()->items,
+                             {{1, 2}, {1, 3}, {2, 3}},
+                             "source-level threaded combination");
+}
+
+} // namespace
+
+int main() {
+  test_std010_task_async_spawn_and_wait_return_values();
+  test_std010_task_wait_timeout_does_not_cancel_child();
+  test_std010_task_yield_sleep_and_cancel_surface();
+  test_std010_task_sync_block_suppresses_cooperative_yield();
+  test_std010_task_failure_is_reported_by_handle();
+  test_std011_task_handle_state_result_failure_contract();
+  test_std012_channel_buffered_fifo_close_and_isolation();
+  test_std012_channel_waiting_senders_fifo_and_send_timeout();
+  test_std012_channel_waiting_receivers_fifo_timeout_and_cancellation();
+  test_std013_mutex_lock_unlock_owned_and_errors();
+  test_std013_mutex_waiter_fifo();
+  test_std013_mutex_synchronize_return_and_unwind();
+  test_std013_mutex_lock_wait_cancellation();
+  test_std014_atomic_get_set_compare_and_set_and_guard();
+  test_std014_atomic_update_value_retry_and_guard();
+  test_std014_atomic_cross_strand_counter();
+  test_std015_barrier_release_timeout_and_cancellation();
+  test_std015_flow_gather_and_scatter_map_ordered_results();
+  test_std015_flow_reduce_broadcast_and_failure_collection();
+  test_std015_flow_isolation_checked_and_unchecked();
+  test_std016_threaded_collection_iteration_and_transforms();
+  test_std016_threaded_collection_combination_and_permutation();
+  test_std016_threaded_collection_failure_and_isolation();
+  test_std017_source_level_task_sync_stack_compiles_and_runs();
+  test_std017_source_level_flow_and_threaded_collection_compile_and_run();
+  std::cout << "stdlib_task_tests: ok\n";
+  return 0;
+}
