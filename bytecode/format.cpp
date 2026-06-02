@@ -1563,6 +1563,30 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x25:
     opcode = Opcode::TypeCheck;
     return true;
+  case 0x26:
+    opcode = Opcode::IAdd;
+    return true;
+  case 0x27:
+    opcode = Opcode::ISub;
+    return true;
+  case 0x28:
+    opcode = Opcode::ILt;
+    return true;
+  case 0x29:
+    opcode = Opcode::IGt;
+    return true;
+  case 0x2A:
+    opcode = Opcode::IAddK;
+    return true;
+  case 0x2B:
+    opcode = Opcode::ISubK;
+    return true;
+  case 0x2C:
+    opcode = Opcode::ILtK;
+    return true;
+  case 0x2D:
+    opcode = Opcode::IGtK;
+    return true;
   case 0x30:
     opcode = Opcode::Jump;
     return true;
@@ -3626,6 +3650,38 @@ InstructionFlow verify_instruction_flow(
     }
     break;
   }
+  case Opcode::IAdd:
+  case Opcode::ISub:
+  case Opcode::ILt:
+  case Opcode::IGt: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      add_register_read(code, instruction, 1, flow, errors);
+      add_register_read(code, instruction, 2, flow, errors);
+    }
+    break;
+  }
+  case Opcode::IAddK:
+  case Opcode::ISubK:
+  case Opcode::ILtK:
+  case Opcode::IGtK: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      add_register_read(code, instruction, 1, flow, errors);
+      std::uint32_t const_id = 0;
+      if (read_u32_operand(instruction, 2,
+                           "integer constant ref must be unsigned", errors,
+                           &const_id) &&
+          verify_const_ref(module, const_id,
+                           "integer constant ref is out of range", errors) &&
+          module.const_pool[const_id].kind != ConstantKind::Integer) {
+        add_verify_error(errors, "BC1314",
+                         "integer opcode constant ref must be integer",
+                         SectionKind::Code, 0);
+      }
+    }
+    break;
+  }
   case Opcode::TypeCheck: {
     if (operand_count_is(instruction, 2, errors)) {
       add_register_read(code, instruction, 0, flow, errors);
@@ -4835,6 +4891,22 @@ std::string opcode_name(Opcode opcode) {
     return "TRIPLE_EQ";
   case Opcode::TypeCheck:
     return "TYPECHECK";
+  case Opcode::IAdd:
+    return "IADD";
+  case Opcode::ISub:
+    return "ISUB";
+  case Opcode::ILt:
+    return "ILT";
+  case Opcode::IGt:
+    return "IGT";
+  case Opcode::IAddK:
+    return "IADDK";
+  case Opcode::ISubK:
+    return "ISUBK";
+  case Opcode::ILtK:
+    return "ILTK";
+  case Opcode::IGtK:
+    return "IGTK";
   case Opcode::Jump:
     return "JUMP";
   case Opcode::JumpIfTrue:

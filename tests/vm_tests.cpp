@@ -822,6 +822,31 @@ void test_execute_emitted_send_method() {
          "add should return summed integer");
 }
 
+void test_execute_emitted_integer_specialized_ops() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("x = 10\n"
+              "y = 3\n"
+              "[x + y, x - 4, x < y, x > 4]\n");
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "specialized integer ops execution failed");
+  expect(exec.value.is_list(), "specialized integer ops should return list");
+  const std::shared_ptr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 4,
+         "specialized integer ops list size");
+  expect(values->items[0].is_integer() &&
+             values->items[0].as_integer() == 13,
+         "IADD should add integer registers");
+  expect(values->items[1].is_integer() &&
+             values->items[1].as_integer() == 6,
+         "ISUBK should subtract integer constant");
+  expect(values->items[2].is_bool() && !values->items[2].as_bool(),
+         "ILT should compare integer registers");
+  expect(values->items[3].is_bool() && values->items[3].as_bool(),
+         "IGTK should compare integer constant");
+}
+
 void test_execute_emitted_compare_method() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def choose(x):\n"
                                                           "  if x > 0:\n"
@@ -1080,6 +1105,15 @@ std::uint32_t append_integer_const(amber::bytecode::BcModule *module,
   return static_cast<std::uint32_t>(module->const_pool.size() - 1U);
 }
 
+std::uint32_t append_float_const(amber::bytecode::BcModule *module,
+                                 double value) {
+  amber::bytecode::Constant constant;
+  constant.kind = amber::bytecode::ConstantKind::Float;
+  constant.float_value = value;
+  module->const_pool.push_back(constant);
+  return static_cast<std::uint32_t>(module->const_pool.size() - 1U);
+}
+
 amber::bytecode::Instruction
 send_instr(std::uint32_t dst, std::uint32_t recv, std::uint32_t selector,
            const std::vector<std::uint32_t> &arg_regs, std::int64_t block_reg,
@@ -1209,6 +1243,34 @@ amber::bytecode::Instruction send_kw_instr(
   insn.operands.push_back({block_reg, block_reg < 0});
   insn.operands.push_back({site_id, false});
   return insn;
+}
+
+void test_manual_integer_opcode_float_fallback() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+  const std::uint32_t plus_id = ensure_symbol_id(&module, "+");
+  (void)plus_id;
+  const std::uint32_t lhs_id = append_float_const(&module, 1.5);
+  const std::uint32_t rhs_id = append_integer_const(&module, 2);
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Method;
+  code.reg_count = 2;
+  code.instructions.push_back({Opcode::LoadK, {{0, false}, {lhs_id, false}}});
+  code.instructions.push_back(
+      {Opcode::IAddK, {{1, false}, {0, false}, {rhs_id, false}}});
+  code.instructions.push_back({Opcode::Return, {{1, false}}});
+  module.code_objects.push_back(code);
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(module, 1);
+  expect(exec.ok(), "IADDK float fallback execution failed");
+  expect(exec.value.is_float() && exec.value.as_float() == 3.5,
+         "IADDK should fallback to Float#+ for non-integer lhs");
 }
 
 amber::runtime::Value make_symbol_map(
@@ -6582,6 +6644,7 @@ int main() {
   test_runtime_uninitialized_register_read_raises_name_error();
   test_manual_call_invokes_object_call_method();
   test_execute_emitted_send_method();
+  test_execute_emitted_integer_specialized_ops();
   test_execute_emitted_compare_method();
   test_execute_emitted_default_method();
   test_execute_emitted_keyword_method();
@@ -6593,6 +6656,7 @@ int main() {
   test_runtime_call_cache_distinguishes_block_presence();
   test_runtime_keyword_call_cache_invalidates_on_world_epoch();
   test_manual_dynamic_send();
+  test_manual_integer_opcode_float_fallback();
   test_execute_emitted_class_method_send();
   test_execute_emitted_constructor_call();
   test_execute_emitted_constructor_auto_assign();

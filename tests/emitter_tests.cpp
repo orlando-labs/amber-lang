@@ -724,6 +724,44 @@ void test_property_emission() {
          "member property assignment callsite flag emitted");
 }
 
+void test_integer_specialized_send_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("def fast():\n"
+              "  x = 10\n"
+              "  y = 3\n"
+              "  z = x + y\n"
+              "  q = z - 2\n"
+              "  (q < x) and (q > 0)\n");
+
+  const amber::bytecode::BcCode *code = code_by_id(
+      emit_result.module, emit_result.module.methods[0].entry_code_id);
+  expect(code != nullptr, "fast code exists");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IAdd),
+         "integer local addition emits IADD");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::ISubK),
+         "integer literal subtraction emits ISUBK");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::ILt),
+         "integer local comparison emits ILT");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IGtK),
+         "integer literal comparison emits IGTK");
+  expect(!contains_opcode(*code, amber::bytecode::Opcode::Send),
+         "integer-only method avoids generic SEND");
+}
+
+void test_unknown_integer_send_stays_dynamic() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("def add(x, y):\n"
+              "  x + y\n");
+
+  const amber::bytecode::BcCode *code = code_by_id(
+      emit_result.module, emit_result.module.methods[0].entry_code_id);
+  expect(code != nullptr, "add code exists");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::Send),
+         "unknown parameter addition keeps SEND");
+  expect(!contains_opcode(*code, amber::bytecode::Opcode::IAdd),
+         "unknown parameter addition does not emit IADD");
+}
+
 } // namespace
 
 int main() {
@@ -746,6 +784,8 @@ int main() {
   test_simple_block_param_emission();
   test_object_model_emission();
   test_property_emission();
+  test_integer_specialized_send_emission();
+  test_unknown_integer_send_stays_dynamic();
   std::cout << "emitter_tests: ok\n";
   return 0;
 }

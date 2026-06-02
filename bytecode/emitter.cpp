@@ -239,6 +239,49 @@ std::int64_t parse_integer_literal(const std::string &value) {
   return std::stoll(text.substr(start), nullptr, base);
 }
 
+bool is_integer_literal_expr(const ast::Expr &expr) {
+  return expr.kind == "HConst" && string_field(expr, "token") == "INTEGER";
+}
+
+bool is_integer_arithmetic_selector(const std::string &selector) {
+  return selector == "+" || selector == "-";
+}
+
+bool is_integer_comparison_selector(const std::string &selector) {
+  return selector == "<" || selector == ">";
+}
+
+bool is_integer_specialized_selector(const std::string &selector) {
+  return is_integer_arithmetic_selector(selector) ||
+         is_integer_comparison_selector(selector);
+}
+
+Opcode integer_register_opcode(const std::string &selector) {
+  if (selector == "+") {
+    return Opcode::IAdd;
+  }
+  if (selector == "-") {
+    return Opcode::ISub;
+  }
+  if (selector == "<") {
+    return Opcode::ILt;
+  }
+  return Opcode::IGt;
+}
+
+Opcode integer_constant_opcode(const std::string &selector) {
+  if (selector == "+") {
+    return Opcode::IAddK;
+  }
+  if (selector == "-") {
+    return Opcode::ISubK;
+  }
+  if (selector == "<") {
+    return Opcode::ILtK;
+  }
+  return Opcode::IGtK;
+}
+
 double parse_float_literal(const std::string &value) {
   return std::stod(remove_numeric_separators(value));
 }
@@ -312,6 +355,9 @@ private:
   std::uint32_t compile_clause_dispatch(const ast::Expr &expr);
   std::uint32_t compile_pattern_assign(const ast::Expr &expr);
   std::uint32_t compile_send_like(const ast::Expr &expr, Opcode opcode);
+  std::optional<std::uint32_t>
+  try_compile_integer_send(const ast::Expr &expr,
+                           std::optional<std::uint32_t> target_reg = {});
   std::uint32_t compile_closure(const ast::Expr &expr,
                                 std::optional<std::uint32_t> target_reg = {});
   std::uint32_t compile_lookup_like(const ast::Expr &expr,
@@ -374,6 +420,10 @@ private:
                             std::vector<PatchRef> *fail_patches);
   void diag(const lexer::Span &span, const std::string &code,
             const std::string &message);
+  void analyze_integer_locals();
+  bool expr_is_integer_for_specialization(
+      const ast::Expr &expr, const std::vector<std::uint8_t> &candidates) const;
+  bool expr_is_integer_for_specialization(const ast::Expr &expr) const;
 
   Emitter *owner_;
   const hir::Procedure *procedure_;
@@ -383,6 +433,7 @@ private:
   bool preserve_last_result_ = false;
   std::optional<std::uint32_t> last_value_reg_;
   std::vector<LoopContext> loops_;
+  std::vector<std::uint8_t> integer_local_slots_;
 };
 
 class Emitter {
@@ -1026,6 +1077,7 @@ CodeEmitter::CodeEmitter(Emitter *owner, const hir::Procedure *procedure,
   next_temp_ = static_cast<std::uint32_t>(procedure_->locals.size());
   const ast::Expr *body =
       body_override_ != nullptr ? body_override_ : procedure_->body.get();
+  analyze_integer_locals();
   preserve_last_result_ = contains_hir_kind(body, "HLastGet");
   for (const std::unique_ptr<ast::Expr> &pattern : procedure_->param_patterns) {
     preserve_last_result_ =
@@ -1104,6 +1156,137 @@ BcCode CodeEmitter::emit_clause_pattern_probe(const ast::Expr &clause) {
 }
 
 std::uint32_t CodeEmitter::alloc_temp() { return next_temp_++; }
+
+bool CodeEmitter::expr_is_integer_for_specialization(
+    const ast::Expr &expr, const std::vector<std::uint8_t> &candidates) const {
+  if (is_integer_literal_expr(expr)) {
+    return true;
+  }
+  if (expr.kind == "HLoadLocal") {
+    const std::uint32_t slot = parse_slot(string_field(expr, "slot"), 'l');
+    return slot < candidates.size() && candidates[slot] != 0U;
+  }
+  if (expr.kind == "HStoreLocal") {
+    const ast::Expr *value = node_field(expr, "expr");
+    return value != nullptr &&
+           expr_is_integer_for_specialization(*value, candidates);
+  }
+  if (expr.kind == "HSend") {
+    const std::string selector = string_field(expr, "selector");
+    if (!is_integer_arithmetic_selector(selector) ||
+        has_non_empty_list_field(expr, "kw_args") ||
+        node_field(expr, "block") != nullptr) {
+      return false;
+    }
+    const ast::Expr *receiver = node_field(expr, "receiver");
+    const ast::ListField *pos_args = list_field(expr, "pos_args");
+    if (receiver == nullptr || pos_args == nullptr ||
+        pos_args->values.size() != 1U) {
+      return false;
+    }
+    return expr_is_integer_for_specialization(*receiver, candidates) &&
+           expr_is_integer_for_specialization(*pos_args->values.front(),
+                                              candidates);
+  }
+  if (expr.kind == "HIf") {
+    const ast::Expr *then_body = node_field(expr, "then_body");
+    const ast::Expr *else_body = node_field(expr, "else_body");
+    if (then_body == nullptr || else_body == nullptr) {
+      return false;
+    }
+    return expr_is_integer_for_specialization(*then_body, candidates) &&
+           expr_is_integer_for_specialization(*else_body, candidates);
+  }
+  if (expr.kind == "HSeq") {
+    const ast::ListField *items = list_field(expr, "items");
+    if (items == nullptr || items->values.empty()) {
+      return false;
+    }
+    return expr_is_integer_for_specialization(*items->values.back(),
+                                              candidates);
+  }
+  if (expr.kind == "HLastSet") {
+    const ast::Expr *value = node_field(expr, "expr");
+    return value != nullptr &&
+           expr_is_integer_for_specialization(*value, candidates);
+  }
+  return false;
+}
+
+bool CodeEmitter::expr_is_integer_for_specialization(
+    const ast::Expr &expr) const {
+  return expr_is_integer_for_specialization(expr, integer_local_slots_);
+}
+
+void CodeEmitter::analyze_integer_locals() {
+  const std::size_t local_count =
+      procedure_ == nullptr ? 0U : procedure_->locals.size();
+  integer_local_slots_.assign(local_count, 0U);
+  if (procedure_ == nullptr || local_count == 0U) {
+    return;
+  }
+
+  std::vector<std::uint8_t> eligible(local_count, 0U);
+  for (const hir::ProcedureLocal &local : procedure_->locals) {
+    const std::uint32_t slot = parse_slot(local.slot, 'l');
+    if (slot < eligible.size() &&
+        (local.role == "local" || local.role == "temp")) {
+      eligible[slot] = 1U;
+    }
+  }
+
+  std::vector<std::vector<const ast::Expr *>> assignments(local_count);
+  const ast::Expr *body =
+      body_override_ != nullptr ? body_override_ : procedure_->body.get();
+  auto collect_assignments = [&](const ast::Expr *node,
+                                 const auto &collect_ref) -> void {
+    if (node == nullptr) {
+      return;
+    }
+    if (node->kind == "HStoreLocal") {
+      const std::uint32_t slot = parse_slot(string_field(*node, "slot"), 'l');
+      if (slot < assignments.size()) {
+        assignments[slot].push_back(node_field(*node, "expr"));
+      }
+    }
+    for (const ast::NodeField &field : node->node_fields) {
+      collect_ref(field.value.get(), collect_ref);
+    }
+    for (const ast::ListField &field : node->list_fields) {
+      for (const std::unique_ptr<ast::Expr> &value : field.values) {
+        collect_ref(value.get(), collect_ref);
+      }
+    }
+  };
+  collect_assignments(body, collect_assignments);
+
+  std::vector<std::uint8_t> candidates = eligible;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    std::vector<std::uint8_t> next(local_count, 0U);
+    for (std::size_t slot = 0; slot < local_count; ++slot) {
+      if (eligible[slot] == 0U || assignments[slot].empty()) {
+        continue;
+      }
+      bool all_integer = true;
+      for (const ast::Expr *assignment : assignments[slot]) {
+        if (assignment == nullptr ||
+            !expr_is_integer_for_specialization(*assignment, candidates)) {
+          all_integer = false;
+          break;
+        }
+      }
+      next[slot] = all_integer ? 1U : 0U;
+    }
+    if (next != candidates) {
+      candidates = std::move(next);
+      changed = true;
+    }
+  }
+
+  integer_local_slots_ = std::move(candidates);
+}
 
 std::uint32_t CodeEmitter::compile_clause_subject(const ast::Expr &clause) {
   if (procedure_ == nullptr || procedure_->signature == nullptr) {
@@ -1465,6 +1648,9 @@ bool CodeEmitter::compile_expr_into_reg_if_simple(const ast::Expr &expr,
   if (expr.kind == "HClosure") {
     compile_closure(expr, dst);
     return true;
+  }
+  if (expr.kind == "HSend") {
+    return try_compile_integer_send(expr, dst).has_value();
   }
   return false;
 }
@@ -2253,8 +2439,60 @@ std::uint32_t CodeEmitter::block_reg_operand(const ast::Expr &expr) {
   return compile_expr(*block);
 }
 
+std::optional<std::uint32_t> CodeEmitter::try_compile_integer_send(
+    const ast::Expr &expr, std::optional<std::uint32_t> target_reg) {
+  if (expr.kind != "HSend") {
+    return std::nullopt;
+  }
+  const std::string selector = string_field(expr, "selector");
+  if (!is_integer_specialized_selector(selector) ||
+      has_non_empty_list_field(expr, "kw_args") ||
+      node_field(expr, "block") != nullptr ||
+      bool_field(expr, "property_access") ||
+      bool_field(expr, "property_assignment")) {
+    return std::nullopt;
+  }
+
+  const ast::Expr *receiver = node_field(expr, "receiver");
+  const ast::ListField *pos_args = list_field(expr, "pos_args");
+  if (receiver == nullptr || pos_args == nullptr ||
+      pos_args->values.size() != 1U) {
+    return std::nullopt;
+  }
+  const ast::Expr &rhs = *pos_args->values.front();
+  if (!expr_is_integer_for_specialization(*receiver) ||
+      !expr_is_integer_for_specialization(rhs)) {
+    return std::nullopt;
+  }
+
+  owner_->intern_symbol(selector);
+  const std::uint32_t dst = target_reg.value_or(alloc_temp());
+  const std::uint32_t lhs_reg = compile_expr(*receiver);
+  if (is_integer_literal_expr(rhs)) {
+    const std::uint32_t constant_id = owner_->intern_literal_constant(
+        string_field(rhs, "token"), string_field(rhs, "value"));
+    emit_instruction(integer_constant_opcode(selector),
+                     {{dst, false}, {lhs_reg, false}, {constant_id, false}},
+                     expr.span);
+    return dst;
+  }
+
+  const std::uint32_t rhs_reg = compile_expr(rhs);
+  emit_instruction(integer_register_opcode(selector),
+                   {{dst, false}, {lhs_reg, false}, {rhs_reg, false}},
+                   expr.span);
+  return dst;
+}
+
 std::uint32_t CodeEmitter::compile_send_like(const ast::Expr &expr,
                                              Opcode opcode) {
+  if (opcode == Opcode::Send) {
+    if (const std::optional<std::uint32_t> dst =
+            try_compile_integer_send(expr)) {
+      return *dst;
+    }
+  }
+
   std::vector<InstructionOperand> operands;
   const std::uint32_t dst = alloc_temp();
   operands.push_back({dst, false});

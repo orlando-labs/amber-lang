@@ -66,6 +66,22 @@ opcodes:
     byte: 0x24
   - name: TYPE_CHECK
     byte: 0x25
+  - name: IADD
+    byte: 0x26
+  - name: ISUB
+    byte: 0x27
+  - name: ILT
+    byte: 0x28
+  - name: IGT
+    byte: 0x29
+  - name: IADDK
+    byte: 0x2A
+  - name: ISUBK
+    byte: 0x2B
+  - name: ILTK
+    byte: 0x2C
+  - name: IGTK
+    byte: 0x2D
   - name: JUMP
     byte: 0x30
   - name: JUMP_IF_TRUE

@@ -7667,6 +7667,137 @@ private:
     return Value::null();
   }
 
+  bool load_integer_constant(const Frame &frame, std::uint32_t const_id,
+                             std::int64_t *out) {
+    if (const_id >= module_.const_pool.size()) {
+      set_fault(frame, "VMError", "integer constant ref out of range");
+      return false;
+    }
+    const Constant &constant = module_.const_pool[const_id];
+    if (constant.kind != ConstantKind::Integer) {
+      set_fault(frame, "VMError", "integer opcode expects integer constant");
+      return false;
+    }
+    *out = constant.int_value;
+    return true;
+  }
+
+  bool step_integer_binary(Frame &frame, const Instruction &insn,
+                           bool rhs_is_constant) {
+    std::uint32_t dst = 0;
+    std::uint32_t lhs_reg = 0;
+    std::uint32_t rhs_operand = 0;
+    if (!operand_u32(frame, insn, 0, &dst) ||
+        !operand_u32(frame, insn, 1, &lhs_reg) ||
+        !operand_u32(frame, insn, 2, &rhs_operand)) {
+      return false;
+    }
+
+    const Value lhs_value = read_reg(frame, lhs_reg);
+    if (fault_.has_value()) {
+      return false;
+    }
+    Value rhs_value = Value::null();
+    if (rhs_is_constant) {
+      std::int64_t rhs = 0;
+      if (!load_integer_constant(frame, rhs_operand, &rhs)) {
+        return false;
+      }
+      rhs_value = Value::integer(rhs);
+    } else {
+      rhs_value = read_reg(frame, rhs_operand);
+      if (fault_.has_value()) {
+        return false;
+      }
+    }
+
+    auto selector = [&]() -> std::string {
+      switch (insn.opcode) {
+      case Opcode::IAdd:
+      case Opcode::IAddK:
+        return "+";
+      case Opcode::ISub:
+      case Opcode::ISubK:
+        return "-";
+      case Opcode::ILt:
+      case Opcode::ILtK:
+        return "<";
+      case Opcode::IGt:
+      case Opcode::IGtK:
+        return ">";
+      default:
+        return "";
+      }
+    };
+
+    if (!lhs_value.is_integer() || !rhs_value.is_integer()) {
+      const std::string selector_text = selector();
+      if (!rhs_is_constant) {
+        Instruction fallback;
+        fallback.opcode = Opcode::Send;
+        fallback.operands = {
+            {dst, false},
+            {lhs_reg, false},
+            {intern_runtime_symbol(selector_text), false},
+            {1, false},
+            {rhs_operand, false},
+            {0, false},
+            {-1, true},
+        };
+        return step_send(frame, fallback, false);
+      }
+
+      Value result = Value::null();
+      const SendStatus status =
+          try_apply_scalar_send(frame, lhs_value, selector_text, {rhs_value},
+                                Value::null(), {}, &result);
+      if (status == SendStatus::Faulted) {
+        return false;
+      }
+      if (status == SendStatus::Matched) {
+        if (!write_reg(frame, dst, std::move(result))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
+      set_fault(frame, "NoMethodError",
+                "selector is not implemented in current runtime baseline");
+      return false;
+    }
+
+    const std::int64_t lhs = lhs_value.as_integer();
+    const std::int64_t rhs = rhs_value.as_integer();
+    Value result = Value::null();
+    switch (insn.opcode) {
+    case Opcode::IAdd:
+    case Opcode::IAddK:
+      result = Value::integer(lhs + rhs);
+      break;
+    case Opcode::ISub:
+    case Opcode::ISubK:
+      result = Value::integer(lhs - rhs);
+      break;
+    case Opcode::ILt:
+    case Opcode::ILtK:
+      result = Value::boolean(lhs < rhs);
+      break;
+    case Opcode::IGt:
+    case Opcode::IGtK:
+      result = Value::boolean(lhs > rhs);
+      break;
+    default:
+      set_fault(frame, "VMError", "unsupported integer opcode");
+      return false;
+    }
+
+    if (!write_reg(frame, dst, std::move(result))) {
+      return false;
+    }
+    ++frame.pc;
+    return true;
+  }
+
   bool path_segments_from_constant(const Frame &frame, const Constant &constant,
                                    std::vector<std::string> *out) {
     if (constant.kind != ConstantKind::Path) {
@@ -12543,6 +12674,23 @@ private:
       return true;
     };
 
+    auto require_numeric_arg = [&](std::size_t index, double *value) -> bool {
+      if (index >= args.size()) {
+        set_fault(frame, "TypeError", "builtin SEND expects numeric argument");
+        return false;
+      }
+      if (args[index].is_integer()) {
+        *value = static_cast<double>(args[index].as_integer());
+        return true;
+      }
+      if (args[index].is_float()) {
+        *value = args[index].as_float();
+        return true;
+      }
+      set_fault(frame, "TypeError", "builtin SEND expects numeric argument");
+      return false;
+    };
+
     auto require_no_block = [&]() -> bool {
       if (!block.is_null()) {
         set_fault(frame, "TypeError",
@@ -13875,33 +14023,63 @@ private:
     if (receiver.is_integer()) {
       const std::int64_t lhs = receiver.as_integer();
       std::int64_t rhs = 0;
+      double numeric_rhs = 0.0;
       if (selector == "+") {
-        if (!require_arity(1) || !require_no_block() ||
-            !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_float()) {
+          *out = Value::floating(static_cast<double>(lhs) + args[0].as_float());
+          return SendStatus::Matched;
+        }
+        if (!require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::integer(lhs + rhs);
         return SendStatus::Matched;
       }
       if (selector == "-") {
-        if (!require_arity(1) || !require_no_block() ||
-            !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_float()) {
+          *out = Value::floating(static_cast<double>(lhs) - args[0].as_float());
+          return SendStatus::Matched;
+        }
+        if (!require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::integer(lhs - rhs);
         return SendStatus::Matched;
       }
       if (selector == "*") {
-        if (!require_arity(1) || !require_no_block() ||
-            !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_float()) {
+          *out = Value::floating(static_cast<double>(lhs) * args[0].as_float());
+          return SendStatus::Matched;
+        }
+        if (!require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::integer(lhs * rhs);
         return SendStatus::Matched;
       }
       if (selector == "/") {
-        if (!require_arity(1) || !require_no_block() ||
-            !require_integer_arg(0, &rhs)) {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_float()) {
+          const double float_rhs = args[0].as_float();
+          if (float_rhs == 0.0) {
+            set_fault(frame, "TypeError", "division by zero");
+            return SendStatus::Faulted;
+          }
+          *out = Value::floating(static_cast<double>(lhs) / float_rhs);
+          return SendStatus::Matched;
+        }
+        if (!require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         if (rhs == 0) {
@@ -13913,7 +14091,80 @@ private:
       }
       if (selector == ">") {
         if (!require_arity(1) || !require_no_block() ||
-            !require_integer_arg(0, &rhs)) {
+            !require_numeric_arg(0, &numeric_rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(static_cast<double>(lhs) > numeric_rhs);
+        return SendStatus::Matched;
+      }
+      if (selector == "<") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &numeric_rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(static_cast<double>(lhs) < numeric_rhs);
+        return SendStatus::Matched;
+      }
+      if (selector == ">=") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &numeric_rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(static_cast<double>(lhs) >= numeric_rhs);
+        return SendStatus::Matched;
+      }
+      if (selector == "<=") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &numeric_rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(static_cast<double>(lhs) <= numeric_rhs);
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_float()) {
+      const double lhs = receiver.as_float();
+      double rhs = 0.0;
+      if (selector == "+") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(lhs + rhs);
+        return SendStatus::Matched;
+      }
+      if (selector == "-") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(lhs - rhs);
+        return SendStatus::Matched;
+      }
+      if (selector == "*") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(lhs * rhs);
+        return SendStatus::Matched;
+      }
+      if (selector == "/") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if (rhs == 0.0) {
+          set_fault(frame, "TypeError", "division by zero");
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(lhs / rhs);
+        return SendStatus::Matched;
+      }
+      if (selector == ">") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::boolean(lhs > rhs);
@@ -13921,7 +14172,7 @@ private:
       }
       if (selector == "<") {
         if (!require_arity(1) || !require_no_block() ||
-            !require_integer_arg(0, &rhs)) {
+            !require_numeric_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::boolean(lhs < rhs);
@@ -13929,7 +14180,7 @@ private:
       }
       if (selector == ">=") {
         if (!require_arity(1) || !require_no_block() ||
-            !require_integer_arg(0, &rhs)) {
+            !require_numeric_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::boolean(lhs >= rhs);
@@ -13937,7 +14188,7 @@ private:
       }
       if (selector == "<=") {
         if (!require_arity(1) || !require_no_block() ||
-            !require_integer_arg(0, &rhs)) {
+            !require_numeric_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
         *out = Value::boolean(lhs <= rhs);
@@ -15013,6 +15264,18 @@ private:
                 "CALL expects closure, class, or object with call method");
       return;
     }
+    case Opcode::IAdd:
+    case Opcode::ISub:
+    case Opcode::ILt:
+    case Opcode::IGt:
+      step_integer_binary(frame, insn, false);
+      return;
+    case Opcode::IAddK:
+    case Opcode::ISubK:
+    case Opcode::ILtK:
+    case Opcode::IGtK:
+      step_integer_binary(frame, insn, true);
+      return;
     case Opcode::Send:
       step_send(frame, insn, false);
       return;
