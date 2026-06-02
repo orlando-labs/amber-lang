@@ -12,6 +12,26 @@ diagnostics:
   - { code: AMB-SYN-INLINE-TERNARY-CSTYLE, severity: error, phase: parser, condition: C-style ternary operator is not supported }
   - { code: AMB-SYN-INLINE-IF-MISSING-ELSE, severity: error, phase: parser, condition: inline conditional expression is missing required else branch }
   - { code: AMB-SYN-CONDITIONAL-ELEMENT-MISSING-VALUE, severity: error, phase: parser, condition: conditional collection element has if or unless without a preceding value }
+  - { code: AMB_PROP_BAD_DECL, severity: error, phase: parser, condition: malformed property declaration }
+  - { code: AMB_PROP_INVALID_CONTEXT, severity: error, phase: parser, condition: property declaration in function or block context }
+  - { code: AMB_PROP_PARAM_LIST_FORBIDDEN, severity: error, phase: parser, condition: property declaration has a forbidden parameter list }
+  - { code: AMB_PROP_EMPTY_DESCRIPTOR, severity: error, phase: parser, condition: grouped property descriptor has no getter or setter arm }
+  - { code: AMB_PROP_DUPLICATE_GETTER, severity: error, phase: parser, condition: grouped property descriptor declares more than one getter arm }
+  - { code: AMB_PROP_DUPLICATE_SETTER, severity: error, phase: parser, condition: grouped property descriptor declares more than one setter arm }
+  - { code: AMB_PROP_GETTER_PARAM_LIST_FORBIDDEN, severity: error, phase: parser, condition: property getter arm declares a parameter list }
+  - { code: AMB_PROP_SETTER_ARITY, severity: error, phase: parser, condition: property setter arm does not declare exactly one parameter }
+  - { code: AMB_PROP_SETTER_DEFAULT, severity: error, phase: parser, condition: property setter parameter has a default value }
+  - { code: AMB_PROP_SETTER_PARAM_KIND, severity: error, phase: parser, condition: property setter parameter is not a plain positional identifier }
+  - { code: AMB_PROP_TOP_LEVEL_SETTER, severity: error, phase: binder, condition: top-level property declares a setter arm }
+  - { code: AMB_PROP_MISSING_GETTER, severity: error, phase: binder, condition: read from write-only property }
+  - { code: AMB_PROP_MISSING_SETTER, severity: error, phase: binder, condition: assignment to read-only property }
+  - { code: AMB_PROP_NAME_CONFLICT, severity: error, phase: binder, condition: property conflicts with method field constant or property }
+  - { code: AMB_PROP_CLASS_PROP_OUTSIDE_CLASS, severity: error, phase: parser, condition: class_prop outside class body }
+  - { code: AMB_PROP_REF_UNSUPPORTED, severity: error, phase: binder, condition: unsupported callable reference to local or module property }
+  - { code: AMB_PROP_CALL_ARGS_FORBIDDEN, severity: error, phase: binder, condition: arguments passed directly to property getter }
+  - { code: AMB_PROP_SETTER_UNDEFINED, severity: error, phase: binder, condition: assignment to property with no setter support }
+  - { code: AMB_PROP_IMPORT_CONFLICT, severity: error, phase: binder, condition: imported property conflicts with local binding }
+  - { code: AMB_PROP_EXPORT_CONFLICT, severity: error, phase: binder, condition: exported property conflicts with export alias }
   - { code: B0001, severity: error, phase: binder, condition: duplicate lexical binding in one scope }
   - { code: B0002, severity: error, phase: binder, condition: wildcard underscore used as an ordinary binding or reference }
   - { code: E1001, severity: error, phase: pattern, condition: duplicate binding names in one pattern }

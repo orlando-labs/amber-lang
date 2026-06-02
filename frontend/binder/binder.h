@@ -25,6 +25,8 @@ struct Binding {
   std::string kind;
   std::string role;
   bool read_only = false;
+  bool property_has_getter = false;
+  bool property_has_setter = false;
   lexer::Span span;
   std::string source;
 };

@@ -35,8 +35,9 @@ Current procedure entries contain:
 Currently lowered node families:
 
 - module/import/export/class/mixin/include/extend declarations;
-- top-level `def` and `class_method def` as `HMethod` with `dispatch_side =
-  module | instance | class`;
+- top-level `def`, `prop`, `class_method def`, and `class_prop` as `HMethod`
+  with `dispatch_side = module | instance | class`; property getters carry
+  `property_getter = true`;
 - clause-style `def` as `HMethod(signature, clauses[], else_body, procedure)`;
 - literals as `HConst`;
 - collection literals as `HListLiteral(elements[])`,
@@ -69,7 +70,8 @@ Currently lowered node families:
   matching entries;
 - simple many-def sugar normalized to one `HMethod` with multiple `HClause`
   entries;
-- postfix lowering to `HSend`, `HCall`, and `HIndex`;
+- postfix lowering to `HSend`, `HCall`, and `HIndex`; bare member access that
+  must resolve as a property carries `property_access = true` on `HSend`;
 - one-line block suffix lowering to `HClosure` plus a separate closure
   procedure with explicit `captures[]`.
 
@@ -80,6 +82,9 @@ Current implementation notes:
   final dump;
 - closure captures are materialized in source order, and nested closures may
   propagate outer captures transitively via `source_kind = capture`;
+- resolved local/module property reads lower as zero-argument `HCall` over the
+  stored property getter closure, preserving the v20.3 rule that ordinary
+  `def` bindings are not implicitly invoked;
 - structural matching currently lowers `pattern` as nested `Pat*` nodes:
   `PatLiteral`, `PatBind`, `PatIgnore`, `PatConst`, `PatPin`,
   `PatMatcherExpr`, `PatTuple`, `PatList`, `PatMap`, `PatMapField`,

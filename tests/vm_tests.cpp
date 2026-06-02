@@ -901,6 +901,81 @@ void test_execute_emitted_block_send() {
          "user-defined SEND should accept forwarded block");
 }
 
+void test_execute_emitted_properties() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("counter = 0\n"
+              "prop next_value:\n"
+              "  counter = counter + 1\n"
+              "  counter\n"
+              "next_value + next_value\n");
+  amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "top-level property execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 3,
+         "top-level property should evaluate getter on each access");
+
+  emit_result = emit_ok("class Point:\n"
+                        "  def init(@x, @y): pass\n"
+                        "  prop sum: @x + @y\n"
+                        "Point(2, 5).sum\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "instance property execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 7,
+         "instance property should return getter result");
+
+  emit_result = emit_ok("class Build:\n"
+                        "  class_prop version: 203\n"
+                        "Build.version\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "class property execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 203,
+         "class property should return getter result");
+
+  emit_result =
+      emit_ok("class Box:\n"
+              "  def init(initial): @value = initial\n"
+              "  prop value:\n"
+              "    get: @value\n"
+              "    set(v):\n"
+              "      @value = v\n"
+              "      999\n"
+              "box = Box(1)\n"
+              "assigned = (box.value = 10)\n"
+              "box.value + assigned\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "instance property setter execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 20,
+         "property assignment should return rhs and update property");
+
+  emit_result = emit_ok("class Build:\n"
+                        "  class_prop version:\n"
+                        "    get: @@version\n"
+                        "    set(v): @@version = v\n"
+                        "Build.version = 204\n"
+                        "Build.version\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "class property setter execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 204,
+         "class property setter should update class-side value");
+}
+
+void test_bare_member_def_is_not_implicit_call() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("class Box:\n"
+              "  def value(): 1\n"
+              "Box().value\n");
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(emit_result.module,
+                                   emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "NoMethodError",
+         "bare ordinary method access should not implicitly call def");
+}
+
 void test_manual_dynamic_send() {
   using namespace amber::bytecode;
 
@@ -6511,6 +6586,8 @@ int main() {
   test_execute_emitted_default_method();
   test_execute_emitted_keyword_method();
   test_execute_emitted_block_send();
+  test_execute_emitted_properties();
+  test_bare_member_def_is_not_implicit_call();
   test_runtime_duplicate_keyword_values_are_read_before_duplicate_check();
   test_runtime_keyword_shape_cache_canonicalizes_keyword_order();
   test_runtime_call_cache_distinguishes_block_presence();

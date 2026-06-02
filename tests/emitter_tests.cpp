@@ -132,6 +132,19 @@ bool module_contains_opcode(const amber::bytecode::BcModule &module,
   return false;
 }
 
+bool module_contains_callsite_flag(const amber::bytecode::BcModule &module,
+                                   std::uint32_t flag) {
+  for (const amber::bytecode::BcCode &code : module.code_objects) {
+    for (const amber::bytecode::CacheSiteEntry &entry :
+         code.call_site_table) {
+      if ((entry.flags & flag) != 0U) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool has_diagnostic_code(const amber::bytecode::EmitResult &result,
                          const std::string &code) {
   for (const amber::lexer::Diagnostic &diagnostic : result.diagnostics) {
@@ -674,6 +687,43 @@ void test_object_model_emission() {
          "class export targets second descriptor");
 }
 
+void test_property_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("prop answer: 42\n"
+              "class User:\n"
+              "  prop full_name:\n"
+              "    get: @first\n"
+              "    set(value): @first = value\n"
+              "user.full_name\n"
+              "user.full_name = \"Ada\"\n");
+
+  expect(emit_result.module.methods.size() == 3,
+         "module getter and instance property methods emitted");
+  expect((emit_result.module.methods[0].flags &
+          amber::bytecode::kMethodFlagPropertyGetter) != 0U,
+         "module property getter flag emitted");
+  expect((emit_result.module.methods[1].flags &
+          amber::bytecode::kMethodFlagPropertyGetter) != 0U,
+         "instance property getter flag emitted");
+  expect((emit_result.module.methods[1].flags &
+          amber::bytecode::kMethodFlagInstance) != 0U,
+         "instance property keeps dispatch flag");
+  expect((emit_result.module.methods[2].flags &
+          amber::bytecode::kMethodFlagPropertySetter) != 0U,
+         "instance property setter flag emitted");
+  expect((emit_result.module.methods[2].flags &
+          amber::bytecode::kMethodFlagInstance) != 0U,
+         "instance property setter keeps dispatch flag");
+  expect(module_contains_callsite_flag(
+             emit_result.module,
+             amber::bytecode::kCallSiteFlagPropertyAccess),
+         "bare member property access callsite flag emitted");
+  expect(module_contains_callsite_flag(
+             emit_result.module,
+             amber::bytecode::kCallSiteFlagPropertyAssignment),
+         "member property assignment callsite flag emitted");
+}
+
 } // namespace
 
 int main() {
@@ -695,6 +745,7 @@ int main() {
   test_block_param_pattern_emission();
   test_simple_block_param_emission();
   test_object_model_emission();
+  test_property_emission();
   std::cout << "emitter_tests: ok\n";
   return 0;
 }

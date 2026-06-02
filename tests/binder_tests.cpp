@@ -762,6 +762,69 @@ void test_bind_call_shape_diagnostics() {
   expect_call_diagnostic_code(unknown, "E2011");
 }
 
+void test_property_bindings_and_conflicts() {
+  amber::binder::BindResult bound = bind_ok("prop answer: 42\n"
+                                            "answer\n");
+  const amber::binder::Scope *module =
+      scope_by_kind_owner(bound.graph, "module", "");
+  expect(module != nullptr, "module scope exists for property");
+  const amber::binder::Binding *answer =
+      binding_in_scope(bound.graph, *module, "answer");
+  expect(answer != nullptr && answer->role == "property" &&
+             answer->read_only,
+         "property binding metadata");
+  const amber::binder::Signature *signature =
+      signature_by_owner(bound.graph, "answer");
+  expect(signature != nullptr && signature->params.empty(),
+         "property getter zero-arg signature");
+  expect(has_resolved_reference(bound.graph, "answer", answer->id),
+         "property read resolves to property binding");
+
+  amber::binder::BindResult method_conflict =
+      bind_any("class User:\n"
+               "  prop name: @name\n"
+               "  def name(): @name\n");
+  expect_diagnostic_code(method_conflict, "AMB_PROP_NAME_CONFLICT");
+
+  amber::binder::BindResult field_conflict =
+      bind_any("class User:\n"
+               "  prop name: @name\n"
+               "  def init(@name): pass\n");
+  expect_diagnostic_code(field_conflict, "AMB_PROP_NAME_CONFLICT");
+
+  amber::binder::BindResult missing_setter = bind_any("prop answer: 42\n"
+                                                      "answer = 7\n");
+  expect_diagnostic_code(missing_setter, "AMB_PROP_MISSING_SETTER");
+
+  amber::binder::BindResult top_level_setter =
+      bind_any("prop answer:\n"
+               "  get: 42\n"
+               "  set(value): pass\n");
+  expect_diagnostic_code(top_level_setter, "AMB_PROP_TOP_LEVEL_SETTER");
+
+  amber::binder::BindResult setter_property =
+      bind_ok("class Box:\n"
+              "  prop value:\n"
+              "    get: @value\n"
+              "    set(value): @value = value\n");
+  const amber::binder::Scope *box_scope =
+      scope_by_kind_owner(setter_property.graph, "class", "Box");
+  expect(box_scope != nullptr, "box scope exists for property setter");
+  const amber::binder::Binding *value =
+      binding_in_scope(setter_property.graph, *box_scope, "value");
+  expect(value != nullptr && value->property_has_getter &&
+             value->property_has_setter && !value->read_only,
+         "read-write property binding metadata");
+  const amber::binder::Scope *setter_scope =
+      scope_by_kind_owner(setter_property.graph, "property_setter", "value=");
+  expect(setter_scope != nullptr, "property setter scope exists");
+  const amber::binder::Signature *setter_signature =
+      signature_by_owner(setter_property.graph, "value=");
+  expect(setter_signature != nullptr && setter_signature->params.size() == 1 &&
+             setter_signature->params[0].local_name == "value",
+         "property setter one-arg signature");
+}
+
 } // namespace
 
 int main() {
@@ -790,6 +853,7 @@ int main() {
   test_bind_call_shape_from_ast_args();
   test_bind_call_auto_assign_plan();
   test_bind_call_shape_diagnostics();
+  test_property_bindings_and_conflicts();
   std::cout << "binder_tests: ok\n";
   return 0;
 }

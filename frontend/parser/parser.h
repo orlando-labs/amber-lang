@@ -41,6 +41,16 @@ private:
     std::vector<std::unique_ptr<ast::Expr>> else_body;
   };
 
+  struct PropertySuite {
+    bool grouped = false;
+    bool has_getter = false;
+    bool has_setter = false;
+    lexer::Span end_span;
+    std::vector<std::unique_ptr<ast::Expr>> getter_body;
+    std::unique_ptr<ast::Expr> setter_signature;
+    std::vector<std::unique_ptr<ast::Expr>> setter_body;
+  };
+
   enum class Assoc { Left, Right };
 
   struct InfixInfo {
@@ -67,6 +77,10 @@ private:
   std::unique_ptr<ast::Expr>
   parse_def_stmt(bool class_method,
                  const lexer::Token *start_override = nullptr);
+  std::unique_ptr<ast::Expr> parse_prop_def(bool class_property);
+  PropertySuite parse_property_suite(const lexer::Span &fallback_span);
+  PropertySuite parse_grouped_property_suite(const lexer::Span &fallback_span);
+  void parse_property_arm(PropertySuite *suite);
   std::unique_ptr<ast::Expr> parse_class_def();
   std::unique_ptr<ast::Expr> parse_mixin_def();
   std::unique_ptr<ast::Expr> parse_include_stmt(bool extend);
@@ -98,7 +112,10 @@ private:
   std::vector<std::unique_ptr<ast::Expr>> parse_block_params();
   std::vector<std::string> parse_many_def_patterns(lexer::Span *span_out);
   std::string consume_method_name_text(const std::string &message);
+  const lexer::Token &consume_identifier_like(const std::string &message);
   std::string consume_identifier_text(const std::string &message);
+  bool looks_like_property_declaration() const;
+  bool property_suite_starts_grouped() const;
   bool match_contextual(const char *text);
   bool starts_clause_body() const;
   bool is_simple_many_def_header() const;

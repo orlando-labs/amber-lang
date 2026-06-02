@@ -6210,8 +6210,13 @@ using amber::bytecode::Instruction;
 using amber::bytecode::Opcode;
 using amber::bytecode::SlotLayoutEntry;
 
-constexpr std::uint32_t kMethodFlagInstance = 1U;
-constexpr std::uint32_t kMethodFlagClass = 2U;
+constexpr std::uint32_t kMethodFlagInstance =
+    amber::bytecode::kMethodFlagInstance;
+constexpr std::uint32_t kMethodFlagClass = amber::bytecode::kMethodFlagClass;
+constexpr std::uint32_t kMethodFlagPropertyGetter =
+    amber::bytecode::kMethodFlagPropertyGetter;
+constexpr std::uint32_t kMethodFlagPropertySetter =
+    amber::bytecode::kMethodFlagPropertySetter;
 constexpr std::int64_t kPatternFailModeSoft = 0;
 constexpr std::int64_t kPatternFailModeMatchError = 1;
 
@@ -6601,9 +6606,10 @@ struct RuntimeState {
            ++offset) {
         bytecode::BcMethod method =
             module.methods[owner.method_range_start + offset];
-        MethodTableDescriptor &table = method.flags == kMethodFlagClass
-                                           ? runtime.class_method_table
-                                           : runtime.instance_method_table;
+        MethodTableDescriptor &table =
+            (method.flags & kMethodFlagClass) != 0U
+                ? runtime.class_method_table
+                : runtime.instance_method_table;
         table.entries[method.selector_sym_id] = std::move(method);
       }
     }
@@ -6693,9 +6699,10 @@ struct RuntimeState {
            ++offset) {
         bytecode::BcMethod method =
             module.methods[owner.method_range_start + offset];
-        MethodTableDescriptor &table = method.flags == kMethodFlagClass
-                                           ? runtime.class_method_table
-                                           : runtime.instance_method_table;
+        MethodTableDescriptor &table =
+            (method.flags & kMethodFlagClass) != 0U
+                ? runtime.class_method_table
+                : runtime.instance_method_table;
         table.entries[method.selector_sym_id] = std::move(method);
       }
     }
@@ -9941,6 +9948,14 @@ private:
     return (code_id << 32U) | site_id;
   }
 
+  std::uint32_t call_site_flags(const Frame &frame,
+                                std::uint32_t site_id) const {
+    if (frame.code == nullptr || site_id >= frame.code->call_site_table.size()) {
+      return 0;
+    }
+    return frame.code->call_site_table[site_id].flags;
+  }
+
   std::vector<std::uint32_t> canonical_keyword_shape(
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args) const {
     std::vector<std::uint32_t> shape;
@@ -10823,6 +10838,100 @@ private:
     return CoercedMapState{result, *result_entries};
   }
 
+  bool invoke_callable_value(Frame &frame, const Value &callee,
+                             const std::vector<Value> &pos_args,
+                             const std::vector<std::pair<std::uint32_t, Value>>
+                                 &kw_args,
+                             const Value &block, std::uint32_t dst) {
+    if (callee.is_closure()) {
+      if (!kw_args.empty()) {
+        set_fault(frame, "TypeError",
+                  "closure CALL does not accept keyword arguments");
+        return false;
+      }
+      if (!ensure_lifecycle_access(frame, callee)) {
+        return false;
+      }
+      const std::shared_ptr<ClosureValue> closure = callee.as_closure();
+      if (closure == nullptr) {
+        set_fault(frame, "TypeError", "closure value is null");
+        return false;
+      }
+      const BcCode *code = find_code(module_, closure->code_id);
+      if (code == nullptr) {
+        set_fault(frame, "VMError", "closure code id is unknown");
+        return false;
+      }
+      const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
+      ++frame.pc;
+      frame.active_call_pc = call_pc;
+      push_frame(*code, pos_args, closure->captures, closure->self, block, dst);
+      return true;
+    }
+
+    if (callee.is_class_object()) {
+      const std::uint32_t class_index = callee.as_class_object().class_index;
+      auto instance = make_instance_value(class_index);
+      if (!ensure_instance_layout(frame, instance)) {
+        return false;
+      }
+      const Value instance_value = Value::instance(instance);
+      const bytecode::BcMethod *init = find_method_for_dispatch(
+          frame, class_index, "init", kMethodFlagInstance);
+      if (fault_.has_value()) {
+        return false;
+      }
+      if (init == nullptr) {
+        if (!pos_args.empty()) {
+          set_fault(frame, "TypeError",
+                    "class call without init accepts no positional arguments");
+          return false;
+        }
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError",
+                    "class call without init does not accept keyword arguments");
+          return false;
+        }
+        if (!block.is_null()) {
+          set_fault(frame, "TypeError",
+                    "class call without init does not accept block");
+          return false;
+        }
+        if (!write_reg(frame, dst, instance_value)) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
+      return invoke_method(frame, *init, pos_args, kw_args, instance_value,
+                           block, dst, instance_value);
+    }
+
+    if (callee.is_instance_object()) {
+      const std::shared_ptr<InstanceValue> instance = callee.as_instance_object();
+      if (instance == nullptr) {
+        set_fault(frame, "TypeError", "instance callee is null");
+        return false;
+      }
+      const bytecode::BcMethod *method = find_method_for_dispatch(
+          frame, instance->class_index, "call", kMethodFlagInstance);
+      if (fault_.has_value()) {
+        return false;
+      }
+      if (method == nullptr) {
+        set_fault(frame, "TypeError",
+                  "CALL expects closure, class, or object with call method");
+        return false;
+      }
+      return invoke_method(frame, *method, pos_args, kw_args, callee, block,
+                           dst);
+    }
+
+    set_fault(frame, "TypeError",
+              "CALL expects closure, class, or object with call method");
+    return false;
+  }
+
   bool complete_invoke_result(Frame &caller,
                               std::optional<std::uint32_t> caller_result_reg,
                               Value value) {
@@ -10987,8 +11096,9 @@ private:
       return nullptr;
     }
     const MethodTableDescriptor &method_table =
-        method_flags == kMethodFlagClass ? runtime_owner.class_method_table
-                                         : runtime_owner.instance_method_table;
+        (method_flags & kMethodFlagClass) != 0U
+            ? runtime_owner.class_method_table
+            : runtime_owner.instance_method_table;
     for (const auto &[selector_id, method] : method_table.entries) {
       if (selector_id >= module_.symbols.size()) {
         set_fault(frame, "VMError", "method selector symbol ref is invalid");
@@ -11171,7 +11281,8 @@ private:
     std::vector<bool> active_mixins(module_.classes.size(), false);
     std::vector<bool> active_classes(module_.classes.size(), false);
     return find_method_for_dispatch_impl(
-        frame, class_index, selector, expected_flags == kMethodFlagClass,
+        frame, class_index, selector,
+        (expected_flags & kMethodFlagClass) != 0U,
         &seen_mixins, &active_mixins, &active_classes);
   }
 
@@ -13928,6 +14039,12 @@ private:
     if (fault_.has_value()) {
       return false;
     }
+    const std::uint32_t site_flags =
+        site_id.has_value() ? call_site_flags(frame, *site_id) : 0U;
+    const bool property_access =
+        (site_flags & bytecode::kCallSiteFlagPropertyAccess) != 0U;
+    const bool property_assignment =
+        (site_flags & bytecode::kCallSiteFlagPropertyAssignment) != 0U;
     const Value block =
         has_optional_reg(block_reg)
             ? read_reg(frame, static_cast<std::uint32_t>(block_reg))
@@ -13940,7 +14057,12 @@ private:
     if (fault_.has_value()) {
       return false;
     }
-    if (*selector == "destroy!") {
+    if (property_access && property_assignment) {
+      set_fault(frame, "VMError",
+                "send cannot be both property access and assignment");
+      return false;
+    }
+    if (!property_access && !property_assignment && *selector == "destroy!") {
       if (!args.empty() || !kw_args.empty() || !block.is_null()) {
         set_fault(frame, "TypeError", "destroy! accepts no arguments");
         return false;
@@ -13955,19 +14077,78 @@ private:
       ++frame.pc;
       return true;
     }
-    Value result = Value::null();
-    const SendStatus scalar_status = try_apply_scalar_send(
-        frame, receiver, *selector, args, block, kw_args, &result);
-    if (scalar_status == SendStatus::Faulted) {
-      return false;
+    if (!property_access && !property_assignment) {
+      Value result = Value::null();
+      const SendStatus scalar_status = try_apply_scalar_send(
+          frame, receiver, *selector, args, block, kw_args, &result);
+      if (scalar_status == SendStatus::Faulted) {
+        return false;
+      }
+      if (scalar_status == SendStatus::Matched) {
+        if (!write_reg(frame, dst, std::move(result))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
     }
-    if (scalar_status == SendStatus::Matched) {
-      if (!write_reg(frame, dst, std::move(result))) {
+    if (property_access) {
+      if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+        set_fault(frame, "TypeError",
+                  "property access does not accept arguments or block");
+        return false;
+      }
+    }
+    if (property_assignment) {
+      if (args.size() != 1U || !kw_args.empty() || !block.is_null()) {
+        set_fault(frame, "TypeError",
+                  "property assignment requires exactly one value and no "
+                  "keywords or block");
+        return false;
+      }
+    }
+
+    auto invoke_property_method = [&](const bytecode::BcMethod &getter) {
+      if ((getter.flags & kMethodFlagPropertyGetter) == 0U) {
+        set_fault(frame, "NoMethodError",
+                  "bare member access requires a property getter");
+        return false;
+      }
+      return invoke_method(frame, getter, {}, {}, receiver, Value::null(), dst);
+    };
+
+    auto invoke_property_result =
+        [&](const bytecode::BcMethod &getter) -> bool {
+      const std::vector<Value> no_pos_args;
+      const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
+      const std::optional<Value> getter_value = execute_method_to_value(
+          frame, getter, no_pos_args, no_kw_args, receiver, Value::null());
+      if (!getter_value.has_value()) {
+        return false;
+      }
+      return invoke_callable_value(frame, *getter_value, args, kw_args, block,
+                                   dst);
+    };
+
+    auto invoke_property_setter =
+        [&](const bytecode::BcMethod &setter) -> bool {
+      if ((setter.flags & kMethodFlagPropertySetter) == 0U) {
+        set_fault(frame, "NoMethodError",
+                  "assignment requires a property setter");
+        return false;
+      }
+      const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
+      const std::optional<Value> ignored = execute_method_to_value(
+          frame, setter, args, no_kw_args, receiver, Value::null());
+      if (!ignored.has_value()) {
+        return false;
+      }
+      if (!write_reg(frame, dst, args.front())) {
         return false;
       }
       ++frame.pc;
       return true;
-    }
+    };
 
     std::uint32_t class_index = 0;
     std::uint32_t dispatch_flags = 0;
@@ -13995,6 +14176,15 @@ private:
           *selector_symbol_id_for_cache,
           static_cast<std::uint32_t>(args.size()), kw_args, block);
       if (cached != nullptr) {
+        if (property_assignment) {
+          return invoke_property_setter(*cached);
+        }
+        if (property_access) {
+          return invoke_property_method(*cached);
+        }
+        if ((cached->flags & kMethodFlagPropertyGetter) != 0U) {
+          return invoke_property_result(*cached);
+        }
         return invoke_method(frame, *cached, args, kw_args, receiver, block,
                              dst);
       }
@@ -14006,6 +14196,17 @@ private:
       return false;
     }
     if (method == nullptr) {
+      if (property_assignment) {
+        set_fault(frame, "NoMethodError",
+                  "property setter is not implemented in current runtime "
+                  "baseline");
+        return false;
+      }
+      if (property_access) {
+        set_fault(frame, "NoMethodError",
+                  "property is not implemented in current runtime baseline");
+        return false;
+      }
       if (try_invoke_method_missing(frame, class_index, dispatch_flags,
                                     *selector, selector_value, args, kw_args,
                                     receiver, block, dst)) {
@@ -14016,6 +14217,32 @@ private:
       }
       set_fault(frame, "NoMethodError",
                 "selector is not implemented in current runtime baseline");
+      return false;
+    }
+    if (property_assignment) {
+      if (site_id.has_value() && selector_symbol_id_for_cache.has_value() &&
+          (method->flags & kMethodFlagPropertySetter) != 0U) {
+        update_call_cache(frame, *site_id, class_index, dispatch_flags,
+                          *selector_symbol_id_for_cache, 1, {}, Value::null(),
+                          *method);
+      }
+      return invoke_property_setter(*method);
+    }
+    if (property_access) {
+      if (site_id.has_value() && selector_symbol_id_for_cache.has_value() &&
+          (method->flags & kMethodFlagPropertyGetter) != 0U) {
+        update_call_cache(frame, *site_id, class_index, dispatch_flags,
+                          *selector_symbol_id_for_cache, 0, {}, Value::null(),
+                          *method);
+      }
+      return invoke_property_method(*method);
+    }
+    if ((method->flags & kMethodFlagPropertyGetter) != 0U) {
+      return invoke_property_result(*method);
+    }
+    if ((method->flags & kMethodFlagPropertySetter) != 0U) {
+      set_fault(frame, "NoMethodError",
+                "property setter requires assignment syntax");
       return false;
     }
     if (site_id.has_value() && selector_symbol_id_for_cache.has_value()) {
@@ -16378,7 +16605,12 @@ std::string method_boundary_signature(const bytecode::BcModule &module,
                                       const bytecode::BcMethod &method) {
   std::ostringstream out;
   out << symbol_name_for_mirror(module, method.selector_sym_id) << "|"
-      << (method.flags == kMethodFlagClass ? "class" : "instance") << "|"
+      << ((method.flags & kMethodFlagClass) != 0U ? "class" : "instance")
+      << "|property="
+      << (((method.flags & kMethodFlagPropertyGetter) != 0U) ? "1" : "0")
+      << "|property_setter="
+      << (((method.flags & kMethodFlagPropertySetter) != 0U) ? "1" : "0")
+      << "|"
       << "defaults=" << method.default_thunk_ids.size() << "|"
       << "type_hooks=" << method.type_hook_ids.size() << "|params=";
   for (std::size_t i = 0; i < method.params.size(); ++i) {
@@ -16652,14 +16884,20 @@ RuntimeWorld::commit_transaction(const RuntimeWorldTransaction &tx) {
   bool changed = false;
   for (bytecode::BcMethod method : tx.instance_methods) {
     method.owner_dispatch_ref = tx.target_index;
-    method.flags = kMethodFlagInstance;
+    method.flags =
+        kMethodFlagInstance |
+        (method.flags &
+         (kMethodFlagPropertyGetter | kMethodFlagPropertySetter));
     runtime_owner.instance_method_table.entries[method.selector_sym_id] =
         std::move(method);
     changed = true;
   }
   for (bytecode::BcMethod method : tx.class_methods) {
     method.owner_dispatch_ref = tx.target_index;
-    method.flags = kMethodFlagClass;
+    method.flags =
+        kMethodFlagClass |
+        (method.flags &
+         (kMethodFlagPropertyGetter | kMethodFlagPropertySetter));
     runtime_owner.class_method_table.entries[method.selector_sym_id] =
         std::move(method);
     changed = true;

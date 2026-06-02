@@ -561,6 +561,104 @@ void test_module_forms() {
          "class body items");
 }
 
+void test_property_forms() {
+  amber::parser::ParseModuleResult result = parse_module_raw(
+      "prop answer: 42\n"
+      "\n"
+      "class User:\n"
+      "  prop full_name:\n"
+      "    get:\n"
+      "      @first\n"
+      "    set(value):\n"
+      "      @first = value\n"
+      "\n"
+      "class Build:\n"
+      "  class_prop version: \"20.3\"\n");
+  if (!result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
+    std::exit(1);
+  }
+
+  expect(result.items.size() == 3, "property module item count");
+  expect(result.items[0]->kind == "AstPropDef", "top-level prop kind");
+  expect(string_field(*result.items[0], "name") == "answer",
+         "top-level prop name");
+  const amber::ast::ListField &user_body = list_field(*result.items[1], "body");
+  expect(user_body.values.size() == 1 &&
+             user_body.values[0]->kind == "AstPropDef",
+         "class instance prop kind");
+  expect(bool_field(*user_body.values[0], "grouped_descriptor"),
+         "grouped property descriptor marker");
+  expect(bool_field(*user_body.values[0], "has_getter"),
+         "grouped property getter marker");
+  expect(bool_field(*user_body.values[0], "has_setter"),
+         "grouped property setter marker");
+  expect(list_field(*user_body.values[0], "getter_body").values.size() == 1,
+         "grouped property getter body");
+  expect(list_field(*user_body.values[0], "setter_body").values.size() == 1,
+         "grouped property setter body");
+  expect(node_field(*user_body.values[0], "setter_signature").kind ==
+             "AstSignature",
+         "grouped property setter signature");
+  const amber::ast::ListField &build_body = list_field(*result.items[2], "body");
+  expect(build_body.values.size() == 1 &&
+             build_body.values[0]->kind == "AstClassPropDef",
+         "class property kind");
+}
+
+void test_property_parameter_diagnostic() {
+  amber::parser::ParseModuleResult result = parse_module_raw("prop f(x): x\n");
+  expect(!result.ok(), "property parameter list rejected");
+  expect(!result.diagnostics.empty() &&
+             result.diagnostics[0].code == "AMB_PROP_PARAM_LIST_FORBIDDEN",
+         "property parameter diagnostic code");
+}
+
+void test_property_grouped_diagnostics_and_context() {
+  amber::parser::ParseModuleResult local_result =
+      parse_module_raw("def f():\n"
+                       "  prop local: 1\n");
+  expect(!local_result.ok(), "local property rejected by parser");
+  expect(!local_result.diagnostics.empty() &&
+             local_result.diagnostics[0].code == "AMB_PROP_INVALID_CONTEXT",
+         "local property diagnostic code");
+
+  amber::parser::ParseModuleResult setter_result =
+      parse_module_raw("class Box:\n"
+                       "  prop value:\n"
+                       "    set(a, b):\n"
+                       "      pass\n");
+  expect(!setter_result.ok(), "bad setter arity rejected");
+  expect(!setter_result.diagnostics.empty() &&
+             setter_result.diagnostics[0].code == "AMB_PROP_SETTER_ARITY",
+         "bad setter arity diagnostic code");
+}
+
+void test_property_keywords_are_contextual_names() {
+  amber::parser::ParseModuleResult result =
+      parse_module_raw("prop = 1\n"
+                       "class_prop = prop\n"
+                       "box.prop\n");
+  if (!result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
+    std::exit(1);
+  }
+
+  expect(result.items.size() == 3, "contextual property keyword item count");
+  const Expr &first_assign = node_field(*result.items[0], "expr");
+  expect(first_assign.kind == "AstAssign", "prop assignment parses");
+  expect(string_field(node_field(first_assign, "left"), "name") == "prop",
+         "prop keyword remains name outside declaration form");
+
+  const Expr &second_assign = node_field(*result.items[1], "expr");
+  expect(second_assign.kind == "AstAssign", "class_prop assignment parses");
+  expect(string_field(node_field(second_assign, "left"), "name") ==
+             "class_prop",
+         "class_prop keyword remains name outside declaration form");
+  expect(result.items[2]->kind == "AstExprStmt",
+         "member named prop parses as expression statement");
+}
+
 void test_control_flow_forms() {
   const std::string source = "def choose(x):\n"
                              "  if x > 10:\n"
@@ -665,6 +763,10 @@ int main() {
   test_effect_row_signature();
   test_pattern_assignment_and_block_param_patterns();
   test_module_forms();
+  test_property_forms();
+  test_property_parameter_diagnostic();
+  test_property_grouped_diagnostics_and_context();
+  test_property_keywords_are_contextual_names();
   test_control_flow_forms();
   test_typed_signature_surface();
   std::cout << "parser_tests: ok\n";

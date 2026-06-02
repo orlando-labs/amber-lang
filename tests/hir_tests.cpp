@@ -146,6 +146,33 @@ bool contains_kind(const amber::ast::Expr &expr, const std::string &kind) {
   return false;
 }
 
+const amber::ast::Expr *find_kind_with_bool(const amber::ast::Expr &expr,
+                                            const std::string &kind,
+                                            const std::string &field_name) {
+  if (expr.kind == kind && bool_field(expr, field_name)) {
+    return &expr;
+  }
+  for (const amber::ast::NodeField &field : expr.node_fields) {
+    if (field.value != nullptr) {
+      if (const amber::ast::Expr *found =
+              find_kind_with_bool(*field.value, kind, field_name)) {
+        return found;
+      }
+    }
+  }
+  for (const amber::ast::ListField &field : expr.list_fields) {
+    for (const std::unique_ptr<amber::ast::Expr> &value : field.values) {
+      if (value != nullptr) {
+        if (const amber::ast::Expr *found =
+                find_kind_with_bool(*value, kind, field_name)) {
+          return found;
+        }
+      }
+    }
+  }
+  return nullptr;
+}
+
 void test_method_and_send_lowering() {
   const amber::hir::Program program =
       lower_ok("def normalize(numbers):\n"
@@ -1270,6 +1297,58 @@ void test_nested_capture_propagation() {
   expect(string_field(*inner_expr, "slot") == "u0", "inner body capture slot");
 }
 
+void test_property_lowering() {
+  const amber::hir::Program program =
+      lower_ok("prop answer: 42\n"
+               "answer\n"
+               "class User:\n"
+               "  prop full_name:\n"
+               "    get: @first\n"
+               "    set(value): @first = value\n"
+               "user.full_name\n"
+               "user.full_name = \"Ada\"\n");
+
+  const amber::ast::Expr *answer = module_item_by_name(program, "answer");
+  expect(answer != nullptr && answer->kind == "HMethod",
+         "module property lowers to HMethod");
+  expect(bool_field(*answer, "property_getter"),
+         "module property getter flag");
+  expect(string_field(*answer, "dispatch_side") == "module",
+         "module property dispatch side");
+
+  const amber::ast::Expr *user_class = module_item_by_name(program, "User");
+  expect(user_class != nullptr && user_class->kind == "HClass",
+         "property class exists");
+  const amber::ast::Expr *full_name = list_item(*user_class, "body", 0);
+  expect(full_name != nullptr && full_name->kind == "HMethod",
+         "class property getter lowers to HMethod");
+  expect(bool_field(*full_name, "property_getter"),
+         "class property getter flag");
+  const amber::ast::Expr *full_name_setter =
+      list_item(*user_class, "body", 1);
+  expect(full_name_setter != nullptr && full_name_setter->kind == "HMethod",
+         "class property setter lowers to HMethod");
+  expect(bool_field(*full_name_setter, "property_setter"),
+         "class property setter flag");
+  expect(string_field(*full_name_setter, "name") == "full_name=",
+         "class property setter selector");
+
+  const amber::hir::Procedure *module_init =
+      procedure_by_name(program, "__module_init__");
+  expect(module_init != nullptr, "module init exists for property lowering");
+  expect(contains_kind(*module_init->body, "HCall"),
+         "bare property name lowers to getter call");
+  const amber::ast::Expr *send =
+      find_kind_with_bool(*module_init->body, "HSend", "property_access");
+  expect(send != nullptr,
+         "bare member access carries property_access marker");
+  const amber::ast::Expr *setter_send =
+      find_kind_with_bool(*module_init->body, "HSend", "property_assignment");
+  expect(setter_send != nullptr &&
+             string_field(*setter_send, "selector") == "full_name=",
+         "member assignment carries property_assignment marker");
+}
+
 } // namespace
 
 int main() {
@@ -1299,6 +1378,7 @@ int main() {
   test_dynamic_pattern_without_with_lowering();
   test_direct_capture_lowering();
   test_nested_capture_propagation();
+  test_property_lowering();
   std::cout << "hir_tests: ok\n";
   return 0;
 }

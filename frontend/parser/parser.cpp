@@ -197,6 +197,28 @@ bool def_stmt_clause_defs_mergeable(const ast::Expr &left,
                                                    *right_signature->value);
 }
 
+bool is_identifier_like_token(lexer::TokenKind kind) {
+  return kind == lexer::TokenKind::Identifier ||
+         kind == lexer::TokenKind::KeywordProp ||
+         kind == lexer::TokenKind::KeywordClassProp;
+}
+
+bool is_contextual_token(const lexer::Token &token, const char *text) {
+  return token.kind == lexer::TokenKind::Identifier && token.lexeme == text;
+}
+
+bool starts_property_arm_label(const lexer::Token &label,
+                               const lexer::Token &after_label) {
+  if (is_contextual_token(label, "get")) {
+    return after_label.kind == lexer::TokenKind::Colon ||
+           after_label.kind == lexer::TokenKind::LParen;
+  }
+  if (is_contextual_token(label, "set")) {
+    return after_label.kind == lexer::TokenKind::LParen;
+  }
+  return false;
+}
+
 std::unique_ptr<ast::Expr> take_node_field(ast::Expr &expr,
                                            const std::string &name) {
   for (ast::NodeField &field : expr.node_fields) {
@@ -661,11 +683,30 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     return parse_export_stmt();
   case lexer::TokenKind::KeywordDef:
     return parse_def_stmt(false);
+  case lexer::TokenKind::KeywordProp:
+    if (looks_like_property_declaration()) {
+      if (context == BodyContext::Def) {
+        error_code(current(), "AMB_PROP_INVALID_CONTEXT",
+                   "property declarations are not allowed in function or "
+                   "block bodies");
+      }
+      return parse_prop_def(false);
+    }
+    break;
   case lexer::TokenKind::KeywordClassMethod: {
     const lexer::Token start = advance();
     consume(lexer::TokenKind::KeywordDef, "expected 'def' after class_method");
     return parse_def_stmt(true, &start);
   }
+  case lexer::TokenKind::KeywordClassProp:
+    if (looks_like_property_declaration()) {
+      if (context != BodyContext::Class) {
+        error_code(current(), "AMB_PROP_CLASS_PROP_OUTSIDE_CLASS",
+                   "class_prop is only allowed in class body");
+      }
+      return parse_prop_def(true);
+    }
+    break;
   case lexer::TokenKind::KeywordClass:
     return parse_class_def();
   case lexer::TokenKind::KeywordMixin:
@@ -889,6 +930,207 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
   node->node_field("signature", std::move(signature));
   node->list_field("body", std::move(body));
   return node;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_prop_def(bool class_property) {
+  const lexer::Token start = advance();
+  const lexer::Token name =
+      consume_identifier_like("expected property name");
+
+  if (match(lexer::TokenKind::LParen)) {
+    const lexer::Token open = previous();
+    error_code(open, "AMB_PROP_PARAM_LIST_FORBIDDEN",
+               "property declarations cannot have parameters");
+    int depth = 1;
+    while (!at_end() && depth > 0) {
+      if (check(lexer::TokenKind::LParen)) {
+        ++depth;
+      } else if (check(lexer::TokenKind::RParen)) {
+        --depth;
+      } else if (check(lexer::TokenKind::Newline) ||
+                 check(lexer::TokenKind::Colon)) {
+        break;
+      }
+      advance();
+    }
+  }
+
+  consume(lexer::TokenKind::Colon, "expected ':' after property name");
+  PropertySuite suite = parse_property_suite(name.span);
+
+  auto node = ast::make_expr(class_property ? "AstClassPropDef" : "AstPropDef",
+                             ast::join_spans(start.span, suite.end_span));
+  node->string_field("name", name.lexeme);
+  node->bool_field("grouped_descriptor", suite.grouped);
+  node->bool_field("has_getter", suite.has_getter);
+  node->bool_field("has_setter", suite.has_setter);
+  node->list_field("getter_body", std::move(suite.getter_body));
+  if (suite.setter_signature) {
+    node->node_field("setter_signature", std::move(suite.setter_signature));
+  }
+  node->list_field("setter_body", std::move(suite.setter_body));
+  return node;
+}
+
+Parser::PropertySuite
+Parser::parse_property_suite(const lexer::Span &fallback_span) {
+  if (property_suite_starts_grouped()) {
+    return parse_grouped_property_suite(fallback_span);
+  }
+
+  PropertySuite suite;
+  suite.has_getter = true;
+  suite.end_span = fallback_span;
+  suite.getter_body = parse_body(BodyContext::Def);
+  if (!suite.getter_body.empty()) {
+    suite.end_span = suite.getter_body.back()->span;
+  } else {
+    suite.end_span = previous().span;
+  }
+  return suite;
+}
+
+Parser::PropertySuite
+Parser::parse_grouped_property_suite(const lexer::Span &fallback_span) {
+  PropertySuite suite;
+  suite.grouped = true;
+  suite.end_span = fallback_span;
+
+  consume(lexer::TokenKind::Newline, "expected newline before property arms");
+  consume(lexer::TokenKind::Indent, "expected indented property descriptor");
+  while (!at_end() && !check(lexer::TokenKind::Dedent)) {
+    while (match(lexer::TokenKind::Newline)) {
+    }
+    if (check(lexer::TokenKind::Dedent) || at_end()) {
+      break;
+    }
+    if (starts_property_arm_label(current(), peek())) {
+      parse_property_arm(&suite);
+    } else {
+      error_code(current(), "AMB_PROP_BAD_DECL",
+                 "expected get: or set(value): property arm");
+      std::unique_ptr<ast::Expr> skipped = parse_statement(BodyContext::Def);
+      if (skipped != nullptr) {
+        suite.end_span = skipped->span;
+      }
+    }
+    while (match(lexer::TokenKind::Newline)) {
+    }
+  }
+  consume(lexer::TokenKind::Dedent, "expected property descriptor dedent");
+  if (!suite.has_getter && !suite.has_setter) {
+    error_code(previous(), "AMB_PROP_EMPTY_DESCRIPTOR",
+               "property descriptor must declare a getter or setter arm");
+  }
+  if (suite.end_span.start.offset == fallback_span.start.offset &&
+      suite.end_span.end.offset == fallback_span.end.offset) {
+    suite.end_span = previous().span;
+  }
+  return suite;
+}
+
+void Parser::parse_property_arm(PropertySuite *suite) {
+  if (suite == nullptr) {
+    return;
+  }
+  const lexer::Token label = advance();
+  if (is_contextual_token(label, "get")) {
+    const bool duplicate = suite->has_getter;
+    if (duplicate) {
+      error_code(label, "AMB_PROP_DUPLICATE_GETTER",
+                 "property descriptor has more than one getter arm");
+    }
+    if (match(lexer::TokenKind::LParen)) {
+      error_code(previous(), "AMB_PROP_GETTER_PARAM_LIST_FORBIDDEN",
+                 "property getter cannot declare parameters");
+      int depth = 1;
+      while (!at_end() && depth > 0) {
+        if (check(lexer::TokenKind::LParen)) {
+          ++depth;
+        } else if (check(lexer::TokenKind::RParen)) {
+          --depth;
+        } else if (check(lexer::TokenKind::Newline) ||
+                   check(lexer::TokenKind::Colon)) {
+          break;
+        }
+        advance();
+      }
+    }
+    consume(lexer::TokenKind::Colon, "expected ':' after getter arm");
+    std::vector<std::unique_ptr<ast::Expr>> body =
+        parse_body(BodyContext::Def);
+    if (!body.empty()) {
+      suite->end_span = body.back()->span;
+    } else {
+      suite->end_span = previous().span;
+    }
+    if (!duplicate) {
+      suite->has_getter = true;
+      suite->getter_body = std::move(body);
+    }
+    return;
+  }
+
+  if (!is_contextual_token(label, "set")) {
+    error_code(label, "AMB_PROP_BAD_DECL",
+               "expected get: or set(value): property arm");
+    return;
+  }
+
+  const bool duplicate = suite->has_setter;
+  if (duplicate) {
+    error_code(label, "AMB_PROP_DUPLICATE_SETTER",
+               "property descriptor has more than one setter arm");
+  }
+
+  std::unique_ptr<ast::Expr> signature;
+  if (check(lexer::TokenKind::LParen)) {
+    signature = parse_signature();
+  } else {
+    error_code(current(), "AMB_PROP_SETTER_ARITY",
+               "property setter must declare exactly one parameter");
+    signature = ast::make_expr("AstSignature", label.span);
+    signature->list_field("params", {});
+  }
+
+  const ast::ListField *params = find_list_field(*signature, "params");
+  const std::size_t param_count =
+      params == nullptr ? 0U : params->values.size();
+  if (param_count != 1U) {
+    const lexer::Token signature_token{lexer::TokenKind::Identifier, "",
+                                       signature->span};
+    error_code(signature_token, "AMB_PROP_SETTER_ARITY",
+               "property setter must declare exactly one parameter");
+  } else {
+    const ast::Expr &param = *params->values.front();
+    if (string_value(param, "param_kind") != "positional" ||
+        string_value(param, "auto_assign_kind") != "none") {
+      const lexer::Token param_token{lexer::TokenKind::Identifier, "",
+                                     param.span};
+      error_code(param_token, "AMB_PROP_SETTER_PARAM_KIND",
+                 "property setter parameter must be one plain positional "
+                 "identifier");
+    }
+    if (find_node_field(param, "default_expr") != nullptr) {
+      const lexer::Token param_token{lexer::TokenKind::Identifier, "",
+                                     param.span};
+      error_code(param_token, "AMB_PROP_SETTER_DEFAULT",
+                 "property setter parameter cannot have a default value");
+    }
+  }
+
+  consume(lexer::TokenKind::Colon, "expected ':' after setter arm");
+  std::vector<std::unique_ptr<ast::Expr>> body = parse_body(BodyContext::Def);
+  if (!body.empty()) {
+    suite->end_span = body.back()->span;
+  } else {
+    suite->end_span = previous().span;
+  }
+  if (!duplicate) {
+    suite->has_setter = true;
+    suite->setter_signature = std::move(signature);
+    suite->setter_body = std::move(body);
+  }
 }
 
 std::unique_ptr<ast::Expr> Parser::parse_class_def() {
@@ -1741,7 +1983,7 @@ std::string Parser::parse_module_path() {
 }
 
 std::string Parser::consume_method_name_text(const std::string &message) {
-  if (check(lexer::TokenKind::Identifier) ||
+  if (is_identifier_like_token(current().kind) ||
       is_operator_method_name(current().kind)) {
     return advance().lexeme;
   }
@@ -1749,9 +1991,47 @@ std::string Parser::consume_method_name_text(const std::string &message) {
   return current().lexeme;
 }
 
+const lexer::Token &
+Parser::consume_identifier_like(const std::string &message) {
+  if (is_identifier_like_token(current().kind)) {
+    return advance();
+  }
+  error(current(), message);
+  return current();
+}
+
 std::string Parser::consume_identifier_text(const std::string &message) {
-  const lexer::Token token = consume(lexer::TokenKind::Identifier, message);
+  const lexer::Token token = consume_identifier_like(message);
   return token.lexeme;
+}
+
+bool Parser::looks_like_property_declaration() const {
+  if (!check(lexer::TokenKind::KeywordProp) &&
+      !check(lexer::TokenKind::KeywordClassProp)) {
+    return false;
+  }
+  if (!is_identifier_like_token(peek().kind)) {
+    return false;
+  }
+  const lexer::TokenKind after_name = peek(2).kind;
+  return after_name == lexer::TokenKind::Colon ||
+         after_name == lexer::TokenKind::LParen;
+}
+
+bool Parser::property_suite_starts_grouped() const {
+  if (!check(lexer::TokenKind::Newline) ||
+      peek().kind != lexer::TokenKind::Indent) {
+    return false;
+  }
+  std::size_t index = current_ + 2U;
+  while (index < tokens_.size() &&
+         tokens_[index].kind == lexer::TokenKind::Newline) {
+    ++index;
+  }
+  if (index + 1U >= tokens_.size()) {
+    return false;
+  }
+  return starts_property_arm_label(tokens_[index], tokens_[index + 1U]);
 }
 
 bool Parser::match_contextual(const char *text) {
@@ -1841,7 +2121,7 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
 
 std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   const lexer::Token token = advance();
-  if (token.kind == lexer::TokenKind::Identifier) {
+  if (is_identifier_like_token(token.kind)) {
     auto expr = ast::make_expr("AstName", token.span);
     expr->string_field("name", token.lexeme);
     return expr;
@@ -2331,8 +2611,8 @@ std::unique_ptr<ast::Expr>
 Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
   if (check(lexer::TokenKind::Dot) || check(lexer::TokenKind::ChainDot)) {
     const lexer::Token dot = advance();
-    const lexer::Token name =
-        consume(lexer::TokenKind::Identifier, "expected method or field name");
+    const lexer::Token name = consume_identifier_like(
+        "expected method or field name");
     auto tail = ast::make_expr("AstTailDotMember",
                                ast::join_spans(dot.span, name.span));
     tail->string_field("name", name.lexeme);
@@ -2372,8 +2652,8 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
       append_postfix_tail(*chain, std::move(tail));
       return chain;
     }
-    const lexer::Token name =
-        consume(lexer::TokenKind::Identifier, "expected method or field name");
+    const lexer::Token name = consume_identifier_like(
+        "expected method or field name");
     auto tail = ast::make_expr("AstTailSafeMember",
                                ast::join_spans(dot.span, name.span));
     tail->string_field("name", name.lexeme);

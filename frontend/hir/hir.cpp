@@ -162,6 +162,10 @@ bool binding_has_slot(const binder::Binding &binding) {
          binding.kind == "placeholder";
 }
 
+bool binding_is_property(const binder::Binding &binding) {
+  return binding.role == "property" || binding.role == "class_property";
+}
+
 bool signature_param_has_auto_assign(const binder::ParamDescriptor &param) {
   return param.auto_assign_kind == "@" || param.auto_assign_kind == "@@";
 }
@@ -487,11 +491,13 @@ private:
     return item.kind != "AstPackageDecl" && item.kind != "AstImportStmt" &&
            item.kind != "AstExportStmt" && item.kind != "AstClassDef" &&
            item.kind != "AstMixinDef" && item.kind != "AstDefStmt" &&
-           item.kind != "AstClassMethodDef" && item.kind != "AstClauseDef";
+           item.kind != "AstClassMethodDef" && item.kind != "AstClauseDef" &&
+           item.kind != "AstPropDef" && item.kind != "AstClassPropDef";
   }
 
   bool is_module_callable_decl(const ast::Expr &item) const {
-    return item.kind == "AstDefStmt" || item.kind == "AstClauseDef";
+    return item.kind == "AstDefStmt" || item.kind == "AstClauseDef" ||
+           item.kind == "AstPropDef";
   }
 
   Procedure *mutable_procedure_by_id(const std::string &id) {
@@ -507,7 +513,8 @@ private:
                                          const ast::Expr &item) const {
     const std::string name = string_value(item, "name");
     for (const ProcedureLocal &local : procedure.locals) {
-      if (local.name == name && local.role == "function" &&
+      if (local.name == name &&
+          (local.role == "function" || local.role == "property") &&
           same_span(local.span, item.span)) {
         return local.slot;
       }
@@ -525,6 +532,20 @@ private:
         if (local.name == binding.name && same_span(local.span, binding.span)) {
           return local.slot;
         }
+      }
+    }
+    return "";
+  }
+
+  std::string current_local_slot_for_decl(const ast::Expr &item) const {
+    if (current_proc_ == nullptr) {
+      return "";
+    }
+    const Procedure &procedure = procedures_[current_proc_->procedure_index];
+    const std::string name = string_value(item, "name");
+    for (const ProcedureLocal &local : procedure.locals) {
+      if (local.name == name && same_span(local.span, item.span)) {
+        return local.slot;
       }
     }
     return "";
@@ -599,6 +620,37 @@ private:
     store->string_field("slot", slot);
     store->node_field("expr", std::move(closure));
     return store;
+  }
+
+  std::unique_ptr<Node> lower_local_property_decl(const ast::Expr &item) {
+    const int scope_index =
+        find_scope_index("property", item.span, string_value(item, "name"));
+    const binder::Signature *signature = signature_for_scope(scope_index);
+    std::vector<const ast::Expr *> body_items;
+    if (const ast::ListField *body = list_field(item, "getter_body")) {
+      for (const std::unique_ptr<ast::Expr> &stmt : body->values) {
+        body_items.push_back(stmt.get());
+      }
+    }
+
+    std::vector<CapturePlan> capture_plans;
+    if (scope_index >= 0) {
+      capture_bindings_for_scope(scope_index);
+      capture_plans = build_capture_plans(scope_index);
+    }
+    const std::string procedure_id = lower_procedure(
+        scope_index, string_value(item, "name"), "property",
+        procedure_name_for_owner(string_value(item, "name")), signature,
+        body_items, item.span, capture_plans);
+    const std::string slot = current_local_slot_for_decl(item);
+    auto seq = make_node("HSeq", item.span);
+    std::vector<std::unique_ptr<Node>> items;
+    if (!slot.empty()) {
+      items.push_back(make_function_binding_init(item, slot, procedure_id));
+    }
+    items.push_back(make_null_last_set(item.span));
+    seq->list_field("items", std::move(items));
+    return seq;
   }
 
   std::unique_ptr<Node> make_null_last_set(const lexer::Span &span) {
@@ -715,10 +767,50 @@ private:
     for (const std::unique_ptr<ast::Expr> &item : items_) {
       if (item->kind == "AstClassDef" || item->kind == "AstMixinDef" ||
           item->kind == "AstDefStmt" || item->kind == "AstClassMethodDef" ||
-          item->kind == "AstClauseDef") {
-        nodes.push_back(lower_item_decl(*item, "module"));
+          item->kind == "AstClauseDef" || item->kind == "AstPropDef" ||
+          item->kind == "AstClassPropDef") {
+        append_lowered_item_decls(&nodes, *item, "module");
       }
     }
+    return nodes;
+  }
+
+  void append_lowered_item_decls(std::vector<std::unique_ptr<Node>> *nodes,
+                                 const ast::Expr &item,
+                                 const std::string &dispatch_side) {
+    if (nodes == nullptr) {
+      return;
+    }
+    std::vector<std::unique_ptr<Node>> lowered =
+        lower_item_decl_list(item, dispatch_side);
+    for (std::unique_ptr<Node> &node : lowered) {
+      nodes->push_back(std::move(node));
+    }
+  }
+
+  std::vector<std::unique_ptr<Node>>
+  lower_item_decl_list(const ast::Expr &item,
+                       const std::string &dispatch_side) {
+    std::vector<std::unique_ptr<Node>> nodes;
+    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+      const std::string method_dispatch_side =
+          item.kind == "AstClassPropDef" ? "class" : dispatch_side;
+      if (bool_value(item, "has_getter")) {
+        nodes.push_back(
+            lower_property_accessor_decl(item, method_dispatch_side, false));
+      }
+      if (bool_value(item, "has_setter")) {
+        nodes.push_back(
+            lower_property_accessor_decl(item, method_dispatch_side, true));
+      }
+      if (nodes.empty()) {
+        auto unsupported = make_node("HUnsupported", item.span);
+        unsupported->string_field("source_kind", item.kind);
+        nodes.push_back(std::move(unsupported));
+      }
+      return nodes;
+    }
+    nodes.push_back(lower_item_decl(item, dispatch_side));
     return nodes;
   }
 
@@ -759,7 +851,7 @@ private:
       const std::string dispatch_side =
           kind == "HClass" ? "instance" : "instance";
       for (const std::unique_ptr<ast::Expr> &child : items->values) {
-        body.push_back(lower_item_decl(*child, dispatch_side));
+        append_lowered_item_decls(&body, *child, dispatch_side);
       }
     }
     node->list_field("body", std::move(body));
@@ -781,16 +873,80 @@ private:
     return node;
   }
 
-  std::unique_ptr<Node> lower_method_decl(const ast::Expr &item,
-                                          const std::string &dispatch_side) {
+  std::unique_ptr<Node>
+  lower_property_accessor_decl(const ast::Expr &item,
+                               const std::string &dispatch_side,
+                               bool setter) {
+    const bool class_property = item.kind == "AstClassPropDef";
+    const std::string base_name = string_value(item, "name");
+    const std::string selector = setter ? base_name + "=" : base_name;
     const std::string scope_kind =
-        item.kind == "AstClassMethodDef" ? "class_method" : "function";
+        setter ? (class_property ? "class_property_setter"
+                                 : "property_setter")
+               : (class_property ? "class_property" : "property");
+    const int scope_index = find_scope_index(scope_kind, item.span, selector);
+    const binder::Signature *signature = signature_for_scope(scope_index);
+
+    auto node = make_node("HMethod", item.span);
+    node->string_field("name", selector);
+    node->string_field("dispatch_side", dispatch_side);
+    if (setter) {
+      node->bool_field("property_setter", true);
+    } else {
+      node->bool_field("property_getter", true);
+    }
+    node->list_field("auto_assign", build_auto_assign_nodes(signature));
+    std::unique_ptr<Node> signature_node =
+        build_signature_node(signature, item.span);
+    if (scope_index >= 0) {
+      const ast::ListField *body =
+          list_field(item, setter ? "setter_body" : "getter_body");
+      std::vector<const ast::Expr *> body_items;
+      if (body != nullptr) {
+        for (const std::unique_ptr<ast::Expr> &stmt : body->values) {
+          body_items.push_back(stmt.get());
+        }
+      }
+      std::vector<CapturePlan> capture_plans;
+      if (dispatch_side == "module") {
+        capture_plans = build_module_method_capture_plans(scope_index);
+      }
+      const std::string procedure_id = lower_procedure(
+          scope_index, selector, setter ? "property_setter" : "property",
+          procedure_name_for_owner(selector), signature, body_items, item.span,
+          capture_plans, nullptr,
+          setter ? node_field(item, "setter_signature") : nullptr);
+      node->string_field("procedure", procedure_id);
+      for (const Procedure &procedure : procedures_) {
+        if (procedure.id == procedure_id && procedure.signature != nullptr) {
+          signature_node = clone_node(*procedure.signature);
+          break;
+        }
+      }
+    }
+    node->node_field("signature", std::move(signature_node));
+    return node;
+  }
+
+  std::unique_ptr<Node> lower_method_decl(const ast::Expr &item,
+                                          const std::string &dispatch_side,
+                                          bool property_getter = false) {
+    const std::string scope_kind =
+        item.kind == "AstClassMethodDef"
+            ? "class_method"
+            : (property_getter ? (item.kind == "AstClassPropDef"
+                                      ? "class_property"
+                                      : "property")
+                               : "function");
     const int scope_index =
         find_scope_index(scope_kind, item.span, string_value(item, "name"));
     const binder::Signature *signature = signature_for_scope(scope_index);
     auto node = make_node("HMethod", item.span);
     node->string_field("name", string_value(item, "name"));
     node->string_field("dispatch_side", dispatch_side);
+    if (property_getter) {
+      node->bool_field("property_getter", true);
+    }
     node->list_field("auto_assign", build_auto_assign_nodes(signature));
     std::unique_ptr<Node> signature_node =
         build_signature_node(signature, item.span);
@@ -1289,6 +1445,11 @@ private:
         item.kind == "AstExtendStmt") {
       return lower_item_decl(item, "module");
     }
+    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+      auto node = make_node("HUnsupported", item.span);
+      node->string_field("source_kind", item.kind);
+      return node;
+    }
     auto node = make_node("HLastSet", item.span);
     node->node_field("expr", lower_expr(item));
     return node;
@@ -1679,12 +1840,26 @@ private:
     if (!slot.empty()) {
       auto node = make_node("HLoadLocal", expr.span);
       node->string_field("slot", slot);
+      if (binding_is_property(binding)) {
+        auto call = make_node("HCall", expr.span);
+        call->node_field("callable", std::move(node));
+        call->list_field("pos_args", {});
+        call->list_field("kw_args", {});
+        return call;
+      }
       return node;
     }
     const std::string capture_slot = capture_slot_for_binding(binding.id);
     if (!capture_slot.empty()) {
       auto node = make_node("HLoadCapture", expr.span);
       node->string_field("slot", capture_slot);
+      if (binding_is_property(binding)) {
+        auto call = make_node("HCall", expr.span);
+        call->node_field("callable", std::move(node));
+        call->list_field("pos_args", {});
+        call->list_field("kw_args", {});
+        return call;
+      }
       return node;
     }
     auto node = make_node("HLoadName", expr.span);
@@ -1735,6 +1910,26 @@ private:
       node->node_field("expr", lower_expr(*right));
       return node;
     }
+    if (left->kind == "AstPostfixChain") {
+      const ast::ListField *tails = list_field(*left, "tails");
+      if (tails != nullptr && !tails->values.empty()) {
+        const ast::Expr &last_tail = *tails->values.back();
+        if (last_tail.kind == "AstTailDotMember") {
+          auto node = make_node("HSend", expr.span);
+          node->node_field(
+              "receiver",
+              lower_postfix_chain_with_limit(*left, tails->values.size() - 1U));
+          node->string_field("selector",
+                             string_value(last_tail, "name") + "=");
+          node->bool_field("property_assignment", true);
+          std::vector<std::unique_ptr<Node>> pos_args;
+          pos_args.push_back(lower_expr(*right));
+          node->list_field("pos_args", std::move(pos_args));
+          node->list_field("kw_args", {});
+          return node;
+        }
+      }
+    }
 
     auto node = make_node("HUnsupported", expr.span);
     node->string_field("source_kind", "assign:" + left->kind);
@@ -1756,6 +1951,14 @@ private:
   }
 
   std::unique_ptr<Node> lower_postfix_chain(const ast::Expr &expr) {
+    const ast::ListField *tails = list_field(expr, "tails");
+    return lower_postfix_chain_with_limit(
+        expr, tails == nullptr ? 0U : tails->values.size());
+  }
+
+  std::unique_ptr<Node>
+  lower_postfix_chain_with_limit(const ast::Expr &expr,
+                                 std::size_t tail_limit) {
     const ast::Expr *base = node_field(expr, "base");
     const ast::ListField *tails = list_field(expr, "tails");
     if (base == nullptr) {
@@ -1767,13 +1970,14 @@ private:
     if (tails == nullptr) {
       return current;
     }
+    const std::size_t tail_count = std::min(tail_limit, tails->values.size());
 
     std::size_t i = 0;
-    while (i < tails->values.size()) {
+    while (i < tail_count) {
       const ast::Expr &tail = *tails->values[i];
       if (i == 0 && tail.kind == "AstTailCall" && is_builtin_send_base(*base)) {
         std::unique_ptr<Node> block;
-        if (i + 1 < tails->values.size() &&
+        if (i + 1 < tail_count &&
             tails->values[i + 1]->kind == "AstTailBlockSuffix") {
           block = lower_block_suffix(*tails->values[i + 1]);
           ++i;
@@ -1792,14 +1996,18 @@ private:
         std::vector<std::unique_ptr<Node>> pos_args;
         std::vector<std::unique_ptr<Node>> kw_args;
         std::unique_ptr<Node> block;
-        if (i + 1 < tails->values.size() &&
+        bool has_explicit_call = false;
+        bool has_block_suffix = false;
+        if (i + 1 < tail_count &&
             tails->values[i + 1]->kind == "AstTailCall") {
           collect_call_args(*tails->values[i + 1], &pos_args, &kw_args);
+          has_explicit_call = true;
           ++i;
         }
-        if (i + 1 < tails->values.size() &&
+        if (i + 1 < tail_count &&
             tails->values[i + 1]->kind == "AstTailBlockSuffix") {
           block = lower_block_suffix(*tails->values[i + 1]);
+          has_block_suffix = true;
           ++i;
         }
         const lexer::Span node_span = ast::join_spans(current->span, tail.span);
@@ -1816,6 +2024,9 @@ private:
         auto node = make_node("HSend", node_span);
         node->node_field("receiver", std::move(receiver));
         node->string_field("selector", selector);
+        if (!has_explicit_call && !has_block_suffix) {
+          node->bool_field("property_access", true);
+        }
         node->list_field("pos_args", std::move(pos_args));
         node->list_field("kw_args", std::move(kw_args));
         if (block) {
@@ -1835,7 +2046,7 @@ private:
         std::vector<std::unique_ptr<Node>> kw_args;
         std::unique_ptr<Node> block;
         collect_call_args(tail, &pos_args, &kw_args);
-        if (i + 1 < tails->values.size() &&
+        if (i + 1 < tail_count &&
             tails->values[i + 1]->kind == "AstTailBlockSuffix") {
           block = lower_block_suffix(*tails->values[i + 1]);
           ++i;

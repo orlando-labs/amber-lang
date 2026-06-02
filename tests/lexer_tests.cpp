@@ -150,6 +150,17 @@ void test_effect_row_punctuation() {
                 TokenKind::Colon, TokenKind::Newline, TokenKind::Eof});
 }
 
+void test_property_keywords() {
+  expect_kinds("property keywords",
+               "prop answer: 42\n"
+               "class_prop version: \"20.3\"\n",
+               {TokenKind::KeywordProp, TokenKind::Identifier,
+                TokenKind::Colon, TokenKind::Integer, TokenKind::Newline,
+                TokenKind::KeywordClassProp, TokenKind::Identifier,
+                TokenKind::Colon, TokenKind::String, TokenKind::Newline,
+                TokenKind::Eof});
+}
+
 void test_unicode_identifier_forms() {
   expect_kinds("unicode identifiers",
                "масса = α + β2\n"
@@ -219,6 +230,7 @@ int main() {
   test_contextual_keywords_remain_identifiers();
   test_pattern_punctuation();
   test_effect_row_punctuation();
+  test_property_keywords();
   test_unicode_identifier_forms();
   test_w13_comments_ranges_and_numbers();
   test_string_interpolation_lexing();

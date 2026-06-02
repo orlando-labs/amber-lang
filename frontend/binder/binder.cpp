@@ -271,6 +271,54 @@ private:
     return &graph_.bindings.back();
   }
 
+  bool binding_is_property(const Binding &binding) const {
+    return binding.role == "property" || binding.role == "class_property";
+  }
+
+  bool same_decl_span(const Binding &binding, const lexer::Span &span) const {
+    return binding.span.file == span.file &&
+           binding.span.start.offset == span.start.offset &&
+           binding.span.end.offset == span.end.offset;
+  }
+
+  Binding *declare_property_binding(int scope_index, const std::string &name,
+                                    const std::string &role,
+                                    const lexer::Span &span, bool has_getter,
+                                    bool has_setter) {
+    if (Binding *existing = find_local_binding(scope_index, name)) {
+      if (!same_decl_span(*existing, span) ||
+          !binding_is_property(*existing) || existing->role != role) {
+        diagnostic("AMB_PROP_NAME_CONFLICT", "error", "binder",
+                   "property name conflicts with an existing declaration",
+                   span);
+      }
+      existing->property_has_getter = has_getter;
+      existing->property_has_setter = has_setter;
+      existing->read_only = !has_setter;
+      return existing;
+    }
+    Binding *binding =
+        declare_binding(scope_index, name, "local", role, span, !has_setter);
+    binding->property_has_getter = has_getter;
+    binding->property_has_setter = has_setter;
+    return binding;
+  }
+
+  Binding *declare_callable_binding(int scope_index, const std::string &name,
+                                    const std::string &role,
+                                    const lexer::Span &span) {
+    if (Binding *existing = find_local_binding(scope_index, name)) {
+      if (binding_is_property(*existing)) {
+        diagnostic("AMB_PROP_NAME_CONFLICT", "error", "binder",
+                   "property name conflicts with an existing declaration",
+                   span);
+        return existing;
+      }
+    }
+    return declare_binding(scope_index, name, "local", role, span, false, "",
+                           DuplicatePolicy::Error);
+  }
+
   void declare_last_value(int scope_index, const lexer::Span &span) {
     declare_binding(scope_index, kLastValueName, "last_value", "last_value",
                     span, true);
@@ -321,8 +369,18 @@ private:
       if (scope_kind == "class" || scope_kind == "mixin") {
         role = item.kind == "AstClassMethodDef" ? "class_method" : "method";
       }
-      declare_binding(scope_index, name, "local", role, item.span, false, "",
-                      DuplicatePolicy::Error);
+      declare_callable_binding(scope_index, name, role, item.span);
+      return;
+    }
+    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+      if (!property_allowed_in_scope(scope_index, item)) {
+        return;
+      }
+      const std::string role =
+          item.kind == "AstClassPropDef" ? "class_property" : "property";
+      declare_property_binding(scope_index, string_value(item, "name"), role,
+                               item.span, bool_value(item, "has_getter"),
+                               bool_value(item, "has_setter"));
       return;
     }
     if (item.kind == "AstClassDef") {
@@ -399,6 +457,10 @@ private:
       visit_def(scope_index, item);
       return;
     }
+    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+      visit_property_def(scope_index, item);
+      return;
+    }
     if (item.kind == "AstClauseDef") {
       visit_clause_def(scope_index, item);
       return;
@@ -465,6 +527,84 @@ private:
     }
     if (const ast::ListField *body = list_field(item, "body")) {
       visit_items(scope, body->values);
+    }
+  }
+
+  void bind_empty_signature(int function_scope, const lexer::Span &span) {
+    Signature descriptor;
+    descriptor.id = "sig" + std::to_string(graph_.signatures.size());
+    descriptor.scope_index = function_scope;
+    descriptor.owner = graph_.scopes[function_scope].owner;
+    descriptor.span = span;
+    graph_.signatures.push_back(std::move(descriptor));
+  }
+
+  bool property_allowed_in_scope(int parent_scope, const ast::Expr &item) const {
+    const std::string scope_kind = graph_.scopes[parent_scope].kind;
+    if (item.kind == "AstClassPropDef") {
+      return scope_kind == "class";
+    }
+    return scope_kind == "module" || scope_kind == "class" ||
+           scope_kind == "mixin";
+  }
+
+  void diagnose_property_context(int parent_scope, const ast::Expr &item) {
+    const std::string scope_kind = graph_.scopes[parent_scope].kind;
+    if (item.kind == "AstClassPropDef" && scope_kind != "class") {
+      diagnostic("AMB_PROP_CLASS_PROP_OUTSIDE_CLASS", "error", "binder",
+                 "class_prop is only allowed in class body", item.span);
+      return;
+    }
+    if (item.kind == "AstPropDef" &&
+        scope_kind != "module" && scope_kind != "class" &&
+        scope_kind != "mixin") {
+      diagnostic("AMB_PROP_INVALID_CONTEXT", "error", "binder",
+                 "property declarations are not allowed in function or block "
+                 "bodies",
+                 item.span);
+    }
+  }
+
+  void visit_property_def(int parent_scope, const ast::Expr &item) {
+    const std::string name = string_value(item, "name");
+    const bool class_property = item.kind == "AstClassPropDef";
+    if (!property_allowed_in_scope(parent_scope, item)) {
+      diagnose_property_context(parent_scope, item);
+      return;
+    }
+    const bool has_getter = bool_value(item, "has_getter");
+    const bool has_setter = bool_value(item, "has_setter");
+    if (graph_.scopes[parent_scope].kind == "module" && has_setter) {
+      diagnostic("AMB_PROP_TOP_LEVEL_SETTER", "error", "binder",
+                 "top-level writable properties are not part of Amber v20.3",
+                 item.span);
+    }
+    declare_property_binding(parent_scope, name,
+                             class_property ? "class_property" : "property",
+                             item.span, has_getter, has_setter);
+    if (has_getter) {
+      const int getter_scope =
+          add_scope(class_property ? "class_property" : "property", name,
+                    parent_scope, item.span);
+      declare_last_value(getter_scope, item.span);
+      bind_empty_signature(getter_scope, item.span);
+      if (const ast::ListField *body = list_field(item, "getter_body")) {
+        visit_items(getter_scope, body->values);
+      }
+    }
+    if (has_setter) {
+      const int setter_scope = add_scope(
+          class_property ? "class_property_setter" : "property_setter",
+          name + "=", parent_scope, item.span);
+      declare_last_value(setter_scope, item.span);
+      if (const ast::Expr *signature = node_field(item, "setter_signature")) {
+        bind_signature(parent_scope, setter_scope, *signature);
+      } else {
+        bind_empty_signature(setter_scope, item.span);
+      }
+      if (const ast::ListField *body = list_field(item, "setter_body")) {
+        visit_items(setter_scope, body->values);
+      }
     }
   }
 
@@ -540,9 +680,19 @@ private:
         auto_assign_fields.insert(auto_assign_kind + local_name);
         const int field_scope = nearest_object_scope(owner_scope);
         const std::string field_name = auto_assign_kind + local_name;
-        declare_binding(field_scope >= 0 ? field_scope : function_scope,
-                        field_name, auto_assign_kind == "@" ? "ivar" : "cvar",
-                        "field", param->span, false);
+        const int target_scope = field_scope >= 0 ? field_scope : function_scope;
+        if (auto_assign_kind == "@") {
+          if (Binding *property = find_local_binding(target_scope, local_name);
+              property != nullptr && binding_is_property(*property)) {
+            diagnostic("AMB_PROP_NAME_CONFLICT", "error", "binder",
+                       "property name conflicts with a generated field "
+                       "accessor",
+                       param->span);
+          }
+        }
+        declare_binding(target_scope, field_name,
+                        auto_assign_kind == "@" ? "ivar" : "cvar", "field",
+                        param->span, false);
       }
     }
     graph_.signatures.push_back(std::move(descriptor));
@@ -713,8 +863,13 @@ private:
         add_reference(scope_index, name, "name", expr.span, nullptr);
         return;
       }
-      add_reference(scope_index, name, "name", expr.span,
-                    resolve(scope_index, name));
+      Binding *binding = resolve(scope_index, name);
+      if (binding != nullptr && binding_is_property(*binding) &&
+          !binding->property_has_getter) {
+        diagnostic("AMB_PROP_MISSING_GETTER", "error", "binder",
+                   "cannot read from write-only property", expr.span);
+      }
+      add_reference(scope_index, name, "name", expr.span, binding);
       return;
     }
     if (expr.kind == "AstLastValue") {
@@ -886,6 +1041,11 @@ private:
       if (binding == nullptr) {
         binding = declare_binding(scope_index, name, "local", "local",
                                   left.span, false);
+      } else if (binding_is_property(*binding)) {
+        if (!binding->property_has_setter) {
+          diagnostic("AMB_PROP_MISSING_SETTER", "error", "binder",
+                     "cannot assign to read-only property", left.span);
+        }
       } else if (binding->kind == "import_alias") {
         diagnostic("E2007", "error", "binder", "assignment to imported alias",
                    left.span);
@@ -1335,6 +1495,10 @@ std::string bind_graph_to_json(const BindGraph &graph,
         << json_escape(binding.kind) << "\",\"role\":\""
         << json_escape(binding.role)
         << "\",\"read_only\":" << (binding.read_only ? "true" : "false")
+        << ",\"property_has_getter\":"
+        << (binding.property_has_getter ? "true" : "false")
+        << ",\"property_has_setter\":"
+        << (binding.property_has_setter ? "true" : "false")
         << ",\"span\":";
     append_span_json(out, binding.span);
     out << ",\"source\":\"" << json_escape(binding.source) << "\"}";

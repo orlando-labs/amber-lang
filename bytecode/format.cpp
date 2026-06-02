@@ -3996,7 +3996,7 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
       add_verify_error(errors, "BC1204", "method entry code id is unknown",
                        SectionKind::Meth, 0);
     }
-    if (method.flags != 0U &&
+    if ((method.flags & (kMethodFlagInstance | kMethodFlagClass)) != 0U &&
         method.owner_dispatch_ref >= module.classes.size()) {
       add_verify_error(errors, "BC1205",
                        "method owner dispatch ref is out of range",

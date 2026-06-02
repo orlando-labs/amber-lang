@@ -473,6 +473,20 @@ private:
           node_field(item, "signature"), list_field(item, "body"));
       return;
     }
+    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+      const std::string kind =
+          item.kind == "AstClassPropDef" ? "class_property" : "property";
+      if (bool_field(item, "has_getter")) {
+        check_callable(item, kind, nullptr, list_field(item, "getter_body"));
+      }
+      if (bool_field(item, "has_setter")) {
+        check_callable(item, kind + "_setter",
+                       node_field(item, "setter_signature"),
+                       list_field(item, "setter_body"),
+                       string_field(item, "name") + "=");
+      }
+      return;
+    }
     if (item.kind == "AstClauseDef") {
       check_callable(item, "function", node_field(item, "base_signature"),
                      list_field(item, "else_body"));
@@ -487,8 +501,10 @@ private:
 
   void check_callable(const ast::Expr &item, const std::string &kind,
                       const ast::Expr *signature_node,
-                      const ast::ListField *body) {
-    const std::string owner = string_field(item, "name");
+                      const ast::ListField *body,
+                      const std::string &owner_override = "") {
+    const std::string owner =
+        owner_override.empty() ? string_field(item, "name") : owner_override;
     const binder::Signature *signature = signature_for_owner(owner);
     const bool exported = exported_names_.count(owner) != 0U;
     CallableBoundary boundary;

@@ -163,6 +163,8 @@ const char *token_kind_name(TokenKind kind) {
     return "KEYWORD_CLASS";
   case TokenKind::KeywordClassMethod:
     return "KEYWORD_CLASS_METHOD";
+  case TokenKind::KeywordClassProp:
+    return "KEYWORD_CLASS_PROP";
   case TokenKind::KeywordDef:
     return "KEYWORD_DEF";
   case TokenKind::KeywordDo:
@@ -205,6 +207,8 @@ const char *token_kind_name(TokenKind kind) {
     return "KEYWORD_PACKAGE";
   case TokenKind::KeywordPass:
     return "KEYWORD_PASS";
+  case TokenKind::KeywordProp:
+    return "KEYWORD_PROP";
   case TokenKind::KeywordTrue:
     return "KEYWORD_TRUE";
   case TokenKind::KeywordUnless:

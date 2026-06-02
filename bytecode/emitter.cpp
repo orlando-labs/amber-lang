@@ -926,11 +926,17 @@ private:
 
     const std::string dispatch_side = string_field(item, "dispatch_side");
     if (dispatch_side == "instance") {
-      method.flags = 1;
+      method.flags = kMethodFlagInstance;
     } else if (dispatch_side == "class") {
-      method.flags = 2;
+      method.flags = kMethodFlagClass;
     } else {
       method.flags = 0;
+    }
+    if (bool_field(item, "property_getter")) {
+      method.flags |= kMethodFlagPropertyGetter;
+    }
+    if (bool_field(item, "property_setter")) {
+      method.flags |= kMethodFlagPropertySetter;
     }
     return method;
   }
@@ -2318,7 +2324,14 @@ std::uint32_t CodeEmitter::compile_send_like(const ast::Expr &expr,
       opcode == Opcode::Send
           ? string_field(expr, "selector")
           : (opcode == Opcode::SendDyn ? "<dynamic>" : "<call>");
-  const std::uint32_t site_id = emit_call_site(pc, site_symbol);
+  std::uint32_t site_flags = 0;
+  if (opcode == Opcode::Send && bool_field(expr, "property_access")) {
+    site_flags |= kCallSiteFlagPropertyAccess;
+  }
+  if (opcode == Opcode::Send && bool_field(expr, "property_assignment")) {
+    site_flags |= kCallSiteFlagPropertyAssignment;
+  }
+  const std::uint32_t site_id = emit_call_site(pc, site_symbol, site_flags);
   operands.push_back({site_id, false});
   emit_instruction(opcode, std::move(operands), expr.span);
   return dst;

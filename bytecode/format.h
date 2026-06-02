@@ -176,6 +176,9 @@ struct CacheSiteEntry {
   std::uint32_t flags = 0;
 };
 
+inline constexpr std::uint32_t kCallSiteFlagPropertyAccess = 0x1U;
+inline constexpr std::uint32_t kCallSiteFlagPropertyAssignment = 0x2U;
+
 struct SourceSpanEntry {
   std::uint32_t pc_from = 0;
   std::uint32_t pc_to = 0;
@@ -237,6 +240,11 @@ struct BcMethod {
   std::uint32_t entry_code_id = 0;
   std::uint32_t flags = 0;
 };
+
+inline constexpr std::uint32_t kMethodFlagInstance = 0x1U;
+inline constexpr std::uint32_t kMethodFlagClass = 0x2U;
+inline constexpr std::uint32_t kMethodFlagPropertyGetter = 0x4U;
+inline constexpr std::uint32_t kMethodFlagPropertySetter = 0x8U;
 
 inline constexpr std::uint32_t kClassFlagMixin = 0x1U;
 

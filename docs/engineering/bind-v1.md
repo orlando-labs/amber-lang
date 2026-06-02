@@ -22,7 +22,9 @@ Scope kinds currently emitted:
 
 - `module`;
 - `function`;
+- `property`;
 - `class_method`;
+- `class_property`;
 - `class`;
 - `mixin`;
 - `block`.
@@ -64,11 +66,20 @@ Implementation-local binder diagnostics currently reserved by this workspace:
 - `B0002`: wildcard `_` used as an ordinary binding or reference outside the
   pattern semantics where it is allowed to be non-binding.
 
+Property declarations use zero-parameter signatures and read-only bindings.
+`prop` contributes a `property` binding and `class_prop` contributes a
+`class_property` binding. These bindings are distinct from ordinary `def`
+bindings, so same-owner property/method/field-accessor conflicts are reported
+as `AMB_PROP_NAME_CONFLICT`. Assignment to a resolved property binding is
+reported as `AMB_PROP_SETTER_UNDEFINED`.
+
 Signature preflight currently covers the static part of the W2.2 default
 pipeline:
 
 - each `AstDefStmt` / `AstClassMethodDef` / `AstClauseDef` scope has one
   descriptor with source-order params;
+- each `AstPropDef` / `AstClassPropDef` scope has one descriptor with no user
+  params;
 - each param descriptor stores `external_name`, `local_name`, `kind`,
   `auto_assign_kind`, `auto_assign_target`, `type_expr`, `has_default`, and
   `default_kind`;
