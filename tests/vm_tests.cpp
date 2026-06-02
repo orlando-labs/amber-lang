@@ -107,9 +107,8 @@ void test_execute_module_init_calls_top_level_def() {
   expect(decoded.module.init.has_entry_code_id,
          "module init entry should exist");
 
-  const amber::runtime::ExecutionResult exec =
-      amber::runtime::execute_code(decoded.module,
-                                   decoded.module.init.entry_code_id);
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
   expect(exec.ok(), "module init top-level def call failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 45,
          "module init should return top-level function result");
@@ -183,9 +182,8 @@ void test_execute_emitted_collection_literals() {
 
   amber::bytecode::EmitResult inline_if_result =
       emit_ok("if false then 1 else 2\n");
-  amber::runtime::ExecutionResult inline_if_exec =
-      amber::runtime::execute_code(inline_if_result.module,
-                                   inline_if_result.module.init.entry_code_id);
+  amber::runtime::ExecutionResult inline_if_exec = amber::runtime::execute_code(
+      inline_if_result.module, inline_if_result.module.init.entry_code_id);
   expect(inline_if_exec.ok(), "inline conditional execution failed");
   expect(inline_if_exec.value.is_integer() &&
              inline_if_exec.value.as_integer() == 2,
@@ -233,8 +231,7 @@ void test_execute_emitted_collection_literals() {
       amber::runtime::execute_code(
           conditional_map_result.module,
           conditional_map_result.module.init.entry_code_id);
-  expect(conditional_map_exec.ok(),
-         "conditional map literal execution failed");
+  expect(conditional_map_exec.ok(), "conditional map literal execution failed");
   const std::shared_ptr<amber::runtime::ListValue> conditional_map_pair =
       conditional_map_exec.value.as_list();
   expect(conditional_map_pair != nullptr &&
@@ -268,31 +265,28 @@ void test_top_level_function_closure_captures_sibling_function() {
           amber::bytecode::serialize_module(emit_result.module));
   expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
 
-  const amber::runtime::ExecutionResult exec =
-      amber::runtime::execute_code(decoded.module,
-                                   decoded.module.init.entry_code_id);
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
   expect(exec.ok(), "top-level function sibling capture failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 7,
          "top-level function should call captured sibling function");
 }
 
 void test_top_level_function_self_recursion() {
-  amber::bytecode::EmitResult emit_result =
-      emit_ok("def fact(n):\n"
-              "  if n == 0:\n"
-              "    1\n"
-              "  else:\n"
-              "    n * fact(n - 1)\n"
-              "\n"
-              "fact(5)\n");
+  amber::bytecode::EmitResult emit_result = emit_ok("def fact(n):\n"
+                                                    "  if n == 0:\n"
+                                                    "    1\n"
+                                                    "  else:\n"
+                                                    "    n * fact(n - 1)\n"
+                                                    "\n"
+                                                    "fact(5)\n");
   const amber::bytecode::DecodeResult decoded =
       amber::bytecode::deserialize_module(
           amber::bytecode::serialize_module(emit_result.module));
   expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
 
-  const amber::runtime::ExecutionResult exec =
-      amber::runtime::execute_code(decoded.module,
-                                   decoded.module.init.entry_code_id);
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
   expect(exec.ok(), "top-level recursive function failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 120,
          "top-level recursive function should return factorial");
@@ -309,52 +303,47 @@ void test_top_level_clause_function_self_recursion() {
           amber::bytecode::serialize_module(emit_result.module));
   expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
 
-  const amber::runtime::ExecutionResult exec =
-      amber::runtime::execute_code(decoded.module,
-                                   decoded.module.init.entry_code_id);
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
   expect(exec.ok(), "top-level recursive clause function failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 120,
          "top-level recursive clause function should return factorial");
 }
 
 void test_top_level_plain_def_fallback_clause_recursion() {
-  amber::bytecode::EmitResult emit_result =
-      emit_ok("def frac(x):\n"
-              "  x * frac(x - 1)\n"
-              "\n"
-              "def frac(2):\n"
-              "  2\n"
-              "\n"
-              "frac(5)\n");
+  amber::bytecode::EmitResult emit_result = emit_ok("def frac(x):\n"
+                                                    "  x * frac(x - 1)\n"
+                                                    "\n"
+                                                    "def frac(2):\n"
+                                                    "  2\n"
+                                                    "\n"
+                                                    "frac(5)\n");
   const amber::bytecode::DecodeResult decoded =
       amber::bytecode::deserialize_module(
           amber::bytecode::serialize_module(emit_result.module));
   expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
 
-  const amber::runtime::ExecutionResult exec =
-      amber::runtime::execute_code(decoded.module,
-                                   decoded.module.init.entry_code_id);
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
   expect(exec.ok(), "plain def fallback clause recursion failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 120,
          "plain def fallback clause recursion should return factorial");
 }
 
 void test_top_level_guarded_clause_function_self_recursion() {
-  amber::bytecode::EmitResult emit_result =
-      emit_ok("def frac(x) if x > 0:\n"
-              "  x * frac(x - 1)\n"
-              "\n"
-              "def frac(0): 1\n"
-              "\n"
-              "frac(5)\n");
+  amber::bytecode::EmitResult emit_result = emit_ok("def frac(x) if x > 0:\n"
+                                                    "  x * frac(x - 1)\n"
+                                                    "\n"
+                                                    "def frac(0): 1\n"
+                                                    "\n"
+                                                    "frac(5)\n");
   const amber::bytecode::DecodeResult decoded =
       amber::bytecode::deserialize_module(
           amber::bytecode::serialize_module(emit_result.module));
   expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
 
-  const amber::runtime::ExecutionResult exec =
-      amber::runtime::execute_code(decoded.module,
-                                   decoded.module.init.entry_code_id);
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
   expect(exec.ok(), "guarded recursive clause function failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 120,
          "guarded recursive clause function should return factorial");
@@ -727,6 +716,43 @@ void test_runtime_uninitialized_register_read_raises_name_error() {
   expect(!exec.ok(), "uninitialized register read should fail");
   expect(exec.fault->error_name == "NameError",
          "uninitialized register read should surface NameError");
+}
+
+void test_runtime_string_interpolation_and_conversions() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("(\"#{1 + 2}\" == \"3\") and "
+              "(\"#{null}\" == \"null\") and "
+              "(\"#{true}\" == \"true\") and "
+              "(\"#{false}\" == \"false\") and "
+              "(\"#{1 + 2} #{$_}\" == \"3 3\") and "
+              "(\"123\".to_int() == 123) and "
+              "(123.to_str() == \"123\") and "
+              "(\"true\".to_bool() == true) and "
+              "(\"false\".to_bool() == false) and "
+              "(Int(\"123\") == 123) and "
+              "(Str(42) == \"42\") and "
+              "(Amber.stringify(123, mode: :display) == \"123\")\n");
+  expect(emit_result.module.init.has_entry_code_id,
+         "conversion/interpolation module init exists");
+  amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "conversion/interpolation execution failed");
+  expect(exec.value.is_bool() && exec.value.as_bool(),
+         "conversion/interpolation predicates should all hold");
+
+  emit_result = emit_ok("\"abc\".to_int()\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "ValueError",
+         "invalid integer string should raise ValueError");
+
+  emit_result = emit_ok("[].to_int()\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "TypeError",
+         "unsupported to_int source should raise TypeError");
 }
 
 void test_manual_call_invokes_object_call_method() {
@@ -1978,7 +2004,8 @@ void expect_integer_list(const amber::runtime::Value &value,
   }
 }
 
-amber::runtime::ExecutionResult execute_emitted_init(const std::string &source) {
+amber::runtime::ExecutionResult
+execute_emitted_init(const std::string &source) {
   const amber::bytecode::EmitResult emit_result = emit_ok(source);
   const amber::bytecode::DecodeResult decoded =
       amber::bytecode::deserialize_module(
@@ -1987,6 +2014,28 @@ amber::runtime::ExecutionResult execute_emitted_init(const std::string &source) 
   expect(decoded.module.init.has_entry_code_id, "emitted module init exists");
   return amber::runtime::execute_code(decoded.module,
                                       decoded.module.init.entry_code_id);
+}
+
+const amber::runtime::ExecutionLocal *
+execution_local_by_name(const amber::runtime::ExecutionResult &result,
+                        const std::string &name) {
+  for (const amber::runtime::ExecutionLocal &local : result.locals) {
+    if (local.name == name) {
+      return &local;
+    }
+  }
+  return nullptr;
+}
+
+const amber::runtime::RuntimeDependency *
+dependency_by_kind(const amber::runtime::RuntimeDependencySet &set,
+                   amber::runtime::RuntimeDependencyKind kind) {
+  for (const amber::runtime::RuntimeDependency &dependency : set.dependencies) {
+    if (dependency.kind == kind) {
+      return &dependency;
+    }
+  }
+  return nullptr;
 }
 
 void test_execute_emitted_block_map_suffixes() {
@@ -1999,6 +2048,372 @@ void test_execute_emitted_block_map_suffixes() {
       execute_emitted_init("[1,2].map |x|: x * 2\n");
   expect(explicit_param.ok(), "explicit param map block should execute");
   expect_integer_list(explicit_param.value, {2, 4}, "explicit param map block");
+}
+
+void test_runtime_watch_local_storage_replacement() {
+  const amber::bytecode::EmitResult emit_result = emit_ok("x = 1\n"
+                                                          "Kernel.watch(x)\n"
+                                                          "x = 1\n"
+                                                          "x = 2\n"
+                                                          "x\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  expect(decoded.module.init.has_entry_code_id, "watch local module init");
+
+  amber::runtime::RuntimeWorld world(decoded.module);
+  const std::uint64_t world_epoch_before = world.world_epoch();
+  const amber::runtime::ExecutionResult exec =
+      world.execute(decoded.module.init.entry_code_id);
+  expect(exec.ok(), "watch local module should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 2,
+         "watched local returns current value");
+  expect(world.world_epoch() == world_epoch_before,
+         "watch local does not mutate dispatch world epoch");
+  expect(world.watch_epoch() == 3, "watch local updates watch epoch");
+  expect(exec.watch_epoch == 3,
+         "watch local bumps watch epoch only for events");
+  expect(exec.watch_events.size() == 3, "watch local records three events");
+  expect(exec.watch_events[0].kind == "watch.binding",
+         "watch local records binding event");
+  expect(exec.watch_events[0].target_name == "x",
+         "watch binding event names local");
+  expect(exec.watch_events[1].kind == "watch.write",
+         "watched local same-value assignment records write event");
+  expect(exec.watch_events[1].old_revision == 0 &&
+             exec.watch_events[1].new_revision == 1,
+         "watched local same-value write advances revision");
+  expect(exec.watch_events[1].old_value.is_integer() &&
+             exec.watch_events[1].old_value.as_integer() == 1,
+         "watched local same-value write records old value");
+  expect(exec.watch_events[1].new_value.is_integer() &&
+             exec.watch_events[1].new_value.as_integer() == 1,
+         "watched local same-value write records new value");
+  expect(exec.watch_events[2].kind == "watch.write",
+         "watched local assignment records write event");
+  expect(exec.watch_events[2].old_revision == 1 &&
+             exec.watch_events[2].new_revision == 2,
+         "watched local write advances revision");
+  expect(exec.watch_events[2].old_value.is_integer() &&
+             exec.watch_events[2].old_value.as_integer() == 1,
+         "watched local write records old value");
+  expect(exec.watch_events[2].new_value.is_integer() &&
+             exec.watch_events[2].new_value.as_integer() == 2,
+         "watched local write records new value");
+
+  const amber::runtime::ExecutionLocal *x_local =
+      execution_local_by_name(exec, "x");
+  expect(x_local != nullptr, "watched local appears in execution locals");
+  expect(x_local->initialized, "watched local remains initialized");
+  expect(x_local->watched, "execution local exposes watched storage");
+  expect(x_local->watch_cell_id != 0, "execution local exposes watch cell id");
+  expect(x_local->watch_revision == 2,
+         "execution local exposes watch revision");
+  expect(x_local->value.is_integer() && x_local->value.as_integer() == 2,
+         "execution local exposes unwrapped watched value");
+}
+
+void test_runtime_watch_capture_uses_shared_storage_cell() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.strings = {"x"};
+
+  Constant one;
+  one.kind = ConstantKind::Integer;
+  one.int_value = 1;
+  Constant two;
+  two.kind = ConstantKind::Integer;
+  two.int_value = 2;
+  module.const_pool = {one, two};
+
+  BcCode outer;
+  outer.code_id = 1;
+  outer.kind = CodeKind::Method;
+  outer.reg_count = 4;
+  outer.local_layout.push_back({0, 0, 0, 0});
+  outer.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  outer.instructions.push_back(
+      {Opcode::MakeClosure,
+       {{1, false}, {2, false}, {1, false}, {0, false}, {0, false}}});
+  outer.instructions.push_back(
+      {Opcode::WatchLocal, {{2, false}, {0, false}, {0, false}}});
+  outer.instructions.push_back({Opcode::LoadK, {{0, false}, {1, false}}});
+  outer.instructions.push_back({Opcode::Call,
+                                {{3, false},
+                                 {1, false},
+                                 {0, false},
+                                 {0, false},
+                                 {-1, true},
+                                 {0, false}}});
+  outer.instructions.push_back({Opcode::Return, {{3, false}}});
+
+  BcCode inner;
+  inner.code_id = 2;
+  inner.kind = CodeKind::Block;
+  inner.reg_count = 1;
+  inner.capture_layout.push_back({0, 0, 0, 0});
+  inner.instructions.push_back({Opcode::LoadUpval, {{0, false}, {0, false}}});
+  inner.instructions.push_back({Opcode::Return, {{0, false}}});
+
+  module.code_objects = {outer, inner};
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(module, 1);
+  expect(exec.ok(), "watch capture module should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 2,
+         "watched captured local is updated through shared storage");
+  expect(exec.watch_epoch == 2, "watch capture updates watch epoch");
+  expect(exec.watch_events.size() == 2, "watch capture records two events");
+  expect(exec.watch_events[0].kind == "watch.binding",
+         "watch capture records binding event");
+  expect(exec.watch_events[1].kind == "watch.write",
+         "watch capture records write event");
+  expect(exec.watch_events[1].target_name == "x",
+         "watch capture write event keeps binding name");
+  expect(exec.watch_events[1].new_value.is_integer() &&
+             exec.watch_events[1].new_value.as_integer() == 2,
+         "watch capture write records updated value");
+}
+
+void test_runtime_watch_ivar_records_object_revision_events() {
+  using namespace amber::bytecode;
+
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("class Particle:\n"
+              "  def observe():\n"
+              "    Kernel.watch(@mass)\n"
+              "    @mass = 1\n"
+              "    @mass = 1\n"
+              "    @mass\n"
+              "\n"
+              "def probe():\n"
+              "  Particle().observe()\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  const amber::bytecode::BcMethod *probe =
+      method_by_name(decoded.module, "probe");
+  expect(probe != nullptr, "watch ivar probe method exists");
+
+  amber::runtime::RuntimeWorld world(decoded.module);
+  const std::uint64_t world_epoch_before = world.world_epoch();
+  const amber::runtime::ExecutionResult exec =
+      world.execute(probe->entry_code_id);
+  expect(exec.ok(), "watch ivar module should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 1,
+         "watched ivar returns current value");
+  expect(world.world_epoch() == world_epoch_before,
+         "watch ivar does not mutate dispatch world epoch");
+  expect(exec.watch_epoch == 3, "watch ivar updates watch epoch");
+  expect(exec.watch_events.size() == 3, "watch ivar records three events");
+
+  const amber::runtime::RuntimeWatchEvent &binding = exec.watch_events[0];
+  expect(binding.kind == "watch.ivar", "watch ivar records binding event");
+  expect(binding.target_name == "@mass" && binding.field_name == "mass",
+         "watch ivar binding names field target");
+  expect(binding.object_id != 0, "watch ivar binding exposes object id");
+  expect(binding.old_revision == 0 && binding.new_revision == 0,
+         "watch ivar binding starts field revision at zero");
+  expect(binding.old_object_revision == 0 && binding.new_object_revision == 0,
+         "watch ivar binding starts object revision at zero");
+
+  const amber::runtime::RuntimeWatchEvent &first_write = exec.watch_events[1];
+  expect(first_write.kind == "watch.ivar.write",
+         "watched ivar assignment records write event");
+  expect(first_write.object_id == binding.object_id,
+         "watched ivar write keeps object id");
+  expect(first_write.old_revision == 0 && first_write.new_revision == 1,
+         "watched ivar first write advances field revision");
+  expect(first_write.old_object_revision == 0 &&
+             first_write.new_object_revision == 1,
+         "watched ivar first write advances object revision");
+  expect(first_write.old_value.is_null(),
+         "watched ivar first write records null old value");
+  expect(first_write.new_value.is_integer() &&
+             first_write.new_value.as_integer() == 1,
+         "watched ivar first write records new value");
+
+  const amber::runtime::RuntimeWatchEvent &second_write = exec.watch_events[2];
+  expect(second_write.kind == "watch.ivar.write",
+         "watched ivar same-value assignment records write event");
+  expect(second_write.old_revision == 1 && second_write.new_revision == 2,
+         "watched ivar same-value write advances field revision");
+  expect(second_write.old_object_revision == 1 &&
+             second_write.new_object_revision == 2,
+         "watched ivar same-value write advances object revision");
+  expect(second_write.old_value.is_integer() &&
+             second_write.old_value.as_integer() == 1,
+         "watched ivar same-value write records old value");
+  expect(second_write.new_value.is_integer() &&
+             second_write.new_value.as_integer() == 1,
+         "watched ivar same-value write records new value");
+
+  BcModule failed_module;
+  failed_module.symbols = {"mass"};
+  Constant two;
+  two.kind = ConstantKind::Integer;
+  two.int_value = 2;
+  failed_module.const_pool = {two};
+
+  BcCode failed;
+  failed.code_id = 1;
+  failed.kind = CodeKind::Method;
+  failed.reg_count = 4;
+  failed.instructions.push_back({Opcode::LoadSelf, {{1, false}}});
+  failed.instructions.push_back(
+      {Opcode::WatchIvar,
+       {{2, false}, {1, false}, {0, false}, {0, false}, {0, false}}});
+  failed.instructions.push_back({Opcode::ObjDealloc, {{3, false}, {1, false}}});
+  failed.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  failed.instructions.push_back(
+      {Opcode::StoreIvar, {{1, false}, {0, false}, {0, false}, {1, false}}});
+  failed.instructions.push_back({Opcode::Return, {{0, false}}});
+  failed_module.code_objects.push_back(failed);
+
+  auto failed_instance = std::make_shared<amber::runtime::InstanceValue>();
+  failed_instance->class_index = 0;
+  amber::runtime::RuntimeWorld failed_world(failed_module);
+  const amber::runtime::ExecutionResult failed_exec = failed_world.execute(
+      1, {}, amber::runtime::Value::instance(failed_instance));
+  expect(!failed_exec.ok(), "failed watched ivar write should fault");
+  expect(failed_exec.watch_events.size() == 1,
+         "failed watched ivar write should not publish write event");
+  expect(failed_exec.watch_events[0].kind == "watch.ivar",
+         "failed watched ivar write keeps only binding event");
+}
+
+void test_runtime_dependency_capture_records_binding_reads() {
+  const amber::bytecode::EmitResult emit_result = emit_ok("x = 1\n"
+                                                          "Kernel.watch(x)\n"
+                                                          "x\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  expect(decoded.module.init.has_entry_code_id,
+         "dependency capture module init exists");
+
+  amber::runtime::RuntimeWorld world(decoded.module);
+  const std::uint64_t watch_epoch_before = world.watch_epoch();
+  world.begin_dependency_capture(42);
+  const amber::runtime::ExecutionResult exec =
+      world.execute(decoded.module.init.entry_code_id);
+  expect(exec.ok(), "dependency capture binding module should execute");
+
+  const amber::runtime::RuntimeDependencySet active =
+      world.dependency_capture_snapshot();
+  expect(active.notebook_cell_id == 42,
+         "active dependency capture keeps notebook cell id");
+  expect(active.dependencies.size() == 1,
+         "active dependency capture deduplicates binding reads");
+
+  const amber::runtime::RuntimeDependencySet deps =
+      world.end_dependency_capture();
+  expect(deps.notebook_cell_id == 42,
+         "ended dependency capture returns notebook cell id");
+  expect(deps.dependencies.size() == 1,
+         "ended dependency capture returns one binding dependency");
+  const amber::runtime::RuntimeDependency *binding =
+      dependency_by_kind(deps, amber::runtime::RuntimeDependencyKind::Binding);
+  expect(binding != nullptr, "dependency capture exposes binding dependency");
+  expect(binding->cell_id == exec.watch_events[0].cell_id,
+         "binding dependency uses watch cell id");
+  expect(binding->target_name == "x", "binding dependency keeps target name");
+  expect(binding->revision == 0, "binding dependency records current revision");
+  expect(binding->object_id == 0 && binding->field_name.empty(),
+         "binding dependency does not set object fields");
+  expect(world.watch_epoch() == watch_epoch_before + 1,
+         "dependency capture itself does not publish watch events");
+  expect(world.dependency_capture_snapshot().dependencies.empty(),
+         "dependency capture snapshot is empty after end");
+}
+
+void test_runtime_dependency_capture_deduplicates_repeated_binding_reads() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.strings = {"x"};
+
+  Constant one;
+  one.kind = ConstantKind::Integer;
+  one.int_value = 1;
+  module.const_pool = {one};
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Module;
+  code.reg_count = 3;
+  code.local_layout.push_back({0, 0, 0, 0});
+  code.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  code.instructions.push_back(
+      {Opcode::WatchLocal, {{1, false}, {0, false}, {0, false}}});
+  code.instructions.push_back({Opcode::Move, {{2, false}, {0, false}}});
+  code.instructions.push_back({Opcode::Move, {{2, false}, {0, false}}});
+  code.instructions.push_back({Opcode::Return, {{2, false}}});
+  module.code_objects.push_back(code);
+
+  amber::runtime::RuntimeWorld world(module);
+  world.begin_dependency_capture(7);
+  const amber::runtime::ExecutionResult exec = world.execute(1);
+  expect(exec.ok(), "repeated binding dependency module should execute");
+  const amber::runtime::RuntimeDependencySet deps =
+      world.end_dependency_capture();
+  expect(deps.notebook_cell_id == 7,
+         "repeated binding capture keeps notebook cell id");
+  expect(deps.dependencies.size() == 1,
+         "repeated binding reads are captured once");
+  expect(deps.dependencies[0].kind ==
+             amber::runtime::RuntimeDependencyKind::Binding,
+         "repeated dependency is a binding dependency");
+  expect(deps.dependencies[0].cell_id == exec.watch_events[0].cell_id,
+         "deduplicated dependency keeps binding id");
+}
+
+void test_runtime_dependency_capture_records_nested_ivar_reads() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("class Particle:\n"
+              "  def observe():\n"
+              "    Kernel.watch(@mass)\n"
+              "    @mass = 7\n"
+              "    @mass\n"
+              "\n"
+              "def probe():\n"
+              "  Particle().observe()\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  const amber::bytecode::BcMethod *probe =
+      method_by_name(decoded.module, "probe");
+  expect(probe != nullptr, "dependency capture ivar probe method exists");
+
+  amber::runtime::RuntimeWorld world(decoded.module);
+  world.begin_dependency_capture(99);
+  const amber::runtime::ExecutionResult exec =
+      world.execute(probe->entry_code_id);
+  expect(exec.ok(), "dependency capture ivar module should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 7,
+         "dependency capture ivar returns watched field value");
+  const amber::runtime::RuntimeDependencySet deps =
+      world.end_dependency_capture();
+  expect(deps.notebook_cell_id == 99,
+         "ivar dependency capture keeps notebook cell id");
+  expect(deps.dependencies.size() == 1,
+         "ivar dependency capture records one field dependency");
+
+  const amber::runtime::RuntimeDependency *ivar =
+      dependency_by_kind(deps, amber::runtime::RuntimeDependencyKind::Ivar);
+  expect(ivar != nullptr, "dependency capture exposes ivar dependency");
+  expect(ivar->object_id == exec.watch_events[0].object_id,
+         "ivar dependency uses watch object id");
+  expect(ivar->target_name == "@mass" && ivar->field_name == "mass",
+         "ivar dependency keeps field target");
+  expect(ivar->revision == 1 && ivar->object_revision == 1,
+         "ivar dependency records current field and object revisions");
+  expect(ivar->cell_id == 0, "ivar dependency does not set binding cell id");
 }
 
 void test_runtime_sequence_collections_contract() {
@@ -6081,6 +6496,7 @@ int main() {
   test_execute_emitted_method();
   test_execute_module_init_calls_top_level_def();
   test_execute_emitted_collection_literals();
+  test_runtime_string_interpolation_and_conversions();
   test_top_level_function_closure_captures_sibling_function();
   test_top_level_function_self_recursion();
   test_top_level_clause_function_self_recursion();
@@ -6130,6 +6546,12 @@ int main() {
   test_runtime_modern_profile_metadata();
   test_manual_make_map();
   test_execute_emitted_block_map_suffixes();
+  test_runtime_watch_local_storage_replacement();
+  test_runtime_watch_capture_uses_shared_storage_cell();
+  test_runtime_watch_ivar_records_object_revision_events();
+  test_runtime_dependency_capture_records_binding_reads();
+  test_runtime_dependency_capture_deduplicates_repeated_binding_reads();
+  test_runtime_dependency_capture_records_nested_ivar_reads();
   test_runtime_sequence_collections_contract();
   test_runtime_map_collections_contract();
   test_manual_instance_send_dispatch();

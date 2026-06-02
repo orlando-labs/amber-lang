@@ -5,9 +5,11 @@ errors:
   - ArgumentError
   - MatchError
   - TypeError
+  - ValueError
   - NoMethodError
   - ImportError
   - ModuleInitError
+  - WatchTargetError
   - EmptyCollectionError
   - IndexError
   - KeyError

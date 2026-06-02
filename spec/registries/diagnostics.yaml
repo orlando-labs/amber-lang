@@ -3,6 +3,12 @@ spec_anchor: amber_spec_consolidated_v20_1_main.md
 diagnostics:
   - { code: L0001, severity: error, phase: lexer, condition: lexer cannot produce a valid token stream }
   - { code: P0001, severity: error, phase: parser, condition: parser cannot produce a valid syntax-faithful AST }
+  - { code: AMB_STRING_UNTERMINATED, severity: error, phase: lexer, condition: string literal is missing a closing quote }
+  - { code: AMB_STRING_BAD_ESCAPE, severity: error, phase: lexer, condition: string literal contains an invalid escape sequence }
+  - { code: AMB_STRING_INTERP_UNTERMINATED, severity: error, phase: lexer, condition: string interpolation is missing a closing brace }
+  - { code: AMB_STRING_INTERP_EMPTY, severity: error, phase: parser, condition: string interpolation expression is empty }
+  - { code: AMB_STRING_INTERP_PARSE_ERROR, severity: error, phase: parser, condition: string interpolation expression cannot be parsed }
+  - { code: AMB_STRING_INTERP_NESTING_LIMIT, severity: error, phase: parser, condition: string interpolation nesting exceeds implementation limit }
   - { code: AMB-SYN-INLINE-TERNARY-CSTYLE, severity: error, phase: parser, condition: C-style ternary operator is not supported }
   - { code: AMB-SYN-INLINE-IF-MISSING-ELSE, severity: error, phase: parser, condition: inline conditional expression is missing required else branch }
   - { code: AMB-SYN-CONDITIONAL-ELEMENT-MISSING-VALUE, severity: error, phase: parser, condition: conditional collection element has if or unless without a preceding value }
@@ -52,4 +58,5 @@ diagnostics:
   - { code: BC2003, severity: error, phase: bytecode, condition: missing procedure or code mapping required by bytecode emitter }
   - { code: BC2006, severity: error, phase: bytecode, condition: unsupported object-model descriptor reached current bytecode emitter }
   - { code: BC2007, severity: error, phase: bytecode, condition: unsupported match-program node reached current bytecode emitter }
+  - { code: BC2008, severity: error, phase: bytecode, condition: invalid Kernel.watch target reached bytecode emitter }
   - { code: W1001, severity: warning, phase: binder, condition: default expression reads field also targeted by delayed auto-assign }

@@ -1054,6 +1054,18 @@ bool is_reflective_send_call(const ast::Expr &base, const ast::Expr &tail) {
          args->values[1]->kind != "AstKeywordArg";
 }
 
+bool is_kernel_watch_chain(const ast::Expr &base, const ast::ListField &tails) {
+  if (base.kind != "AstName" || string_value(base, "name") != "Kernel" ||
+      tails.values.size() < 2U) {
+    return false;
+  }
+  const ast::Expr &member = *tails.values[0];
+  const ast::Expr &call = *tails.values[1];
+  return member.kind == "AstTailDotMember" &&
+         string_value(member, "name") == "watch" &&
+         call.kind == "AstTailCall";
+}
+
 void collect_call_name_contexts(const ast::Expr &expr,
                                 std::vector<NameRefKey> *callable_names,
                                 std::vector<NameRefKey> *reflective_names) {
@@ -1062,6 +1074,10 @@ void collect_call_name_contexts(const ast::Expr &expr,
     const ast::ListField *tails = list_field(expr, "tails");
     if (base != nullptr && base->kind == "AstName" && tails != nullptr &&
         !tails->values.empty()) {
+      if (is_kernel_watch_chain(*base, *tails)) {
+        reflective_names->push_back(
+            name_ref_key(base->span, string_value(*base, "name")));
+      }
       const ast::Expr &first_tail = *tails->values.front();
       if (first_tail.kind == "AstTailCall" ||
           first_tail.kind == "AstTailSafeCall") {

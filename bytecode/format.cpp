@@ -1536,6 +1536,15 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x1A:
     opcode = Opcode::CloseUpvalues;
     return true;
+  case 0x1B:
+    opcode = Opcode::WatchLocal;
+    return true;
+  case 0x1C:
+    opcode = Opcode::WatchUpval;
+    return true;
+  case 0x1D:
+    opcode = Opcode::WatchIvar;
+    return true;
   case 0x20:
     opcode = Opcode::Send;
     return true;
@@ -3486,6 +3495,49 @@ InstructionFlow verify_instruction_flow(
     }
     break;
   }
+  case Opcode::WatchLocal: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::uint32_t slot = 0;
+      if (read_u32_operand(instruction, 1, "watch slot must be unsigned",
+                           errors, &slot)) {
+        if (slot >= code.reg_count) {
+          add_verify_error(errors, "BC1311",
+                           "watch local register is out of range",
+                           SectionKind::Code, 0);
+        } else {
+          flow.reads.push_back(slot);
+        }
+      }
+    }
+    break;
+  }
+  case Opcode::WatchUpval: {
+    if (operand_count_is(instruction, 3, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::uint32_t slot = 0;
+      if (read_u32_operand(instruction, 1, "watch capture slot must be unsigned",
+                           errors, &slot) &&
+          slot >= code.capture_layout.size()) {
+        add_verify_error(errors, "BC1312", "watch capture slot is out of range",
+                         SectionKind::Code, 0);
+      }
+    }
+    break;
+  }
+  case Opcode::WatchIvar: {
+    if (operand_count_is(instruction, 5, errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      add_register_read(code, instruction, 1, flow, errors);
+      std::uint32_t symbol_id = 0;
+      if (read_u32_operand(instruction, 2, "symbol ref must be unsigned",
+                           errors, &symbol_id)) {
+        verify_symbol_ref(module, symbol_id, "ivar symbol ref is invalid",
+                          errors);
+      }
+    }
+    break;
+  }
   case Opcode::Send:
   case Opcode::SendDyn:
   case Opcode::Call: {
@@ -4765,6 +4817,12 @@ std::string opcode_name(Opcode opcode) {
     return "OBJ_DEALLOC";
   case Opcode::CloseUpvalues:
     return "CLOSE_UPVALUES";
+  case Opcode::WatchLocal:
+    return "WATCH_LOCAL";
+  case Opcode::WatchUpval:
+    return "WATCH_UPVAL";
+  case Opcode::WatchIvar:
+    return "WATCH_IVAR";
   case Opcode::Send:
     return "SEND";
   case Opcode::SendDyn:

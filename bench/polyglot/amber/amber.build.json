@@ -1,0 +1,14 @@
+{
+  "schema": "amber.build.v1",
+  "name": "bench.polyglot",
+  "root": "bench.polyglot",
+  "profiles": {
+    "required": ["core.v1"]
+  },
+  "stdlib": [
+    {"name": "amber.core", "path": "stdlib/core.am", "bootstrap": "B2"}
+  ],
+  "modules": [
+    {"name": "bench.polyglot", "path": "src/main.am"}
+  ]
+}

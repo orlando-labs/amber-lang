@@ -188,6 +188,27 @@ void test_w13_comments_ranges_and_numbers() {
   }
 }
 
+void test_string_interpolation_lexing() {
+  expect_kinds("interpolated string stays one token",
+               "\"#{if ok then \"yes\" else \"no\"}\"\n",
+               {TokenKind::String, TokenKind::Newline, TokenKind::Eof});
+
+  amber::lexer::LexResult bad_escape = lex_raw("\"bad\\q\"\n");
+  if (bad_escape.ok() || bad_escape.diagnostics.empty() ||
+      bad_escape.diagnostics[0].code != "AMB_STRING_BAD_ESCAPE") {
+    std::cerr << "lexer test failed: bad escape diagnostic code\n";
+    std::exit(1);
+  }
+
+  amber::lexer::LexResult unterminated = lex_raw("\"#{value\"\n");
+  if (unterminated.ok() || unterminated.diagnostics.empty() ||
+      unterminated.diagnostics[0].code != "AMB_STRING_INTERP_UNTERMINATED" ||
+      unterminated.diagnostics[0].phase != "lexer") {
+    std::cerr << "lexer test failed: unterminated interpolation diagnostic\n";
+    std::exit(1);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -200,6 +221,7 @@ int main() {
   test_effect_row_punctuation();
   test_unicode_identifier_forms();
   test_w13_comments_ranges_and_numbers();
+  test_string_interpolation_lexing();
   std::cout << "lexer_tests: ok\n";
   return 0;
 }

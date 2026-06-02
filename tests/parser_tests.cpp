@@ -186,9 +186,8 @@ void test_indented_postfix_continuation() {
 }
 
 void test_module_stray_indent_progresses() {
-  amber::parser::ParseModuleResult result =
-      parse_module_raw("value\n"
-                       "  stray\n");
+  amber::parser::ParseModuleResult result = parse_module_raw("value\n"
+                                                             "  stray\n");
   expect(!result.ok(), "stray top-level indent is rejected");
   expect(!result.diagnostics.empty(), "stray indent emits diagnostic");
 }
@@ -321,6 +320,49 @@ void test_conditional_collection_elements() {
   expect(string_field(node_field(*entries.values[2], "condition"), "kind") ==
              "unless",
          "map unless condition kind");
+}
+
+void test_string_literal_surface() {
+  std::unique_ptr<Expr> plain = parse_ok("\"plain\"\n");
+  expect(plain->kind == "AstStringLiteral", "plain double string AST kind");
+  expect(!bool_field(*plain, "interpolation"), "plain string flag");
+  const amber::ast::ListField &plain_parts = list_field(*plain, "parts");
+  expect(plain_parts.values.size() == 1, "plain string part count");
+  expect(plain_parts.values[0]->kind == "AstStringText",
+         "plain string text part");
+  expect(string_field(*plain_parts.values[0], "value") == "plain",
+         "plain string text preserved");
+
+  std::unique_ptr<Expr> escaped = parse_ok("\"\\#{literal}\"\n");
+  expect(escaped->kind == "AstStringLiteral", "escaped interpolation AST kind");
+  expect(!bool_field(*escaped, "interpolation"),
+         "escaped interpolation marker stays literal");
+  const amber::ast::ListField &escaped_parts = list_field(*escaped, "parts");
+  expect(escaped_parts.values.size() == 2, "escaped marker part count");
+  expect(escaped_parts.values[0]->kind == "AstStringEscape",
+         "escaped hash part kind");
+  expect(string_field(*escaped_parts.values[0], "value") == "#",
+         "escaped hash value");
+
+  std::unique_ptr<Expr> interp =
+      parse_ok("\"hello #{name} #{if ok then \"yes\" else \"no\"}\"\n");
+  expect(interp->kind == "AstStringLiteral", "interpolated string AST kind");
+  expect(bool_field(*interp, "interpolation"), "interpolation flag");
+  const amber::ast::ListField &parts = list_field(*interp, "parts");
+  expect(parts.values.size() == 4, "interpolated string part count");
+  expect(parts.values[1]->kind == "AstStringExpr", "first expr part");
+  expect(node_field(*parts.values[1], "expr").kind == "AstName",
+         "interpolation expression span parses as name");
+  expect(parts.values[2]->kind == "AstStringText" &&
+             string_field(*parts.values[2], "value") == " ",
+         "text between interpolation expressions is preserved");
+  expect(parts.values[3]->kind == "AstStringExpr", "second expr part");
+  expect(node_field(*parts.values[3], "expr").kind == "AstInlineIfExpr",
+         "inline conditional expression inside interpolation parses");
+
+  amber::parser::ParseResult empty = parse_raw("\"#{}\"\n");
+  expect(has_diagnostic(empty, "AMB_STRING_INTERP_EMPTY"),
+         "empty interpolation diagnostic");
 }
 
 void test_inline_conditional_diagnostics() {
@@ -617,6 +659,7 @@ int main() {
   test_collection_literals();
   test_inline_conditional_expression();
   test_conditional_collection_elements();
+  test_string_literal_surface();
   test_inline_conditional_diagnostics();
   test_clause_def_forms();
   test_effect_row_signature();

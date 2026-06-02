@@ -52,6 +52,34 @@ amber::bytecode::EmitResult emit_ok(const std::string &source) {
   return emit_result;
 }
 
+amber::bytecode::EmitResult emit_allow_bytecode_diagnostics(
+    const std::string &source) {
+  amber::lexer::Lexer lexer(source, "<test>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(parse_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(bind_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::hir::Program program = amber::hir::lower_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  return amber::bytecode::emit_program(program, parse_result.module_name);
+}
+
 const amber::bytecode::BcCode *
 code_by_id(const amber::bytecode::BcModule &module, std::uint32_t code_id) {
   for (const amber::bytecode::BcCode &code : module.code_objects) {
@@ -77,6 +105,27 @@ bool contains_opcode(const amber::bytecode::BcCode &code,
                      amber::bytecode::Opcode opcode) {
   for (const amber::bytecode::Instruction &instruction : code.instructions) {
     if (instruction.opcode == opcode) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::size_t count_opcode(const amber::bytecode::BcCode &code,
+                         amber::bytecode::Opcode opcode) {
+  std::size_t count = 0;
+  for (const amber::bytecode::Instruction &instruction : code.instructions) {
+    if (instruction.opcode == opcode) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+bool module_contains_opcode(const amber::bytecode::BcModule &module,
+                            amber::bytecode::Opcode opcode) {
+  for (const amber::bytecode::BcCode &code : module.code_objects) {
+    if (contains_opcode(code, opcode)) {
       return true;
     }
   }
@@ -260,8 +309,40 @@ void test_case_emission() {
          "case emits P_CHECK_EQ");
   expect(contains_opcode(*code, amber::bytecode::Opcode::Jump),
          "case emits jumps");
+  expect(!contains_opcode(*code, amber::bytecode::Opcode::GetLast),
+         "case without explicit last-value avoids GETLAST");
+}
+
+void test_last_result_elision_without_explicit_last_value() {
+  const amber::bytecode::EmitResult emit_result = emit_ok("def compute():\n"
+                                                          "  x = 1\n"
+                                                          "  x + 2\n");
+  const amber::bytecode::BcCode *code = code_by_id(
+      emit_result.module, emit_result.module.methods[0].entry_code_id);
+  expect(code != nullptr, "compute code exists");
+  expect(!contains_opcode(*code, amber::bytecode::Opcode::SetLast),
+         "method without $_ avoids SETLAST");
+  expect(!contains_opcode(*code, amber::bytecode::Opcode::GetLast),
+         "method without $_ avoids GETLAST");
+  expect(!code->instructions.empty() &&
+             code->instructions.front().opcode ==
+                 amber::bytecode::Opcode::LoadK &&
+             code->instructions.front().operands.size() >= 2 &&
+             code->instructions.front().operands[0].value == 0,
+         "constant assignment loads directly into local slot");
+}
+
+void test_explicit_last_value_preserves_last_result_updates() {
+  const amber::bytecode::EmitResult emit_result = emit_ok("def compute():\n"
+                                                          "  1\n"
+                                                          "  $_ + 2\n");
+  const amber::bytecode::BcCode *code = code_by_id(
+      emit_result.module, emit_result.module.methods[0].entry_code_id);
+  expect(code != nullptr, "last-value code exists");
+  expect(count_opcode(*code, amber::bytecode::Opcode::SetLast) >= 1,
+         "$_ method emits SETLAST for prior expression");
   expect(contains_opcode(*code, amber::bytecode::Opcode::GetLast),
-         "case emits GETLAST");
+         "$_ method emits GETLAST");
 }
 
 void test_pattern_assignment_emission() {
@@ -427,6 +508,51 @@ void test_collection_literal_emission() {
          "string map key interns symbol-compatible key");
 }
 
+void test_kernel_watch_emission() {
+  const amber::bytecode::EmitResult local_result =
+      emit_ok("x = 1\n"
+              "Kernel.watch(x)\n");
+  expect(local_result.module.init.has_entry_code_id,
+         "watch local module init exists");
+  const amber::bytecode::BcCode *init_code =
+      code_by_id(local_result.module, local_result.module.init.entry_code_id);
+  expect(init_code != nullptr, "watch local init code exists");
+  expect(contains_opcode(*init_code, amber::bytecode::Opcode::WatchLocal),
+         "Kernel.watch(local) emits WATCH_LOCAL");
+  const amber::bytecode::DecodeResult local_decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(local_result.module));
+  expect(local_decoded.ok(),
+         amber::bytecode::verify_errors_to_json(local_decoded.errors));
+
+  const amber::bytecode::EmitResult capture_result =
+      emit_ok("def watch_each(xs, x):\n"
+              "  xs.map: Kernel.watch(x)\n");
+  expect(module_contains_opcode(capture_result.module,
+                                amber::bytecode::Opcode::WatchUpval),
+         "Kernel.watch(capture) emits WATCH_UPVAL");
+
+  const amber::bytecode::EmitResult ivar_result =
+      emit_ok("class Particle:\n"
+              "  def observe():\n"
+              "    Kernel.watch(@mass)\n");
+  expect(module_contains_opcode(ivar_result.module,
+                                amber::bytecode::Opcode::WatchIvar),
+         "Kernel.watch(ivar) emits WATCH_IVAR");
+  const amber::bytecode::DecodeResult ivar_decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(ivar_result.module));
+  expect(ivar_decoded.ok(),
+         amber::bytecode::verify_errors_to_json(ivar_decoded.errors));
+
+  const amber::bytecode::EmitResult invalid_result =
+      emit_allow_bytecode_diagnostics("x = 1\n"
+                                      "Kernel.watch(x + 1)\n");
+  expect(!invalid_result.ok(), "invalid watch target emits diagnostic");
+  expect(has_diagnostic_code(invalid_result, "BC2008"),
+         "invalid watch target diagnostic code");
+}
+
 void test_block_param_pattern_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("def transform(xs):\n"
@@ -557,12 +683,15 @@ int main() {
   test_default_thunk_emission();
   test_keyword_param_emission();
   test_case_emission();
+  test_last_result_elision_without_explicit_last_value();
+  test_explicit_last_value_preserves_last_result_updates();
   test_pattern_assignment_emission();
   test_matcher_expr_emission();
   test_dynamic_pattern_emission();
   test_clause_method_emission();
   test_w13_operator_emission();
   test_collection_literal_emission();
+  test_kernel_watch_emission();
   test_block_param_pattern_emission();
   test_simple_block_param_emission();
   test_object_model_emission();

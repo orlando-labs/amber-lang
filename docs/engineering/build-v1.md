@@ -48,19 +48,26 @@ compiled stdlib ABI hashes.
 
 ```sh
 amberc build amber.build.json --out-dir build/amber --cache-dir build/amber/.cache
+amberc build src/main.am -o build/main
 ```
 
-The command emits `amber.build.result.v1` JSON with per-module source hashes,
-cache keys, artifact hashes, ABI hashes, output paths, and cache-hit state. A
-second identical build reuses cache entries while preserving byte-identical
-output artifacts.
+Manifest builds emit `amber.build.result.v1` JSON with per-module source
+hashes, cache keys, artifact hashes, ABI hashes, output paths, and cache-hit
+state. A second identical build reuses cache entries while preserving
+byte-identical output artifacts.
+
+Single-file builds emit `amber.executable.build.v1` JSON and create an
+executable wrapper at `-o <path>`, `--out-dir <dir>/<source-stem>`, or the
+source path without the `.am` extension. The wrapper embeds the compiled
+`.amberbc` payload and re-enters `amberc run-embedded` to execute it.
 
 ## Conformance
 
 `make test` runs the W14 fixture twice and verifies the emitted root module with
 both `amberc amberbc-verify` and the public
 `amberc verify <file.amberbc> --json` surface. It also smoke-checks
-`amberc metadata <file.amberbc> --json` and a corrupted-bytecode verifier
-failure. `make conformance` runs
+`amberc metadata <file.amberbc> --json`, a corrupted-bytecode verifier
+failure, direct `amberc <file.am>` execution, and
+`amberc build <file.am>` executable execution. `make conformance` runs
 `ambertest run corpus --bundle M11`, which adds a compile-all postpass over the
 compile/disasm/run/load corpus.

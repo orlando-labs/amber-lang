@@ -2,16 +2,21 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <charconv>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <functional>
 #include <initializer_list>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <queue>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -91,6 +96,8 @@ bool header_is_deallocated(const ObjHeader &header);
 bool header_is_destroyed(const ObjHeader &header);
 std::optional<std::string> lifecycle_access_error_name(const ObjHeader &header);
 std::string lifecycle_access_error_message(const std::string &error_name);
+std::shared_ptr<RuntimeWatchCell> watch_cell_from_value(const Value &value);
+Value unwrap_watch_value(const Value &value);
 
 struct RuntimeSyncBoundaryError {
   std::string error_name;
@@ -177,6 +184,21 @@ RuntimeSyncBoundaryError runtime_isolation_error() {
 
 std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
     const Value &value, std::unordered_set<std::uint64_t> *visited) {
+  if (value.is_watch_cell()) {
+    const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();
+    if (cell == nullptr) {
+      return RuntimeSyncBoundaryError{"TypeError", "watch cell is null"};
+    }
+    return runtime_value_shareability_error_impl(cell->read(), visited);
+  }
+  if (value.is_watch_handle()) {
+    const std::shared_ptr<RuntimeWatchHandle> handle = value.as_watch_handle();
+    if (handle == nullptr || handle->cell() == nullptr) {
+      return std::nullopt;
+    }
+    return runtime_value_shareability_error_impl(handle->cell()->read(),
+                                                 visited);
+  }
   if (!value_has_heap_payload_tag(value)) {
     return std::nullopt;
   }
@@ -337,6 +359,20 @@ bool runtime_header_is_shared_or_sync(const ObjHeader &header) {
 void runtime_append_child_values(const Value &value,
                                  std::vector<Value> *children) {
   if (children == nullptr) {
+    return;
+  }
+  if (value.is_watch_cell()) {
+    const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();
+    if (cell != nullptr) {
+      children->push_back(cell->read());
+    }
+    return;
+  }
+  if (value.is_watch_handle()) {
+    const std::shared_ptr<RuntimeWatchHandle> handle = value.as_watch_handle();
+    if (handle != nullptr && handle->cell() != nullptr) {
+      children->push_back(handle->cell()->read());
+    }
     return;
   }
   if (value.is_closure()) {
@@ -579,6 +615,396 @@ RuntimeMutexResult runtime_mutex_cancelled_result() {
 bool runtime_value_is_shareable(const Value &value) {
   return !runtime_value_shareability_error(value).has_value();
 }
+
+class RuntimeWatchCell::Impl {
+public:
+  Impl(Value value, std::uint64_t cell_id, std::string target_name)
+      : value_(std::move(value)), cell_id_(cell_id),
+        target_name_(std::move(target_name)) {}
+
+  Value read() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return value_;
+  }
+
+  RuntimeWatchWriteResult write(Value value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RuntimeWatchWriteResult result;
+    result.old_value = value_;
+    result.new_value = value;
+    result.old_revision = revision_;
+    result.new_revision = revision_;
+    if (watched_) {
+      value_ = std::move(value);
+      ++revision_;
+      result.changed = true;
+      result.new_revision = revision_;
+      result.new_value = value_;
+      return result;
+    }
+    value_ = std::move(value);
+    result.new_value = value_;
+    return result;
+  }
+
+  RuntimeWatchCellSnapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RuntimeWatchCellSnapshot snapshot;
+    snapshot.cell_id = cell_id_;
+    snapshot.revision = revision_;
+    snapshot.subscriber_count = subscriber_count_;
+    snapshot.target_name = target_name_;
+    snapshot.watched = watched_;
+    snapshot.value = value_;
+    return snapshot;
+  }
+
+  bool watched() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return watched_;
+  }
+
+  void enable_watch(std::string target_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    watched_ = true;
+    if (!target_name.empty()) {
+      target_name_ = std::move(target_name);
+    }
+  }
+
+  void subscribe() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    watched_ = true;
+    ++subscriber_count_;
+  }
+
+  void unsubscribe() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (subscriber_count_ > 0) {
+      --subscriber_count_;
+    }
+  }
+
+  std::uint64_t cell_id() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cell_id_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  Value value_ = Value::null();
+  std::uint64_t cell_id_ = 0;
+  std::uint64_t revision_ = 0;
+  std::uint64_t subscriber_count_ = 0;
+  std::string target_name_;
+  bool watched_ = false;
+};
+
+RuntimeWatchCell::RuntimeWatchCell(Value value, std::uint64_t cell_id,
+                                   std::string target_name)
+    : impl_(std::make_shared<Impl>(std::move(value), cell_id,
+                                   std::move(target_name))) {}
+
+Value RuntimeWatchCell::read() const { return impl_->read(); }
+
+RuntimeWatchWriteResult RuntimeWatchCell::write(Value value) {
+  return impl_->write(std::move(value));
+}
+
+RuntimeWatchCellSnapshot RuntimeWatchCell::snapshot() const {
+  return impl_->snapshot();
+}
+
+bool RuntimeWatchCell::watched() const { return impl_->watched(); }
+
+void RuntimeWatchCell::enable_watch(std::string target_name) {
+  impl_->enable_watch(std::move(target_name));
+}
+
+void RuntimeWatchCell::subscribe() { impl_->subscribe(); }
+
+void RuntimeWatchCell::unsubscribe() { impl_->unsubscribe(); }
+
+std::uint64_t RuntimeWatchCell::cell_id() const { return impl_->cell_id(); }
+
+class RuntimeWatchObjectState::Impl {
+public:
+  explicit Impl(std::uint64_t object_id) : object_id_(object_id) {}
+
+  RuntimeWatchObjectStateSnapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RuntimeWatchObjectStateSnapshot snapshot;
+    snapshot.object_id = object_id_;
+    snapshot.object_revision = object_revision_;
+    snapshot.subscriber_count = subscriber_count_;
+    for (const auto &[name, field] : fields_) {
+      snapshot.field_revisions[name] = field.revision;
+    }
+    return snapshot;
+  }
+
+  RuntimeWatchIvarSnapshot snapshot_field(const std::string &field_name,
+                                          Value current_value) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RuntimeWatchIvarSnapshot snapshot;
+    snapshot.object_id = object_id_;
+    snapshot.object_revision = object_revision_;
+    snapshot.field_name = field_name;
+    snapshot.value = std::move(current_value);
+    const auto found = fields_.find(field_name);
+    if (found != fields_.end()) {
+      snapshot.field_revision = found->second.revision;
+      snapshot.subscriber_count = found->second.subscriber_count;
+      snapshot.watched = found->second.watched;
+    }
+    return snapshot;
+  }
+
+  RuntimeWatchIvarWriteResult write_field(std::string field_name,
+                                          Value old_value, Value new_value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RuntimeWatchIvarWriteResult result;
+    result.field_name = field_name;
+    result.old_value = std::move(old_value);
+    result.new_value = std::move(new_value);
+    FieldState &field = fields_[field_name];
+    result.old_revision = field.revision;
+    result.new_revision = field.revision;
+    result.old_object_revision = object_revision_;
+    result.new_object_revision = object_revision_;
+    if (!field.watched) {
+      return result;
+    }
+    ++field.revision;
+    ++object_revision_;
+    result.changed = true;
+    result.new_revision = field.revision;
+    result.new_object_revision = object_revision_;
+    return result;
+  }
+
+  void subscribe_field(std::string field_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    FieldState &field = fields_[std::move(field_name)];
+    field.watched = true;
+    ++field.subscriber_count;
+    ++subscriber_count_;
+  }
+
+  void unsubscribe_field(const std::string &field_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = fields_.find(field_name);
+    if (found == fields_.end()) {
+      return;
+    }
+    if (found->second.subscriber_count > 0) {
+      --found->second.subscriber_count;
+    }
+    if (subscriber_count_ > 0) {
+      --subscriber_count_;
+    }
+  }
+
+  bool field_watched(const std::string &field_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = fields_.find(field_name);
+    return found != fields_.end() && found->second.watched;
+  }
+
+  std::uint64_t object_id() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return object_id_;
+  }
+
+private:
+  struct FieldState {
+    std::uint64_t revision = 0;
+    std::uint64_t subscriber_count = 0;
+    bool watched = false;
+  };
+
+  mutable std::mutex mutex_;
+  std::uint64_t object_id_ = 0;
+  std::uint64_t object_revision_ = 0;
+  std::uint64_t subscriber_count_ = 0;
+  std::unordered_map<std::string, FieldState> fields_;
+};
+
+RuntimeWatchObjectState::RuntimeWatchObjectState(std::uint64_t object_id)
+    : impl_(std::make_shared<Impl>(object_id)) {}
+
+RuntimeWatchObjectStateSnapshot RuntimeWatchObjectState::snapshot() const {
+  return impl_->snapshot();
+}
+
+RuntimeWatchIvarSnapshot
+RuntimeWatchObjectState::snapshot_field(const std::string &field_name,
+                                        Value current_value) const {
+  return impl_->snapshot_field(field_name, std::move(current_value));
+}
+
+RuntimeWatchIvarWriteResult
+RuntimeWatchObjectState::write_field(std::string field_name, Value old_value,
+                                     Value new_value) {
+  return impl_->write_field(std::move(field_name), std::move(old_value),
+                            std::move(new_value));
+}
+
+void RuntimeWatchObjectState::subscribe_field(std::string field_name) {
+  impl_->subscribe_field(std::move(field_name));
+}
+
+void RuntimeWatchObjectState::unsubscribe_field(const std::string &field_name) {
+  impl_->unsubscribe_field(field_name);
+}
+
+bool RuntimeWatchObjectState::field_watched(
+    const std::string &field_name) const {
+  return impl_->field_watched(field_name);
+}
+
+std::uint64_t RuntimeWatchObjectState::object_id() const {
+  return impl_->object_id();
+}
+
+class RuntimeWatchHandle::Impl {
+public:
+  Impl(std::shared_ptr<RuntimeWatchCell> cell, std::uint64_t handle_id,
+       std::string target_name)
+      : cell_(std::move(cell)), handle_id_(handle_id),
+        target_name_(std::move(target_name)) {
+    if (cell_ != nullptr) {
+      cell_->enable_watch(target_name_);
+      cell_->subscribe();
+      active_ = true;
+    }
+  }
+
+  Impl(std::shared_ptr<RuntimeWatchObjectState> object_state,
+       std::uint64_t handle_id, std::string target_name, std::string field_name)
+      : object_state_(std::move(object_state)), handle_id_(handle_id),
+        target_name_(std::move(target_name)),
+        field_name_(std::move(field_name)) {
+    if (object_state_ != nullptr) {
+      object_state_->subscribe_field(field_name_);
+      active_ = true;
+    }
+  }
+
+  ~Impl() { unwatch(); }
+
+  bool active() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return active_;
+  }
+
+  bool unwatch() {
+    std::shared_ptr<RuntimeWatchCell> cell;
+    std::shared_ptr<RuntimeWatchObjectState> object_state;
+    std::string field_name;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_) {
+        return false;
+      }
+      active_ = false;
+      cell = cell_;
+      object_state = object_state_;
+      field_name = field_name_;
+    }
+    if (cell != nullptr) {
+      cell->unsubscribe();
+    }
+    if (object_state != nullptr) {
+      object_state->unsubscribe_field(field_name);
+    }
+    return true;
+  }
+
+  std::uint64_t handle_id() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return handle_id_;
+  }
+
+  std::shared_ptr<RuntimeWatchCell> cell() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cell_;
+  }
+
+  RuntimeWatchCellSnapshot snapshot() const {
+    std::shared_ptr<RuntimeWatchCell> cell;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cell = cell_;
+    }
+    return cell == nullptr ? RuntimeWatchCellSnapshot{} : cell->snapshot();
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::shared_ptr<RuntimeWatchCell> cell_;
+  std::shared_ptr<RuntimeWatchObjectState> object_state_;
+  std::uint64_t handle_id_ = 0;
+  std::string target_name_;
+  std::string field_name_;
+  bool active_ = false;
+};
+
+RuntimeWatchHandle::RuntimeWatchHandle()
+    : impl_(std::make_shared<Impl>(nullptr, 0, "")) {}
+
+RuntimeWatchHandle::RuntimeWatchHandle(std::shared_ptr<RuntimeWatchCell> cell,
+                                       std::uint64_t handle_id,
+                                       std::string target_name)
+    : impl_(std::make_shared<Impl>(std::move(cell), handle_id,
+                                   std::move(target_name))) {}
+
+RuntimeWatchHandle::RuntimeWatchHandle(
+    std::shared_ptr<RuntimeWatchObjectState> object_state,
+    std::uint64_t handle_id, std::string target_name, std::string field_name)
+    : impl_(std::make_shared<Impl>(std::move(object_state), handle_id,
+                                   std::move(target_name),
+                                   std::move(field_name))) {}
+
+RuntimeWatchHandle::RuntimeWatchHandle(RuntimeWatchHandle &&) noexcept =
+    default;
+
+RuntimeWatchHandle &
+RuntimeWatchHandle::operator=(RuntimeWatchHandle &&) noexcept = default;
+
+RuntimeWatchHandle::~RuntimeWatchHandle() = default;
+
+bool RuntimeWatchHandle::active() const { return impl_->active(); }
+
+bool RuntimeWatchHandle::unwatch() { return impl_->unwatch(); }
+
+std::uint64_t RuntimeWatchHandle::handle_id() const {
+  return impl_->handle_id();
+}
+
+std::shared_ptr<RuntimeWatchCell> RuntimeWatchHandle::cell() const {
+  return impl_->cell();
+}
+
+RuntimeWatchCellSnapshot RuntimeWatchHandle::snapshot() const {
+  return impl_->snapshot();
+}
+
+namespace {
+
+std::shared_ptr<RuntimeWatchCell> watch_cell_from_value(const Value &value) {
+  if (!value.is_watch_cell()) {
+    return nullptr;
+  }
+  return value.as_watch_cell();
+}
+
+Value unwrap_watch_value(const Value &value) {
+  const std::shared_ptr<RuntimeWatchCell> cell = watch_cell_from_value(value);
+  return cell == nullptr ? value : cell->read();
+}
+
+} // namespace
 
 class RuntimeAwaitable::Impl {
 public:
@@ -5570,6 +5996,14 @@ Value Value::threaded_collection(
   return {std::move(value)};
 }
 
+Value Value::watch_cell(std::shared_ptr<RuntimeWatchCell> value) {
+  return {std::move(value)};
+}
+
+Value Value::watch_handle(std::shared_ptr<RuntimeWatchHandle> value) {
+  return {std::move(value)};
+}
+
 bool Value::is_null() const {
   return std::holds_alternative<std::monostate>(payload);
 }
@@ -5655,6 +6089,14 @@ bool Value::is_threaded_collection() const {
       payload);
 }
 
+bool Value::is_watch_cell() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeWatchCell>>(payload);
+}
+
+bool Value::is_watch_handle() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeWatchHandle>>(payload);
+}
+
 bool Value::as_bool() const { return std::get<bool>(payload); }
 
 std::int64_t Value::as_integer() const {
@@ -5732,6 +6174,14 @@ Value::as_threaded_collection() const {
   return std::get<std::shared_ptr<RuntimeThreadedCollection>>(payload);
 }
 
+std::shared_ptr<RuntimeWatchCell> Value::as_watch_cell() const {
+  return std::get<std::shared_ptr<RuntimeWatchCell>>(payload);
+}
+
+std::shared_ptr<RuntimeWatchHandle> Value::as_watch_handle() const {
+  return std::get<std::shared_ptr<RuntimeWatchHandle>>(payload);
+}
+
 Value make_list_value(std::vector<Value> items, bool frozen) {
   return default_runtime_heap().make_list_value(std::move(items), frozen);
 }
@@ -5764,6 +6214,50 @@ constexpr std::uint32_t kMethodFlagInstance = 1U;
 constexpr std::uint32_t kMethodFlagClass = 2U;
 constexpr std::int64_t kPatternFailModeSoft = 0;
 constexpr std::int64_t kPatternFailModeMatchError = 1;
+
+const char *native_type_name(RuntimeNativeTypeKind kind) {
+  switch (kind) {
+  case RuntimeNativeTypeKind::TaskModule:
+    return "TaskModule";
+  case RuntimeNativeTypeKind::Channel:
+    return "Channel";
+  case RuntimeNativeTypeKind::Mutex:
+    return "Mutex";
+  case RuntimeNativeTypeKind::Atomic:
+    return "Atomic";
+  case RuntimeNativeTypeKind::Barrier:
+    return "Barrier";
+  case RuntimeNativeTypeKind::Flow:
+    return "Flow";
+  case RuntimeNativeTypeKind::ThreadedCollection:
+    return "ThreadedCollection";
+  case RuntimeNativeTypeKind::Amber:
+    return "Amber";
+  case RuntimeNativeTypeKind::Str:
+    return "Str";
+  case RuntimeNativeTypeKind::Int:
+    return "Int";
+  case RuntimeNativeTypeKind::Float:
+    return "Float";
+  case RuntimeNativeTypeKind::Bool:
+    return "Bool";
+  case RuntimeNativeTypeKind::Symbol:
+    return "Symbol";
+  case RuntimeNativeTypeKind::Array:
+    return "Array";
+  case RuntimeNativeTypeKind::Tuple:
+    return "Tuple";
+  case RuntimeNativeTypeKind::Set:
+    return "Set";
+  case RuntimeNativeTypeKind::Map:
+    return "Map";
+  case RuntimeNativeTypeKind::Null:
+    return "Null";
+  case RuntimeNativeTypeKind::Object:
+    return "Object";
+  }
+  return "NativeType";
+}
 
 bool value_has_heap_payload_tag(const Value &value) {
   return value.is_closure() || value.is_instance_object() || value.is_list() ||
@@ -5973,6 +6467,13 @@ struct RuntimeState {
   bool owners_initialized = false;
   bool world_frozen = false;
   std::uint64_t world_epoch = 1;
+  std::uint64_t watch_epoch = 0;
+  std::uint64_t next_watch_cell_id = 1;
+  std::uint64_t next_watch_handle_id = 1;
+  std::vector<RuntimeWatchEvent> watch_events;
+  bool dependency_capture_active = false;
+  RuntimeDependencySet dependency_capture;
+  std::unordered_map<std::string, std::size_t> dependency_capture_index;
   std::unordered_map<std::uint64_t, CallCacheEntry> call_caches;
   std::uint64_t call_cache_hits = 0;
   std::uint64_t call_cache_misses = 0;
@@ -5987,6 +6488,84 @@ struct RuntimeState {
   static std::string shape_transition_key(std::uint64_t parent_id,
                                           const std::string &name) {
     return std::to_string(parent_id) + "\x1f" + name;
+  }
+
+  std::shared_ptr<RuntimeWatchCell> make_watch_cell(Value value,
+                                                    std::string target_name) {
+    return std::make_shared<RuntimeWatchCell>(
+        std::move(value), next_watch_cell_id++, std::move(target_name));
+  }
+
+  std::shared_ptr<RuntimeWatchHandle>
+  make_watch_handle(std::shared_ptr<RuntimeWatchCell> cell,
+                    std::string target_name) {
+    return std::make_shared<RuntimeWatchHandle>(
+        std::move(cell), next_watch_handle_id++, std::move(target_name));
+  }
+
+  std::shared_ptr<RuntimeWatchHandle>
+  make_watch_handle(std::shared_ptr<RuntimeWatchObjectState> object_state,
+                    std::string target_name, std::string field_name) {
+    return std::make_shared<RuntimeWatchHandle>(
+        std::move(object_state), next_watch_handle_id++, std::move(target_name),
+        std::move(field_name));
+  }
+
+  RuntimeWatchEvent record_watch_event(RuntimeWatchEvent event) {
+    event.watch_epoch = ++watch_epoch;
+    watch_events.push_back(event);
+    return event;
+  }
+
+  static std::string dependency_key(const RuntimeDependency &dependency) {
+    switch (dependency.kind) {
+    case RuntimeDependencyKind::Binding:
+      return "binding:" + std::to_string(dependency.cell_id);
+    case RuntimeDependencyKind::Ivar:
+      return "ivar:" + std::to_string(dependency.object_id) + ":" +
+             dependency.field_name;
+    case RuntimeDependencyKind::Object:
+      return "object:" + std::to_string(dependency.object_id);
+    }
+    return {};
+  }
+
+  void begin_dependency_capture(std::uint64_t notebook_cell_id) {
+    dependency_capture_active = true;
+    dependency_capture = RuntimeDependencySet{};
+    dependency_capture.notebook_cell_id = notebook_cell_id;
+    dependency_capture_index.clear();
+  }
+
+  RuntimeDependencySet end_dependency_capture() {
+    RuntimeDependencySet result = dependency_capture;
+    dependency_capture_active = false;
+    dependency_capture = RuntimeDependencySet{};
+    dependency_capture_index.clear();
+    return result;
+  }
+
+  RuntimeDependencySet dependency_capture_snapshot() const {
+    return dependency_capture_active ? dependency_capture
+                                     : RuntimeDependencySet{};
+  }
+
+  void record_dependency(RuntimeDependency dependency) {
+    if (!dependency_capture_active) {
+      return;
+    }
+    const std::string key = dependency_key(dependency);
+    if (key.empty()) {
+      return;
+    }
+    const auto found = dependency_capture_index.find(key);
+    if (found == dependency_capture_index.end()) {
+      dependency_capture_index.emplace(key,
+                                       dependency_capture.dependencies.size());
+      dependency_capture.dependencies.push_back(std::move(dependency));
+      return;
+    }
+    dependency_capture.dependencies[found->second] = std::move(dependency);
   }
 
   void initialize_for_module(const BcModule &module) {
@@ -6142,6 +6721,9 @@ bool is_truthy(const Value &value) {
 }
 
 bool value_equals(const Value &lhs, const Value &rhs) {
+  if (lhs.is_watch_cell() || rhs.is_watch_cell()) {
+    return value_equals(unwrap_watch_value(lhs), unwrap_watch_value(rhs));
+  }
   if (lhs.payload.index() != rhs.payload.index()) {
     return false;
   }
@@ -6196,6 +6778,9 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   }
   if (lhs.is_threaded_collection()) {
     return lhs.as_threaded_collection() == rhs.as_threaded_collection();
+  }
+  if (lhs.is_watch_handle()) {
+    return lhs.as_watch_handle() == rhs.as_watch_handle();
   }
   if (lhs.is_instance_object()) {
     return lhs.as_instance_object() == rhs.as_instance_object();
@@ -6323,6 +6908,7 @@ public:
 
   ExecutionResult execute(std::uint32_t code_id, const std::vector<Value> &args,
                           Value self, Value block) {
+    const std::size_t watch_event_start = state_->watch_events.size();
     const BcCode *entry = find_code(module_, code_id);
     if (entry == nullptr) {
       return fail("VMError", "unknown code id", code_id, 0);
@@ -6333,10 +6919,21 @@ public:
       step();
     }
     state_->heap.drain_remote_frees();
-    if (fault_.has_value()) {
-      return {Value::null(), fault_};
+    std::vector<RuntimeWatchEvent> watch_events;
+    if (watch_event_start <= state_->watch_events.size()) {
+      watch_events.assign(state_->watch_events.begin() +
+                              static_cast<std::ptrdiff_t>(watch_event_start),
+                          state_->watch_events.end());
     }
-    return {final_value_, std::nullopt, completed_locals_for(*entry)};
+    if (fault_.has_value()) {
+      return {Value::null(),
+              fault_,
+              {},
+              std::move(watch_events),
+              state_->watch_epoch};
+    }
+    return {final_value_, std::nullopt, completed_locals_for(*entry),
+            std::move(watch_events), state_->watch_epoch};
   }
 
 private:
@@ -6353,6 +6950,26 @@ private:
     return module_.strings[string_id];
   }
 
+  std::string local_name_for_slot(const BcCode &code,
+                                  std::uint32_t slot) const {
+    for (const SlotLayoutEntry &entry : code.local_layout) {
+      if (entry.slot == slot) {
+        return string_or_empty(entry.name_str_id);
+      }
+    }
+    return "l" + std::to_string(slot);
+  }
+
+  std::string capture_name_for_slot(const BcCode &code,
+                                    std::uint32_t slot) const {
+    for (const bytecode::CaptureLayoutEntry &entry : code.capture_layout) {
+      if (entry.slot == slot) {
+        return string_or_empty(entry.name_str_id);
+      }
+    }
+    return "u" + std::to_string(slot);
+  }
+
   std::vector<ExecutionLocal> completed_locals_for(const BcCode &code) const {
     std::vector<ExecutionLocal> locals;
     locals.reserve(code.local_layout.size());
@@ -6366,7 +6983,20 @@ private:
                           last_completed_initialized_[entry.slot] != 0U &&
                           entry.slot < last_completed_regs_.size();
       if (local.initialized) {
-        local.value = last_completed_regs_[entry.slot];
+        const Value storage = last_completed_regs_[entry.slot];
+        if (storage.is_watch_cell()) {
+          const std::shared_ptr<RuntimeWatchCell> cell =
+              storage.as_watch_cell();
+          if (cell != nullptr) {
+            const RuntimeWatchCellSnapshot snapshot = cell->snapshot();
+            local.value = snapshot.value;
+            local.watched = snapshot.watched;
+            local.watch_cell_id = snapshot.cell_id;
+            local.watch_revision = snapshot.revision;
+          }
+        } else {
+          local.value = storage;
+        }
       }
       locals.push_back(std::move(local));
     }
@@ -6709,6 +7339,21 @@ private:
   }
 
   void append_value_root(std::vector<Value> *roots, const Value &value) const {
+    if (value.is_watch_cell()) {
+      const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();
+      if (cell != nullptr) {
+        append_value_root(roots, cell->read());
+      }
+      return;
+    }
+    if (value.is_watch_handle()) {
+      const std::shared_ptr<RuntimeWatchHandle> handle =
+          value.as_watch_handle();
+      if (handle != nullptr && handle->cell() != nullptr) {
+        append_value_root(roots, handle->cell()->read());
+      }
+      return;
+    }
     if (value_has_heap_payload_tag(value)) {
       roots->push_back(value);
     }
@@ -7052,6 +7697,42 @@ private:
   std::optional<Value>
   lookup_native_prelude_constant(const std::vector<std::string> &segments) {
     const std::string path = join_path_segments(segments);
+    if (path == "Amber") {
+      return Value::native_type(RuntimeNativeTypeKind::Amber);
+    }
+    if (path == "Str") {
+      return Value::native_type(RuntimeNativeTypeKind::Str);
+    }
+    if (path == "Int") {
+      return Value::native_type(RuntimeNativeTypeKind::Int);
+    }
+    if (path == "Float") {
+      return Value::native_type(RuntimeNativeTypeKind::Float);
+    }
+    if (path == "Bool") {
+      return Value::native_type(RuntimeNativeTypeKind::Bool);
+    }
+    if (path == "Symbol") {
+      return Value::native_type(RuntimeNativeTypeKind::Symbol);
+    }
+    if (path == "Array") {
+      return Value::native_type(RuntimeNativeTypeKind::Array);
+    }
+    if (path == "Tuple") {
+      return Value::native_type(RuntimeNativeTypeKind::Tuple);
+    }
+    if (path == "Set") {
+      return Value::native_type(RuntimeNativeTypeKind::Set);
+    }
+    if (path == "Map") {
+      return Value::native_type(RuntimeNativeTypeKind::Map);
+    }
+    if (path == "Null") {
+      return Value::native_type(RuntimeNativeTypeKind::Null);
+    }
+    if (path == "Object") {
+      return Value::native_type(RuntimeNativeTypeKind::Object);
+    }
     if (path == "task") {
       return Value::task_module(std::make_shared<RuntimeTaskModule>());
     }
@@ -7080,6 +7761,43 @@ private:
     return std::nullopt;
   }
 
+  std::optional<std::uint32_t> lookup_class_by_path_segments_no_fault(
+      const std::vector<std::string> &segments, bool *ambiguous) {
+    if (ambiguous != nullptr) {
+      *ambiguous = false;
+    }
+    if (segments.empty()) {
+      return std::nullopt;
+    }
+
+    const std::string full_path = join_path_segments(segments);
+    for (std::uint32_t index = 0; index < module_.classes.size(); ++index) {
+      const std::uint32_t symbol_id = module_.classes[index].class_name_sym_id;
+      if (symbol_id < module_.symbols.size() &&
+          module_.symbols[symbol_id] == full_path) {
+        return index;
+      }
+    }
+
+    const std::string &leaf = segments.back();
+    std::optional<std::uint32_t> match;
+    for (std::uint32_t index = 0; index < module_.classes.size(); ++index) {
+      const std::uint32_t symbol_id = module_.classes[index].class_name_sym_id;
+      if (symbol_id >= module_.symbols.size() ||
+          module_.symbols[symbol_id] != leaf) {
+        continue;
+      }
+      if (match.has_value()) {
+        if (ambiguous != nullptr) {
+          *ambiguous = true;
+        }
+        return std::nullopt;
+      }
+      match = index;
+    }
+    return match;
+  }
+
   bool find_class_by_path_segments(const Frame &frame,
                                    const std::vector<std::string> &segments,
                                    std::uint32_t *out_class_index) {
@@ -7088,35 +7806,16 @@ private:
       return false;
     }
 
-    const std::string full_path = join_path_segments(segments);
-    for (std::uint32_t index = 0; index < module_.classes.size(); ++index) {
-      const std::uint32_t symbol_id = module_.classes[index].class_name_sym_id;
-      if (symbol_id < module_.symbols.size() &&
-          module_.symbols[symbol_id] == full_path) {
-        *out_class_index = index;
-        return true;
-      }
-    }
-
-    const std::string &leaf = segments.back();
-    std::optional<std::uint32_t> match;
-    for (std::uint32_t index = 0; index < module_.classes.size(); ++index) {
-      const std::uint32_t symbol_id = module_.classes[index].class_name_sym_id;
-      if (symbol_id >= module_.symbols.size()) {
-        continue;
-      }
-      if (module_.symbols[symbol_id] != leaf) {
-        continue;
-      }
-      if (match.has_value()) {
-        set_fault(frame, "VMError", "class path ref is ambiguous");
-        return false;
-      }
-      match = index;
-    }
+    bool ambiguous = false;
+    const std::optional<std::uint32_t> match =
+        lookup_class_by_path_segments_no_fault(segments, &ambiguous);
     if (match.has_value()) {
       *out_class_index = *match;
       return true;
+    }
+    if (ambiguous) {
+      set_fault(frame, "VMError", "class path ref is ambiguous");
+      return false;
     }
     set_fault(frame, "VMError", "class path ref target is unknown");
     return false;
@@ -7137,11 +7836,21 @@ private:
     if (!path_segments_from_constant(frame, constant, &segments)) {
       return Value::null();
     }
+    std::uint32_t class_index = 0;
+    bool ambiguous = false;
+    const std::optional<std::uint32_t> class_match =
+        lookup_class_by_path_segments_no_fault(segments, &ambiguous);
+    if (class_match.has_value()) {
+      return Value::class_object(*class_match);
+    }
+    if (ambiguous) {
+      set_fault(frame, "VMError", "class path ref is ambiguous");
+      return Value::null();
+    }
     if (std::optional<Value> native_value =
             lookup_native_prelude_constant(segments)) {
       return *native_value;
     }
-    std::uint32_t class_index = 0;
     if (find_class_by_path_segments(frame, segments, &class_index)) {
       return Value::class_object(class_index);
     }
@@ -7157,7 +7866,181 @@ private:
       set_fault(frame, "NameError", "read of uninitialized local/module cell");
       return Value::null();
     }
-    return frame.regs[reg];
+    return unwrap_watch_value_for_read(frame.regs[reg]);
+  }
+
+  void record_watch_cell_dependency(const RuntimeWatchCellSnapshot &snapshot) {
+    if (!snapshot.watched || snapshot.cell_id == 0) {
+      return;
+    }
+    RuntimeDependency dependency;
+    dependency.kind = RuntimeDependencyKind::Binding;
+    dependency.cell_id = snapshot.cell_id;
+    dependency.target_name = snapshot.target_name;
+    dependency.revision = snapshot.revision;
+    state_->record_dependency(std::move(dependency));
+  }
+
+  Value read_watch_cell_value(const std::shared_ptr<RuntimeWatchCell> &cell) {
+    if (cell == nullptr) {
+      return Value::null();
+    }
+    const RuntimeWatchCellSnapshot snapshot = cell->snapshot();
+    record_watch_cell_dependency(snapshot);
+    return snapshot.value;
+  }
+
+  Value unwrap_watch_value_for_read(const Value &value) {
+    if (!value.is_watch_cell()) {
+      return value;
+    }
+    return read_watch_cell_value(value.as_watch_cell());
+  }
+
+  void record_watch_ivar_dependency(const RuntimeWatchIvarSnapshot &snapshot) {
+    if (!snapshot.watched || snapshot.object_id == 0 ||
+        snapshot.field_name.empty()) {
+      return;
+    }
+    RuntimeDependency dependency;
+    dependency.kind = RuntimeDependencyKind::Ivar;
+    dependency.object_id = snapshot.object_id;
+    dependency.target_name = "@" + snapshot.field_name;
+    dependency.field_name = snapshot.field_name;
+    dependency.revision = snapshot.field_revision;
+    dependency.object_revision = snapshot.object_revision;
+    state_->record_dependency(std::move(dependency));
+  }
+
+  Value record_watch_ivar_read(const std::shared_ptr<InstanceValue> &instance,
+                               const std::string &field_name,
+                               Value current_value) {
+    if (instance == nullptr || instance->watch_state == nullptr ||
+        !instance->watch_state->field_watched(field_name)) {
+      return current_value;
+    }
+    const RuntimeWatchIvarSnapshot snapshot =
+        instance->watch_state->snapshot_field(field_name, current_value);
+    record_watch_ivar_dependency(snapshot);
+    return current_value;
+  }
+
+  RuntimeWatchEvent make_watch_event(const std::string &kind,
+                                     const RuntimeWatchCellSnapshot &snapshot,
+                                     const RuntimeWatchWriteResult *write,
+                                     std::uint64_t handle_id = 0) {
+    RuntimeWatchEvent event;
+    event.kind = kind;
+    event.cell_id = snapshot.cell_id;
+    event.handle_id = handle_id;
+    event.target_name = snapshot.target_name;
+    event.old_revision = snapshot.revision;
+    event.new_revision = snapshot.revision;
+    event.old_value = snapshot.value;
+    event.new_value = snapshot.value;
+    if (write != nullptr) {
+      event.old_revision = write->old_revision;
+      event.new_revision = write->new_revision;
+      event.old_value = write->old_value;
+      event.new_value = write->new_value;
+    }
+    return event;
+  }
+
+  RuntimeWatchEvent make_watch_ivar_event(
+      const std::string &kind, const RuntimeWatchIvarSnapshot &snapshot,
+      const RuntimeWatchIvarWriteResult *write, std::uint64_t handle_id = 0) {
+    RuntimeWatchEvent event;
+    event.kind = kind;
+    event.handle_id = handle_id;
+    event.object_id = snapshot.object_id;
+    event.old_object_revision = snapshot.object_revision;
+    event.new_object_revision = snapshot.object_revision;
+    event.target_name = "@" + snapshot.field_name;
+    event.field_name = snapshot.field_name;
+    event.old_revision = snapshot.field_revision;
+    event.new_revision = snapshot.field_revision;
+    event.old_value = snapshot.value;
+    event.new_value = snapshot.value;
+    if (write != nullptr) {
+      event.old_object_revision = write->old_object_revision;
+      event.new_object_revision = write->new_object_revision;
+      event.old_revision = write->old_revision;
+      event.new_revision = write->new_revision;
+      event.old_value = write->old_value;
+      event.new_value = write->new_value;
+    }
+    return event;
+  }
+
+  void record_watch_write(const std::shared_ptr<RuntimeWatchCell> &cell,
+                          const RuntimeWatchWriteResult &write) {
+    if (cell == nullptr || !write.changed) {
+      return;
+    }
+    state_->record_watch_event(
+        make_watch_event("watch.write", cell->snapshot(), &write));
+  }
+
+  std::uint64_t
+  object_watch_id(const std::shared_ptr<InstanceValue> &instance) const {
+    if (instance == nullptr) {
+      return 0;
+    }
+    if (instance->header.allocation_id != 0) {
+      return instance->header.allocation_id;
+    }
+    return static_cast<std::uint64_t>(
+        reinterpret_cast<std::uintptr_t>(instance.get()));
+  }
+
+  std::shared_ptr<RuntimeWatchObjectState>
+  ensure_watch_object_state(const std::shared_ptr<InstanceValue> &instance) {
+    if (instance == nullptr) {
+      return nullptr;
+    }
+    if (instance->watch_state == nullptr) {
+      instance->watch_state =
+          std::make_shared<RuntimeWatchObjectState>(object_watch_id(instance));
+    }
+    return instance->watch_state;
+  }
+
+  Value
+  instance_ivar_value_or_null(const std::shared_ptr<InstanceValue> &instance,
+                              const std::string &name) const {
+    if (instance == nullptr) {
+      return Value::null();
+    }
+    const std::shared_ptr<const ShapeDescriptor> shape = instance->header.shape;
+    if (shape != nullptr && !shape->dead) {
+      const auto slot = shape->ivar_slots.find(name);
+      if (slot != shape->ivar_slots.end() &&
+          slot->second < instance->ivar_storage.size()) {
+        return instance->ivar_storage[slot->second];
+      }
+    }
+    const auto legacy = instance->ivars.find(name);
+    return legacy == instance->ivars.end() ? Value::null() : legacy->second;
+  }
+
+  void record_watch_ivar_write(const std::shared_ptr<InstanceValue> &instance,
+                               const std::string &field_name, Value old_value,
+                               Value new_value) {
+    if (instance == nullptr || instance->watch_state == nullptr ||
+        !instance->watch_state->field_watched(field_name)) {
+      return;
+    }
+    const RuntimeWatchIvarWriteResult write =
+        instance->watch_state->write_field(field_name, std::move(old_value),
+                                           std::move(new_value));
+    if (!write.changed) {
+      return;
+    }
+    const RuntimeWatchIvarSnapshot snapshot =
+        instance->watch_state->snapshot_field(field_name, write.new_value);
+    state_->record_watch_event(
+        make_watch_ivar_event("watch.ivar.write", snapshot, &write));
   }
 
   bool write_reg(Frame &frame, std::uint32_t reg, Value value) {
@@ -7168,12 +8051,115 @@ private:
     if (frame.initialized.size() < frame.regs.size()) {
       frame.initialized.resize(frame.regs.size(), 0U);
     }
+    if (frame.initialized[reg] != 0U && frame.regs[reg].is_watch_cell()) {
+      const std::shared_ptr<RuntimeWatchCell> cell =
+          frame.regs[reg].as_watch_cell();
+      if (cell != nullptr) {
+        const RuntimeWatchWriteResult write = cell->write(std::move(value));
+        record_watch_write(cell, write);
+        frame.initialized[reg] = 1U;
+        frame.prepared_seq_regs.erase(reg);
+        frame.prepared_map_regs.erase(reg);
+        frame.pending_pattern_bindings.erase(reg);
+        return true;
+      }
+    }
     frame.regs[reg] = std::move(value);
     frame.initialized[reg] = 1U;
     frame.prepared_seq_regs.erase(reg);
     frame.prepared_map_regs.erase(reg);
     frame.pending_pattern_bindings.erase(reg);
     return true;
+  }
+
+  std::shared_ptr<RuntimeWatchCell>
+  ensure_local_storage_cell(Frame &frame, std::uint32_t slot,
+                            std::optional<Value> seed = {}) {
+    if (slot >= frame.regs.size()) {
+      set_fault(frame, "VMError", "register out of range");
+      return nullptr;
+    }
+    if (frame.initialized.size() < frame.regs.size()) {
+      frame.initialized.resize(frame.regs.size(), 0U);
+    }
+    if (frame.initialized[slot] == 0U && !seed.has_value()) {
+      set_fault(frame, "NameError", "read of uninitialized local/module cell");
+      return nullptr;
+    }
+    if (frame.initialized[slot] != 0U && frame.regs[slot].is_watch_cell()) {
+      return frame.regs[slot].as_watch_cell();
+    }
+    const std::string target_name =
+        frame.code == nullptr ? "l" + std::to_string(slot)
+                              : local_name_for_slot(*frame.code, slot);
+    std::shared_ptr<RuntimeWatchCell> cell = state_->make_watch_cell(
+        seed.has_value() ? std::move(*seed) : frame.regs[slot], target_name);
+    frame.regs[slot] = Value::watch_cell(cell);
+    frame.initialized[slot] = 1U;
+    return cell;
+  }
+
+  std::shared_ptr<RuntimeWatchCell>
+  ensure_capture_storage_cell(Frame &frame, std::uint32_t slot) {
+    if (slot >= frame.captures.size()) {
+      set_fault(frame, "VMError", "capture slot out of range");
+      return nullptr;
+    }
+    if (frame.captures[slot].is_watch_cell()) {
+      return frame.captures[slot].as_watch_cell();
+    }
+    const std::string target_name =
+        frame.code == nullptr ? "u" + std::to_string(slot)
+                              : capture_name_for_slot(*frame.code, slot);
+    std::shared_ptr<RuntimeWatchCell> cell =
+        state_->make_watch_cell(frame.captures[slot], target_name);
+    frame.captures[slot] = Value::watch_cell(cell);
+    return cell;
+  }
+
+  std::shared_ptr<RuntimeWatchHandle>
+  watch_cell(const std::shared_ptr<RuntimeWatchCell> &cell,
+             std::string target_name) {
+    if (cell == nullptr) {
+      return nullptr;
+    }
+    std::shared_ptr<RuntimeWatchHandle> handle =
+        state_->make_watch_handle(cell, std::move(target_name));
+    state_->record_watch_event(make_watch_event(
+        "watch.binding", cell->snapshot(), nullptr, handle->handle_id()));
+    return handle;
+  }
+
+  std::shared_ptr<RuntimeWatchHandle>
+  watch_ivar(Frame &frame, const std::shared_ptr<InstanceValue> &instance,
+             const std::string &field_name) {
+    if (instance == nullptr) {
+      set_fault(frame, "TypeError", "instance receiver is null");
+      return nullptr;
+    }
+    if (!ensure_instance_layout(frame, instance)) {
+      return nullptr;
+    }
+    const Value current_value =
+        instance_ivar_value_or_null(instance, field_name);
+    std::shared_ptr<RuntimeWatchObjectState> object_state =
+        ensure_watch_object_state(instance);
+    if (object_state == nullptr) {
+      set_fault(frame, "VMError", "watch object state is missing");
+      return nullptr;
+    }
+    const std::string target_name = "@" + field_name;
+    std::shared_ptr<RuntimeWatchHandle> handle =
+        state_->make_watch_handle(object_state, target_name, field_name);
+    if (handle == nullptr) {
+      set_fault(frame, "VMError", "watch handle allocation failed");
+      return nullptr;
+    }
+    const RuntimeWatchIvarSnapshot snapshot =
+        object_state->snapshot_field(field_name, current_value);
+    state_->record_watch_event(make_watch_ivar_event(
+        "watch.ivar", snapshot, nullptr, handle->handle_id()));
+    return handle;
   }
 
   void clear_pattern_state(Frame &frame) {
@@ -7998,10 +8984,11 @@ private:
     if (fault_.has_value()) {
       return std::nullopt;
     }
-    if (!slot.has_value() || *slot >= instance->ivar_storage.size()) {
-      return Value::null();
-    }
-    return instance->ivar_storage[*slot];
+    const Value value =
+        !slot.has_value() || *slot >= instance->ivar_storage.size()
+            ? Value::null()
+            : instance->ivar_storage[*slot];
+    return record_watch_ivar_read(instance, name, value);
   }
 
   struct RangeBounds {
@@ -8484,6 +9471,16 @@ private:
     return module_.strings[string_id];
   }
 
+  std::uint32_t intern_runtime_string(const std::string &text) {
+    for (std::uint32_t i = 0; i < module_.strings.size(); ++i) {
+      if (module_.strings[i] == text) {
+        return i;
+      }
+    }
+    module_.strings.push_back(text);
+    return static_cast<std::uint32_t>(module_.strings.size() - 1U);
+  }
+
   std::optional<std::uint32_t> symbol_id_for_text(const std::string &text) {
     for (std::uint32_t i = 0; i < module_.symbols.size(); ++i) {
       if (module_.symbols[i] == text) {
@@ -8491,6 +9488,371 @@ private:
       }
     }
     return std::nullopt;
+  }
+
+  std::uint32_t intern_runtime_symbol(const std::string &text) {
+    if (const std::optional<std::uint32_t> existing =
+            symbol_id_for_text(text)) {
+      return *existing;
+    }
+    module_.symbols.push_back(text);
+    return static_cast<std::uint32_t>(module_.symbols.size() - 1U);
+  }
+
+  struct ConversionResult {
+    bool ok = false;
+    Value value = Value::null();
+    std::string error_name = "TypeError";
+    std::string message;
+  };
+
+  static bool is_conversion_type(RuntimeNativeTypeKind kind) {
+    switch (kind) {
+    case RuntimeNativeTypeKind::Str:
+    case RuntimeNativeTypeKind::Int:
+    case RuntimeNativeTypeKind::Float:
+    case RuntimeNativeTypeKind::Bool:
+    case RuntimeNativeTypeKind::Symbol:
+    case RuntimeNativeTypeKind::Array:
+    case RuntimeNativeTypeKind::Tuple:
+    case RuntimeNativeTypeKind::Set:
+    case RuntimeNativeTypeKind::Map:
+    case RuntimeNativeTypeKind::Null:
+    case RuntimeNativeTypeKind::Object:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  std::optional<RuntimeNativeTypeKind>
+  conversion_type_from_value(const Value &target) const {
+    if (target.is_native_type()) {
+      const RuntimeNativeTypeKind kind = target.as_native_type().kind;
+      if (is_conversion_type(kind)) {
+        return kind;
+      }
+    }
+    return std::nullopt;
+  }
+
+  ConversionResult conversion_ok(Value value) {
+    ConversionResult result;
+    result.ok = true;
+    result.value = std::move(value);
+    return result;
+  }
+
+  ConversionResult conversion_error(std::string error_name,
+                                    std::string message) {
+    ConversionResult result;
+    result.ok = false;
+    result.error_name = std::move(error_name);
+    result.message = std::move(message);
+    return result;
+  }
+
+  bool parse_integer_text(const std::string &text, std::int64_t *out) {
+    if (text.empty()) {
+      return false;
+    }
+    const char *begin = text.data();
+    const char *end = text.data() + text.size();
+    const auto parsed = std::from_chars(begin, end, *out, 10);
+    return parsed.ec == std::errc{} && parsed.ptr == end;
+  }
+
+  bool parse_float_text(const std::string &text, double *out) {
+    if (text.empty()) {
+      return false;
+    }
+    for (unsigned char c : text) {
+      if (std::isspace(c) != 0) {
+        return false;
+      }
+    }
+    try {
+      std::size_t consumed = 0;
+      const double parsed = std::stod(text, &consumed);
+      if (consumed != text.size()) {
+        return false;
+      }
+      *out = parsed;
+      return true;
+    } catch (const std::invalid_argument &) {
+      return false;
+    } catch (const std::out_of_range &) {
+      return false;
+    }
+  }
+
+  ConversionResult display_string_value(const Value &value) {
+    if (value.is_string()) {
+      const std::optional<std::string> text =
+          string_text_from_id(value.as_string().string_id);
+      if (!text.has_value()) {
+        return conversion_error("VMError", "string ref is invalid");
+      }
+      return conversion_ok(value);
+    }
+    if (value.is_symbol()) {
+      const std::optional<std::string> text =
+          selector_text_from_symbol(value.as_symbol().symbol_id);
+      if (!text.has_value()) {
+        return conversion_error("VMError", "symbol ref is invalid");
+      }
+      return conversion_ok(Value::string(intern_runtime_string(*text)));
+    }
+    if (value.is_float()) {
+      std::ostringstream out;
+      out << std::setprecision(17) << value.as_float();
+      return conversion_ok(Value::string(intern_runtime_string(out.str())));
+    }
+    if (value.is_native_type()) {
+      return conversion_ok(Value::string(intern_runtime_string(
+          std::string("<type ") +
+          native_type_name(value.as_native_type().kind) + ">")));
+    }
+    const std::string text = value_to_debug_string(value, &module_);
+    if (value.is_string()) {
+      return conversion_ok(value);
+    }
+    return conversion_ok(Value::string(intern_runtime_string(text)));
+  }
+
+  ConversionResult convert_value_to_native_type(const Frame &frame,
+                                                const Value &value,
+                                                RuntimeNativeTypeKind target) {
+    (void)frame;
+    switch (target) {
+    case RuntimeNativeTypeKind::Str:
+      return display_string_value(value);
+    case RuntimeNativeTypeKind::Int: {
+      if (value.is_integer()) {
+        return conversion_ok(value);
+      }
+      if (value.is_float()) {
+        const double raw = value.as_float();
+        const auto as_int = static_cast<std::int64_t>(raw);
+        if (!std::isfinite(raw) || static_cast<double>(as_int) != raw) {
+          return conversion_error("ValueError",
+                                  "Float cannot be exactly cast to Int");
+        }
+        return conversion_ok(Value::integer(as_int));
+      }
+      if (value.is_string()) {
+        const std::optional<std::string> text =
+            string_text_from_id(value.as_string().string_id);
+        std::int64_t parsed = 0;
+        if (!text.has_value()) {
+          return conversion_error("VMError", "string ref is invalid");
+        }
+        if (!parse_integer_text(*text, &parsed)) {
+          return conversion_error("ValueError", "String content is not an Int");
+        }
+        return conversion_ok(Value::integer(parsed));
+      }
+      return conversion_error("TypeError", "cannot cast value to Int");
+    }
+    case RuntimeNativeTypeKind::Float: {
+      if (value.is_float()) {
+        return conversion_ok(value);
+      }
+      if (value.is_integer()) {
+        return conversion_ok(
+            Value::floating(static_cast<double>(value.as_integer())));
+      }
+      if (value.is_string()) {
+        const std::optional<std::string> text =
+            string_text_from_id(value.as_string().string_id);
+        double parsed = 0.0;
+        if (!text.has_value()) {
+          return conversion_error("VMError", "string ref is invalid");
+        }
+        if (!parse_float_text(*text, &parsed)) {
+          return conversion_error("ValueError",
+                                  "String content is not a Float");
+        }
+        return conversion_ok(Value::floating(parsed));
+      }
+      return conversion_error("TypeError", "cannot cast value to Float");
+    }
+    case RuntimeNativeTypeKind::Bool: {
+      if (value.is_bool()) {
+        return conversion_ok(value);
+      }
+      if (value.is_string()) {
+        const std::optional<std::string> text =
+            string_text_from_id(value.as_string().string_id);
+        if (!text.has_value()) {
+          return conversion_error("VMError", "string ref is invalid");
+        }
+        if (*text == "true") {
+          return conversion_ok(Value::boolean(true));
+        }
+        if (*text == "false") {
+          return conversion_ok(Value::boolean(false));
+        }
+        return conversion_error("ValueError", "String content is not a Bool");
+      }
+      return conversion_error("TypeError", "cannot cast value to Bool");
+    }
+    case RuntimeNativeTypeKind::Symbol: {
+      if (value.is_symbol()) {
+        return conversion_ok(value);
+      }
+      if (value.is_string()) {
+        const std::optional<std::string> text =
+            string_text_from_id(value.as_string().string_id);
+        if (!text.has_value()) {
+          return conversion_error("VMError", "string ref is invalid");
+        }
+        if (text->empty()) {
+          return conversion_error("ValueError",
+                                  "String content is not a Symbol");
+        }
+        return conversion_ok(Value::symbol(intern_runtime_symbol(*text)));
+      }
+      return conversion_error("TypeError", "cannot cast value to Symbol");
+    }
+    case RuntimeNativeTypeKind::Array: {
+      if (value.is_list()) {
+        return conversion_ok(value);
+      }
+      if (value.is_tuple()) {
+        const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+        if (tuple == nullptr) {
+          return conversion_error("TypeError", "tuple value is null");
+        }
+        return conversion_ok(make_list_value(tuple->items));
+      }
+      if (value.is_set()) {
+        const std::shared_ptr<SetValue> set = value.as_set();
+        if (set == nullptr) {
+          return conversion_error("TypeError", "set value is null");
+        }
+        return conversion_ok(make_list_value(set->items));
+      }
+      return conversion_error("TypeError", "cannot cast value to Array");
+    }
+    case RuntimeNativeTypeKind::Tuple: {
+      if (value.is_tuple()) {
+        return conversion_ok(value);
+      }
+      if (value.is_list()) {
+        const std::shared_ptr<ListValue> list = value.as_list();
+        if (list == nullptr) {
+          return conversion_error("TypeError", "list value is null");
+        }
+        return conversion_ok(make_tuple_value(list->items));
+      }
+      if (value.is_set()) {
+        const std::shared_ptr<SetValue> set = value.as_set();
+        if (set == nullptr) {
+          return conversion_error("TypeError", "set value is null");
+        }
+        return conversion_ok(make_tuple_value(set->items));
+      }
+      return conversion_error("TypeError", "cannot cast value to Tuple");
+    }
+    case RuntimeNativeTypeKind::Set: {
+      if (value.is_set()) {
+        return conversion_ok(value);
+      }
+      if (value.is_list()) {
+        const std::shared_ptr<ListValue> list = value.as_list();
+        if (list == nullptr) {
+          return conversion_error("TypeError", "list value is null");
+        }
+        return conversion_ok(make_set_value(list->items));
+      }
+      if (value.is_tuple()) {
+        const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+        if (tuple == nullptr) {
+          return conversion_error("TypeError", "tuple value is null");
+        }
+        return conversion_ok(make_set_value(tuple->items));
+      }
+      return conversion_error("TypeError", "cannot cast value to Set");
+    }
+    case RuntimeNativeTypeKind::Map: {
+      if (value.is_map()) {
+        return conversion_ok(value);
+      }
+      std::vector<Value> items;
+      if (value.is_list()) {
+        const std::shared_ptr<ListValue> list = value.as_list();
+        if (list == nullptr) {
+          return conversion_error("TypeError", "list value is null");
+        }
+        items = list->items;
+      } else if (value.is_tuple()) {
+        const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+        if (tuple == nullptr) {
+          return conversion_error("TypeError", "tuple value is null");
+        }
+        items = tuple->items;
+      } else {
+        return conversion_error("TypeError", "cannot cast value to Map");
+      }
+      std::vector<MapEntry> entries;
+      entries.reserve(items.size());
+      for (const Value &item : items) {
+        std::vector<Value> pair;
+        if (item.is_tuple()) {
+          const std::shared_ptr<TupleValue> tuple = item.as_tuple();
+          if (tuple == nullptr) {
+            return conversion_error("TypeError", "map pair tuple is null");
+          }
+          pair = tuple->items;
+        } else if (item.is_list()) {
+          const std::shared_ptr<ListValue> list = item.as_list();
+          if (list == nullptr) {
+            return conversion_error("TypeError", "map pair list is null");
+          }
+          pair = list->items;
+        } else {
+          return conversion_error("TypeError",
+                                  "Map cast expects key/value pairs");
+        }
+        if (pair.size() != 2U) {
+          return conversion_error("TypeError",
+                                  "Map cast pair must have two values");
+        }
+        std::uint32_t key_symbol_id = 0;
+        if (pair[0].is_symbol()) {
+          key_symbol_id = pair[0].as_symbol().symbol_id;
+        } else if (pair[0].is_string()) {
+          const std::optional<std::string> text =
+              string_text_from_id(pair[0].as_string().string_id);
+          if (!text.has_value()) {
+            return conversion_error("VMError", "string key ref is invalid");
+          }
+          key_symbol_id = intern_runtime_symbol(*text);
+        } else {
+          return conversion_error("TypeError",
+                                  "Map cast key must be Symbol or String");
+        }
+        entries.push_back({key_symbol_id, pair[1]});
+      }
+      return conversion_ok(make_symbol_map_value(std::move(entries)));
+    }
+    case RuntimeNativeTypeKind::Null:
+      if (value.is_null()) {
+        return conversion_ok(value);
+      }
+      return conversion_error("TypeError", "cannot cast value to Null");
+    case RuntimeNativeTypeKind::Object:
+      return conversion_ok(value);
+    default:
+      return conversion_error("TypeError", "target is not a conversion type");
+    }
+  }
+
+  bool conversion_error_is_nullable(const ConversionResult &result) const {
+    return result.error_name == "TypeError" ||
+           result.error_name == "ValueError" ||
+           result.error_name == "EncodingError";
   }
 
   std::optional<std::string> selector_text_from_value(const Value &value) {
@@ -8843,6 +10205,7 @@ private:
     if (!ensure_instance_layout(frame, instance)) {
       return false;
     }
+    const Value old_value = instance_ivar_value_or_null(instance, name);
     if (!store_instance_ivar_slow(frame, instance, name, std::move(value))) {
       return false;
     }
@@ -8852,6 +10215,8 @@ private:
       return false;
     }
     update_ivar_cache(frame, site_id, *instance, symbol_id, slot->second);
+    record_watch_ivar_write(instance, name, old_value,
+                            instance_ivar_value_or_null(instance, name));
     return true;
   }
 
@@ -9056,9 +10421,12 @@ private:
       if (fault_.has_value()) {
         return false;
       }
+      const Value old_value = instance_ivar_value_or_null(instance, ivar_name);
       if (!store_instance_ivar_slow(frame, instance, ivar_name, value)) {
         return false;
       }
+      record_watch_ivar_write(instance, ivar_name, old_value,
+                              instance_ivar_value_or_null(instance, ivar_name));
     }
     return true;
   }
@@ -10193,6 +11561,61 @@ private:
 
     if (receiver.is_native_type()) {
       const RuntimeNativeTypeKind kind = receiver.as_native_type().kind;
+      if (kind == RuntimeNativeTypeKind::Amber) {
+        if (selector != "stringify") {
+          return SendStatus::NotHandled;
+        }
+        if (!require_arity(1) ||
+            !reject_unknown_keywords(frame, kw_args, {"mode"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<Value> mode = keyword_arg_value(kw_args, "mode");
+        if (mode.has_value()) {
+          std::optional<std::string> mode_text;
+          if (mode->is_symbol()) {
+            mode_text = selector_text_from_symbol(mode->as_symbol().symbol_id);
+          } else if (mode->is_string()) {
+            mode_text = string_text_from_id(mode->as_string().string_id);
+          }
+          if (!mode_text.has_value() || *mode_text != "display") {
+            set_fault(frame, "TypeError",
+                      "Amber.stringify mode must be :display");
+            return SendStatus::Faulted;
+          }
+        }
+        ConversionResult converted = display_string_value(args[0]);
+        if (!converted.ok) {
+          set_fault(frame, converted.error_name, converted.message);
+          return SendStatus::Faulted;
+        }
+        *out = converted.value;
+        return SendStatus::Matched;
+      }
+      if (is_conversion_type(kind)) {
+        if (selector != "cast" && selector != "new" && selector != "parse") {
+          return SendStatus::NotHandled;
+        }
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "conversion type call does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (selector == "parse" && !args[0].is_string()) {
+          set_fault(frame, "TypeError", "parse expects Str input");
+          return SendStatus::Faulted;
+        }
+        ConversionResult converted =
+            convert_value_to_native_type(frame, args[0], kind);
+        if (!converted.ok) {
+          set_fault(frame, converted.error_name, converted.message);
+          return SendStatus::Faulted;
+        }
+        *out = converted.value;
+        return SendStatus::Matched;
+      }
       if (selector != "new") {
         return SendStatus::NotHandled;
       }
@@ -11030,6 +12453,102 @@ private:
     auto require_receiver_live_after_block = [&]() -> bool {
       return ensure_lifecycle_access(frame, receiver);
     };
+
+    auto apply_conversion_result = [&](ConversionResult converted,
+                                       bool nullable) -> SendStatus {
+      if (converted.ok) {
+        *out = converted.value;
+        return SendStatus::Matched;
+      }
+      if (nullable && conversion_error_is_nullable(converted)) {
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      set_fault(frame, converted.error_name, converted.message);
+      return SendStatus::Faulted;
+    };
+
+    if (selector == "cast" || selector == "cast?" || selector == "to_type") {
+      if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError", "cast does not accept keywords");
+        }
+        return SendStatus::Faulted;
+      }
+      const std::optional<RuntimeNativeTypeKind> target =
+          conversion_type_from_value(args[0]);
+      if (!target.has_value()) {
+        set_fault(frame, "TypeError", "cast target must be a type object");
+        return SendStatus::Faulted;
+      }
+      return apply_conversion_result(
+          convert_value_to_native_type(frame, receiver, *target),
+          selector == "cast?");
+    }
+
+    auto target_for_to_method = [&]() -> std::optional<RuntimeNativeTypeKind> {
+      if (selector == "to_str") {
+        return RuntimeNativeTypeKind::Str;
+      }
+      if (selector == "to_int") {
+        return RuntimeNativeTypeKind::Int;
+      }
+      if (selector == "to_float") {
+        return RuntimeNativeTypeKind::Float;
+      }
+      if (selector == "to_bool") {
+        return RuntimeNativeTypeKind::Bool;
+      }
+      if (selector == "to_symbol") {
+        return RuntimeNativeTypeKind::Symbol;
+      }
+      if (selector == "to_array") {
+        return RuntimeNativeTypeKind::Array;
+      }
+      if (selector == "to_tuple") {
+        return RuntimeNativeTypeKind::Tuple;
+      }
+      if (selector == "to_set") {
+        return RuntimeNativeTypeKind::Set;
+      }
+      if (selector == "to_map") {
+        return RuntimeNativeTypeKind::Map;
+      }
+      return std::nullopt;
+    };
+
+    if (const std::optional<RuntimeNativeTypeKind> target =
+            target_for_to_method()) {
+      if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError",
+                    "to_* conversion does not accept keywords");
+        }
+        return SendStatus::Faulted;
+      }
+      return apply_conversion_result(
+          convert_value_to_native_type(frame, receiver, *target), false);
+    }
+
+    if (receiver.is_string() && (selector == "+" || selector == "concat")) {
+      if (!require_arity(1) || !require_no_block()) {
+        return SendStatus::Faulted;
+      }
+      if (!args[0].is_string()) {
+        set_fault(frame, "TypeError", "String#+ expects Str argument");
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::string> left =
+          string_text_from_id(receiver.as_string().string_id);
+      const std::optional<std::string> right =
+          string_text_from_id(args[0].as_string().string_id);
+      if (!left.has_value() || !right.has_value()) {
+        set_fault(frame, "VMError", "string ref is invalid");
+        return SendStatus::Faulted;
+      }
+      *out = Value::string(intern_runtime_string(*left + *right));
+      return SendStatus::Matched;
+    }
 
     const bool receiver_is_range = value_is_range_instance(receiver);
     const bool receiver_is_lazy_seq = value_is_lazy_seq_instance(receiver);
@@ -12722,15 +14241,15 @@ private:
       if (!expect_instance_receiver(frame, receiver, &instance)) {
         return;
       }
+      const std::optional<std::string> ivar_name =
+          selector_text_from_symbol(symbol_id);
+      if (!ivar_name.has_value()) {
+        set_fault(frame, "VMError", "ivar symbol ref is out of range");
+        return;
+      }
       std::optional<std::uint32_t> slot =
           probe_ivar_cache(frame, site_id, *instance, symbol_id);
       if (!slot.has_value()) {
-        const std::optional<std::string> ivar_name =
-            selector_text_from_symbol(symbol_id);
-        if (!ivar_name.has_value()) {
-          set_fault(frame, "VMError", "ivar symbol ref is out of range");
-          return;
-        }
         slot = ensure_instance_ivar_slot(frame, instance, *ivar_name);
         if (fault_.has_value()) {
           return;
@@ -12743,7 +14262,8 @@ private:
           slot.has_value() && *slot < instance->ivar_storage.size()
               ? instance->ivar_storage[*slot]
               : Value::null();
-      if (!write_reg(frame, dst, value)) {
+      if (!write_reg(frame, dst,
+                     record_watch_ivar_read(instance, *ivar_name, value))) {
         return;
       }
       ++frame.pc;
@@ -12899,7 +14419,8 @@ private:
         set_fault(frame, "VMError", "capture slot out of range");
         return;
       }
-      if (!write_reg(frame, dst, frame.captures[slot])) {
+      if (!write_reg(frame, dst,
+                     unwrap_watch_value_for_read(frame.captures[slot]))) {
         return;
       }
       ++frame.pc;
@@ -12916,8 +14437,110 @@ private:
         set_fault(frame, "VMError", "capture slot out of range");
         return;
       }
-      frame.captures[slot] = read_reg(frame, src);
+      const Value value = read_reg(frame, src);
       if (fault_.has_value()) {
+        return;
+      }
+      if (frame.captures[slot].is_watch_cell()) {
+        const std::shared_ptr<RuntimeWatchCell> cell =
+            frame.captures[slot].as_watch_cell();
+        if (cell != nullptr) {
+          const RuntimeWatchWriteResult write = cell->write(value);
+          record_watch_write(cell, write);
+        }
+      } else {
+        frame.captures[slot] = value;
+      }
+      ++frame.pc;
+      return;
+    }
+    case Opcode::WatchLocal: {
+      std::uint32_t dst = 0;
+      std::uint32_t slot = 0;
+      std::uint32_t flags = 0;
+      if (!operand_u32(frame, insn, 0, &dst) ||
+          !operand_u32(frame, insn, 1, &slot) ||
+          !operand_u32(frame, insn, 2, &flags)) {
+        return;
+      }
+      (void)flags;
+      std::shared_ptr<RuntimeWatchCell> cell =
+          ensure_local_storage_cell(frame, slot);
+      if (cell == nullptr) {
+        return;
+      }
+      const std::string target_name =
+          frame.code == nullptr ? "l" + std::to_string(slot)
+                                : local_name_for_slot(*frame.code, slot);
+      std::shared_ptr<RuntimeWatchHandle> handle =
+          watch_cell(cell, target_name);
+      if (handle == nullptr ||
+          !write_reg(frame, dst, Value::watch_handle(handle))) {
+        return;
+      }
+      ++frame.pc;
+      return;
+    }
+    case Opcode::WatchUpval: {
+      std::uint32_t dst = 0;
+      std::uint32_t slot = 0;
+      std::uint32_t flags = 0;
+      if (!operand_u32(frame, insn, 0, &dst) ||
+          !operand_u32(frame, insn, 1, &slot) ||
+          !operand_u32(frame, insn, 2, &flags)) {
+        return;
+      }
+      (void)flags;
+      std::shared_ptr<RuntimeWatchCell> cell =
+          ensure_capture_storage_cell(frame, slot);
+      if (cell == nullptr) {
+        return;
+      }
+      const std::string target_name =
+          frame.code == nullptr ? "u" + std::to_string(slot)
+                                : capture_name_for_slot(*frame.code, slot);
+      std::shared_ptr<RuntimeWatchHandle> handle =
+          watch_cell(cell, target_name);
+      if (handle == nullptr ||
+          !write_reg(frame, dst, Value::watch_handle(handle))) {
+        return;
+      }
+      ++frame.pc;
+      return;
+    }
+    case Opcode::WatchIvar: {
+      std::uint32_t dst = 0;
+      std::uint32_t recv_reg = 0;
+      std::uint32_t symbol_id = 0;
+      std::uint32_t site_id = 0;
+      std::uint32_t flags = 0;
+      if (!operand_u32(frame, insn, 0, &dst) ||
+          !operand_u32(frame, insn, 1, &recv_reg) ||
+          !operand_u32(frame, insn, 2, &symbol_id) ||
+          !operand_u32(frame, insn, 3, &site_id) ||
+          !operand_u32(frame, insn, 4, &flags)) {
+        return;
+      }
+      (void)site_id;
+      (void)flags;
+      const Value receiver = read_reg(frame, recv_reg);
+      if (fault_.has_value()) {
+        return;
+      }
+      std::shared_ptr<InstanceValue> instance;
+      if (!expect_instance_receiver(frame, receiver, &instance)) {
+        return;
+      }
+      const std::optional<std::string> ivar_name =
+          selector_text_from_symbol(symbol_id);
+      if (!ivar_name.has_value()) {
+        set_fault(frame, "VMError", "ivar symbol ref is out of range");
+        return;
+      }
+      std::shared_ptr<RuntimeWatchHandle> handle =
+          watch_ivar(frame, instance, *ivar_name);
+      if (handle == nullptr ||
+          !write_reg(frame, dst, Value::watch_handle(handle))) {
         return;
       }
       ++frame.pc;
@@ -12946,14 +14569,28 @@ private:
           return;
         }
         if (kind == 0U) {
-          closure->captures.push_back(slot == dst ? closure_value
-                                                  : read_reg(frame, slot));
+          if (slot == dst) {
+            std::shared_ptr<RuntimeWatchCell> cell =
+                ensure_local_storage_cell(frame, slot, closure_value);
+            if (cell == nullptr) {
+              return;
+            }
+            closure->captures.push_back(Value::watch_cell(cell));
+          } else {
+            std::shared_ptr<RuntimeWatchCell> cell =
+                ensure_local_storage_cell(frame, slot);
+            if (cell == nullptr) {
+              return;
+            }
+            closure->captures.push_back(Value::watch_cell(cell));
+          }
         } else {
-          if (slot >= frame.captures.size()) {
-            set_fault(frame, "VMError", "capture slot out of range");
+          std::shared_ptr<RuntimeWatchCell> cell =
+              ensure_capture_storage_cell(frame, slot);
+          if (cell == nullptr) {
             return;
           }
-          closure->captures.push_back(frame.captures[slot]);
+          closure->captures.push_back(Value::watch_cell(cell));
         }
         if (fault_.has_value()) {
           return;
@@ -13022,6 +14659,38 @@ private:
         push_frame(*code, packet.pos_args, closure->captures, closure->self,
                    packet.block, packet.dst);
         return;
+      }
+
+      if (packet.callee.is_native_type()) {
+        const RuntimeNativeTypeKind kind = packet.callee.as_native_type().kind;
+        if (is_conversion_type(kind)) {
+          if (packet.pos_args.size() != 1U) {
+            set_fault(frame, "TypeError",
+                      "conversion type call expects one argument");
+            return;
+          }
+          if (!packet.kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "conversion type call does not accept keywords");
+            return;
+          }
+          if (!packet.block.is_null()) {
+            set_fault(frame, "TypeError",
+                      "conversion type call does not accept block");
+            return;
+          }
+          ConversionResult converted =
+              convert_value_to_native_type(frame, packet.pos_args[0], kind);
+          if (!converted.ok) {
+            set_fault(frame, converted.error_name, converted.message);
+            return;
+          }
+          if (!write_reg(frame, packet.dst, converted.value)) {
+            return;
+          }
+          ++frame.pc;
+          return;
+        }
       }
 
       if (packet.callee.is_class_object()) {
@@ -13574,7 +15243,7 @@ private:
     }
   }
 
-  const BcModule &module_;
+  BcModule module_;
   std::shared_ptr<RuntimeState> state_;
   std::string module_id_;
   std::vector<Frame> frames_;
@@ -15299,6 +16968,41 @@ std::uint64_t RuntimeWorld::world_epoch() const {
   return impl_->state->world_epoch;
 }
 
+std::uint64_t RuntimeWorld::watch_epoch() const {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return 0;
+  }
+  return impl_->state->watch_epoch;
+}
+
+std::vector<RuntimeWatchEvent> RuntimeWorld::watch_events() const {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return {};
+  }
+  return impl_->state->watch_events;
+}
+
+void RuntimeWorld::begin_dependency_capture(std::uint64_t notebook_cell_id) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return;
+  }
+  impl_->state->begin_dependency_capture(notebook_cell_id);
+}
+
+RuntimeDependencySet RuntimeWorld::end_dependency_capture() {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return {};
+  }
+  return impl_->state->end_dependency_capture();
+}
+
+RuntimeDependencySet RuntimeWorld::dependency_capture_snapshot() const {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return {};
+  }
+  return impl_->state->dependency_capture_snapshot();
+}
+
 RuntimeWorldState RuntimeWorld::world_state() const {
   if (impl_ == nullptr || impl_->state == nullptr ||
       !impl_->state->world_frozen) {
@@ -15379,6 +17083,7 @@ RuntimeWorldMirror RuntimeWorld::world_mirror() const {
   mirror.state = impl_->state->world_frozen ? RuntimeWorldState::Frozen
                                             : RuntimeWorldState::Open;
   mirror.world_epoch = impl_->state->world_epoch;
+  mirror.watch_epoch = impl_->state->watch_epoch;
   mirror.package = package_mirror_for(*impl_->module);
   mirror.owners.reserve(impl_->module->classes.size());
   for (std::uint32_t index = 0; index < impl_->module->classes.size();
@@ -15634,6 +17339,35 @@ std::string value_to_debug_string(const Value &value,
       }
     } else {
       out << " #" << klass.class_index;
+    }
+    out << ">";
+    return out.str();
+  }
+  if (value.is_native_type()) {
+    return std::string("<type ") +
+           native_type_name(value.as_native_type().kind) + ">";
+  }
+  if (value.is_watch_cell()) {
+    const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();
+    if (cell == nullptr) {
+      return "<watch-cell null>";
+    }
+    const RuntimeWatchCellSnapshot snapshot = cell->snapshot();
+    std::ostringstream out;
+    out << "<watch-cell #" << snapshot.cell_id << " r" << snapshot.revision
+        << " " << value_to_debug_string(snapshot.value, module) << ">";
+    return out.str();
+  }
+  if (value.is_watch_handle()) {
+    const std::shared_ptr<RuntimeWatchHandle> handle = value.as_watch_handle();
+    if (handle == nullptr) {
+      return "<watch null>";
+    }
+    const RuntimeWatchCellSnapshot snapshot = handle->snapshot();
+    std::ostringstream out;
+    out << "<watch #" << handle->handle_id();
+    if (snapshot.cell_id != 0) {
+      out << " cell:" << snapshot.cell_id << " r" << snapshot.revision;
     }
     out << ">";
     return out.str();

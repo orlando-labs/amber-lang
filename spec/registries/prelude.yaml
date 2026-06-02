@@ -12,6 +12,11 @@ entries:
     intrinsic_id: amber.prelude.Kernel.v1
     dispatch: constant_lookup
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: Amber
+    kind: prelude_module
+    intrinsic_id: amber.prelude.Amber.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: memory
     kind: prelude_module
     intrinsic_id: amber.prelude.memory.v1
@@ -157,6 +162,11 @@ entries:
     intrinsic_id: amber.error.TypeError.v1
     dispatch: exception_class
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: ValueError
+    kind: error_class
+    intrinsic_id: amber.error.ValueError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: NameError
     kind: error_class
     intrinsic_id: amber.error.NameError.v1
@@ -180,6 +190,11 @@ entries:
   - name: ModuleInitError
     kind: error_class
     intrinsic_id: amber.error.ModuleInitError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: WatchTargetError
+    kind: error_class
+    intrinsic_id: amber.error.WatchTargetError.v1
     dispatch: exception_class
     shadowing: local_binding_disables_intrinsic_lowering
   - name: IsolationError

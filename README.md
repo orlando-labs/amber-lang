@@ -20,6 +20,8 @@ make conformance
 make spec-sync-check
 make fmt
 make clean
+build/amberc tests/fixtures/run_script/main.am
+build/amberc build tests/fixtures/w14_build/src/main.am -o build/w14-main-exe
 build/amberc lex corpus/parse/lexer/basic/source.am
 build/amberc parse corpus/parse/module/basic/source.am
 build/amberc parse-expr corpus/parse/expr/postfix/source.am
@@ -99,6 +101,7 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
 
 - repo/build/test skeleton;
 - deterministic lexer token stream with source spans;
+- `amberc <file.am>` compiles and runs a single Amber source file;
 - `amberc lex <file>` JSON token dump;
 - Pratt expression parser for precedence, assignment, inline conditionals,
   conditional collection elements, syntax-faithful postfix chains, safe
@@ -169,6 +172,8 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   deterministic `.amberbc` emission into an output directory, cache-keyed
   incremental rebuilds, B2 stdlib bootstrap metadata, stdlib ABI dependency
   pinning, and required/optional/forbidden profile feature metadata in `PROF`;
+- `amberc build <file.am>` for single-file executable wrappers that embed the
+  compiled `.amberbc` payload and run through `amberc run-embedded`;
 - `amberc metadata <file.amberbc> --json` and
   `amberc verify <file.amberbc> --json` as the public `.amberbc` artifact
   inspection/verification surface, with structured verifier JSON for corrupted

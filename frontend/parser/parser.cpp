@@ -2,6 +2,8 @@
 #include "frontend/lexer/lexer.h"
 #include "frontend/pattern/pattern.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 
@@ -240,8 +242,7 @@ merge_def_stmt_with_clause_def(std::unique_ptr<ast::Expr> def_stmt,
   auto merged = ast::make_expr(
       "AstClauseDef", ast::join_spans(def_stmt->span, clause_def->span));
   merged->string_field("name", string_value(*def_stmt, "name"));
-  merged->node_field("base_signature",
-                     take_node_field(*def_stmt, "signature"));
+  merged->node_field("base_signature", take_node_field(*def_stmt, "signature"));
   merged->list_field("clauses", take_list_field(*clause_def, "clauses"));
   merged->list_field("else_body", take_list_field(*def_stmt, "body"));
   return merged;
@@ -257,7 +258,8 @@ void append_item_or_merge_clause_def(
     merge_clause_def_into(*items->back(), std::move(item));
     return;
   }
-  if (!items->empty() && def_stmt_clause_defs_mergeable(*items->back(), *item)) {
+  if (!items->empty() &&
+      def_stmt_clause_defs_mergeable(*items->back(), *item)) {
     items->back() = merge_def_stmt_with_clause_def(std::move(items->back()),
                                                    std::move(item));
     return;
@@ -384,6 +386,131 @@ lexer::Span span_for_token_slice(const lexer::Token &token,
   return lexer::Span{token.span.file,
                      offset_position_in_token(token, begin_offset),
                      offset_position_in_token(token, end_offset)};
+}
+
+std::string utf8_from_codepoint(std::uint32_t codepoint) {
+  std::string out;
+  if (codepoint <= 0x7FU) {
+    out.push_back(static_cast<char>(codepoint));
+  } else if (codepoint <= 0x7FFU) {
+    out.push_back(static_cast<char>(0xC0U | (codepoint >> 6U)));
+    out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+  } else if (codepoint <= 0xFFFFU) {
+    out.push_back(static_cast<char>(0xE0U | (codepoint >> 12U)));
+    out.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+    out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+  } else {
+    out.push_back(static_cast<char>(0xF0U | (codepoint >> 18U)));
+    out.push_back(static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3FU)));
+    out.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+    out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+  }
+  return out;
+}
+
+bool is_hex_digit(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+         (c >= 'A' && c <= 'F');
+}
+
+std::uint32_t hex_digit_value(char c) {
+  if (c >= '0' && c <= '9') {
+    return static_cast<std::uint32_t>(c - '0');
+  }
+  if (c >= 'a' && c <= 'f') {
+    return static_cast<std::uint32_t>(c - 'a' + 10);
+  }
+  return static_cast<std::uint32_t>(c - 'A' + 10);
+}
+
+struct StringEscapePart {
+  std::string kind;
+  std::string source;
+  std::string value;
+  std::size_t end_offset = 0;
+};
+
+StringEscapePart parse_string_escape_part(const std::string &lexeme,
+                                          std::size_t offset,
+                                          std::size_t content_end) {
+  StringEscapePart part;
+  part.end_offset = std::min(offset + 1U, content_end);
+  if (offset + 1U >= content_end) {
+    part.kind = "invalid";
+    part.source = "\\";
+    return part;
+  }
+
+  const char escaped = lexeme[offset + 1U];
+  part.end_offset = offset + 2U;
+  switch (escaped) {
+  case 'n':
+    part.kind = "newline";
+    part.value = "\n";
+    break;
+  case 'r':
+    part.kind = "carriage_return";
+    part.value = "\r";
+    break;
+  case 't':
+    part.kind = "tab";
+    part.value = "\t";
+    break;
+  case '"':
+    part.kind = "quote";
+    part.value = "\"";
+    break;
+  case '\'':
+    part.kind = "single_quote";
+    part.value = "'";
+    break;
+  case '\\':
+    part.kind = "backslash";
+    part.value = "\\";
+    break;
+  case '#':
+    part.kind = "hash";
+    part.value = "#";
+    break;
+  case 'u': {
+    std::size_t cursor = offset + 2U;
+    if (cursor < content_end && lexeme[cursor] == '{') {
+      ++cursor;
+      std::uint32_t codepoint = 0;
+      while (cursor < content_end && lexeme[cursor] != '}') {
+        if (is_hex_digit(lexeme[cursor])) {
+          codepoint = (codepoint << 4U) | hex_digit_value(lexeme[cursor]);
+        }
+        ++cursor;
+      }
+      if (cursor < content_end && lexeme[cursor] == '}') {
+        ++cursor;
+        part.end_offset = cursor;
+        part.kind = "unicode";
+        part.value = utf8_from_codepoint(codepoint);
+        break;
+      }
+    }
+    part.kind = "invalid";
+    part.value = "u";
+    break;
+  }
+  default:
+    part.kind = "invalid";
+    part.value = std::string(1, escaped);
+    break;
+  }
+  part.source = lexeme.substr(offset, part.end_offset - offset);
+  return part;
+}
+
+bool string_is_blank(const std::string &value) {
+  for (char c : value) {
+    if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+      return false;
+    }
+  }
+  return true;
 }
 
 void shift_position_from_interpolation(lexer::Position *position,
@@ -1328,8 +1455,8 @@ std::unique_ptr<ast::Expr> Parser::parse_if_expr(StopMode stop_mode) {
         alternative != nullptr
             ? alternative->span
             : (consequent != nullptr ? consequent->span : cond->span);
-    auto node =
-        ast::make_expr("AstInlineIfExpr", ast::join_spans(start.span, end_span));
+    auto node = ast::make_expr("AstInlineIfExpr",
+                               ast::join_spans(start.span, end_span));
     node->string_field("form", "inline");
     node->node_field("condition", std::move(cond));
     node->node_field("consequent", std::move(consequent));
@@ -1800,8 +1927,8 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   }
   if (token.kind == lexer::TokenKind::LBracket) {
     std::vector<std::unique_ptr<ast::Expr>> elements =
-        parse_collection_elements(lexer::TokenKind::RBracket,
-                                  "AstArrayElement", stop_mode);
+        parse_collection_elements(lexer::TokenKind::RBracket, "AstArrayElement",
+                                  stop_mode);
     const lexer::Token close = previous();
     auto expr = ast::make_expr("AstListLiteral",
                                ast::join_spans(token.span, close.span));
@@ -2048,21 +2175,31 @@ Parser::parse_string_literal_expr(const lexer::Token &token) {
 
   const std::size_t content_end = token.lexeme.size() - 1U;
   std::vector<std::unique_ptr<ast::Expr>> parts;
-  std::size_t literal_begin = 1U;
+  std::size_t text_begin = 1U;
   std::size_t cursor = 1U;
   bool saw_interpolation = false;
 
-  auto push_literal_part = [&](std::size_t begin, std::size_t end) {
+  auto push_text_part = [&](std::size_t begin, std::size_t end) {
     if (end <= begin) {
       return;
     }
-    auto part =
-        ast::make_expr("AstInterpolationLiteral",
-                       span_for_token_slice(token, begin, end));
-    part->string_field("token", "STRING");
-    part->string_field("value",
-                       "\"" + token.lexeme.substr(begin, end - begin) + "\"");
+    auto part = ast::make_expr("AstStringText",
+                               span_for_token_slice(token, begin, end));
+    part->string_field("value", token.lexeme.substr(begin, end - begin));
     parts.push_back(std::move(part));
+  };
+
+  auto push_escape_part = [&](std::size_t begin) {
+    const StringEscapePart escape =
+        parse_string_escape_part(token.lexeme, begin, content_end);
+    auto part =
+        ast::make_expr("AstStringEscape",
+                       span_for_token_slice(token, begin, escape.end_offset));
+    part->string_field("escape_kind", escape.kind);
+    part->string_field("source", escape.source);
+    part->string_field("value", escape.value);
+    parts.push_back(std::move(part));
+    return escape.end_offset;
   };
 
   auto find_interpolation_end = [&](std::size_t begin,
@@ -2112,18 +2249,33 @@ Parser::parse_string_literal_expr(const lexer::Token &token) {
 
   while (cursor < content_end) {
     if (token.lexeme[cursor] == '\\') {
-      cursor += 2;
+      push_text_part(text_begin, cursor);
+      cursor = push_escape_part(cursor);
+      text_begin = cursor;
       continue;
     }
     if (token.lexeme[cursor] == '#' && cursor + 1U < content_end &&
         token.lexeme[cursor + 1U] == '{') {
       saw_interpolation = true;
-      push_literal_part(literal_begin, cursor);
+      push_text_part(text_begin, cursor);
       const std::size_t expr_begin = cursor + 2U;
       std::size_t expr_end = expr_begin;
       if (!find_interpolation_end(expr_begin, &expr_end)) {
-        error(token, "unterminated string interpolation");
-        return literal();
+        diagnostics_.push_back(lexer::Diagnostic{
+            "AMB_STRING_INTERP_UNTERMINATED", "error", "lexer",
+            "unterminated string interpolation",
+            span_for_token_slice(token, cursor, content_end)});
+        expr_end = content_end;
+      }
+      if (string_is_blank(
+              token.lexeme.substr(expr_begin, expr_end - expr_begin))) {
+        diagnostics_.push_back(lexer::Diagnostic{
+            "AMB_STRING_INTERP_EMPTY", "error", "parser",
+            "empty string interpolation",
+            span_for_token_slice(token, cursor, expr_end + 1U)});
+        cursor = expr_end + 1U;
+        text_begin = cursor;
+        continue;
       }
       const std::string expr_source =
           token.lexeme.substr(expr_begin, expr_end - expr_begin);
@@ -2138,34 +2290,39 @@ Parser::parse_string_literal_expr(const lexer::Token &token) {
           shift_position_from_interpolation(&diagnostic.span.end, expr_base);
           diagnostics_.push_back(std::move(diagnostic));
         }
-        return literal();
+        cursor = expr_end + 1U;
+        text_begin = cursor;
+        continue;
       }
       Parser nested(lex_result.tokens);
       ParseResult parsed = nested.parse_expression_unit();
       if (!parsed.ok()) {
         for (lexer::Diagnostic diagnostic : parsed.diagnostics) {
+          diagnostic.code = "AMB_STRING_INTERP_PARSE_ERROR";
+          diagnostic.message = "invalid expression in string interpolation: " +
+                               diagnostic.message;
           diagnostics_.push_back(std::move(diagnostic));
         }
-        return literal();
+        cursor = expr_end + 1U;
+        text_begin = cursor;
+        continue;
       }
-      auto part =
-          ast::make_expr("AstInterpolationExpr",
-                         span_for_token_slice(token, cursor, expr_end + 1U));
+      auto part = ast::make_expr(
+          "AstStringExpr", span_for_token_slice(token, cursor, expr_end + 1U));
       part->node_field("expr", std::move(parsed.expr));
       parts.push_back(std::move(part));
       cursor = expr_end + 1U;
-      literal_begin = cursor;
+      text_begin = cursor;
       continue;
     }
     ++cursor;
   }
 
-  if (!saw_interpolation) {
-    return literal();
-  }
-  push_literal_part(literal_begin, content_end);
+  push_text_part(text_begin, content_end);
 
-  auto expr = ast::make_expr("AstInterpolatedString", token.span);
+  auto expr = ast::make_expr("AstStringLiteral", token.span);
+  expr->string_field("quote_kind", "double");
+  expr->bool_field("interpolation", saw_interpolation);
   expr->list_field("parts", std::move(parts));
   return expr;
 }
@@ -2448,8 +2605,7 @@ bool Parser::starts_indented_postfix_continuation() const {
     return false;
   }
   const lexer::TokenKind next = peek(2).kind;
-  return next == lexer::TokenKind::Dot ||
-         next == lexer::TokenKind::ChainDot ||
+  return next == lexer::TokenKind::Dot || next == lexer::TokenKind::ChainDot ||
          next == lexer::TokenKind::SafeDot;
 }
 
@@ -2458,8 +2614,7 @@ bool Parser::starts_same_indent_postfix_continuation() const {
     return false;
   }
   const lexer::TokenKind next = peek().kind;
-  return next == lexer::TokenKind::Dot ||
-         next == lexer::TokenKind::ChainDot ||
+  return next == lexer::TokenKind::Dot || next == lexer::TokenKind::ChainDot ||
          next == lexer::TokenKind::SafeDot;
 }
 
@@ -2500,12 +2655,10 @@ std::size_t Parser::find_inline_then_delimiter(std::size_t begin) const {
     if (bracket_depth == 0) {
       if (kind == lexer::TokenKind::Colon ||
           kind == lexer::TokenKind::Newline ||
-          kind == lexer::TokenKind::Dedent ||
-          kind == lexer::TokenKind::Comma ||
+          kind == lexer::TokenKind::Dedent || kind == lexer::TokenKind::Comma ||
           kind == lexer::TokenKind::RParen ||
           kind == lexer::TokenKind::RBracket ||
-          kind == lexer::TokenKind::RBrace ||
-          kind == lexer::TokenKind::Eof) {
+          kind == lexer::TokenKind::RBrace || kind == lexer::TokenKind::Eof) {
         break;
       }
       if (is_contextual_at(index, "then") &&

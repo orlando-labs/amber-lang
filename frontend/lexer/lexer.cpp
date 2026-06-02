@@ -363,8 +363,13 @@ void Lexer::emit(TokenKind kind, Position start, std::string lexeme) {
 }
 
 void Lexer::error(Position start, const std::string &message) {
-  result_.diagnostics.push_back(Diagnostic{std::string(kLexErrorCode), "error",
-                                           "lexer", message, span_from(start)});
+  error_code(start, std::string(kLexErrorCode), message);
+}
+
+void Lexer::error_code(Position start, const std::string &code,
+                       const std::string &message) {
+  result_.diagnostics.push_back(
+      Diagnostic{code, "error", "lexer", message, span_from(start)});
 }
 
 void Lexer::lex_line_indent() {
@@ -566,11 +571,22 @@ void Lexer::lex_string(char quote) {
   const Position start = position();
   advance();
   bool closed = false;
+  bool emitted_unterminated_interpolation = false;
   while (!at_end()) {
     if (current() == '\\') {
       const Position escape_start = position();
       advance();
       validate_string_escape(escape_start, quote);
+      continue;
+    }
+    if (quote == '"' && current() == '#' && peek() == '{') {
+      const Position interpolation_start = position();
+      advance();
+      advance();
+      if (!consume_interpolation_in_string(interpolation_start)) {
+        emitted_unterminated_interpolation = true;
+        break;
+      }
       continue;
     }
     if (current() == quote) {
@@ -585,20 +601,84 @@ void Lexer::lex_string(char quote) {
   }
 
   if (!closed) {
-    error(start, "unterminated string literal");
+    if (!emitted_unterminated_interpolation) {
+      error_code(start, "AMB_STRING_UNTERMINATED",
+                 "unterminated string literal");
+    }
   }
   const std::string text =
       source_.substr(start.offset, position().offset - start.offset);
   emit(TokenKind::String, start, text);
 }
 
+bool Lexer::consume_interpolation_in_string(Position interpolation_start) {
+  int depth = 0;
+  while (!at_end()) {
+    if (current() == '\\') {
+      advance();
+      if (!at_end()) {
+        advance();
+      }
+      continue;
+    }
+    if (current() == '"' || current() == '\'') {
+      if (!consume_nested_string_in_interpolation(current())) {
+        error_code(interpolation_start, "AMB_STRING_INTERP_UNTERMINATED",
+                   "unterminated string interpolation");
+        return false;
+      }
+      continue;
+    }
+    if (current() == '{') {
+      ++depth;
+      advance();
+      continue;
+    }
+    if (current() == '}') {
+      if (depth == 0) {
+        advance();
+        return true;
+      }
+      --depth;
+      advance();
+      continue;
+    }
+    advance();
+  }
+
+  error_code(interpolation_start, "AMB_STRING_INTERP_UNTERMINATED",
+             "unterminated string interpolation");
+  return false;
+}
+
+bool Lexer::consume_nested_string_in_interpolation(char quote) {
+  advance();
+  while (!at_end()) {
+    if (current() == '\\') {
+      advance();
+      if (!at_end()) {
+        advance();
+      }
+      continue;
+    }
+    if (current() == quote) {
+      advance();
+      return true;
+    }
+    advance();
+  }
+  return false;
+}
+
 bool Lexer::validate_string_escape(Position escape_start, char quote) {
   if (at_end()) {
-    error(escape_start, "unterminated escape sequence in string literal");
+    error_code(escape_start, "AMB_STRING_BAD_ESCAPE",
+               "unterminated escape sequence in string literal");
     return false;
   }
   if (at_line_break()) {
-    error(escape_start, "unterminated escape sequence in string literal");
+    error_code(escape_start, "AMB_STRING_BAD_ESCAPE",
+               "unterminated escape sequence in string literal");
     return false;
   }
 
@@ -621,7 +701,8 @@ bool Lexer::validate_string_escape(Position escape_start, char quote) {
   case 'u': {
     advance();
     if (at_end() || current() != '{') {
-      error(escape_start, "unicode escape must use \\u{HEX}");
+      error_code(escape_start, "AMB_STRING_BAD_ESCAPE",
+                 "unicode escape must use \\u{HEX}");
       return false;
     }
     advance();
@@ -630,7 +711,8 @@ bool Lexer::validate_string_escape(Position escape_start, char quote) {
     while (!at_end() && current() != '}') {
       const char c = current();
       if (!is_hex_digit(c)) {
-        error(position(), "unicode escape contains a non-hex digit");
+        error_code(position(), "AMB_STRING_BAD_ESCAPE",
+                   "unicode escape contains a non-hex digit");
         advance();
         continue;
       }
@@ -647,17 +729,20 @@ bool Lexer::validate_string_escape(Position escape_start, char quote) {
       advance();
     }
     if (at_end() || current() != '}') {
-      error(escape_start, "unicode escape must end with '}'");
+      error_code(escape_start, "AMB_STRING_BAD_ESCAPE",
+                 "unicode escape must end with '}'");
       return false;
     }
     advance();
     if (digits == 0 || digits > 6) {
-      error(escape_start, "unicode escape must contain 1 to 6 hex digits");
+      error_code(escape_start, "AMB_STRING_BAD_ESCAPE",
+                 "unicode escape must contain 1 to 6 hex digits");
       return false;
     }
     if (codepoint > 0x10FFFFU ||
         (codepoint >= 0xD800U && codepoint <= 0xDFFFU)) {
-      error(escape_start, "unicode escape codepoint is invalid");
+      error_code(escape_start, "AMB_STRING_BAD_ESCAPE",
+                 "unicode escape codepoint is invalid");
       return false;
     }
     return true;
@@ -666,7 +751,8 @@ bool Lexer::validate_string_escape(Position escape_start, char quote) {
     break;
   }
 
-  error(escape_start, "invalid escape sequence in string literal");
+  error_code(escape_start, "AMB_STRING_BAD_ESCAPE",
+             "invalid escape sequence in string literal");
   advance();
   return false;
 }

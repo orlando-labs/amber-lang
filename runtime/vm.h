@@ -35,6 +35,9 @@ class RuntimeMutex;
 class RuntimeTaskHandle;
 class RuntimeTaskModule;
 class RuntimeThreadedCollection;
+class RuntimeWatchCell;
+class RuntimeWatchObjectState;
+class RuntimeWatchHandle;
 
 enum class HeapObjectKind { Instance, List, Tuple, Set, Map, Closure };
 
@@ -107,7 +110,19 @@ enum class RuntimeNativeTypeKind {
   Atomic,
   Barrier,
   Flow,
-  ThreadedCollection
+  ThreadedCollection,
+  Amber,
+  Str,
+  Int,
+  Float,
+  Bool,
+  Symbol,
+  Array,
+  Tuple,
+  Set,
+  Map,
+  Null,
+  Object
 };
 
 struct NativeTypeValue {
@@ -125,7 +140,8 @@ struct Value {
       std::shared_ptr<RuntimeChannel>, std::shared_ptr<RuntimeMutex>,
       std::shared_ptr<RuntimeAtomic>, std::shared_ptr<RuntimeBarrier>,
       std::shared_ptr<RuntimeFlowModule>,
-      std::shared_ptr<RuntimeThreadedCollection>>;
+      std::shared_ptr<RuntimeThreadedCollection>,
+      std::shared_ptr<RuntimeWatchCell>, std::shared_ptr<RuntimeWatchHandle>>;
 
   Payload payload;
 
@@ -148,6 +164,8 @@ struct Value {
   static Value flow_module(std::shared_ptr<RuntimeFlowModule> value);
   static Value
   threaded_collection(std::shared_ptr<RuntimeThreadedCollection> value);
+  static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
+  static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -171,6 +189,8 @@ struct Value {
   bool is_barrier() const;
   bool is_flow_module() const;
   bool is_threaded_collection() const;
+  bool is_watch_cell() const;
+  bool is_watch_handle() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -193,6 +213,150 @@ struct Value {
   std::shared_ptr<RuntimeBarrier> as_barrier() const;
   std::shared_ptr<RuntimeFlowModule> as_flow_module() const;
   std::shared_ptr<RuntimeThreadedCollection> as_threaded_collection() const;
+  std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
+  std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
+};
+
+struct RuntimeWatchCellSnapshot {
+  std::uint64_t cell_id = 0;
+  std::uint64_t revision = 0;
+  std::uint64_t subscriber_count = 0;
+  std::string target_name;
+  bool watched = false;
+  Value value = Value::null();
+};
+
+struct RuntimeWatchWriteResult {
+  bool changed = false;
+  Value old_value = Value::null();
+  Value new_value = Value::null();
+  std::uint64_t old_revision = 0;
+  std::uint64_t new_revision = 0;
+};
+
+struct RuntimeWatchObjectStateSnapshot {
+  std::uint64_t object_id = 0;
+  std::uint64_t object_revision = 0;
+  std::uint64_t subscriber_count = 0;
+  std::unordered_map<std::string, std::uint64_t> field_revisions;
+};
+
+struct RuntimeWatchIvarSnapshot {
+  std::uint64_t object_id = 0;
+  std::uint64_t object_revision = 0;
+  std::uint64_t field_revision = 0;
+  std::uint64_t subscriber_count = 0;
+  std::string field_name;
+  bool watched = false;
+  Value value = Value::null();
+};
+
+struct RuntimeWatchIvarWriteResult {
+  bool changed = false;
+  std::string field_name;
+  Value old_value = Value::null();
+  Value new_value = Value::null();
+  std::uint64_t old_revision = 0;
+  std::uint64_t new_revision = 0;
+  std::uint64_t old_object_revision = 0;
+  std::uint64_t new_object_revision = 0;
+};
+
+struct RuntimeWatchEvent {
+  std::string kind;
+  std::uint64_t watch_epoch = 0;
+  std::uint64_t cell_id = 0;
+  std::uint64_t handle_id = 0;
+  std::uint64_t object_id = 0;
+  std::uint64_t old_object_revision = 0;
+  std::uint64_t new_object_revision = 0;
+  std::string target_name;
+  std::string field_name;
+  std::uint64_t old_revision = 0;
+  std::uint64_t new_revision = 0;
+  Value old_value = Value::null();
+  Value new_value = Value::null();
+};
+
+enum class RuntimeDependencyKind { Binding, Ivar, Object };
+
+struct RuntimeDependency {
+  RuntimeDependencyKind kind = RuntimeDependencyKind::Binding;
+  std::uint64_t cell_id = 0;
+  std::uint64_t object_id = 0;
+  std::string target_name;
+  std::string field_name;
+  std::uint64_t revision = 0;
+  std::uint64_t object_revision = 0;
+};
+
+struct RuntimeDependencySet {
+  std::uint64_t notebook_cell_id = 0;
+  std::vector<RuntimeDependency> dependencies;
+};
+
+class RuntimeWatchCell {
+public:
+  explicit RuntimeWatchCell(Value value = Value::null(),
+                            std::uint64_t cell_id = 0,
+                            std::string target_name = {});
+
+  Value read() const;
+  RuntimeWatchWriteResult write(Value value);
+  RuntimeWatchCellSnapshot snapshot() const;
+  bool watched() const;
+  void enable_watch(std::string target_name = {});
+  void subscribe();
+  void unsubscribe();
+  std::uint64_t cell_id() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+class RuntimeWatchObjectState {
+public:
+  explicit RuntimeWatchObjectState(std::uint64_t object_id = 0);
+
+  RuntimeWatchObjectStateSnapshot snapshot() const;
+  RuntimeWatchIvarSnapshot snapshot_field(const std::string &field_name,
+                                          Value current_value) const;
+  RuntimeWatchIvarWriteResult write_field(std::string field_name,
+                                          Value old_value, Value new_value);
+  void subscribe_field(std::string field_name);
+  void unsubscribe_field(const std::string &field_name);
+  bool field_watched(const std::string &field_name) const;
+  std::uint64_t object_id() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+class RuntimeWatchHandle {
+public:
+  RuntimeWatchHandle();
+  RuntimeWatchHandle(std::shared_ptr<RuntimeWatchCell> cell,
+                     std::uint64_t handle_id, std::string target_name);
+  RuntimeWatchHandle(std::shared_ptr<RuntimeWatchObjectState> object_state,
+                     std::uint64_t handle_id, std::string target_name,
+                     std::string field_name);
+  RuntimeWatchHandle(const RuntimeWatchHandle &) = delete;
+  RuntimeWatchHandle &operator=(const RuntimeWatchHandle &) = delete;
+  RuntimeWatchHandle(RuntimeWatchHandle &&) noexcept;
+  RuntimeWatchHandle &operator=(RuntimeWatchHandle &&) noexcept;
+  ~RuntimeWatchHandle();
+
+  bool active() const;
+  bool unwatch();
+  std::uint64_t handle_id() const;
+  std::shared_ptr<RuntimeWatchCell> cell() const;
+  RuntimeWatchCellSnapshot snapshot() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
 };
 
 struct InstanceValue {
@@ -201,6 +365,7 @@ struct InstanceValue {
   std::vector<Value> ivar_storage;
   std::uint64_t ivar_shape_version = 1;
   std::unordered_map<std::string, Value> ivars;
+  std::shared_ptr<RuntimeWatchObjectState> watch_state;
 };
 
 struct ListValue {
@@ -1343,6 +1508,7 @@ struct RuntimeWorldMirror {
   bool read_only = true;
   RuntimeWorldState state = RuntimeWorldState::Open;
   std::uint64_t world_epoch = 0;
+  std::uint64_t watch_epoch = 0;
   RuntimePackageMirror package;
   std::vector<RuntimeOwnerMirror> owners;
 };
@@ -1434,19 +1600,28 @@ struct ExecutionLocal {
   std::string role;
   std::string binding_kind;
   bool initialized = false;
+  bool watched = false;
+  std::uint64_t watch_cell_id = 0;
+  std::uint64_t watch_revision = 0;
   Value value = Value::null();
 };
 
 struct ExecutionResult {
   ExecutionResult() = default;
   ExecutionResult(Value result_value, std::optional<Fault> result_fault,
-                  std::vector<ExecutionLocal> result_locals = {})
+                  std::vector<ExecutionLocal> result_locals = {},
+                  std::vector<RuntimeWatchEvent> result_watch_events = {},
+                  std::uint64_t result_watch_epoch = 0)
       : value(std::move(result_value)), fault(std::move(result_fault)),
-        locals(std::move(result_locals)) {}
+        locals(std::move(result_locals)),
+        watch_events(std::move(result_watch_events)),
+        watch_epoch(result_watch_epoch) {}
 
   Value value = Value::null();
   std::optional<Fault> fault;
   std::vector<ExecutionLocal> locals;
+  std::vector<RuntimeWatchEvent> watch_events;
+  std::uint64_t watch_epoch = 0;
 
   bool ok() const { return !fault.has_value(); }
 };
@@ -1497,6 +1672,11 @@ public:
   RuntimeReplayValidation replay_validation() const;
 
   std::uint64_t world_epoch() const;
+  std::uint64_t watch_epoch() const;
+  std::vector<RuntimeWatchEvent> watch_events() const;
+  void begin_dependency_capture(std::uint64_t notebook_cell_id);
+  RuntimeDependencySet end_dependency_capture();
+  RuntimeDependencySet dependency_capture_snapshot() const;
   RuntimeWorldState world_state() const;
   bool is_world_frozen() const;
   std::uint64_t method_version(std::uint32_t class_index) const;

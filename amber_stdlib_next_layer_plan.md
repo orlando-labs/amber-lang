@@ -757,8 +757,22 @@ Detailed project see in amber_threading_async_api_project_v1.md
 
 - `STD-020` Notebook watch target diagnostics.
 - `STD-021` WatchCell storage replacement.
-- `STD-022` WatchObjectState and ivar revision events.
+- `STD-022` WatchObjectState and ivar revision events. Done:
+  `Kernel.watch(@ivar)` lowers/emits through `HWatchIvar` / `WATCH_IVAR`;
+  runtime instances carry `RuntimeWatchObjectState` with stable object ids,
+  object revisions, field revisions, and field subscribers; successful watched
+  ivar writes publish `watch.ivar.write` events with old/new values plus
+  field/object revision deltas without bumping `world_epoch`; failed writes do
+  not publish events; `hir_tests`, `emitter_tests`, and `vm_tests` cover the
+  path.
 - `STD-023` Dependency capture API for notebook host.
+  Done: `RuntimeWorld` exposes `begin_dependency_capture(cell_id)`,
+  `end_dependency_capture()`, and `dependency_capture_snapshot()`; watched
+  binding reads through locals/upvalues and watched ivar reads publish
+  deterministic `RuntimeDependencySet` entries keyed by watch cell or
+  object/field revision without bumping `watch_epoch` or `world_epoch`;
+  `vm_tests` covers binding reads, repeated-read de-duplication, nested method
+  ivar reads, and capture shutdown.
 
 ## IO
 

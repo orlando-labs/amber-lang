@@ -28,7 +28,7 @@ FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(CHECKER_SRCS) $(HIR_SRCS)
 CORE_SRCS := $(PROFILE_SRCS) $(BUILD_SRCS) $(FRONTEND_SRCS) $(MIR_SRCS) $(NATIVE_SRCS) $(BYTECODE_SRCS)
-AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS) $(PACKAGE_SRCS) $(FROZEN_SRCS)
+AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS) $(FROZEN_SRCS)
 AMBERTEST_SRCS := tools/ambertest/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
 IAMBER_SRCS := tools/iamber/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
 IAMBER_LDLIBS ?= -lncurses
@@ -227,6 +227,12 @@ test: build
 	grep -q '"schema": "amber.bc.verify.v1"' $(BUILD_DIR)/w14-main.public-verify.json
 	grep -q '"code":"BC1002"' $(BUILD_DIR)/bad.public-verify.json
 	$(BUILD_DIR)/amberc amberbc-disasm $(BUILD_DIR)/w14_build/out/demo.main.amberbc > $(BUILD_DIR)/w14-main.disasm.txt
+	$(BUILD_DIR)/amberc tests/fixtures/run_script/main.am > $(BUILD_DIR)/run-script.out
+	grep -q '^42$$' $(BUILD_DIR)/run-script.out
+	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/src/main.am -o $(BUILD_DIR)/w14-main-exe > $(BUILD_DIR)/w14-main-exe-build.json
+	grep -q '"entry": "main"' $(BUILD_DIR)/w14-main-exe-build.json
+	$(BUILD_DIR)/w14-main-exe > $(BUILD_DIR)/w14-main-exe.out
+	grep -q '^42$$' $(BUILD_DIR)/w14-main-exe.out
 	$(BUILD_DIR)/ambertest run corpus
 
 conformance: $(BUILD_DIR)/ambertest

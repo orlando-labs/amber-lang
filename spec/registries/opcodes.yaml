@@ -24,6 +24,8 @@ opcodes:
     byte: 0x0A
   - name: FREEZE
     byte: 0x0B
+  - name: MAKESET
+    byte: 0x0C
   - name: LOADUPVAL
     byte: 0x10
   - name: STOREUPVAL
@@ -46,6 +48,12 @@ opcodes:
     byte: 0x19
   - name: CLOSEUPVALUES
     byte: 0x1A
+  - name: WATCH_LOCAL
+    byte: 0x1B
+  - name: WATCH_UPVAL
+    byte: 0x1C
+  - name: WATCH_IVAR
+    byte: 0x1D
   - name: SEND
     byte: 0x20
   - name: SEND_DYN

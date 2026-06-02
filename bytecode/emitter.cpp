@@ -87,6 +87,28 @@ bool is_empty_seq_expr(const ast::Expr *expr) {
   return items == nullptr || items->values.empty();
 }
 
+bool contains_hir_kind(const ast::Expr *expr, const std::string &kind) {
+  if (expr == nullptr) {
+    return false;
+  }
+  if (expr->kind == kind) {
+    return true;
+  }
+  for (const ast::NodeField &field : expr->node_fields) {
+    if (contains_hir_kind(field.value.get(), kind)) {
+      return true;
+    }
+  }
+  for (const ast::ListField &field : expr->list_fields) {
+    for (const std::unique_ptr<ast::Expr> &value : field.values) {
+      if (contains_hir_kind(value.get(), kind)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 std::vector<std::string> named_entries(const ast::Expr &expr,
                                        const std::string &field_name) {
   std::vector<std::string> names;
@@ -247,6 +269,7 @@ public:
 private:
   struct LoopContext {
     std::vector<std::size_t> break_jump_indices;
+    std::optional<std::uint32_t> result_reg;
   };
 
   struct PatchRef {
@@ -267,13 +290,23 @@ private:
   void patch_operand(std::size_t instruction_index, std::size_t operand_index,
                      std::int64_t value, bool signed_immediate = false);
   void record_line(const lexer::Span &span);
-  void compile_seq(const ast::Expr &seq);
-  void compile_stmt(const ast::Expr &stmt);
+  void record_last_value(std::uint32_t reg, const lexer::Span &span,
+                         bool want_result);
+  void emit_value_to_reg(std::uint32_t dst,
+                         std::optional<std::uint32_t> src,
+                         const lexer::Span &span);
+  void compile_seq(const ast::Expr &seq, bool want_result = true);
+  void compile_seq_to_reg(const ast::Expr &seq, std::uint32_t dst,
+                          const lexer::Span &span);
+  void compile_stmt(const ast::Expr &stmt, bool want_result = true);
+  void compile_expr_for_effect(const ast::Expr &expr);
   std::uint32_t compile_expr(const ast::Expr &expr);
   std::uint32_t compile_clause_subject(const ast::Expr &clause);
   void compile_param_pattern_prologues();
+  void compile_if_for_effect(const ast::Expr &expr);
   std::uint32_t compile_if(const ast::Expr &expr);
   std::uint32_t compile_logical(const ast::Expr &expr);
+  void compile_loop_for_effect(const ast::Expr &expr);
   std::uint32_t compile_loop(const ast::Expr &expr);
   std::uint32_t compile_match_dispatch(const ast::Expr &expr);
   std::uint32_t compile_clause_dispatch(const ast::Expr &expr);
@@ -283,24 +316,31 @@ private:
                                 std::optional<std::uint32_t> target_reg = {});
   std::uint32_t compile_lookup_like(const ast::Expr &expr,
                                     const std::string &name);
+  void compile_const_into(const ast::Expr &expr, std::uint32_t dst);
   std::uint32_t compile_const(const ast::Expr &expr);
+  void compile_const_str_into(const ast::Expr &expr, std::uint32_t dst);
+  std::uint32_t compile_const_str(const ast::Expr &expr);
+  bool compile_expr_into_reg_if_simple(const ast::Expr &expr,
+                                       std::uint32_t dst);
+  std::uint32_t compile_stringify(const ast::Expr &expr);
+  std::uint32_t compile_string_build(const ast::Expr &expr);
   std::uint32_t compile_sequence_literal(const ast::Expr &expr, Opcode opcode);
   void emit_make_sequence_from_regs(std::uint32_t dst,
                                     const std::vector<std::uint32_t> &regs,
                                     Opcode opcode, const lexer::Span &span);
-  void compile_sequence_literal_suffix(
-      const ast::ListField *elements, std::size_t index,
-      std::vector<std::uint32_t> prefix_regs, std::uint32_t dst, Opcode opcode,
-      const lexer::Span &span);
+  void compile_sequence_literal_suffix(const ast::ListField *elements,
+                                       std::size_t index,
+                                       std::vector<std::uint32_t> prefix_regs,
+                                       std::uint32_t dst, Opcode opcode,
+                                       const lexer::Span &span);
   std::uint32_t compile_map_literal(const ast::Expr &expr);
-  void emit_make_map_from_entries(
-      std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
-      const lexer::Span &span);
+  void emit_make_map_from_entries(std::uint32_t dst,
+                                  const std::vector<CompiledMapEntry> &entries,
+                                  const lexer::Span &span);
   void compile_map_literal_suffix(const ast::ListField *entries,
                                   std::size_t index,
                                   std::vector<CompiledMapEntry> prefix_entries,
-                                  std::uint32_t dst,
-                                  const lexer::Span &span);
+                                  std::uint32_t dst, const lexer::Span &span);
   std::uint32_t compile_cond_source(const ast::Expr &cond, Opcode *jump_opcode,
                                     bool *jump_to_then_branch);
   std::uint32_t block_reg_operand(const ast::Expr &expr);
@@ -340,6 +380,8 @@ private:
   const ast::Expr *body_override_ = nullptr;
   BcCode code_;
   std::uint32_t next_temp_ = 0;
+  bool preserve_last_result_ = false;
+  std::optional<std::uint32_t> last_value_reg_;
   std::vector<LoopContext> loops_;
 };
 
@@ -976,6 +1018,13 @@ CodeEmitter::CodeEmitter(Emitter *owner, const hir::Procedure *procedure,
   }
 
   next_temp_ = static_cast<std::uint32_t>(procedure_->locals.size());
+  const ast::Expr *body =
+      body_override_ != nullptr ? body_override_ : procedure_->body.get();
+  preserve_last_result_ = contains_hir_kind(body, "HLastGet");
+  for (const std::unique_ptr<ast::Expr> &pattern : procedure_->param_patterns) {
+    preserve_last_result_ =
+        preserve_last_result_ || contains_hir_kind(pattern.get(), "HLastGet");
+  }
 }
 
 BcCode CodeEmitter::emit() {
@@ -989,9 +1038,13 @@ BcCode CodeEmitter::emit() {
   }
 
   emit_instruction(Opcode::CloseUpvalues, {{0, false}}, procedure_->span);
-  const std::uint32_t last_reg = alloc_temp();
-  emit_instruction(Opcode::GetLast, {{last_reg, false}}, procedure_->span);
-  emit_instruction(Opcode::Return, {{last_reg, false}}, procedure_->span);
+  if (!last_value_reg_.has_value()) {
+    const std::uint32_t null_reg = alloc_temp();
+    emit_instruction(Opcode::LoadNull, {{null_reg, false}}, procedure_->span);
+    last_value_reg_ = null_reg;
+  }
+  emit_instruction(Opcode::Return, {{*last_value_reg_, false}},
+                   procedure_->span);
 
   code_.reg_count = next_temp_;
   return code_;
@@ -1249,19 +1302,63 @@ void CodeEmitter::diag(const lexer::Span &span, const std::string &code,
   owner_->diag(span, code, message);
 }
 
-void CodeEmitter::compile_seq(const ast::Expr &seq) {
-  const ast::ListField *items = list_field(seq, "items");
-  if (items == nullptr) {
-    return;
+void CodeEmitter::record_last_value(std::uint32_t reg, const lexer::Span &span,
+                                    bool want_result) {
+  if (preserve_last_result_) {
+    emit_instruction(Opcode::SetLast, {{reg, false}}, span);
   }
-  for (const std::unique_ptr<ast::Expr> &item : items->values) {
-    compile_stmt(*item);
+  if (want_result) {
+    last_value_reg_ = reg;
   }
 }
 
-void CodeEmitter::compile_stmt(const ast::Expr &stmt) {
+void CodeEmitter::emit_value_to_reg(std::uint32_t dst,
+                                    std::optional<std::uint32_t> src,
+                                    const lexer::Span &span) {
+  if (!src.has_value()) {
+    emit_instruction(Opcode::LoadNull, {{dst, false}}, span);
+    return;
+  }
+  if (*src != dst) {
+    emit_instruction(Opcode::Move, {{dst, false}, {*src, false}}, span);
+  }
+}
+
+void CodeEmitter::compile_seq(const ast::Expr &seq, bool want_result) {
+  const ast::ListField *items = list_field(seq, "items");
+  if (items == nullptr) {
+    if (want_result) {
+      last_value_reg_.reset();
+    }
+    return;
+  }
+  if (items->values.empty()) {
+    if (want_result) {
+      last_value_reg_.reset();
+    }
+    return;
+  }
+  for (std::size_t i = 0; i < items->values.size(); ++i) {
+    const bool item_wants_result =
+        preserve_last_result_ || (want_result && i + 1U == items->values.size());
+    compile_stmt(*items->values[i], item_wants_result);
+  }
+}
+
+void CodeEmitter::compile_seq_to_reg(const ast::Expr &seq, std::uint32_t dst,
+                                     const lexer::Span &span) {
+  const std::optional<std::uint32_t> saved_last = last_value_reg_;
+  last_value_reg_.reset();
+  compile_seq(seq, true);
+  emit_value_to_reg(dst, last_value_reg_.has_value() ? last_value_reg_
+                                                     : saved_last,
+                    span);
+  last_value_reg_ = saved_last;
+}
+
+void CodeEmitter::compile_stmt(const ast::Expr &stmt, bool want_result) {
   if (stmt.kind == "HSeq") {
-    compile_seq(stmt);
+    compile_seq(stmt, want_result);
     return;
   }
   if (stmt.kind == "HLastSet") {
@@ -1270,34 +1367,132 @@ void CodeEmitter::compile_stmt(const ast::Expr &stmt) {
       diag(stmt.span, "BC2001", "HLastSet is missing expr");
       return;
     }
+    if (!want_result && !preserve_last_result_) {
+      const std::optional<std::uint32_t> saved_last = last_value_reg_;
+      compile_expr_for_effect(*expr);
+      last_value_reg_ = saved_last;
+      return;
+    }
     const std::uint32_t reg = compile_expr(*expr);
-    emit_instruction(Opcode::SetLast, {{reg, false}}, stmt.span);
+    record_last_value(reg, stmt.span, want_result);
     return;
   }
 
+  if (!want_result && !preserve_last_result_) {
+    const std::optional<std::uint32_t> saved_last = last_value_reg_;
+    compile_expr_for_effect(stmt);
+    last_value_reg_ = saved_last;
+    return;
+  }
   const std::uint32_t reg = compile_expr(stmt);
-  emit_instruction(Opcode::SetLast, {{reg, false}}, stmt.span);
+  record_last_value(reg, stmt.span, want_result);
 }
 
-std::uint32_t CodeEmitter::compile_const(const ast::Expr &expr) {
+void CodeEmitter::compile_expr_for_effect(const ast::Expr &expr) {
+  if (expr.kind == "HConst" || expr.kind == "HConstStr" ||
+      expr.kind == "HLoadLocal" || expr.kind == "HLoadCapture") {
+    return;
+  }
+  if (expr.kind == "HIf") {
+    compile_if_for_effect(expr);
+    return;
+  }
+  if (expr.kind == "HLoop") {
+    compile_loop_for_effect(expr);
+    return;
+  }
+  compile_expr(expr);
+}
+
+void CodeEmitter::compile_const_into(const ast::Expr &expr,
+                                     std::uint32_t dst) {
   const std::string token = string_field(expr, "token");
   const std::string value = string_field(expr, "value");
-  const std::uint32_t dst = alloc_temp();
   if (token == "KEYWORD_NULL") {
     emit_instruction(Opcode::LoadNull, {{dst, false}}, expr.span);
-    return dst;
+    return;
   }
   if (token == "KEYWORD_TRUE" || token == "KEYWORD_FALSE") {
     emit_instruction(Opcode::LoadBool,
                      {{dst, false}, {token == "KEYWORD_TRUE" ? 1 : 0, false}},
                      expr.span);
-    return dst;
+    return;
   }
   const std::uint32_t constant_id =
       owner_->intern_literal_constant(token, value);
   emit_instruction(Opcode::LoadK, {{dst, false}, {constant_id, false}},
                    expr.span);
+}
+
+std::uint32_t CodeEmitter::compile_const(const ast::Expr &expr) {
+  const std::uint32_t dst = alloc_temp();
+  compile_const_into(expr, dst);
   return dst;
+}
+
+void CodeEmitter::compile_const_str_into(const ast::Expr &expr,
+                                         std::uint32_t dst) {
+  Constant constant;
+  constant.kind = ConstantKind::StringRef;
+  constant.ref_id = owner_->intern_string(string_field(expr, "value"));
+  const std::uint32_t constant_id = owner_->intern_constant(constant);
+  emit_instruction(Opcode::LoadK, {{dst, false}, {constant_id, false}},
+                   expr.span);
+}
+
+std::uint32_t CodeEmitter::compile_const_str(const ast::Expr &expr) {
+  const std::uint32_t dst = alloc_temp();
+  compile_const_str_into(expr, dst);
+  return dst;
+}
+
+bool CodeEmitter::compile_expr_into_reg_if_simple(const ast::Expr &expr,
+                                                  std::uint32_t dst) {
+  if (expr.kind == "HConst") {
+    compile_const_into(expr, dst);
+    return true;
+  }
+  if (expr.kind == "HConstStr") {
+    compile_const_str_into(expr, dst);
+    return true;
+  }
+  if (expr.kind == "HClosure") {
+    compile_closure(expr, dst);
+    return true;
+  }
+  return false;
+}
+
+std::uint32_t CodeEmitter::compile_stringify(const ast::Expr &expr) {
+  const ast::Expr *inner = node_field(expr, "expr");
+  if (inner == nullptr) {
+    diag(expr.span, "BC2001", "HStringify is missing expr");
+    return compile_const_str(expr);
+  }
+  if (inner->kind == "HConstStr") {
+    return compile_expr(*inner);
+  }
+  const std::uint32_t value_reg = compile_expr(*inner);
+  if (preserve_last_result_) {
+    emit_instruction(Opcode::SetLast, {{value_reg, false}}, inner->span);
+  }
+  return emit_simple_send(expr.span, value_reg, "to_str", {});
+}
+
+std::uint32_t CodeEmitter::compile_string_build(const ast::Expr &expr) {
+  const ast::ListField *parts = list_field(expr, "parts");
+  if (parts == nullptr || parts->values.empty()) {
+    auto empty = ast::make_expr("HConstStr", expr.span);
+    empty->string_field("value", "");
+    return compile_const_str(*empty);
+  }
+
+  std::uint32_t acc = compile_expr(*parts->values.front());
+  for (std::size_t i = 1; i < parts->values.size(); ++i) {
+    const std::uint32_t part = compile_expr(*parts->values[i]);
+    acc = emit_simple_send(expr.span, acc, "+", {part});
+  }
+  return acc;
 }
 
 std::uint32_t CodeEmitter::compile_sequence_literal(const ast::Expr &expr,
@@ -1359,11 +1554,11 @@ void CodeEmitter::emit_make_sequence_from_regs(
       }
     }
   }
-  emit_instruction(
-      opcode,
-      {{dst, false}, {first_reg, false},
-       {static_cast<std::int64_t>(regs.size()), false}},
-      span);
+  emit_instruction(opcode,
+                   {{dst, false},
+                    {first_reg, false},
+                    {static_cast<std::int64_t>(regs.size()), false}},
+                   span);
 }
 
 void CodeEmitter::compile_sequence_literal_suffix(
@@ -1393,9 +1588,9 @@ void CodeEmitter::compile_sequence_literal_suffix(
   }
 
   const std::uint32_t condition_reg = compile_expr(*condition);
-  const Opcode skip_opcode =
-      string_field(element, "condition_kind") == "unless" ? Opcode::JumpIfTrue
-                                                          : Opcode::JumpIfFalse;
+  const Opcode skip_opcode = string_field(element, "condition_kind") == "unless"
+                                 ? Opcode::JumpIfTrue
+                                 : Opcode::JumpIfFalse;
   const std::size_t jump_skip = emit_instruction(
       skip_opcode, {{condition_reg, false}, {-1, true}}, condition->span);
 
@@ -1488,17 +1683,16 @@ void CodeEmitter::compile_map_literal_suffix(
   const std::uint32_t symbol_id = owner_->intern_symbol(key);
   const ast::Expr *condition = node_field(entry, "condition");
   if (condition == nullptr) {
-    prefix_entries.push_back(
-        CompiledMapEntry{symbol_id, compile_expr(*value)});
+    prefix_entries.push_back(CompiledMapEntry{symbol_id, compile_expr(*value)});
     compile_map_literal_suffix(entries, index + 1, std::move(prefix_entries),
                                dst, span);
     return;
   }
 
   const std::uint32_t condition_reg = compile_expr(*condition);
-  const Opcode skip_opcode =
-      string_field(entry, "condition_kind") == "unless" ? Opcode::JumpIfTrue
-                                                        : Opcode::JumpIfFalse;
+  const Opcode skip_opcode = string_field(entry, "condition_kind") == "unless"
+                                 ? Opcode::JumpIfTrue
+                                 : Opcode::JumpIfFalse;
   const std::size_t jump_skip = emit_instruction(
       skip_opcode, {{condition_reg, false}, {-1, true}}, condition->span);
 
@@ -2187,6 +2381,41 @@ std::uint32_t CodeEmitter::compile_cond_source(const ast::Expr &cond,
   return compile_expr(cond);
 }
 
+void CodeEmitter::compile_if_for_effect(const ast::Expr &expr) {
+  const ast::Expr *cond = node_field(expr, "cond");
+  const ast::Expr *then_body = node_field(expr, "then_body");
+  const ast::Expr *else_body = node_field(expr, "else_body");
+  if (cond == nullptr || then_body == nullptr || else_body == nullptr) {
+    diag(expr.span, "BC2001", "HIf is missing child nodes");
+    return;
+  }
+
+  Opcode cond_jump = Opcode::JumpIfFalse;
+  bool jump_to_then = false;
+  const std::uint32_t cond_reg =
+      compile_cond_source(*cond, &cond_jump, &jump_to_then);
+  if (jump_to_then) {
+    const std::size_t jump_then = emit_instruction(
+        cond_jump, {{cond_reg, false}, {-1, true}}, cond->span);
+    compile_seq(*else_body, false);
+    const std::size_t jump_end =
+        emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
+    patch_operand(jump_then, 1, current_pc(), false);
+    compile_seq(*then_body, false);
+    patch_operand(jump_end, 0, current_pc(), false);
+    return;
+  }
+
+  const std::size_t jump_else = emit_instruction(
+      cond_jump, {{cond_reg, false}, {-1, true}}, cond->span);
+  compile_seq(*then_body, false);
+  const std::size_t jump_end =
+      emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
+  patch_operand(jump_else, 1, current_pc(), false);
+  compile_seq(*else_body, false);
+  patch_operand(jump_end, 0, current_pc(), false);
+}
+
 std::uint32_t CodeEmitter::compile_if(const ast::Expr &expr) {
   const ast::Expr *cond = node_field(expr, "cond");
   const ast::Expr *then_body = node_field(expr, "then_body");
@@ -2204,23 +2433,23 @@ std::uint32_t CodeEmitter::compile_if(const ast::Expr &expr) {
   if (jump_to_then) {
     const std::size_t jump_then = emit_instruction(
         cond_jump, {{cond_reg, false}, {-1, true}}, cond->span);
-    compile_seq(*else_body);
+    compile_seq_to_reg(*else_body, dst, else_body->span);
     const std::size_t jump_end =
         emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
     patch_operand(jump_then, 1, current_pc(), false);
-    compile_seq(*then_body);
+    compile_seq_to_reg(*then_body, dst, then_body->span);
     patch_operand(jump_end, 0, current_pc(), false);
   } else {
     const std::size_t jump_else = emit_instruction(
         cond_jump, {{cond_reg, false}, {-1, true}}, cond->span);
-    compile_seq(*then_body);
+    compile_seq_to_reg(*then_body, dst, then_body->span);
     const std::size_t jump_end =
         emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
     patch_operand(jump_else, 1, current_pc(), false);
-    compile_seq(*else_body);
+    compile_seq_to_reg(*else_body, dst, else_body->span);
     patch_operand(jump_end, 0, current_pc(), false);
   }
-  emit_instruction(Opcode::GetLast, {{dst, false}}, expr.span);
+  last_value_reg_ = dst;
   return dst;
 }
 
@@ -2249,6 +2478,67 @@ std::uint32_t CodeEmitter::compile_logical(const ast::Expr &expr) {
   return dst;
 }
 
+void CodeEmitter::compile_loop_for_effect(const ast::Expr &expr) {
+  const std::string kind = string_field(expr, "kind");
+  const ast::Expr *cond = node_field(expr, "cond");
+  const ast::Expr *body = node_field(expr, "body");
+  if (body == nullptr) {
+    diag(expr.span, "BC2001", "HLoop is missing body");
+    return;
+  }
+
+  const std::uint32_t header_pc = current_pc();
+  code_.safepoint_table.push_back({header_pc, 0});
+  emit_instruction(Opcode::Safepoint, {}, expr.span);
+
+  if (kind == "while" || kind == "until") {
+    if (cond == nullptr) {
+      diag(expr.span, "BC2001", "conditional loop is missing cond");
+      return;
+    }
+    const std::uint32_t cond_reg = compile_expr(*cond);
+    const Opcode jump_opcode =
+        kind == "while" ? Opcode::JumpIfFalse : Opcode::JumpIfTrue;
+    const std::size_t jump_exit = emit_instruction(
+        jump_opcode, {{cond_reg, false}, {-1, true}}, cond->span);
+    loops_.push_back(LoopContext{});
+    compile_seq(*body, false);
+    emit_instruction(Opcode::Jump, {{header_pc, false}}, expr.span);
+    const std::uint32_t exit_pc = current_pc();
+    patch_operand(jump_exit, 1, exit_pc, false);
+    for (std::size_t patch : loops_.back().break_jump_indices) {
+      patch_operand(patch, 0, exit_pc, false);
+    }
+    loops_.pop_back();
+  } else if (kind == "loop") {
+    loops_.push_back(LoopContext{});
+    compile_seq(*body, false);
+    emit_instruction(Opcode::Jump, {{header_pc, false}}, expr.span);
+    const std::uint32_t exit_pc = current_pc();
+    for (std::size_t patch : loops_.back().break_jump_indices) {
+      patch_operand(patch, 0, exit_pc, false);
+    }
+    loops_.pop_back();
+  } else if (kind == "do_while") {
+    loops_.push_back(LoopContext{});
+    compile_seq(*body, false);
+    if (cond == nullptr) {
+      diag(expr.span, "BC2001", "do_while loop is missing cond");
+    } else {
+      const std::uint32_t cond_reg = compile_expr(*cond);
+      emit_instruction(Opcode::JumpIfTrue,
+                       {{cond_reg, false}, {header_pc, false}}, cond->span);
+    }
+    const std::uint32_t exit_pc = current_pc();
+    for (std::size_t patch : loops_.back().break_jump_indices) {
+      patch_operand(patch, 0, exit_pc, false);
+    }
+    loops_.pop_back();
+  } else {
+    diag(expr.span, "BC2001", "unsupported loop kind in bytecode emitter");
+  }
+}
+
 std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
   const std::string kind = string_field(expr, "kind");
   const ast::Expr *cond = node_field(expr, "cond");
@@ -2259,6 +2549,7 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
     return dst;
   }
 
+  emit_value_to_reg(dst, last_value_reg_, expr.span);
   const std::uint32_t header_pc = current_pc();
   code_.safepoint_table.push_back({header_pc, 0});
   emit_instruction(Opcode::Safepoint, {}, expr.span);
@@ -2273,8 +2564,11 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
         kind == "while" ? Opcode::JumpIfFalse : Opcode::JumpIfTrue;
     const std::size_t jump_exit = emit_instruction(
         jump_opcode, {{cond_reg, false}, {-1, true}}, cond->span);
-    loops_.push_back({});
+    LoopContext context;
+    context.result_reg = dst;
+    loops_.push_back(context);
     compile_seq(*body);
+    emit_value_to_reg(dst, last_value_reg_, body->span);
     emit_instruction(Opcode::Jump, {{header_pc, false}}, expr.span);
     const std::uint32_t exit_pc = current_pc();
     patch_operand(jump_exit, 1, exit_pc, false);
@@ -2283,8 +2577,11 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
     }
     loops_.pop_back();
   } else if (kind == "loop") {
-    loops_.push_back({});
+    LoopContext context;
+    context.result_reg = dst;
+    loops_.push_back(context);
     compile_seq(*body);
+    emit_value_to_reg(dst, last_value_reg_, body->span);
     emit_instruction(Opcode::Jump, {{header_pc, false}}, expr.span);
     const std::uint32_t exit_pc = current_pc();
     for (std::size_t patch : loops_.back().break_jump_indices) {
@@ -2292,8 +2589,11 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
     }
     loops_.pop_back();
   } else if (kind == "do_while") {
-    loops_.push_back({});
+    LoopContext context;
+    context.result_reg = dst;
+    loops_.push_back(context);
     compile_seq(*body);
+    emit_value_to_reg(dst, last_value_reg_, body->span);
     if (cond == nullptr) {
       diag(expr.span, "BC2001", "do_while loop is missing cond");
     } else {
@@ -2310,7 +2610,7 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
     diag(expr.span, "BC2001", "unsupported loop kind in bytecode emitter");
   }
 
-  emit_instruction(Opcode::GetLast, {{dst, false}}, expr.span);
+  last_value_reg_ = dst;
   return dst;
 }
 
@@ -2373,8 +2673,7 @@ std::uint32_t CodeEmitter::compile_match_dispatch(const ast::Expr &expr) {
         next_arm_patches.push_back({jump_next, 1});
       }
 
-      compile_seq(*body);
-      emit_instruction(Opcode::GetLast, {{dst, false}}, arm->span);
+      compile_seq_to_reg(*body, dst, body->span);
       end_jumps.push_back(
           emit_instruction(Opcode::Jump, {{-1, true}}, arm->span));
       patch_fail_patches(next_arm_patches, current_pc());
@@ -2383,14 +2682,15 @@ std::uint32_t CodeEmitter::compile_match_dispatch(const ast::Expr &expr) {
 
   const ast::Expr *else_body = node_field(expr, "else_body");
   if (else_body != nullptr && !is_empty_seq_expr(else_body)) {
-    compile_seq(*else_body);
-    emit_instruction(Opcode::GetLast, {{dst, false}}, else_body->span);
+    compile_seq_to_reg(*else_body, dst, else_body->span);
   } else if (string_field(expr, "fail_mode") == "match_error") {
     emit_instruction(Opcode::PFail, {{kPatternFailModeMatchError, false}},
                      expr.span);
   } else {
     emit_instruction(Opcode::LoadNull, {{dst, false}}, expr.span);
-    emit_instruction(Opcode::SetLast, {{dst, false}}, expr.span);
+    if (preserve_last_result_) {
+      emit_instruction(Opcode::SetLast, {{dst, false}}, expr.span);
+    }
   }
 
   for (std::size_t jump : end_jumps) {
@@ -2414,9 +2714,9 @@ std::uint32_t CodeEmitter::compile_clause_dispatch(const ast::Expr &expr) {
           compiled_pattern == nullptr
               ? nullptr
               : node_field(*compiled_pattern, "match_program");
-      const ast::Expr *root =
-          match_program == nullptr ? nullptr : node_field(*match_program,
-                                                          "root");
+      const ast::Expr *root = match_program == nullptr
+                                  ? nullptr
+                                  : node_field(*match_program, "root");
       const ast::Expr *body = node_field(*clause, "body");
       if (compiled_pattern == nullptr || match_program == nullptr ||
           root == nullptr || body == nullptr) {
@@ -2445,14 +2745,12 @@ std::uint32_t CodeEmitter::compile_clause_dispatch(const ast::Expr &expr) {
       std::vector<PatchRef> next_clause_patches = fail_patches;
       if (const ast::Expr *guard = node_field(*clause, "guard")) {
         const std::uint32_t guard_reg = compile_expr(*guard);
-        const std::size_t jump_next =
-            emit_instruction(Opcode::JumpIfFalse,
-                             {{guard_reg, false}, {-1, true}}, guard->span);
+        const std::size_t jump_next = emit_instruction(
+            Opcode::JumpIfFalse, {{guard_reg, false}, {-1, true}}, guard->span);
         next_clause_patches.push_back({jump_next, 1});
       }
 
-      compile_seq(*body);
-      emit_instruction(Opcode::GetLast, {{dst, false}}, body->span);
+      compile_seq_to_reg(*body, dst, body->span);
       end_jumps.push_back(
           emit_instruction(Opcode::Jump, {{-1, true}}, clause->span));
       patch_fail_patches(next_clause_patches, current_pc());
@@ -2461,11 +2759,12 @@ std::uint32_t CodeEmitter::compile_clause_dispatch(const ast::Expr &expr) {
 
   const ast::Expr *else_body = node_field(expr, "else_body");
   if (else_body != nullptr && !is_empty_seq_expr(else_body)) {
-    compile_seq(*else_body);
-    emit_instruction(Opcode::GetLast, {{dst, false}}, else_body->span);
+    compile_seq_to_reg(*else_body, dst, else_body->span);
   } else {
     emit_instruction(Opcode::LoadNull, {{dst, false}}, expr.span);
-    emit_instruction(Opcode::SetLast, {{dst, false}}, expr.span);
+    if (preserve_last_result_) {
+      emit_instruction(Opcode::SetLast, {{dst, false}}, expr.span);
+    }
   }
 
   for (std::size_t jump : end_jumps) {
@@ -2509,7 +2808,9 @@ std::uint32_t CodeEmitter::compile_pattern_assign(const ast::Expr &expr) {
                        expr.span);
     }
   }
-  emit_instruction(Opcode::SetLast, {{rhs_reg, false}}, expr.span);
+  if (preserve_last_result_) {
+    emit_instruction(Opcode::SetLast, {{rhs_reg, false}}, expr.span);
+  }
   const std::size_t jump_end =
       emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
   patch_fail_patches(fail_patches, current_pc());
@@ -2522,6 +2823,15 @@ std::uint32_t CodeEmitter::compile_pattern_assign(const ast::Expr &expr) {
 std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   if (expr.kind == "HConst") {
     return compile_const(expr);
+  }
+  if (expr.kind == "HConstStr") {
+    return compile_const_str(expr);
+  }
+  if (expr.kind == "HStringify") {
+    return compile_stringify(expr);
+  }
+  if (expr.kind == "HStringBuild") {
+    return compile_string_build(expr);
   }
   if (expr.kind == "HListLiteral") {
     return compile_sequence_literal(expr, Opcode::MakeList);
@@ -2550,6 +2860,45 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
         {{dst, false}, {parse_slot(string_field(expr, "slot"), 'u'), false}},
         expr.span);
     return dst;
+  }
+  if (expr.kind == "HWatchLocal") {
+    const std::uint32_t dst = alloc_temp();
+    emit_instruction(Opcode::WatchLocal,
+                     {{dst, false},
+                      {parse_slot(string_field(expr, "slot"), 'l'), false},
+                      {0, false}},
+                     expr.span);
+    return dst;
+  }
+  if (expr.kind == "HWatchCapture") {
+    const std::uint32_t dst = alloc_temp();
+    emit_instruction(Opcode::WatchUpval,
+                     {{dst, false},
+                      {parse_slot(string_field(expr, "slot"), 'u'), false},
+                      {0, false}},
+                     expr.span);
+    return dst;
+  }
+  if (expr.kind == "HWatchIvar") {
+    const std::uint32_t self_reg = alloc_temp();
+    emit_instruction(Opcode::LoadSelf, {{self_reg, false}}, expr.span);
+    const std::uint32_t dst = alloc_temp();
+    const std::uint32_t site_id =
+        emit_ivar_site(current_pc(), string_field(expr, "name"));
+    emit_instruction(
+        Opcode::WatchIvar,
+        {{dst, false},
+         {self_reg, false},
+         {owner_->intern_symbol(string_field(expr, "name")), false},
+         {site_id, false},
+         {0, false}},
+        expr.span);
+    return dst;
+  }
+  if (expr.kind == "HWatchUnsupported") {
+    diag(expr.span, "BC2008",
+         "Kernel.watch target is not a watchable binding in this profile");
+    return alloc_temp();
   }
   if (expr.kind == "HLoadName") {
     return compile_lookup_like(expr, string_field(expr, "name"));
@@ -2591,8 +2940,8 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
       diag(expr.span, "BC2001", "HStoreLocal is missing expr");
       return slot;
     }
-    if (value->kind == "HClosure") {
-      return compile_closure(*value, slot);
+    if (compile_expr_into_reg_if_simple(*value, slot)) {
+      return slot;
     }
     const std::uint32_t src = compile_expr(*value);
     if (src != slot) {
@@ -2707,7 +3056,9 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
     }
     if (const ast::Expr *value = node_field(expr, "value")) {
       const std::uint32_t reg = compile_expr(*value);
-      emit_instruction(Opcode::SetLast, {{reg, false}}, expr.span);
+      if (loops_.back().result_reg.has_value()) {
+        emit_value_to_reg(*loops_.back().result_reg, reg, expr.span);
+      }
     }
     loops_.back().break_jump_indices.push_back(
         emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));

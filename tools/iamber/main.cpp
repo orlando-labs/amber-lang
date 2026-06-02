@@ -12,6 +12,7 @@
 #include <cctype>
 #include <clocale>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -30,6 +31,9 @@ struct LocalView {
   std::string binding_kind;
   std::string value;
   bool initialized = false;
+  bool watched = false;
+  std::uint64_t watch_cell_id = 0;
+  std::uint64_t watch_revision = 0;
 };
 
 struct CodeErrorRange {
@@ -73,6 +77,8 @@ struct Cell {
   std::string result = "not evaluated";
   std::string error;
   std::vector<LocalView> locals;
+  std::uint64_t watch_epoch = 0;
+  std::size_t watch_event_count = 0;
   std::vector<CodeErrorRange> error_ranges;
   std::vector<CellErrorView> errors;
   std::size_t selected_error = 0;
@@ -101,6 +107,8 @@ struct EvalView {
   std::string result;
   std::string error;
   std::vector<LocalView> locals;
+  std::uint64_t watch_epoch = 0;
+  std::size_t watch_event_count = 0;
   std::vector<CellErrorRange> error_ranges;
 };
 
@@ -615,12 +623,17 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
   view.ok = true;
   view.result = amber::runtime::value_to_debug_string(initialized.value,
                                                       &compiled.module);
+  view.watch_epoch = initialized.watch_epoch;
+  view.watch_event_count = initialized.watch_events.size();
   for (const amber::runtime::ExecutionLocal &local : initialized.locals) {
     LocalView local_view;
     local_view.name = local.name;
     local_view.role = local.role;
     local_view.binding_kind = local.binding_kind;
     local_view.initialized = local.initialized;
+    local_view.watched = local.watched;
+    local_view.watch_cell_id = local.watch_cell_id;
+    local_view.watch_revision = local.watch_revision;
     local_view.value = local.initialized
                            ? amber::runtime::value_to_debug_string(
                                  local.value, &compiled.module)
@@ -700,6 +713,8 @@ void apply_eval(Session *session, std::size_t index, EvalView view) {
   cell->running = false;
   cell->ok = view.ok;
   cell->locals = std::move(view.locals);
+  cell->watch_epoch = view.watch_epoch;
+  cell->watch_event_count = view.watch_event_count;
   if (view.ok) {
     cell->result = std::move(view.result);
     cell->error.clear();
@@ -1573,6 +1588,10 @@ void draw_cell_locals(WINDOW *window, const Cell &cell, int height, int split_x,
     }
     std::ostringstream meta;
     meta << "  " << local.role;
+    if (local.watched) {
+      meta << " watch#" << local.watch_cell_id << " r"
+           << local.watch_revision;
+    }
     wattron(window, A_DIM);
     print_clipped(window, row++, locals_x + 1, locals_width - 2, meta.str());
     wattroff(window, A_DIM);
@@ -1617,6 +1636,10 @@ void draw_cell_pane(WINDOW *window, Session *session, std::size_t index,
   std::ostringstream title;
   title << " cell " << (index + 1U) << " " << cell_status(cell) << " "
         << (cell.watch ? "watch:on" : "watch:off");
+  if (cell.watch_event_count != 0U) {
+    title << " events:" << cell.watch_event_count << " epoch:"
+          << cell.watch_epoch;
+  }
   if (selected) {
     if (cell.running) {
       title << " RUNNING";
@@ -1875,9 +1898,18 @@ int run_eval_command(const std::string &source) {
     return 1;
   }
   std::cout << "=> " << view.result << "\n";
+  if (view.watch_event_count != 0U) {
+    std::cout << "watch events = " << view.watch_event_count
+              << " [epoch " << view.watch_epoch << "]\n";
+  }
   for (const LocalView &local : view.locals) {
     std::cout << local.name << " = " << local.value << " [" << local.role
-              << "]\n";
+              << "]";
+    if (local.watched) {
+      std::cout << " watch#" << local.watch_cell_id << " r"
+                << local.watch_revision;
+    }
+    std::cout << "\n";
   }
   return 0;
 }

@@ -38,11 +38,15 @@ private:
   void advance_line_break();
   void emit(TokenKind kind, Position start, std::string lexeme);
   void error(Position start, const std::string &message);
+  void error_code(Position start, const std::string &code,
+                  const std::string &message);
 
   void lex_line_indent();
   void lex_identifier_or_keyword();
   void lex_number();
   void lex_string(char quote);
+  bool consume_interpolation_in_string(Position interpolation_start);
+  bool consume_nested_string_in_interpolation(char quote);
   bool validate_string_escape(Position escape_start, char quote);
   void consume_comment();
 

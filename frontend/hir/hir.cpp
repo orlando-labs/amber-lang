@@ -202,10 +202,6 @@ clone_node_list(const std::vector<std::unique_ptr<Node>> &nodes) {
   return copies;
 }
 
-bool is_string_literal(const ast::Expr &expr) {
-  return expr.kind == "AstLiteral" && string_value(expr, "token") == "STRING";
-}
-
 std::string unquote_string_literal(const std::string &value) {
   if (value.size() >= 2) {
     const char quote = value.front();
@@ -213,6 +209,30 @@ std::string unquote_string_literal(const std::string &value) {
       return value.substr(1, value.size() - 2);
     }
   }
+  return value;
+}
+
+std::string static_string_literal_value(const ast::Expr &expr, bool *ok) {
+  if (expr.kind == "AstLiteral" && string_value(expr, "token") == "STRING") {
+    *ok = true;
+    return unquote_string_literal(string_value(expr, "value"));
+  }
+  if (expr.kind != "AstStringLiteral" || bool_value(expr, "interpolation")) {
+    *ok = false;
+    return "";
+  }
+  std::string value;
+  if (const ast::ListField *parts = list_field(expr, "parts")) {
+    for (const std::unique_ptr<ast::Expr> &part : parts->values) {
+      if (part == nullptr ||
+          (part->kind != "AstStringText" && part->kind != "AstStringEscape")) {
+        *ok = false;
+        return "";
+      }
+      value += string_value(*part, "value");
+    }
+  }
+  *ok = true;
   return value;
 }
 
@@ -1217,6 +1237,13 @@ private:
     return node;
   }
 
+  std::unique_ptr<Node> make_const_str(const std::string &value,
+                                       const lexer::Span &span) {
+    auto node = make_node("HConstStr", span);
+    node->string_field("value", value);
+    return node;
+  }
+
   std::unique_ptr<Node> make_expr_body(std::unique_ptr<Node> expr) {
     auto body = make_node("HSeq", expr->span);
     std::vector<std::unique_ptr<Node>> items;
@@ -1268,22 +1295,54 @@ private:
   }
 
   std::unique_ptr<Node> lower_expr(const ast::Expr &expr) {
+    if (expr.kind == "AstStringLiteral") {
+      std::vector<std::unique_ptr<Node>> parts;
+      std::string static_value;
+      bool can_collapse_static = !bool_value(expr, "interpolation");
+      if (const ast::ListField *list = list_field(expr, "parts")) {
+        for (const std::unique_ptr<ast::Expr> &part : list->values) {
+          if (part->kind == "AstStringText" ||
+              part->kind == "AstStringEscape") {
+            const std::string value = string_value(*part, "value");
+            if (can_collapse_static) {
+              static_value += value;
+            } else {
+              parts.push_back(make_const_str(value, part->span));
+            }
+          } else if (part->kind == "AstStringExpr") {
+            can_collapse_static = false;
+            if (const ast::Expr *inner = node_field(*part, "expr")) {
+              auto stringify = make_node("HStringify", inner->span);
+              stringify->string_field("mode", "display");
+              stringify->node_field("expr", lower_expr(*inner));
+              parts.push_back(std::move(stringify));
+            }
+          }
+        }
+      }
+      if (can_collapse_static) {
+        return make_const_str(static_value, expr.span);
+      }
+      auto node = make_node("HStringBuild", expr.span);
+      node->list_field("parts", std::move(parts));
+      return node;
+    }
     if (expr.kind == "AstInterpolatedString") {
-      auto node = make_node("HInterpolatedString", expr.span);
+      auto node = make_node("HStringBuild", expr.span);
       std::vector<std::unique_ptr<Node>> parts;
       if (const ast::ListField *list = list_field(expr, "parts")) {
         for (const std::unique_ptr<ast::Expr> &part : list->values) {
           if (part->kind == "AstInterpolationLiteral") {
-            auto lowered = make_node("HInterpolationLiteral", part->span);
-            lowered->string_field("token", string_value(*part, "token"));
-            lowered->string_field("value", string_value(*part, "value"));
-            parts.push_back(std::move(lowered));
+            parts.push_back(make_const_str(
+                unquote_string_literal(string_value(*part, "value")),
+                part->span));
           } else if (part->kind == "AstInterpolationExpr") {
-            auto lowered = make_node("HInterpolationExpr", part->span);
             if (const ast::Expr *inner = node_field(*part, "expr")) {
-              lowered->node_field("expr", lower_expr(*inner));
+              auto stringify = make_node("HStringify", inner->span);
+              stringify->string_field("mode", "display");
+              stringify->node_field("expr", lower_expr(*inner));
+              parts.push_back(std::move(stringify));
             }
-            parts.push_back(std::move(lowered));
           }
         }
       }
@@ -1762,9 +1821,11 @@ private:
         if (block) {
           node->node_field("block", std::move(block));
         }
+        std::unique_ptr<Node> lowered =
+            lower_kernel_watch_send(*base, std::move(node));
         current = safe ? wrap_safe_guard(std::move(guard_base), temp_slot,
-                                         std::move(node), node_span)
-                       : std::move(node);
+                                         std::move(lowered), node_span)
+                       : std::move(lowered);
         ++i;
         continue;
       }
@@ -1872,11 +1933,13 @@ private:
       }
     }
 
-    if (is_string_literal(selector_arg)) {
+    bool selector_is_static = false;
+    const std::string static_selector =
+        static_string_literal_value(selector_arg, &selector_is_static);
+    if (selector_is_static) {
       auto node = make_node("HSend", span);
       node->node_field("receiver", lower_expr(receiver_arg));
-      node->string_field("selector", unquote_string_literal(
-                                         string_value(selector_arg, "value")));
+      node->string_field("selector", static_selector);
       node->list_field("pos_args", std::move(pos_args));
       node->list_field("kw_args", std::move(kw_args));
       if (block) {
@@ -1893,6 +1956,51 @@ private:
     if (block) {
       node->node_field("block", std::move(block));
     }
+    return node;
+  }
+
+  std::unique_ptr<Node> lower_kernel_watch_send(const ast::Expr &base,
+                                                std::unique_ptr<Node> send) {
+    if (send == nullptr || send->kind != "HSend" ||
+        string_value(*send, "selector") != "watch" || base.kind != "AstName" ||
+        string_value(base, "name") != "Kernel") {
+      return send;
+    }
+    const binder::Reference *kernel_ref =
+        find_reference(base.span, "Kernel", "name");
+    if (kernel_ref != nullptr && kernel_ref->resolved) {
+      return send;
+    }
+
+    const ast::ListField *kw_args = list_field(*send, "kw_args");
+    const ast::ListField *pos_args = list_field(*send, "pos_args");
+    if (node_field(*send, "block") != nullptr ||
+        (kw_args != nullptr && !kw_args->values.empty()) ||
+        pos_args == nullptr || pos_args->values.size() != 1U) {
+      auto node = make_node("HWatchUnsupported", send->span);
+      node->string_field("target_kind", "arity");
+      return node;
+    }
+
+    const ast::Expr &target = *pos_args->values.front();
+    if (target.kind == "HLoadLocal") {
+      auto node = make_node("HWatchLocal", send->span);
+      node->string_field("slot", string_value(target, "slot"));
+      return node;
+    }
+    if (target.kind == "HLoadCapture") {
+      auto node = make_node("HWatchCapture", send->span);
+      node->string_field("slot", string_value(target, "slot"));
+      return node;
+    }
+    if (target.kind == "HLoadIvar") {
+      auto node = make_node("HWatchIvar", send->span);
+      node->string_field("name", string_value(target, "name"));
+      return node;
+    }
+
+    auto node = make_node("HWatchUnsupported", send->span);
+    node->string_field("target_kind", target.kind);
     return node;
   }
 

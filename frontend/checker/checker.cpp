@@ -90,6 +90,13 @@ const ast::ListField *list_field(const ast::Expr &expr,
   return nullptr;
 }
 
+bool is_static_string_literal(const ast::Expr &expr) {
+  if (expr.kind == "AstLiteral" && string_field(expr, "token") == "STRING") {
+    return true;
+  }
+  return expr.kind == "AstStringLiteral" && !bool_field(expr, "interpolation");
+}
+
 lexer::Diagnostic diagnostic(const std::string &code,
                              const std::string &message,
                              const lexer::Span &span) {
@@ -659,6 +666,9 @@ private:
         return named_type("Null");
       }
     }
+    if (expr.kind == "AstStringLiteral") {
+      return named_type("Str");
+    }
     if (expr.kind == "AstName") {
       const auto found = env.find(string_field(expr, "name"));
       return found == env.end() ? named_type("Any") : found->second;
@@ -946,8 +956,7 @@ private:
         const ast::ListField *args = list_field(*tail, "args");
         if (args != nullptr && args->values.size() >= 2U &&
             args->values[1] != nullptr &&
-            args->values[1]->kind == "AstLiteral" &&
-            string_field(*args->values[1], "token") == "STRING") {
+            is_static_string_literal(*args->values[1])) {
           literal_selector = true;
         }
       }

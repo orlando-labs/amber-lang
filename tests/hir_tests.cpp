@@ -223,8 +223,7 @@ void test_module_def_closure_captures_prior_function() {
       node_field(*describe_store, "expr");
   expect(describe_closure != nullptr && describe_closure->kind == "HClosure",
          "second module def stores callable closure");
-  const amber::ast::Expr *capture =
-      list_item(*describe_closure, "captures", 0);
+  const amber::ast::Expr *capture = list_item(*describe_closure, "captures", 0);
   expect(capture != nullptr && capture->kind == "HCapture",
          "second module closure captures first function");
   expect(string_field(*capture, "source_slot") == "l0",
@@ -234,7 +233,8 @@ void test_module_def_closure_captures_prior_function() {
       procedure_by_id(program, string_field(*describe_closure, "procedure"));
   expect(describe != nullptr, "describe procedure exists");
   const amber::ast::Expr *stmt = list_item(*describe->body, "items", 0);
-  const amber::ast::Expr *call = stmt == nullptr ? nullptr : node_field(*stmt, "expr");
+  const amber::ast::Expr *call =
+      stmt == nullptr ? nullptr : node_field(*stmt, "expr");
   expect(call != nullptr && call->kind == "HCall", "describe body calls tap");
   const amber::ast::Expr *callable = node_field(*call, "callable");
   expect(callable != nullptr && callable->kind == "HLoadCapture",
@@ -394,6 +394,54 @@ void test_builtin_send_lowering() {
          "dynamic send forwards keyword args");
 }
 
+void test_kernel_watch_lowering() {
+  const amber::hir::Program local_program = lower_ok("x = 1\n"
+                                                     "Kernel.watch(x)\n");
+  const amber::hir::Procedure *local_init =
+      procedure_by_name(local_program, "__module_init__");
+  expect(local_init != nullptr && local_init->body != nullptr,
+         "watch local init exists");
+  expect(contains_kind(*local_init->body, "HWatchLocal"),
+         "Kernel.watch(local) lowers to HWatchLocal");
+  expect(!contains_kind(*local_init->body, "HWatchUnsupported"),
+         "Kernel.watch(local) is supported");
+
+  const amber::hir::Program capture_program =
+      lower_ok("def watch_each(xs, x):\n"
+               "  xs.map: Kernel.watch(x)\n");
+  bool saw_capture_watch = false;
+  for (const amber::hir::Procedure &procedure : capture_program.procedures) {
+    saw_capture_watch =
+        saw_capture_watch || (procedure.body != nullptr &&
+                              contains_kind(*procedure.body, "HWatchCapture"));
+  }
+  expect(saw_capture_watch, "Kernel.watch(capture) lowers to HWatchCapture");
+
+  const amber::hir::Program ivar_program =
+      lower_ok("class Particle:\n"
+               "  def observe():\n"
+               "    Kernel.watch(@mass)\n");
+  bool saw_ivar_watch = false;
+  for (const amber::hir::Procedure &procedure : ivar_program.procedures) {
+    saw_ivar_watch =
+        saw_ivar_watch || (procedure.body != nullptr &&
+                           contains_kind(*procedure.body, "HWatchIvar"));
+  }
+  expect(saw_ivar_watch, "Kernel.watch(ivar) lowers to HWatchIvar");
+
+  const amber::hir::Program shadowed_program = lower_ok("Kernel = 1\n"
+                                                        "x = 2\n"
+                                                        "Kernel.watch(x)\n");
+  const amber::hir::Procedure *shadowed_init =
+      procedure_by_name(shadowed_program, "__module_init__");
+  expect(shadowed_init != nullptr && shadowed_init->body != nullptr,
+         "shadowed Kernel init exists");
+  expect(!contains_kind(*shadowed_init->body, "HWatchLocal"),
+         "shadowed Kernel.watch remains ordinary send");
+  expect(contains_kind(*shadowed_init->body, "HSend"),
+         "shadowed Kernel.watch keeps HSend");
+}
+
 void test_collection_literal_lowering() {
   const amber::hir::Program program = lower_ok("[1, 2]\n"
                                                "(3, 4)\n"
@@ -428,10 +476,9 @@ void test_collection_literal_lowering() {
 }
 
 void test_inline_conditional_and_conditional_literal_lowering() {
-  const amber::hir::Program program =
-      lower_ok("if true then 1 else 2\n"
-               "[1, 2 if true]\n"
-               "{id: 1 unless false}\n");
+  const amber::hir::Program program = lower_ok("if true then 1 else 2\n"
+                                               "[1, 2 if true]\n"
+                                               "{id: 1 unless false}\n");
   const amber::hir::Procedure *init =
       procedure_by_name(program, "__module_init__");
   expect(init != nullptr && init->body != nullptr, "module init exists");
@@ -467,6 +514,31 @@ void test_inline_conditional_and_conditional_literal_lowering() {
          "conditional map kind preserved");
   expect(node_field(*entry, "condition") != nullptr,
          "conditional map condition lowers");
+}
+
+void test_string_interpolation_lowering() {
+  const amber::hir::Program program = lower_ok("def describe(name):\n"
+                                               "  \"hello #{name}\"\n");
+  const amber::hir::Procedure *describe =
+      procedure_by_name(program, "describe");
+  expect(describe != nullptr, "describe procedure exists");
+  const amber::ast::Expr *stmt = list_item(*describe->body, "items", 0);
+  expect(stmt != nullptr && stmt->kind == "HLastSet",
+         "string interpolation statement exists");
+  const amber::ast::Expr *expr = node_field(*stmt, "expr");
+  expect(expr != nullptr && expr->kind == "HStringBuild",
+         "interpolation lowers to HStringBuild");
+  const amber::ast::Expr *first = list_item(*expr, "parts", 0);
+  const amber::ast::Expr *second = list_item(*expr, "parts", 1);
+  expect(first != nullptr && first->kind == "HConstStr",
+         "literal part lowers to HConstStr");
+  expect(string_field(*first, "value") == "hello ", "literal text preserved");
+  expect(second != nullptr && second->kind == "HStringify",
+         "expression part lowers to HStringify");
+  expect(string_field(*second, "mode") == "display", "stringify mode");
+  const amber::ast::Expr *inner = node_field(*second, "expr");
+  expect(inner != nullptr && inner->kind == "HLoadLocal",
+         "stringify wraps lowered expression");
 }
 
 void test_shadowed_send_stays_call() {
@@ -1209,8 +1281,10 @@ int main() {
   test_safe_navigation_lowering();
   test_safe_call_and_index_lowering();
   test_builtin_send_lowering();
+  test_kernel_watch_lowering();
   test_collection_literal_lowering();
   test_inline_conditional_and_conditional_literal_lowering();
+  test_string_interpolation_lowering();
   test_shadowed_send_stays_call();
   test_w13_operator_lowering();
   test_clause_method_lowering();

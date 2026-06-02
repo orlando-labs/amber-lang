@@ -21,6 +21,7 @@ Check with `make spec-sync-check`.
 | `docs/engineering/data-schema-v1.md` | 1 |
 | `docs/engineering/diag-v1.md` | 1 |
 | `docs/engineering/effects-v1.md` | 1 |
+| `docs/engineering/full-native-implementation-plan-v1.md` | 27 |
 | `docs/engineering/hir-v1.md` | 1 |
 | `docs/engineering/image-v1.md` | 4 |
 | `docs/engineering/implementation-status-v1.md` | 4 |
@@ -41,10 +42,10 @@ Check with `make spec-sync-check`.
 | Registry | Lines | SHA-256 |
 | --- | ---: | --- |
 | `spec/registries/bytecode_sections.yaml` | 88 | `beb53d82556008ef1c60bfa9955722b05b2b87b9c2df74110484a93224dec7e9` |
-| `spec/registries/diagnostics.yaml` | 55 | `1d427f0b3a4a79deea46d2336ea9047d64e6f564163a97d39f2e8351bc63f2b9` |
-| `spec/registries/opcodes.yaml` | 100 | `809f8a89a1da015b0aef01890ed2e8f8f2be7139eac314f14c714208cafe2431` |
-| `spec/registries/prelude.yaml` | 314 | `7982b5a7dddda9717a4fbde8d78916d063f71a1de7324465bfdf797d03ce2221` |
-| `spec/registries/runtime_errors.yaml` | 43 | `e05b89f4a2e382f66930741d3db5e089acfb042b6a03c070576be987a43545fb` |
+| `spec/registries/diagnostics.yaml` | 62 | `64a126b86541128801021a638dd80d127f5f67a2acdb3703e8f872a695333801` |
+| `spec/registries/opcodes.yaml` | 108 | `dd1299ade833cde298ab8bd16c1d4a17f33d8fcf09ce8017cdad0565a1158577` |
+| `spec/registries/prelude.yaml` | 329 | `23b6a897f9409ad8e8c615f741221c287beb5e85e744e8f19f48d1fbac607f14` |
+| `spec/registries/runtime_errors.yaml` | 45 | `91575e5aa6d37bf8de2b4111f2007daf2d51886a2fc9ca859e1cee21fed3df80` |
 | `spec/registries/tokens.yaml` | 101 | `18f1415eab58a61369bc91b982dfdee7a2f5945254831bdd6b8da071d8463f3c` |
 
 ## Anchor Map
@@ -313,12 +314,39 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 1 | 1 | [`amberbuildv1`](../../docs/engineering/build-v1.md#amberbuildv1) | amber.build.v1 |
 | [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 19 | 2 | [`manifest-shape`](../../docs/engineering/build-v1.md#manifest-shape) | Manifest Shape |
 | [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 47 | 2 | [`cli`](../../docs/engineering/build-v1.md#cli) | CLI |
-| [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 58 | 2 | [`conformance`](../../docs/engineering/build-v1.md#conformance) | Conformance |
+| [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 64 | 2 | [`conformance`](../../docs/engineering/build-v1.md#conformance) | Conformance |
 | [`docs/engineering/capabilities-v1.md`](../../docs/engineering/capabilities-v1.md) | 1 | 1 | [`ambercapabilitiesv1`](../../docs/engineering/capabilities-v1.md#ambercapabilitiesv1) | amber.capabilities.v1 |
 | [`docs/engineering/conformance-v1.md`](../../docs/engineering/conformance-v1.md) | 1 | 1 | [`amberconformancev1`](../../docs/engineering/conformance-v1.md#amberconformancev1) | amber.conformance.v1 |
 | [`docs/engineering/data-schema-v1.md`](../../docs/engineering/data-schema-v1.md) | 1 | 1 | [`amberdataschemav1`](../../docs/engineering/data-schema-v1.md#amberdataschemav1) | amber.data/schema.v1 |
 | [`docs/engineering/diag-v1.md`](../../docs/engineering/diag-v1.md) | 1 | 1 | [`amberdiagv1`](../../docs/engineering/diag-v1.md#amberdiagv1) | amber.diag.v1 |
 | [`docs/engineering/effects-v1.md`](../../docs/engineering/effects-v1.md) | 1 | 1 | [`ambereffectsv1`](../../docs/engineering/effects-v1.md#ambereffectsv1) | amber.effects.v1 |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 1 | 1 | [`amberfull-nativeimplementation-planv1`](../../docs/engineering/full-native-implementation-plan-v1.md#amberfull-nativeimplementation-planv1) | amber.full-native.implementation-plan.v1 |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 21 | 2 | [`target-definition`](../../docs/engineering/full-native-implementation-plan-v1.md#target-definition) | Target Definition |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 42 | 2 | [`non-goals-for-the-first-native-milestone`](../../docs/engineering/full-native-implementation-plan-v1.md#non-goals-for-the-first-native-milestone) | Non-Goals For The First Native Milestone |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 52 | 2 | [`guiding-invariants`](../../docs/engineering/full-native-implementation-plan-v1.md#guiding-invariants) | Guiding Invariants |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 65 | 2 | [`existing-assets-to-reuse`](../../docs/engineering/full-native-implementation-plan-v1.md#existing-assets-to-reuse) | Existing Assets To Reuse |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 82 | 2 | [`phase-0-baseline-audit-and-gates`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-0-baseline-audit-and-gates) | Phase 0: Baseline Audit And Gates |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 106 | 2 | [`phase-1-native-build-surface`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-1-native-build-surface) | Phase 1: Native Build Surface |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 155 | 2 | [`phase-2-native-artifact-model`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-2-native-artifact-model) | Phase 2: Native Artifact Model |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 205 | 2 | [`phase-3-runtime-native-abi`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-3-runtime-native-abi) | Phase 3: Runtime Native ABI |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 276 | 2 | [`phase-4-native-eligibility-analysis`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-4-native-eligibility-analysis) | Phase 4: Native Eligibility Analysis |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 321 | 2 | [`phase-5-mir-normalization-for-native`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-5-mir-normalization-for-native) | Phase 5: MIR Normalization For Native |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 365 | 2 | [`phase-6-generated-c-backend-skeleton`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-6-generated-c-backend-skeleton) | Phase 6: Generated C++ Backend Skeleton |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 407 | 2 | [`phase-7-native-compilation-driver`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-7-native-compilation-driver) | Phase 7: Native Compilation Driver |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 443 | 2 | [`phase-8-runtime-dispatch-to-native`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-8-runtime-dispatch-to-native) | Phase 8: Runtime Dispatch To Native |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 484 | 2 | [`phase-9-slowpath-helper-coverage`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-9-slowpath-helper-coverage) | Phase 9: Slowpath Helper Coverage |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 535 | 2 | [`phase-10-native-exception-and-unwind-support`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-10-native-exception-and-unwind-support) | Phase 10: Native Exception And Unwind Support |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 566 | 2 | [`phase-11-heap-gc-pinning-and-lifetime-hardening`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-11-heap-gc-pinning-and-lifetime-hardening) | Phase 11: Heap, GC, Pinning, And Lifetime Hardening |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 603 | 2 | [`phase-12-classes-mixins-open-world-and-invalidation`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-12-classes-mixins-open-world-and-invalidation) | Phase 12: Classes, Mixins, Open World, And Invalidation |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 636 | 2 | [`phase-13-full-language-coverage`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-13-full-language-coverage) | Phase 13: Full Language Coverage |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 688 | 2 | [`phase-14-native-conformance-mode`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-14-native-conformance-mode) | Phase 14: Native Conformance Mode |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 724 | 2 | [`phase-15-make-native-the-default-build-target`](../../docs/engineering/full-native-implementation-plan-v1.md#phase-15-make-native-the-default-build-target) | Phase 15: Make Native The Default Build Target |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 760 | 2 | [`recommended-first-implementation-slice`](../../docs/engineering/full-native-implementation-plan-v1.md#recommended-first-implementation-slice) | Recommended First Implementation Slice |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 781 | 2 | [`test-matrix`](../../docs/engineering/full-native-implementation-plan-v1.md#test-matrix) | Test Matrix |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 796 | 2 | [`risk-register`](../../docs/engineering/full-native-implementation-plan-v1.md#risk-register) | Risk Register |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 809 | 2 | [`documentation-updates-per-phase`](../../docs/engineering/full-native-implementation-plan-v1.md#documentation-updates-per-phase) | Documentation Updates Per Phase |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 819 | 2 | [`open-decisions`](../../docs/engineering/full-native-implementation-plan-v1.md#open-decisions) | Open Decisions |
+| [`docs/engineering/full-native-implementation-plan-v1.md`](../../docs/engineering/full-native-implementation-plan-v1.md) | 832 | 2 | [`completion-checklist`](../../docs/engineering/full-native-implementation-plan-v1.md#completion-checklist) | Completion Checklist |
 | [`docs/engineering/hir-v1.md`](../../docs/engineering/hir-v1.md) | 1 | 1 | [`amberhirv1`](../../docs/engineering/hir-v1.md#amberhirv1) | amber.hir.v1 |
 | [`docs/engineering/image-v1.md`](../../docs/engineering/image-v1.md) | 1 | 1 | [`amberimagev1`](../../docs/engineering/image-v1.md#amberimagev1) | amber.image.v1 |
 | [`docs/engineering/image-v1.md`](../../docs/engineering/image-v1.md) | 24 | 2 | [`artifact-layout`](../../docs/engineering/image-v1.md#artifact-layout) | Artifact Layout |

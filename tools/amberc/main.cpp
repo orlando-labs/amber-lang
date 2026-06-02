@@ -15,6 +15,7 @@
 #include "profile/modern.h"
 #include "profile/replay.h"
 #include "profile/wasm_accel.h"
+#include "runtime/vm.h"
 
 #include <array>
 #include <cctype>
@@ -42,6 +43,8 @@ std::string read_file(const std::string &path) {
 
 void usage(std::ostream &out) {
   out << "usage:\n";
+  out << "  amberc <file.am>\n";
+  out << "  amberc build <file.am> [-o <path>] [--out-dir <dir>]\n";
   out << "  amberc lex <file>\n";
   out << "  amberc parse <file>\n";
   out << "  amberc parse-expr <file>\n";
@@ -540,6 +543,496 @@ std::vector<std::uint8_t> compile_source_to_bytecode(
   return bytes;
 }
 
+std::string json_escape(const std::string &value) {
+  std::ostringstream out;
+  for (const char c : value) {
+    switch (c) {
+    case '"':
+      out << "\\\"";
+      break;
+    case '\\':
+      out << "\\\\";
+      break;
+    case '\n':
+      out << "\\n";
+      break;
+    case '\r':
+      out << "\\r";
+      break;
+    case '\t':
+      out << "\\t";
+      break;
+    default:
+      out << c;
+      break;
+    }
+  }
+  return out.str();
+}
+
+bool has_suffix(const std::string &value, const std::string &suffix) {
+  return value.size() >= suffix.size() &&
+         value.compare(value.size() - suffix.size(), suffix.size(), suffix) ==
+             0;
+}
+
+bool is_amber_source_path(const std::string &path) {
+  return has_suffix(path, ".am");
+}
+
+std::string synthetic_module_name_for_path(const std::string &path) {
+  const std::string stem = std::filesystem::path(path).stem().string();
+  return "amber.entry." + safe_artifact_name(stem.empty() ? "main" : stem);
+}
+
+std::string shell_single_quote(const std::string &value) {
+  std::string out = "'";
+  for (const char c : value) {
+    if (c == '\'') {
+      out += "'\\''";
+    } else {
+      out.push_back(c);
+    }
+  }
+  out += "'";
+  return out;
+}
+
+std::string executable_amberc_ref(const std::string &argv0) {
+  if (argv0.find('/') == std::string::npos &&
+      argv0.find('\\') == std::string::npos) {
+    return "amberc";
+  }
+  try {
+    return std::filesystem::absolute(argv0).lexically_normal().string();
+  } catch (const std::exception &) {
+    return argv0;
+  }
+}
+
+std::string bytes_to_hex_text(const std::vector<std::uint8_t> &bytes) {
+  std::string out;
+  out.reserve(bytes.size() * 2U);
+  const char *hex = "0123456789abcdef";
+  for (const std::uint8_t byte : bytes) {
+    out.push_back(hex[(byte >> 4U) & 0x0FU]);
+    out.push_back(hex[byte & 0x0FU]);
+  }
+  return out;
+}
+
+std::vector<std::uint8_t> hex_text_to_bytes(const std::string &hex) {
+  std::vector<std::uint8_t> bytes;
+  int high = -1;
+  for (const char c : hex) {
+    if (c == '\n' || c == '\r' || c == ' ' || c == '\t') {
+      continue;
+    }
+    const int digit = from_hex_digit(c);
+    if (digit < 0) {
+      throw std::runtime_error("invalid embedded executable hex payload");
+    }
+    if (high < 0) {
+      high = digit;
+    } else {
+      bytes.push_back(static_cast<std::uint8_t>((high << 4) | digit));
+      high = -1;
+    }
+  }
+  if (high >= 0) {
+    throw std::runtime_error("odd-length embedded executable hex payload");
+  }
+  return bytes;
+}
+
+std::string string_to_hex_text(const std::string &value) {
+  return bytes_to_hex_text(
+      std::vector<std::uint8_t>(value.begin(), value.end()));
+}
+
+std::string hex_text_to_string(const std::string &hex) {
+  const std::vector<std::uint8_t> bytes = hex_text_to_bytes(hex);
+  return std::string(bytes.begin(), bytes.end());
+}
+
+const amber::bytecode::BcMethod *
+zero_arg_method_by_name(const amber::bytecode::BcModule &module,
+                        const std::string &name) {
+  for (const amber::bytecode::BcMethod &method : module.methods) {
+    if (method.selector_sym_id < module.symbols.size() &&
+        module.symbols[method.selector_sym_id] == name &&
+        method.params.empty() && method.flags == 0) {
+      return &method;
+    }
+  }
+  return nullptr;
+}
+
+enum class EntryExecutionMode { Init, MainAfterInit };
+
+std::string entry_mode_name(EntryExecutionMode mode) {
+  return mode == EntryExecutionMode::MainAfterInit ? "main" : "init";
+}
+
+EntryExecutionMode parse_entry_mode(const std::string &mode) {
+  if (mode == "init") {
+    return EntryExecutionMode::Init;
+  }
+  if (mode == "main") {
+    return EntryExecutionMode::MainAfterInit;
+  }
+  throw std::runtime_error("unknown embedded executable entry mode: " + mode);
+}
+
+EntryExecutionMode default_entry_mode_for(
+    bool has_package, const amber::bytecode::BcModule &module) {
+  if (has_package && zero_arg_method_by_name(module, "main") != nullptr) {
+    return EntryExecutionMode::MainAfterInit;
+  }
+  return EntryExecutionMode::Init;
+}
+
+struct RunnableModuleArtifact {
+  std::string module_name;
+  EntryExecutionMode entry_mode = EntryExecutionMode::Init;
+  std::vector<std::uint8_t> bytes;
+  amber::bytecode::BcModule module;
+};
+
+RunnableModuleArtifact compile_source_to_runnable_module(
+    const std::string &path,
+    const std::vector<amber::capability::CapabilityRequest> &capabilities =
+        {}) {
+  const std::string source = read_file(path);
+  amber::lexer::LexResult lex_result = lex_source(source, path);
+  if (!lex_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(lex_result.diagnostics));
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(parse_result.diagnostics));
+  }
+
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(bind_result.diagnostics));
+  }
+  amber::checker::CheckResult check_result = amber::checker::check_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  const std::vector<amber::lexer::Diagnostic> effect_diagnostics =
+      effect_diagnostics_only(check_result);
+  if (!effect_diagnostics.empty()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(effect_diagnostics));
+  }
+
+  amber::hir::Program program = amber::hir::lower_module(
+      parse_result.items, parse_result.module_name, bind_result.graph);
+  amber::bytecode::EmitResult emit_result =
+      amber::bytecode::emit_program(program, parse_result.module_name);
+  if (!emit_result.ok()) {
+    throw std::runtime_error(
+        amber::lexer::diagnostics_to_json(emit_result.diagnostics));
+  }
+  emit_result.module.capabilities = capabilities;
+  emit_result.module.effects = check_result.effect_summaries;
+
+  const bool has_package = !parse_result.module_name.empty();
+  const std::string module_name =
+      has_package ? parse_result.module_name : synthetic_module_name_for_path(path);
+  const EntryExecutionMode entry_mode =
+      default_entry_mode_for(has_package, emit_result.module);
+  add_module_attr(&emit_result.module, "amber.entry.module", module_name);
+  add_module_attr(&emit_result.module, "amber.entry.source", path);
+  add_module_attr(&emit_result.module, "amber.entry.mode",
+                  entry_mode_name(entry_mode));
+
+  const std::vector<std::uint8_t> bytes =
+      amber::bytecode::serialize_module(emit_result.module);
+  amber::bytecode::DecodeResult decode_result =
+      amber::bytecode::deserialize_module(bytes);
+  if (!decode_result.ok()) {
+    throw std::runtime_error(
+        amber::bytecode::verify_errors_to_json(decode_result.errors));
+  }
+
+  RunnableModuleArtifact artifact;
+  artifact.module_name = module_name;
+  artifact.entry_mode = entry_mode;
+  artifact.bytes = bytes;
+  artifact.module = std::move(decode_result.module);
+  return artifact;
+}
+
+amber::runtime::ExecutionResult
+execute_runnable_module(const amber::bytecode::BcModule &module,
+                        EntryExecutionMode mode) {
+  amber::runtime::RuntimeWorld world(module);
+  amber::runtime::ExecutionResult init_result;
+  if (module.init.has_entry_code_id) {
+    init_result = world.execute(module.init.entry_code_id);
+    if (!init_result.ok()) {
+      return init_result;
+    }
+  }
+
+  if (mode == EntryExecutionMode::MainAfterInit) {
+    const amber::bytecode::BcMethod *main_method =
+        zero_arg_method_by_name(module, "main");
+    if (main_method == nullptr) {
+      return {amber::runtime::Value::null(),
+              amber::runtime::Fault{
+                  "EntryError",
+                  "entry mode requires a zero-argument main() method", 0, 0}};
+    }
+    return world.execute(main_method->entry_code_id);
+  }
+
+  return init_result;
+}
+
+void print_execution_fault(const amber::runtime::ExecutionResult &result) {
+  if (!result.fault.has_value()) {
+    return;
+  }
+  std::cerr << result.fault->error_name << ": " << result.fault->message
+            << "\n";
+  if (!result.fault->trace_text.empty()) {
+    std::cerr << result.fault->trace_text;
+    if (!has_suffix(result.fault->trace_text, "\n")) {
+      std::cerr << "\n";
+    }
+  }
+}
+
+bool should_print_run_value(const amber::runtime::Value &value) {
+  return !value.is_null() && !value.is_closure();
+}
+
+int run_runnable_module(const std::string &module_name,
+                        EntryExecutionMode entry_mode,
+                        const std::vector<std::uint8_t> &bytes) {
+  (void)module_name;
+  amber::bytecode::DecodeResult decode_result =
+      amber::bytecode::deserialize_module(bytes);
+  if (!decode_result.ok()) {
+    std::cerr << amber::bytecode::verify_errors_to_json(decode_result.errors);
+    return 1;
+  }
+  const amber::runtime::ExecutionResult result =
+      execute_runnable_module(decode_result.module, entry_mode);
+  if (!result.ok()) {
+    print_execution_fault(result);
+    return 1;
+  }
+  if (should_print_run_value(result.value)) {
+    std::cout << amber::runtime::value_to_debug_string(result.value,
+                                                       &decode_result.module)
+              << "\n";
+  }
+  return 0;
+}
+
+int run_source_file_command(const std::string &path) {
+  const RunnableModuleArtifact artifact = compile_source_to_runnable_module(path);
+  return run_runnable_module(artifact.module_name, artifact.entry_mode,
+                             artifact.bytes);
+}
+
+std::string render_executable_script(const std::string &amberc_ref,
+                                     const RunnableModuleArtifact &artifact) {
+  const std::string quoted_amberc = shell_single_quote(amberc_ref);
+  std::ostringstream out;
+  out << "#!/bin/sh\n";
+  out << "set -e\n";
+  out << "if [ -n \"${AMBERC:-}\" ]; then\n";
+  out << "  exec \"$AMBERC\" run-embedded \"$0\" \"$@\"\n";
+  out << "fi\n";
+  out << "if [ -x " << quoted_amberc << " ]; then\n";
+  out << "  exec " << quoted_amberc << " run-embedded \"$0\" \"$@\"\n";
+  out << "fi\n";
+  out << "exec amberc run-embedded \"$0\" \"$@\"\n";
+  out << "__AMBER_EXECUTABLE_V1__\n";
+  out << "module " << string_to_hex_text(artifact.module_name) << "\n";
+  out << "mode " << entry_mode_name(artifact.entry_mode) << "\n";
+  out << "bytecode\n";
+  const std::string hex = bytes_to_hex_text(artifact.bytes);
+  for (std::size_t i = 0; i < hex.size(); i += 80U) {
+    out << hex.substr(i, 80U) << "\n";
+  }
+  out << "__END_AMBER_EXECUTABLE_V1__\n";
+  return out.str();
+}
+
+struct EmbeddedExecutable {
+  std::string module_name;
+  EntryExecutionMode entry_mode = EntryExecutionMode::Init;
+  std::vector<std::uint8_t> bytes;
+};
+
+EmbeddedExecutable parse_embedded_executable(const std::string &path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    throw std::runtime_error("failed to open embedded executable: " + path);
+  }
+
+  EmbeddedExecutable executable;
+  bool in_payload = false;
+  bool in_bytecode = false;
+  bool saw_marker = false;
+  bool saw_end = false;
+  std::string bytecode_hex;
+  std::string line;
+  while (std::getline(input, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (!in_payload) {
+      if (line == "__AMBER_EXECUTABLE_V1__") {
+        in_payload = true;
+        saw_marker = true;
+      }
+      continue;
+    }
+    if (line == "__END_AMBER_EXECUTABLE_V1__") {
+      saw_end = true;
+      break;
+    }
+    if (line == "bytecode") {
+      in_bytecode = true;
+      continue;
+    }
+    if (!in_bytecode) {
+      if (line.compare(0, 7, "module ") == 0) {
+        executable.module_name = hex_text_to_string(line.substr(7));
+      } else if (line.compare(0, 5, "mode ") == 0) {
+        executable.entry_mode = parse_entry_mode(line.substr(5));
+      }
+      continue;
+    }
+    bytecode_hex += line;
+  }
+
+  if (!saw_marker || !saw_end || executable.module_name.empty() ||
+      bytecode_hex.empty()) {
+    throw std::runtime_error("invalid amber executable wrapper: " + path);
+  }
+  executable.bytes = hex_text_to_bytes(bytecode_hex);
+  return executable;
+}
+
+int run_embedded_command(int argc, char **argv) {
+  if (argc < 3 || std::string(argv[1]) != "run-embedded") {
+    usage(std::cerr);
+    return 2;
+  }
+  const EmbeddedExecutable executable = parse_embedded_executable(argv[2]);
+  return run_runnable_module(executable.module_name, executable.entry_mode,
+                             executable.bytes);
+}
+
+struct SourceBuildCliOptions {
+  std::string out_path;
+  std::string out_dir;
+};
+
+SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
+                                                 int start_index) {
+  SourceBuildCliOptions options;
+  for (int i = start_index; i < argc; ++i) {
+    const std::string arg = argv[i];
+    if ((arg == "-o" || arg == "--out") && i + 1 < argc) {
+      options.out_path = argv[++i];
+    } else if (arg == "--out-dir" && i + 1 < argc) {
+      options.out_dir = argv[++i];
+    } else {
+      throw std::runtime_error("unknown source build option: " + arg);
+    }
+  }
+  return options;
+}
+
+std::filesystem::path default_executable_path_for(
+    const std::string &source_path, const SourceBuildCliOptions &options) {
+  if (!options.out_path.empty()) {
+    return std::filesystem::path(options.out_path);
+  }
+  const std::filesystem::path source(source_path);
+  const std::string stem = source.stem().string().empty()
+                               ? "amber-program"
+                               : source.stem().string();
+  if (!options.out_dir.empty()) {
+    return std::filesystem::path(options.out_dir) / stem;
+  }
+  std::filesystem::path output = source;
+  output.replace_extension("");
+  return output;
+}
+
+std::string executable_build_result_to_json(
+    bool ok, const std::string &source_path, const std::string &output_path,
+    const std::string &module_name, EntryExecutionMode entry_mode,
+    const std::string &diagnostic = {}) {
+  std::ostringstream out;
+  out << "{\n";
+  out << "  \"schema\": \"amber.executable.build.v1\",\n";
+  out << "  \"status\": \"" << (ok ? "ok" : "error") << "\",\n";
+  out << "  \"source\": \"" << json_escape(source_path) << "\",\n";
+  out << "  \"output\": \"" << json_escape(output_path) << "\",\n";
+  out << "  \"module\": \"" << json_escape(module_name) << "\",\n";
+  out << "  \"entry\": \"" << entry_mode_name(entry_mode) << "\"";
+  if (!ok) {
+    out << ",\n  \"diagnostic\": \"" << json_escape(diagnostic) << "\"\n";
+  } else {
+    out << "\n";
+  }
+  out << "}\n";
+  return out.str();
+}
+
+int run_source_build_command(int argc, char **argv) {
+  const std::string source_path = argv[2];
+  SourceBuildCliOptions options = parse_source_build_options(argc, argv, 3);
+  const std::filesystem::path output_path =
+      default_executable_path_for(source_path, options);
+  try {
+    const RunnableModuleArtifact artifact =
+        compile_source_to_runnable_module(source_path);
+    const std::string script =
+        render_executable_script(executable_amberc_ref(argv[0]), artifact);
+    const std::filesystem::path parent = output_path.parent_path();
+    if (!parent.empty()) {
+      std::filesystem::create_directories(parent);
+    }
+    write_file(output_path.string(), script);
+    std::filesystem::permissions(
+        output_path,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec |
+            std::filesystem::perms::group_read |
+            std::filesystem::perms::group_exec |
+            std::filesystem::perms::others_read |
+            std::filesystem::perms::others_exec,
+        std::filesystem::perm_options::replace);
+    std::cout << executable_build_result_to_json(
+        true, source_path, output_path.string(), artifact.module_name,
+        artifact.entry_mode);
+    return 0;
+  } catch (const std::exception &error) {
+    std::cout << executable_build_result_to_json(
+        false, source_path, output_path.string(), {}, EntryExecutionMode::Init,
+        error.what());
+    return 1;
+  }
+}
+
 amber::pkg::PackageBuildOptions
 parse_package_build_options(int argc, char **argv, int start_index) {
   amber::pkg::PackageBuildOptions options;
@@ -828,6 +1321,9 @@ int run_build_command(int argc, char **argv) {
   }
 
   const std::string manifest_path = argv[2];
+  if (is_amber_source_path(manifest_path)) {
+    return run_source_build_command(argc, argv);
+  }
   const BuildCliOptions options = parse_build_options(argc, argv, 3);
   const std::filesystem::path manifest_dir =
       std::filesystem::path(dirname(manifest_path));
@@ -1148,6 +1644,12 @@ int main(int argc, char **argv) {
     if (argc == 2 && std::string(argv[1]) == "--version") {
       std::cout << "amberc 0.1.0-dev\n";
       return 0;
+    }
+    if (argc >= 2 && std::string(argv[1]) == "run-embedded") {
+      return run_embedded_command(argc, argv);
+    }
+    if (argc == 2 && is_amber_source_path(argv[1])) {
+      return run_source_file_command(argv[1]);
     }
     if (argc >= 2 && std::string(argv[1]) == "build") {
       return run_build_command(argc, argv);
