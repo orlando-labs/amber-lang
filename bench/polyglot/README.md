@@ -1,6 +1,6 @@
 # Polyglot benchmark
 
-This benchmark compares one identical integer workload across:
+This benchmark compares identical workloads across:
 
 - Amber interpreted: `build/iamber --eval-file`
 - Amber built bytecode: `amberc build` first, then `amberbc_run <file.amberbc>`
@@ -15,12 +15,16 @@ Run:
 
 ```sh
 python3 bench/polyglot/run_benchmark.py --repeats 3
+python3 bench/polyglot/run_benchmark.py --workload calls-collections --repeats 5
 ```
 
 The script prints mean/best wall-clock time and peak RSS reported by a small
 Python measurement helper via `resource.getrusage(RUSAGE_CHILDREN)`. It also
-validates that every implementation returns the same checksum:
-`715609516598740`.
+validates that every implementation returns the same checksum for the selected
+workload:
+
+- `arithmetic`: `715609516598740`
+- `calls-collections`: `2047795430`
 
 Baseline before bytecode arithmetic fast paths:
 
@@ -110,10 +114,95 @@ ruby                   3     0.0710     0.0705         15.6    715609516598740
 cpp                    3     0.0036     0.0035          1.4    715609516598740
 ```
 
-The required `python3 bench/polyglot/run_benchmark.py --repeats 3` run in the
-existing generated benchmark directory reported `amber-built` at 2.1337s mean,
-but that artifact was stale: disassembling the generated
-`bench/polyglot/build/amber/out/bench.polyglot.amberbc` showed 17 generic
-`SEND` instructions and zero integer opcodes. Use a fresh `--out-dir` and
-`--cache-dir`, or clear the generated benchmark cache deliberately, for trusted
-`amber-built` numbers after compiler or emitter changes.
+The next VM optimization keeps the serialized `.amberbc` format unchanged and
+builds a VM-local quickened instruction array per `BcCode`. Fixed-arity hot
+opcodes read decoded `a/b/c/imm` fields instead of
+`std::vector<InstructionOperand>` on every dispatch. The VM also fuses
+`ILT`/`IGT`/`ILTK`/`IGTK` followed by `JUMP_IF_FALSE` when a conservative CFG
+walk proves the compare result register is dead and not present in
+`local_layout`, preserving debug/completed locals.
+
+Fresh-cache results after VM quickening and fused compare-branch on 2026-06-03
+(Darwin arm64):
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted      5     0.2113     0.1353          3.7    715609516598740
+amber-built-fresh      5     0.1372     0.1347          2.3    715609516598740
+python                 5     0.1206     0.1179         14.7    715609516598740
+ruby                   5     0.0793     0.0749         15.9    715609516598740
+cpp                    5     0.0044     0.0042          1.4    715609516598740
+```
+
+The next VM optimization keeps the serialized `.amberbc` format unchanged and
+adds a VM-frame integer sidecar (`int64_regs` plus validity bits). `LOADK`
+integer constants and integer args seed the sidecar, `IADD`/`ISUB` write
+unboxed integer results directly, and integer compare/fused-branch paths read
+the sidecar first. Generic `Value` registers are materialized at boundaries
+such as `read_reg`, `Return`, completed locals, watch storage, and GC root
+collection; generic writes invalidate the sidecar.
+
+Fresh-cache results after the integer sidecar on 2026-06-03 (Darwin arm64):
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted      5     0.1269     0.1253          3.7    715609516598740
+amber-built-fresh      5     0.1273     0.1266          2.3    715609516598740
+python                 5     0.1179     0.1153         14.7    715609516598740
+ruby                   5     0.0735     0.0728         16.0    715609516598740
+cpp                    5     0.0040     0.0039          1.4    715609516598740
+```
+
+The latest `amber-built-fresh` row used a fresh bytecode build:
+
+```sh
+build/amberc build bench/polyglot/amber/amber.build.json \
+  --out-dir /private/tmp/amber_sidecar_bench_rebuilt_ly31k6ae/amber/out \
+  --cache-dir /private/tmp/amber_sidecar_bench_rebuilt_ly31k6ae/amber/cache
+/private/tmp/amber_sidecar_bench_rebuilt_ly31k6ae/amberbc_run \
+  /private/tmp/amber_sidecar_bench_rebuilt_ly31k6ae/amber/out/bench.polyglot.amberbc \
+  main
+```
+
+The first measurement pass against that freshly built artifact had cold-process
+outliers (`amber-interpreted` first sample `0.4596s`, `amber-built-fresh`
+first sample `0.3544s`, and C++ first sample `0.1843s`). The table above is
+the immediate stable rerun against the same fresh `.amberbc` artifact.
+For compiler/emitter changes, continue to use a fresh `--out-dir` and
+`--cache-dir`, or clear the generated benchmark cache deliberately. The cache
+key is source-hash based and can reuse stale bytecode after compiler/emitter
+changes.
+
+The `calls-collections` workload adds helper-function calls and collection
+traffic: nested list literals, `[]`, `first`, `count`, list arguments, and
+helper loops over collections. Its Amber bytecode path runs module init through
+`amberbc_run ... __init__`, because the compiled `main` closure captures helper
+closures created by module initialization.
+
+Fresh-cache results for `calls-collections` on 2026-06-03 (Darwin arm64):
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted      5     0.1455     0.1424          5.2         2047795430
+amber-built            5     0.1441     0.1398          3.3         2047795430
+python                 5     0.0196     0.0193         15.1         2047795430
+ruby                   5     0.0298     0.0294         16.0         2047795430
+cpp                    5     0.0024     0.0023          1.3         2047795430
+```
+
+That table is the immediate stable rerun against fresh artifacts built with:
+
+```sh
+python3 bench/polyglot/run_benchmark.py \
+  --workload calls-collections \
+  --repeats 5 \
+  --build-dir /private/tmp/amber_polyglot_calls_results
+python3 bench/polyglot/run_benchmark.py \
+  --workload calls-collections \
+  --repeats 5 \
+  --no-build \
+  --build-dir /private/tmp/amber_polyglot_calls_results
+```

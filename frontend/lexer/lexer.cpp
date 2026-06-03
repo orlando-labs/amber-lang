@@ -163,7 +163,12 @@ LexResult Lexer::lex() {
       break;
     case '/':
       advance();
-      emit(TokenKind::Slash, start, "/");
+      if (!at_end() && current() == '/') {
+        advance();
+        emit(TokenKind::SlashSlash, start, "//");
+      } else {
+        emit(TokenKind::Slash, start, "/");
+      }
       break;
     case '%':
       advance();
@@ -193,7 +198,11 @@ LexResult Lexer::lex() {
       break;
     case '<':
       advance();
-      if (!at_end() && current() == '=') {
+      if (!at_end() && current() == '=' && peek() == '>') {
+        advance();
+        advance();
+        emit(TokenKind::LessEqualGreater, start, "<=>");
+      } else if (!at_end() && current() == '=') {
         advance();
         emit(TokenKind::LessEqual, start, "<=");
       } else {

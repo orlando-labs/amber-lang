@@ -218,7 +218,7 @@ test: build
 	$(BUILD_DIR)/package_tests
 	$(BUILD_DIR)/amberc lex corpus/parse/lexer/basic/source.am > $(BUILD_DIR)/lexer-basic.tokens.json
 	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-first.json
-	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-second.json
+	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --target bytecode --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-second.json
 	$(BUILD_DIR)/amberc amberbc-verify $(BUILD_DIR)/w14_build/out/demo.main.amberbc > $(BUILD_DIR)/w14-main.verify.json
 	$(BUILD_DIR)/amberc metadata $(BUILD_DIR)/w14_build/out/demo.main.amberbc --json > $(BUILD_DIR)/w14-main.metadata.json
 	$(BUILD_DIR)/amberc verify $(BUILD_DIR)/w14_build/out/demo.main.amberbc --json > $(BUILD_DIR)/w14-main.public-verify.json
@@ -227,10 +227,14 @@ test: build
 	grep -q '"schema": "amber.bc.verify.v1"' $(BUILD_DIR)/w14-main.public-verify.json
 	grep -q '"code":"BC1002"' $(BUILD_DIR)/bad.public-verify.json
 	$(BUILD_DIR)/amberc amberbc-disasm $(BUILD_DIR)/w14_build/out/demo.main.amberbc > $(BUILD_DIR)/w14-main.disasm.txt
+	grep -q '"native_output": "$(BUILD_DIR)/w14_build/out/demo.main"' $(BUILD_DIR)/w14-build-first.json
+	$(BUILD_DIR)/w14_build/out/demo.main > $(BUILD_DIR)/w14-main-native-manifest.out
+	grep -q '^42$$' $(BUILD_DIR)/w14-main-native-manifest.out
 	$(BUILD_DIR)/amberc tests/fixtures/run_script/main.am > $(BUILD_DIR)/run-script.out
 	grep -q '^42$$' $(BUILD_DIR)/run-script.out
 	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/src/main.am -o $(BUILD_DIR)/w14-main-exe > $(BUILD_DIR)/w14-main-exe-build.json
 	grep -q '"entry": "main"' $(BUILD_DIR)/w14-main-exe-build.json
+	grep -q '"native_entry": true' $(BUILD_DIR)/w14-main-exe-build.json
 	$(BUILD_DIR)/w14-main-exe > $(BUILD_DIR)/w14-main-exe.out
 	grep -q '^42$$' $(BUILD_DIR)/w14-main-exe.out
 	$(BUILD_DIR)/ambertest run corpus

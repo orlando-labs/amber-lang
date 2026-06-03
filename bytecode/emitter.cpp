@@ -243,16 +243,19 @@ bool is_integer_literal_expr(const ast::Expr &expr) {
   return expr.kind == "HConst" && string_field(expr, "token") == "INTEGER";
 }
 
-bool is_integer_arithmetic_selector(const std::string &selector) {
-  return selector == "+" || selector == "-";
+bool is_integer_result_selector(const std::string &selector) {
+  return selector == "+" || selector == "-" || selector == "*" ||
+         selector == "/" || selector == "%" || selector == "//" ||
+         selector == "<=>";
 }
 
 bool is_integer_comparison_selector(const std::string &selector) {
-  return selector == "<" || selector == ">";
+  return selector == "<" || selector == ">" || selector == "<=" ||
+         selector == ">=" || selector == "==" || selector == "!=";
 }
 
 bool is_integer_specialized_selector(const std::string &selector) {
-  return is_integer_arithmetic_selector(selector) ||
+  return is_integer_result_selector(selector) ||
          is_integer_comparison_selector(selector);
 }
 
@@ -263,10 +266,37 @@ Opcode integer_register_opcode(const std::string &selector) {
   if (selector == "-") {
     return Opcode::ISub;
   }
+  if (selector == "*") {
+    return Opcode::IMul;
+  }
+  if (selector == "/") {
+    return Opcode::IDiv;
+  }
+  if (selector == "%") {
+    return Opcode::IMod;
+  }
+  if (selector == "//") {
+    return Opcode::IFloorDiv;
+  }
   if (selector == "<") {
     return Opcode::ILt;
   }
-  return Opcode::IGt;
+  if (selector == ">") {
+    return Opcode::IGt;
+  }
+  if (selector == "<=") {
+    return Opcode::ILe;
+  }
+  if (selector == ">=") {
+    return Opcode::IGe;
+  }
+  if (selector == "==") {
+    return Opcode::IEq;
+  }
+  if (selector == "!=") {
+    return Opcode::INe;
+  }
+  return Opcode::ICmp;
 }
 
 Opcode integer_constant_opcode(const std::string &selector) {
@@ -276,10 +306,37 @@ Opcode integer_constant_opcode(const std::string &selector) {
   if (selector == "-") {
     return Opcode::ISubK;
   }
+  if (selector == "*") {
+    return Opcode::IMulK;
+  }
+  if (selector == "/") {
+    return Opcode::IDivK;
+  }
+  if (selector == "%") {
+    return Opcode::IModK;
+  }
+  if (selector == "//") {
+    return Opcode::IFloorDivK;
+  }
   if (selector == "<") {
     return Opcode::ILtK;
   }
-  return Opcode::IGtK;
+  if (selector == ">") {
+    return Opcode::IGtK;
+  }
+  if (selector == "<=") {
+    return Opcode::ILeK;
+  }
+  if (selector == ">=") {
+    return Opcode::IGeK;
+  }
+  if (selector == "==") {
+    return Opcode::IEqK;
+  }
+  if (selector == "!=") {
+    return Opcode::INeK;
+  }
+  return Opcode::ICmpK;
 }
 
 double parse_float_literal(const std::string &value) {
@@ -349,6 +406,7 @@ private:
   void compile_if_for_effect(const ast::Expr &expr);
   std::uint32_t compile_if(const ast::Expr &expr);
   std::uint32_t compile_logical(const ast::Expr &expr);
+  std::uint32_t compile_compare_chain(const ast::Expr &expr);
   void compile_loop_for_effect(const ast::Expr &expr);
   std::uint32_t compile_loop(const ast::Expr &expr);
   std::uint32_t compile_match_dispatch(const ast::Expr &expr);
@@ -1173,7 +1231,7 @@ bool CodeEmitter::expr_is_integer_for_specialization(
   }
   if (expr.kind == "HSend") {
     const std::string selector = string_field(expr, "selector");
-    if (!is_integer_arithmetic_selector(selector) ||
+    if (!is_integer_result_selector(selector) ||
         has_non_empty_list_field(expr, "kw_args") ||
         node_field(expr, "block") != nullptr) {
       return false;
@@ -2729,6 +2787,43 @@ std::uint32_t CodeEmitter::compile_logical(const ast::Expr &expr) {
   return dst;
 }
 
+std::uint32_t CodeEmitter::compile_compare_chain(const ast::Expr &expr) {
+  const ast::Expr *first = node_field(expr, "first");
+  const ast::ListField *links = list_field(expr, "links");
+  const std::uint32_t dst = alloc_temp();
+  if (first == nullptr || links == nullptr || links->values.empty()) {
+    diag(expr.span, "BC2001", "HCompareChain is missing operands");
+    emit_instruction(Opcode::LoadBool, {{dst, false}, {1, false}}, expr.span);
+    return dst;
+  }
+
+  std::vector<PatchRef> false_patches;
+  std::uint32_t lhs_reg = compile_expr(*first);
+  for (const std::unique_ptr<ast::Expr> &link : links->values) {
+    const ast::Expr *right = node_field(*link, "right");
+    if (right == nullptr) {
+      diag(link->span, "BC2001", "HCompareLink is missing right operand");
+      continue;
+    }
+    const std::uint32_t rhs_reg = compile_expr(*right);
+    const std::uint32_t cmp_reg =
+        emit_simple_send(link->span, lhs_reg, string_field(*link, "op"),
+                         {rhs_reg});
+    const std::size_t jump_false = emit_instruction(
+        Opcode::JumpIfFalse, {{cmp_reg, false}, {-1, true}}, link->span);
+    add_fail_patch(&false_patches, jump_false, 1);
+    lhs_reg = rhs_reg;
+  }
+
+  emit_instruction(Opcode::LoadBool, {{dst, false}, {1, false}}, expr.span);
+  const std::size_t jump_end =
+      emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
+  patch_fail_patches(false_patches, current_pc());
+  emit_instruction(Opcode::LoadBool, {{dst, false}, {0, false}}, expr.span);
+  patch_operand(jump_end, 0, current_pc(), false);
+  return dst;
+}
+
 void CodeEmitter::compile_loop_for_effect(const ast::Expr &expr) {
   const std::string kind = string_field(expr, "kind");
   const ast::Expr *cond = node_field(expr, "cond");
@@ -3287,6 +3382,9 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   }
   if (expr.kind == "HLogical") {
     return compile_logical(expr);
+  }
+  if (expr.kind == "HCompareChain") {
+    return compile_compare_chain(expr);
   }
   if (expr.kind == "HLoop") {
     return compile_loop(expr);

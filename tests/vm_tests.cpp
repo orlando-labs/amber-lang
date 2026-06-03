@@ -81,6 +81,11 @@ method_by_name(const amber::bytecode::BcModule &module,
                const std::string &name);
 std::uint32_t symbol_id_or_die(const amber::bytecode::BcModule &module,
                                const std::string &name);
+std::uint32_t append_integer_const(amber::bytecode::BcModule *module,
+                                   std::int64_t value);
+const amber::runtime::ExecutionLocal *
+execution_local_by_name(const amber::runtime::ExecutionResult &result,
+                        const std::string &name);
 
 void test_execute_emitted_method() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def echo(x):\n"
@@ -270,6 +275,39 @@ void test_top_level_function_closure_captures_sibling_function() {
   expect(exec.ok(), "top-level function sibling capture failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 7,
          "top-level function should call captured sibling function");
+}
+
+void test_direct_top_level_method_entry_materializes_module_captures() {
+  amber::bytecode::EmitResult emit_result = emit_ok("def helper(value):\n"
+                                                    "  value + 1\n"
+                                                    "\n"
+                                                    "def main():\n"
+                                                    "  helper(41)\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  const amber::bytecode::BcMethod *main_method =
+      method_by_name(decoded.module, "main");
+  expect(main_method != nullptr, "direct entry main method exists");
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(decoded.module, main_method->entry_code_id);
+  expect(exec.ok(),
+         "direct top-level method entry should materialize module captures");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "direct top-level method entry should call captured sibling helper");
+
+  amber::runtime::RuntimeWorld world(decoded.module);
+  const amber::runtime::ExecutionResult init =
+      world.execute(decoded.module.init.entry_code_id);
+  expect(init.ok(), "module init should persist top-level bindings");
+  const amber::runtime::ExecutionResult after_init =
+      world.execute(main_method->entry_code_id);
+  expect(after_init.ok(),
+         "direct top-level method entry should reuse persisted captures");
+  expect(after_init.value.is_integer() && after_init.value.as_integer() == 42,
+         "direct top-level method after init should call sibling helper");
 }
 
 void test_top_level_function_self_recursion() {
@@ -826,14 +864,18 @@ void test_execute_emitted_integer_specialized_ops() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("x = 10\n"
               "y = 3\n"
-              "[x + y, x - 4, x < y, x > 4]\n");
+              "zero = 0\n"
+              "neg = zero - x\n"
+              "[x + y, x - 4, x * y, x / y, x % y, neg % y, x // y, "
+              "neg // y, x < y, x > 4, x <= 10, x >= y, x == 10, "
+              "x != y, x <=> y, y <=> x, y <=> 3]\n");
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       emit_result.module, emit_result.module.init.entry_code_id);
   expect(exec.ok(), "specialized integer ops execution failed");
   expect(exec.value.is_list(), "specialized integer ops should return list");
   const std::shared_ptr<amber::runtime::ListValue> values =
       exec.value.as_list();
-  expect(values != nullptr && values->items.size() == 4,
+  expect(values != nullptr && values->items.size() == 17,
          "specialized integer ops list size");
   expect(values->items[0].is_integer() &&
              values->items[0].as_integer() == 13,
@@ -841,10 +883,172 @@ void test_execute_emitted_integer_specialized_ops() {
   expect(values->items[1].is_integer() &&
              values->items[1].as_integer() == 6,
          "ISUBK should subtract integer constant");
-  expect(values->items[2].is_bool() && !values->items[2].as_bool(),
+  expect(values->items[2].is_integer() &&
+             values->items[2].as_integer() == 30,
+         "IMUL should multiply integer registers");
+  expect(values->items[3].is_integer() &&
+             values->items[3].as_integer() == 3,
+         "IDIV should divide integer registers");
+  expect(values->items[4].is_integer() &&
+             values->items[4].as_integer() == 1,
+         "IMOD should floor-mod positive integers");
+  expect(values->items[5].is_integer() &&
+             values->items[5].as_integer() == 2,
+         "IMOD should floor-mod negative integers");
+  expect(values->items[6].is_integer() &&
+             values->items[6].as_integer() == 3,
+         "IFLOORDIV should divide positive integers");
+  expect(values->items[7].is_integer() &&
+             values->items[7].as_integer() == -4,
+         "IFLOORDIV should floor negative quotients");
+  expect(values->items[8].is_bool() && !values->items[8].as_bool(),
          "ILT should compare integer registers");
-  expect(values->items[3].is_bool() && values->items[3].as_bool(),
+  expect(values->items[9].is_bool() && values->items[9].as_bool(),
          "IGTK should compare integer constant");
+  expect(values->items[10].is_bool() && values->items[10].as_bool(),
+         "ILEK should compare integer constant");
+  expect(values->items[11].is_bool() && values->items[11].as_bool(),
+         "IGE should compare integer registers");
+  expect(values->items[12].is_bool() && values->items[12].as_bool(),
+         "IEQK should compare integer constant");
+  expect(values->items[13].is_bool() && values->items[13].as_bool(),
+         "INE should compare integer registers");
+  expect(values->items[14].is_integer() &&
+             values->items[14].as_integer() == 1,
+         "ICMP should return 1 for greater lhs");
+  expect(values->items[15].is_integer() &&
+             values->items[15].as_integer() == -1,
+         "ICMP should return -1 for lesser lhs");
+  expect(values->items[16].is_integer() &&
+             values->items[16].as_integer() == 0,
+         "ICMPK should return 0 for equal operands");
+}
+
+void test_execute_emitted_numeric_equality_and_new_ops() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("[1 == 1.0, 1 != 1.0, 7.5 % 2, 7.5 // 2, 1 <=> 1.0, "
+              "1 < 2 < 3, 3 > 2 > 1, 1 < 2 < 2, 3 > 3 > 1]\n");
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "numeric equality and new ops execution failed");
+  expect(exec.value.is_list(), "numeric equality result should be list");
+  const std::shared_ptr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 9,
+         "numeric equality list size");
+  expect(values->items[0].is_bool() && values->items[0].as_bool(),
+         "int and float equality should compare numeric values");
+  expect(values->items[1].is_bool() && !values->items[1].as_bool(),
+         "int and float inequality should compare numeric values");
+  expect(values->items[2].is_float() && values->items[2].as_float() == 1.5,
+         "float modulo should use floor modulo");
+  expect(values->items[3].is_float() && values->items[3].as_float() == 3.0,
+         "float floor division should floor quotient");
+  expect(values->items[4].is_integer() &&
+             values->items[4].as_integer() == 0,
+         "mixed numeric spaceship should return zero");
+  expect(values->items[5].is_bool() && values->items[5].as_bool(),
+         "ascending comparison chain should pass");
+  expect(values->items[6].is_bool() && values->items[6].as_bool(),
+         "descending comparison chain should pass");
+  expect(values->items[7].is_bool() && !values->items[7].as_bool(),
+         "ascending comparison chain should fail");
+  expect(values->items[8].is_bool() && !values->items[8].as_bool(),
+         "descending comparison chain should fail");
+}
+
+void test_execute_emitted_integer_send_fast_path_new_ops() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("def ops(x, y):\n"
+              "  [x % y, x // y, x == y, x != y, x <=> y]\n");
+  expect(emit_result.module.methods.size() == 1, "expected ops method");
+
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.methods[0].entry_code_id,
+      {amber::runtime::Value::integer(10),
+       amber::runtime::Value::integer(3)});
+  expect(exec.ok(), "integer send fast path execution failed");
+  expect(exec.value.is_list(), "integer send fast path should return list");
+  const std::shared_ptr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 5,
+         "integer send fast path list size");
+  expect(values->items[0].is_integer() &&
+             values->items[0].as_integer() == 1,
+         "integer SEND modulo should execute");
+  expect(values->items[1].is_integer() &&
+             values->items[1].as_integer() == 3,
+         "integer SEND floor division should execute");
+  expect(values->items[2].is_bool() && !values->items[2].as_bool(),
+         "integer SEND equality should execute");
+  expect(values->items[3].is_bool() && values->items[3].as_bool(),
+         "integer SEND inequality should execute");
+  expect(values->items[4].is_integer() &&
+             values->items[4].as_integer() == 1,
+         "integer SEND spaceship should execute");
+}
+
+void test_runtime_integer_sidecar_result_returns_materialized_value() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+  const std::uint32_t ten_id = append_integer_const(&module, 10);
+  const std::uint32_t thirty_two_id = append_integer_const(&module, 32);
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Module;
+  code.reg_count = 3;
+  code.instructions.push_back({Opcode::LoadK, {{0, false}, {ten_id, false}}});
+  code.instructions.push_back(
+      {Opcode::LoadK, {{1, false}, {thirty_two_id, false}}});
+  code.instructions.push_back(
+      {Opcode::IAdd, {{2, false}, {0, false}, {1, false}}});
+  code.instructions.push_back({Opcode::Return, {{2, false}}});
+  module.code_objects.push_back(code);
+
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(module, 1);
+  expect(exec.ok(), "integer sidecar return should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "integer sidecar result is materialized on return");
+}
+
+void test_runtime_integer_sidecar_materializes_completed_local() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+  module.strings = {"total"};
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Module;
+  code.reg_count = 1;
+  code.local_layout.push_back({0, 0, 0, 0});
+  code.instructions.push_back({Opcode::LoadK, {{0, false}, {one_id, false}}});
+  code.instructions.push_back(
+      {Opcode::IAddK, {{0, false}, {0, false}, {one_id, false}}});
+  code.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects.push_back(code);
+
+  amber::runtime::RuntimeWorld world(module);
+  const amber::runtime::ExecutionResult exec = world.execute(code.code_id);
+  expect(exec.ok(), "integer sidecar completed local should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 2,
+         "integer sidecar completed local returns updated value");
+
+  const amber::runtime::ExecutionLocal *total_local =
+      execution_local_by_name(exec, "total");
+  expect(total_local != nullptr, "integer sidecar local appears in locals");
+  expect(total_local->initialized, "integer sidecar local is initialized");
+  expect(total_local->value.is_integer() &&
+             total_local->value.as_integer() == 2,
+         "integer sidecar completed local is materialized");
 }
 
 void test_execute_emitted_compare_method() {
@@ -2288,6 +2492,47 @@ void test_runtime_integer_specialized_op_preserves_watch_local_write() {
   expect(exec.watch_events[1].new_value.is_integer() &&
              exec.watch_events[1].new_value.as_integer() == 2,
          "watched integer add records new value");
+}
+
+void test_runtime_compare_branch_preserves_debug_local() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+  module.strings = {"cmp"};
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+  const std::uint32_t two_id = append_integer_const(&module, 2);
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Module;
+  code.reg_count = 3;
+  code.local_layout.push_back({0, 0, 0, 0});
+  code.instructions.push_back({Opcode::LoadK, {{1, false}, {one_id, false}}});
+  code.instructions.push_back({Opcode::LoadK, {{2, false}, {two_id, false}}});
+  code.instructions.push_back(
+      {Opcode::ILt, {{0, false}, {1, false}, {2, false}}});
+  code.instructions.push_back(
+      {Opcode::JumpIfFalse, {{0, false}, {6, false}}});
+  code.instructions.push_back({Opcode::LoadK, {{1, false}, {two_id, false}}});
+  code.instructions.push_back({Opcode::Return, {{1, false}}});
+  code.instructions.push_back({Opcode::LoadK, {{1, false}, {one_id, false}}});
+  code.instructions.push_back({Opcode::Return, {{1, false}}});
+  module.code_objects.push_back(code);
+
+  amber::runtime::RuntimeWorld world(module);
+  const amber::runtime::ExecutionResult exec = world.execute(code.code_id);
+  expect(exec.ok(), "compare branch with debug local should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 2,
+         "compare branch should take true path");
+
+  const amber::runtime::ExecutionLocal *cmp_local =
+      execution_local_by_name(exec, "cmp");
+  expect(cmp_local != nullptr, "compare local appears in execution locals");
+  expect(cmp_local->initialized, "compare local remains initialized");
+  expect(cmp_local->value.is_bool() && cmp_local->value.as_bool(),
+         "compare local preserves boolean value");
 }
 
 void test_runtime_watch_capture_uses_shared_storage_cell() {
@@ -6674,6 +6919,7 @@ int main() {
   test_execute_emitted_collection_literals();
   test_runtime_string_interpolation_and_conversions();
   test_top_level_function_closure_captures_sibling_function();
+  test_direct_top_level_method_entry_materializes_module_captures();
   test_top_level_function_self_recursion();
   test_top_level_clause_function_self_recursion();
   test_top_level_plain_def_fallback_clause_recursion();
@@ -6684,6 +6930,10 @@ int main() {
   test_manual_call_invokes_object_call_method();
   test_execute_emitted_send_method();
   test_execute_emitted_integer_specialized_ops();
+  test_execute_emitted_numeric_equality_and_new_ops();
+  test_execute_emitted_integer_send_fast_path_new_ops();
+  test_runtime_integer_sidecar_result_returns_materialized_value();
+  test_runtime_integer_sidecar_materializes_completed_local();
   test_execute_emitted_compare_method();
   test_execute_emitted_default_method();
   test_execute_emitted_keyword_method();
@@ -6728,6 +6978,7 @@ int main() {
   test_execute_emitted_block_map_suffixes();
   test_runtime_watch_local_storage_replacement();
   test_runtime_integer_specialized_op_preserves_watch_local_write();
+  test_runtime_compare_branch_preserves_debug_local();
   test_runtime_watch_capture_uses_shared_storage_cell();
   test_runtime_watch_ivar_records_object_revision_events();
   test_runtime_dependency_capture_records_binding_reads();

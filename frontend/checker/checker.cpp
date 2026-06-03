@@ -704,6 +704,19 @@ private:
     if (expr.kind == "AstBinary" || expr.kind == "AstAssign") {
       return infer_binary(expr, env);
     }
+    if (expr.kind == "AstCompareChain") {
+      if (const ast::Expr *first = node_field(expr, "first")) {
+        (void)infer_expr(*first, env);
+      }
+      if (const ast::ListField *links = list_field(expr, "links")) {
+        for (const std::unique_ptr<ast::Expr> &link : links->values) {
+          if (const ast::Expr *right = node_field(*link, "right")) {
+            (void)infer_expr(*right, env);
+          }
+        }
+      }
+      return named_type("Bool");
+    }
     if (expr.kind == "AstInlineIfExpr") {
       TypeEnv then_env = env;
       TypeEnv else_env = env;
@@ -793,11 +806,16 @@ private:
     }
     const TypeTerm right = right_expr == nullptr ? named_type("Any")
                                                  : infer_expr(*right_expr, env);
-    if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%") &&
+    if (op == "<=>") {
+      return named_type("Int");
+    }
+    if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%" ||
+         op == "//") &&
         (is_named(left, "Float") || is_named(right, "Float"))) {
       return named_type("Float");
     }
-    if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+    if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" ||
+        op == "//") {
       return named_type("Int");
     }
     return named_type("Any");

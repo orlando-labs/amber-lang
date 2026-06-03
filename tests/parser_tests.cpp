@@ -119,6 +119,54 @@ void test_precedence() {
          "multiplication op");
 }
 
+void test_new_binary_operators() {
+  std::unique_ptr<Expr> floor_div = parse_ok("x // 2\n");
+  expect(floor_div->kind == "AstBinary", "floor division parses as binary");
+  expect(string_field(*floor_div, "op") == "//", "floor division op");
+
+  std::unique_ptr<Expr> modulo = parse_ok("x % 2\n");
+  expect(modulo->kind == "AstBinary", "modulo parses as binary");
+  expect(string_field(*modulo, "op") == "%", "modulo op");
+
+  std::unique_ptr<Expr> spaceship = parse_ok("x <=> y\n");
+  expect(spaceship->kind == "AstBinary", "spaceship parses as binary");
+  expect(string_field(*spaceship, "op") == "<=>", "spaceship op");
+}
+
+void test_comparison_chains() {
+  std::unique_ptr<Expr> ascending = parse_ok("a < x <= b\n");
+  expect(ascending->kind == "AstCompareChain",
+         "ascending comparison chain parses as chain");
+  expect(node_field(*ascending, "first").kind == "AstName",
+         "chain first operand");
+  const amber::ast::ListField &ascending_links =
+      list_field(*ascending, "links");
+  expect(ascending_links.values.size() == 2, "ascending chain link count");
+  expect(string_field(*ascending_links.values[0], "op") == "<",
+         "ascending first op");
+  expect(string_field(*ascending_links.values[1], "op") == "<=",
+         "ascending second op");
+
+  std::unique_ptr<Expr> descending = parse_ok("a > x >= b\n");
+  expect(descending->kind == "AstCompareChain",
+         "descending comparison chain parses as chain");
+  const amber::ast::ListField &descending_links =
+      list_field(*descending, "links");
+  expect(descending_links.values.size() == 2, "descending chain link count");
+  expect(string_field(*descending_links.values[0], "op") == ">",
+         "descending first op");
+  expect(string_field(*descending_links.values[1], "op") == ">=",
+         "descending second op");
+
+  std::unique_ptr<Expr> mixed = parse_ok("a < x > b\n");
+  expect(mixed->kind == "AstBinary",
+         "mixed comparison directions stay nested binaries");
+  expect(string_field(*mixed, "op") == ">", "mixed outer op");
+  expect(node_field(*mixed, "left").kind == "AstBinary", "mixed left binary");
+  expect(string_field(node_field(*mixed, "left"), "op") == "<",
+         "mixed inner op");
+}
+
 void test_bare_call() {
   std::unique_ptr<Expr> expr = parse_ok("puts x + 1\n");
   expect(expr->kind == "AstPostfixChain", "bare call produces postfix chain");
@@ -747,6 +795,8 @@ void test_typed_signature_surface() {
 
 int main() {
   test_precedence();
+  test_new_binary_operators();
+  test_comparison_chains();
   test_bare_call();
   test_safe_nav_and_index();
   test_inline_block_chain_boundary();

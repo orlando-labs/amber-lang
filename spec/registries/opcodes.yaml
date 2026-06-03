@@ -82,6 +82,42 @@ opcodes:
     byte: 0x2C
   - name: IGTK
     byte: 0x2D
+  - name: IMUL
+    byte: 0x50
+  - name: IDIV
+    byte: 0x51
+  - name: IMOD
+    byte: 0x52
+  - name: IFLOORDIV
+    byte: 0x53
+  - name: ILE
+    byte: 0x54
+  - name: IGE
+    byte: 0x55
+  - name: IEQ
+    byte: 0x56
+  - name: INE
+    byte: 0x57
+  - name: ICMP
+    byte: 0x58
+  - name: IMULK
+    byte: 0x59
+  - name: IDIVK
+    byte: 0x5A
+  - name: IMODK
+    byte: 0x5B
+  - name: IFLOORDIVK
+    byte: 0x5C
+  - name: ILEK
+    byte: 0x5D
+  - name: IGEK
+    byte: 0x5E
+  - name: IEQK
+    byte: 0x5F
+  - name: INEK
+    byte: 0x60
+  - name: ICMPK
+    byte: 0x61
   - name: JUMP
     byte: 0x30
   - name: JUMP_IF_TRUE

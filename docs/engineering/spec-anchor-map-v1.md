@@ -42,11 +42,11 @@ Check with `make spec-sync-check`.
 | Registry | Lines | SHA-256 |
 | --- | ---: | --- |
 | `spec/registries/bytecode_sections.yaml` | 88 | `beb53d82556008ef1c60bfa9955722b05b2b87b9c2df74110484a93224dec7e9` |
-| `spec/registries/diagnostics.yaml` | 71 | `de142e3dfe26e53b88ce14291c7b2a1edca84cd791a97a7e0f131bf8a72657f7` |
-| `spec/registries/opcodes.yaml` | 108 | `dd1299ade833cde298ab8bd16c1d4a17f33d8fcf09ce8017cdad0565a1158577` |
+| `spec/registries/diagnostics.yaml` | 82 | `534d0f22d2719102585863d581a17300fb4b29ed5edac812d59ead5a6af995c2` |
+| `spec/registries/opcodes.yaml` | 160 | `cfb1144ae9aa5ddfdc92cbf6244c6ebc57a50d4422fd41f61ac9b6516502c7f6` |
 | `spec/registries/prelude.yaml` | 329 | `23b6a897f9409ad8e8c615f741221c287beb5e85e744e8f19f48d1fbac607f14` |
 | `spec/registries/runtime_errors.yaml` | 45 | `91575e5aa6d37bf8de2b4111f2007daf2d51886a2fc9ca859e1cee21fed3df80` |
-| `spec/registries/tokens.yaml` | 103 | `945c4164f82ba54a1d5b16b7cb60c75f74c25bead108760fbdf4010c163ea771` |
+| `spec/registries/tokens.yaml` | 105 | `d86e2981bd7830edd5d489e35fc1b33644d6c8ca5b7b9e715d71fe3ad8d04a27` |
 
 ## Anchor Map
 
@@ -314,7 +314,7 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 1 | 1 | [`amberbuildv1`](../../docs/engineering/build-v1.md#amberbuildv1) | amber.build.v1 |
 | [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 19 | 2 | [`manifest-shape`](../../docs/engineering/build-v1.md#manifest-shape) | Manifest Shape |
 | [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 47 | 2 | [`cli`](../../docs/engineering/build-v1.md#cli) | CLI |
-| [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 64 | 2 | [`conformance`](../../docs/engineering/build-v1.md#conformance) | Conformance |
+| [`docs/engineering/build-v1.md`](../../docs/engineering/build-v1.md) | 69 | 2 | [`conformance`](../../docs/engineering/build-v1.md#conformance) | Conformance |
 | [`docs/engineering/capabilities-v1.md`](../../docs/engineering/capabilities-v1.md) | 1 | 1 | [`ambercapabilitiesv1`](../../docs/engineering/capabilities-v1.md#ambercapabilitiesv1) | amber.capabilities.v1 |
 | [`docs/engineering/conformance-v1.md`](../../docs/engineering/conformance-v1.md) | 1 | 1 | [`amberconformancev1`](../../docs/engineering/conformance-v1.md#amberconformancev1) | amber.conformance.v1 |
 | [`docs/engineering/data-schema-v1.md`](../../docs/engineering/data-schema-v1.md) | 1 | 1 | [`amberdataschemav1`](../../docs/engineering/data-schema-v1.md#amberdataschemav1) | amber.data/schema.v1 |
@@ -368,9 +368,9 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/modern-profiles-v1.md`](../../docs/engineering/modern-profiles-v1.md) | 1 | 1 | [`ambermodern-profilesv1`](../../docs/engineering/modern-profiles-v1.md#ambermodern-profilesv1) | amber.modern-profiles.v1 |
 | [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 1 | 1 | [`ambernativev1`](../../docs/engineering/native-v1.md#ambernativev1) | amber.native.v1 |
 | [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 30 | 2 | [`code-objects`](../../docs/engineering/native-v1.md#code-objects) | Code Objects |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 57 | 2 | [`runtime-bridge`](../../docs/engineering/native-v1.md#runtime-bridge) | Runtime Bridge |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 73 | 2 | [`validation`](../../docs/engineering/native-v1.md#validation) | Validation |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 93 | 2 | [`w15-closure`](../../docs/engineering/native-v1.md#w15-closure) | W15 Closure |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 60 | 2 | [`runtime-bridge`](../../docs/engineering/native-v1.md#runtime-bridge) | Runtime Bridge |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 76 | 2 | [`validation`](../../docs/engineering/native-v1.md#validation) | Validation |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 96 | 2 | [`w15-closure`](../../docs/engineering/native-v1.md#w15-closure) | W15 Closure |
 | [`docs/engineering/package-v1.md`](../../docs/engineering/package-v1.md) | 1 | 1 | [`amberpackagev1`](../../docs/engineering/package-v1.md#amberpackagev1) | amber.package.v1 |
 | [`docs/engineering/replay-v1.md`](../../docs/engineering/replay-v1.md) | 1 | 1 | [`amberreplayv1`](../../docs/engineering/replay-v1.md#amberreplayv1) | amber.replay.v1 |
 | [`docs/engineering/runtime-v1.md`](../../docs/engineering/runtime-v1.md) | 1 | 1 | [`amberruntimev1`](../../docs/engineering/runtime-v1.md#amberruntimev1) | amber.runtime.v1 |

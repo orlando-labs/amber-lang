@@ -1607,6 +1607,22 @@ private:
       node->list_field("kw_args", {});
       return node;
     }
+    if (expr.kind == "AstCompareChain") {
+      auto node = make_node("HCompareChain", expr.span);
+      node->node_field("first", lower_expr(*node_field_required(expr, "first")));
+      std::vector<std::unique_ptr<Node>> links;
+      if (const ast::ListField *list = list_field(expr, "links")) {
+        for (const std::unique_ptr<ast::Expr> &link : list->values) {
+          auto lowered = make_node("HCompareLink", link->span);
+          lowered->string_field("op", string_value(*link, "op"));
+          lowered->node_field("right",
+                              lower_expr(*node_field_required(*link, "right")));
+          links.push_back(std::move(lowered));
+        }
+      }
+      node->list_field("links", std::move(links));
+      return node;
+    }
     if (expr.kind == "AstBinary") {
       const std::string op = string_value(expr, "op");
       if (op == "and" || op == "or") {

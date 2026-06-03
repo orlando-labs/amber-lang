@@ -171,9 +171,13 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
 - `amberc build <amber.build.json>` for W14 multi-module build manifests,
   deterministic `.amberbc` emission into an output directory, cache-keyed
   incremental rebuilds, B2 stdlib bootstrap metadata, stdlib ABI dependency
-  pinning, and required/optional/forbidden profile feature metadata in `PROF`;
-- `amberc build <file.am>` for single-file executable wrappers that embed the
-  compiled `.amberbc` payload and run through `amberc run-embedded`;
+  pinning, required/optional/forbidden profile feature metadata in `PROF`, and
+  a root native executable sidecar by default (`--target bytecode` keeps the
+  bytecode-only path);
+- `amberc build <file.am>` for single-file native executables generated from
+  eligible bytecode through the `cpp-bytecode-direct-v1` backend, with verified
+  VM fallback for unsupported bytecode and explicit
+  `--target bytecode-wrapper` for the legacy embedded-wrapper path;
 - `amberc metadata <file.amberbc> --json` and
   `amberc verify <file.amberbc> --json` as the public `.amberbc` artifact
   inspection/verification surface, with structured verifier JSON for corrupted

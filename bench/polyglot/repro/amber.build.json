@@ -1,0 +1,14 @@
+{
+  "schema": "amber.build.v1",
+  "name": "bench.polyglot.repro",
+  "root": "bench.polyglot.repro.direct_method_capture_failure",
+  "profiles": {
+    "required": ["core.v1"]
+  },
+  "modules": [
+    {
+      "name": "bench.polyglot.repro.direct_method_capture_failure",
+      "path": "direct_method_capture_failure.am"
+    }
+  ]
+}

@@ -122,6 +122,11 @@ private:
 
   std::unique_ptr<ast::Expr> parse_expression(int min_precedence,
                                               StopMode stop_mode);
+  std::unique_ptr<ast::Expr>
+  parse_comparison_chain(std::unique_ptr<ast::Expr> left,
+                         const InfixInfo &first_info,
+                         const lexer::Token &first_op_token,
+                         StopMode stop_mode);
   std::unique_ptr<ast::Expr> parse_prefix(StopMode stop_mode);
   std::unique_ptr<ast::Expr>
   parse_paren_or_tuple_literal(const lexer::Token &open, StopMode stop_mode);

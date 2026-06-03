@@ -731,7 +731,18 @@ void test_integer_specialized_send_emission() {
               "  y = 3\n"
               "  z = x + y\n"
               "  q = z - 2\n"
-              "  (q < x) and (q > 0)\n");
+              "  product = x * y\n"
+              "  quotient = product / y\n"
+              "  remainder = product % y\n"
+              "  floored = product // y\n"
+              "  cmp = x <=> y\n"
+              "  le = q <= x\n"
+              "  ge = q >= 0\n"
+              "  eq = x == 10\n"
+              "  ne = x != y\n"
+              "  (q < x) and (q > 0) and le and ge and eq and ne and "
+              "(cmp > 0) and (floored > 0) and (remainder >= 0) and "
+              "(quotient > 0)\n");
 
   const amber::bytecode::BcCode *code = code_by_id(
       emit_result.module, emit_result.module.methods[0].entry_code_id);
@@ -740,10 +751,28 @@ void test_integer_specialized_send_emission() {
          "integer local addition emits IADD");
   expect(contains_opcode(*code, amber::bytecode::Opcode::ISubK),
          "integer literal subtraction emits ISUBK");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IMul),
+         "integer local multiplication emits IMUL");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IDiv),
+         "integer local division emits IDIV");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IMod),
+         "integer local modulo emits IMOD");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IFloorDiv),
+         "integer local floor division emits IFLOORDIV");
   expect(contains_opcode(*code, amber::bytecode::Opcode::ILt),
          "integer local comparison emits ILT");
   expect(contains_opcode(*code, amber::bytecode::Opcode::IGtK),
          "integer literal comparison emits IGTK");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::ILe),
+         "integer <= comparison emits ILE");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IGeK),
+         "integer >= literal comparison emits IGEK");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IEqK),
+         "integer equality literal comparison emits IEQK");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::INe),
+         "integer inequality local comparison emits INE");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::ICmp),
+         "integer spaceship comparison emits ICMP");
   expect(!contains_opcode(*code, amber::bytecode::Opcode::Send),
          "integer-only method avoids generic SEND");
 }

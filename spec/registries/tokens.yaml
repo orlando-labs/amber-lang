@@ -34,6 +34,7 @@ tokens:
     - MINUS
     - STAR
     - SLASH
+    - SLASH_SLASH
     - PERCENT
     - EQUAL
     - EQUAL_EQUAL
@@ -41,6 +42,7 @@ tokens:
     - BANG_EQUAL
     - LESS
     - LESS_EQUAL
+    - LESS_EQUAL_GREATER
     - GREATER
     - GREATER_EQUAL
     - AT

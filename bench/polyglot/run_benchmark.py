@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import shutil
@@ -8,7 +9,43 @@ import sys
 from pathlib import Path
 
 
-EXPECTED_CHECKSUM = "715609516598740"
+@dataclass(frozen=True)
+class Workload:
+    name: str
+    expected_checksum: str
+    amber_module: str
+    amber_entry: str
+    amber_source: str
+    python_source: str
+    ruby_source: str
+    cpp_source: str
+    cpp_binary: str
+
+
+WORKLOADS = {
+    "arithmetic": Workload(
+        name="arithmetic",
+        expected_checksum="715609516598740",
+        amber_module="bench.polyglot",
+        amber_entry="main",
+        amber_source="main.am",
+        python_source="main.py",
+        ruby_source="main.rb",
+        cpp_source="main.cpp",
+        cpp_binary="main",
+    ),
+    "calls-collections": Workload(
+        name="calls-collections",
+        expected_checksum="2047795430",
+        amber_module="bench.polyglot.calls_collections",
+        amber_entry="__init__",
+        amber_source="calls_collections.am",
+        python_source="calls_collections.py",
+        ruby_source="calls_collections.rb",
+        cpp_source="calls_collections.cpp",
+        cpp_binary="calls_collections",
+    ),
+}
 
 
 def repo_root() -> Path:
@@ -53,7 +90,11 @@ def ensure_amber_tools(root: Path) -> None:
     run_command(["make", "build/amberc", "build/iamber"], root, capture=False)
 
 
-def build_amber_bytecode(root: Path, build_dir: Path) -> Path:
+def amber_artifact_path(build_dir: Path, workload: Workload) -> Path:
+    return build_dir / "amber" / "out" / f"{workload.amber_module}.amberbc"
+
+
+def build_amber_bytecode(root: Path, build_dir: Path) -> None:
     out_dir = build_dir / "amber" / "out"
     cache_dir = build_dir / "amber" / "cache"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -70,14 +111,18 @@ def build_amber_bytecode(root: Path, build_dir: Path) -> Path:
         ],
         root,
     )
-    artifact = out_dir / "bench.polyglot.amberbc"
-    if not artifact.exists():
-        raise RuntimeError(f"expected Amber bytecode artifact is missing: {artifact}")
-    return artifact
+    for workload in WORKLOADS.values():
+        artifact = amber_artifact_path(build_dir, workload)
+        if not artifact.exists():
+            raise RuntimeError(
+                f"expected Amber bytecode artifact is missing: {artifact}"
+            )
 
 
-def compile_cpp_program(root: Path, build_dir: Path, cxx: str) -> Path:
-    output = build_dir / "cpp" / "main"
+def compile_cpp_program(
+    root: Path, build_dir: Path, cxx: str, workload: Workload
+) -> Path:
+    output = build_dir / "cpp" / workload.cpp_binary
     output.parent.mkdir(parents=True, exist_ok=True)
     run_command(
         [
@@ -85,7 +130,7 @@ def compile_cpp_program(root: Path, build_dir: Path, cxx: str) -> Path:
             "-std=c++17",
             "-O2",
             "-pipe",
-            root / "bench" / "polyglot" / "cpp" / "main.cpp",
+            root / "bench" / "polyglot" / "cpp" / workload.cpp_source,
             "-o",
             output,
         ],
@@ -181,7 +226,9 @@ def extract_checksum(name: str, stdout: str) -> str:
     return ""
 
 
-def aggregate(name: str, command, samples: list[dict]) -> dict:
+def aggregate(
+    name: str, command, samples: list[dict], expected_checksum: str
+) -> dict:
     good = [sample for sample in samples if sample["returncode"] == 0]
     if len(good) != len(samples):
         failed = next(sample for sample in samples if sample["returncode"] != 0)
@@ -190,11 +237,13 @@ def aggregate(name: str, command, samples: list[dict]) -> dict:
             f"stdout:\n{failed['stdout']}\nstderr:\n{failed['stderr']}"
         )
     checksums = [extract_checksum(name, sample["stdout"]) for sample in good]
-    mismatches = [checksum for checksum in checksums if checksum != EXPECTED_CHECKSUM]
+    mismatches = [
+        checksum for checksum in checksums if checksum != expected_checksum
+    ]
     if mismatches:
         raise RuntimeError(
             f"{name} produced unexpected checksum {mismatches[0]}, "
-            f"expected {EXPECTED_CHECKSUM}"
+            f"expected {expected_checksum}"
         )
     elapsed = [sample["elapsed_s"] for sample in good]
     rss_values = [
@@ -239,9 +288,21 @@ def main() -> int:
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(
+        "--workload",
+        choices=sorted(WORKLOADS.keys()),
+        default="arithmetic",
+        help="benchmark program to run",
+    )
+    parser.add_argument(
         "--no-build",
         action="store_true",
         help="reuse existing generated binaries and Amber bytecode artifacts",
+    )
+    parser.add_argument(
+        "--build-dir",
+        type=Path,
+        default=None,
+        help="directory for generated binaries and Amber bytecode artifacts",
     )
     parser.add_argument(
         "--json-out",
@@ -254,19 +315,23 @@ def main() -> int:
         raise RuntimeError("--repeats must be at least 1")
 
     root = repo_root()
-    build_dir = root / "bench" / "polyglot" / "build"
+    workload = WORKLOADS[args.workload]
+    build_dir = args.build_dir or (root / "bench" / "polyglot" / "build")
+    if not build_dir.is_absolute():
+        build_dir = root / build_dir
     build_dir.mkdir(parents=True, exist_ok=True)
 
     cxx = choose_cxx()
     if args.no_build:
-        amberbc = build_dir / "amber" / "out" / "bench.polyglot.amberbc"
+        amberbc = amber_artifact_path(build_dir, workload)
         amberbc_runner = build_dir / "amberbc_run"
-        cpp_binary = build_dir / "cpp" / "main"
+        cpp_binary = build_dir / "cpp" / workload.cpp_binary
     else:
         ensure_amber_tools(root)
-        amberbc = build_amber_bytecode(root, build_dir)
+        build_amber_bytecode(root, build_dir)
+        amberbc = amber_artifact_path(build_dir, workload)
         amberbc_runner = compile_amberbc_runner(root, build_dir, cxx)
-        cpp_binary = compile_cpp_program(root, build_dir, cxx)
+        cpp_binary = compile_cpp_program(root, build_dir, cxx, workload)
 
     ruby = shutil.which("ruby")
     if ruby is None:
@@ -278,25 +343,43 @@ def main() -> int:
             [
                 root / "build" / "iamber",
                 "--eval-file",
-                root / "bench" / "polyglot" / "amber" / "src" / "main.am",
+                root
+                / "bench"
+                / "polyglot"
+                / "amber"
+                / "src"
+                / workload.amber_source,
             ],
         ),
-        ("amber-built", [amberbc_runner, amberbc, "main"]),
+        ("amber-built", [amberbc_runner, amberbc, workload.amber_entry]),
         (
             "python",
-            [sys.executable, root / "bench" / "polyglot" / "python" / "main.py"],
+            [
+                sys.executable,
+                root / "bench" / "polyglot" / "python" / workload.python_source,
+            ],
         ),
-        ("ruby", [ruby, root / "bench" / "polyglot" / "ruby" / "main.rb"]),
+        (
+            "ruby",
+            [ruby, root / "bench" / "polyglot" / "ruby" / workload.ruby_source],
+        ),
         ("cpp", [cpp_binary]),
     ]
 
     results = []
     for name, command in programs:
         samples = [measure(command, root) for _ in range(args.repeats)]
-        results.append(aggregate(name, command, samples))
+        results.append(
+            aggregate(name, command, samples, workload.expected_checksum)
+        )
 
     print_table(results)
-    json_out = args.json_out or (build_dir / "results.json")
+    default_json = (
+        build_dir / "results.json"
+        if workload.name == "arithmetic"
+        else build_dir / f"{workload.name}.results.json"
+    )
+    json_out = args.json_out or default_json
     json_out.write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(f"\nWrote JSON results to {json_out}")
     return 0

@@ -129,6 +129,8 @@ const char *token_kind_name(TokenKind kind) {
     return "STAR";
   case TokenKind::Slash:
     return "SLASH";
+  case TokenKind::SlashSlash:
+    return "SLASH_SLASH";
   case TokenKind::Percent:
     return "PERCENT";
   case TokenKind::Equal:
@@ -141,6 +143,8 @@ const char *token_kind_name(TokenKind kind) {
     return "BANG_EQUAL";
   case TokenKind::Less:
     return "LESS";
+  case TokenKind::LessEqualGreater:
+    return "LESS_EQUAL_GREATER";
   case TokenKind::LessEqual:
     return "LESS_EQUAL";
   case TokenKind::Greater:

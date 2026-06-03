@@ -20,10 +20,13 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -44,7 +47,8 @@ std::string read_file(const std::string &path) {
 void usage(std::ostream &out) {
   out << "usage:\n";
   out << "  amberc <file.am>\n";
-  out << "  amberc build <file.am> [-o <path>] [--out-dir <dir>]\n";
+  out << "  amberc build <file.am> [-o <path>] [--out-dir <dir>] "
+         "[--target native|native-debug|bytecode-wrapper]\n";
   out << "  amberc lex <file>\n";
   out << "  amberc parse <file>\n";
   out << "  amberc parse-expr <file>\n";
@@ -61,7 +65,7 @@ void usage(std::ostream &out) {
   out << "  amberc bc <file>\n";
   out << "  amberc bc-disasm <file>\n";
   out << "  amberc build <amber.build.json> [--out-dir <dir>] "
-         "[--cache-dir <dir>] [--no-cache]\n";
+         "[--cache-dir <dir>] [--target both|native|bytecode] [--no-cache]\n";
   out << "  amberc metadata <file.amberbc> --json\n";
   out << "  amberc verify <file.amberbc> --json\n";
   out << "  amberc amberbc-dump <file>\n";
@@ -684,8 +688,9 @@ EntryExecutionMode parse_entry_mode(const std::string &mode) {
   throw std::runtime_error("unknown embedded executable entry mode: " + mode);
 }
 
-EntryExecutionMode default_entry_mode_for(
-    bool has_package, const amber::bytecode::BcModule &module) {
+EntryExecutionMode
+default_entry_mode_for(bool has_package,
+                       const amber::bytecode::BcModule &module) {
   if (has_package && zero_arg_method_by_name(module, "main") != nullptr) {
     return EntryExecutionMode::MainAfterInit;
   }
@@ -744,8 +749,9 @@ RunnableModuleArtifact compile_source_to_runnable_module(
   emit_result.module.effects = check_result.effect_summaries;
 
   const bool has_package = !parse_result.module_name.empty();
-  const std::string module_name =
-      has_package ? parse_result.module_name : synthetic_module_name_for_path(path);
+  const std::string module_name = has_package
+                                      ? parse_result.module_name
+                                      : synthetic_module_name_for_path(path);
   const EntryExecutionMode entry_mode =
       default_entry_mode_for(has_package, emit_result.module);
   add_module_attr(&emit_result.module, "amber.entry.module", module_name);
@@ -840,7 +846,8 @@ int run_runnable_module(const std::string &module_name,
 }
 
 int run_source_file_command(const std::string &path) {
-  const RunnableModuleArtifact artifact = compile_source_to_runnable_module(path);
+  const RunnableModuleArtifact artifact =
+      compile_source_to_runnable_module(path);
   return run_runnable_module(artifact.module_name, artifact.entry_mode,
                              artifact.bytes);
 }
@@ -868,6 +875,928 @@ std::string render_executable_script(const std::string &amberc_ref,
   }
   out << "__END_AMBER_EXECUTABLE_V1__\n";
   return out.str();
+}
+
+struct NativeCppBuildPlan {
+  std::string source;
+  std::set<std::uint32_t> native_code_ids;
+  std::string fallback_reason;
+  std::string backend = "cpp-bytecode-direct-v1";
+  bool entry_native = false;
+  bool uses_bytecode_fallback = true;
+};
+
+struct NativeExecutableBuildResult {
+  std::string output_path;
+  std::string source_path;
+  std::string hash;
+  std::string backend;
+  std::string cxx;
+  std::size_t native_code_count = 0;
+  std::size_t total_code_count = 0;
+  bool entry_native = false;
+  bool uses_bytecode_fallback = true;
+  std::string fallback_reason;
+};
+
+bool operand_u32_value(const amber::bytecode::Instruction &instruction,
+                       std::size_t index, std::uint32_t *out) {
+  if (index >= instruction.operands.size()) {
+    return false;
+  }
+  const amber::bytecode::InstructionOperand &operand =
+      instruction.operands[index];
+  if (operand.value < 0 || static_cast<std::uint64_t>(operand.value) >
+                               static_cast<std::uint64_t>(
+                                   std::numeric_limits<std::uint32_t>::max())) {
+    return false;
+  }
+  *out = static_cast<std::uint32_t>(operand.value);
+  return true;
+}
+
+bool operand_is_no_block(const amber::bytecode::Instruction &instruction,
+                         std::size_t index) {
+  if (index >= instruction.operands.size()) {
+    return false;
+  }
+  const std::int64_t value = instruction.operands[index].value;
+  return value < 0 || value == static_cast<std::int64_t>(
+                                   std::numeric_limits<std::uint32_t>::max());
+}
+
+std::string native_cpp_function_name(std::uint32_t code_id) {
+  return "amber_native_c" + std::to_string(code_id);
+}
+
+std::string cpp_decimal_i64(std::int64_t value) {
+  return "static_cast<std::int64_t>(" + std::to_string(value) + "LL)";
+}
+
+std::string native_cpp_next(std::size_t pc, std::size_t size) {
+  if (pc + 1U < size) {
+    return "goto pc_" + std::to_string(pc + 1U) + ";";
+  }
+  return "throw NativeBailout();";
+}
+
+bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
+                                std::uint32_t symbol_id,
+                                std::string *selector) {
+  if (symbol_id >= module.symbols.size()) {
+    return false;
+  }
+  *selector = module.symbols[symbol_id];
+  return *selector == "+" || *selector == "-" || *selector == "*" ||
+         *selector == "/" || *selector == "<" || *selector == ">";
+}
+
+bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
+                               const amber::bytecode::BcCode &code,
+                               std::string *reason) {
+  if (!code.handler_table.empty() || !code.capture_layout.empty()) {
+    *reason = "exceptions and captures still use VM fallback";
+    return false;
+  }
+  for (std::size_t pc = 0; pc < code.instructions.size(); ++pc) {
+    const amber::bytecode::Instruction &instruction = code.instructions[pc];
+    using amber::bytecode::Opcode;
+    const bool integer_k_opcode = instruction.opcode == Opcode::IAddK ||
+                                  instruction.opcode == Opcode::ISubK ||
+                                  instruction.opcode == Opcode::ILtK ||
+                                  instruction.opcode == Opcode::IGtK ||
+                                  instruction.opcode == Opcode::IMulK ||
+                                  instruction.opcode == Opcode::IDivK ||
+                                  instruction.opcode == Opcode::IModK ||
+                                  instruction.opcode == Opcode::IFloorDivK ||
+                                  instruction.opcode == Opcode::ILeK ||
+                                  instruction.opcode == Opcode::IGeK ||
+                                  instruction.opcode == Opcode::IEqK ||
+                                  instruction.opcode == Opcode::INeK ||
+                                  instruction.opcode == Opcode::ICmpK;
+    if (integer_k_opcode) {
+      std::uint32_t const_id = 0;
+      if (!operand_u32_value(instruction, 2, &const_id) ||
+          const_id >= module.const_pool.size() ||
+          module.const_pool[const_id].kind !=
+              amber::bytecode::ConstantKind::Integer) {
+        *reason = "integer-K opcode expects an integer constant";
+        return false;
+      }
+    }
+    switch (instruction.opcode) {
+    case Opcode::LoadK: {
+      std::uint32_t ignored_dst = 0;
+      std::uint32_t const_id = 0;
+      if (!operand_u32_value(instruction, 0, &ignored_dst) ||
+          !operand_u32_value(instruction, 1, &const_id) ||
+          const_id >= module.const_pool.size()) {
+        *reason = "invalid LOADK operand";
+        return false;
+      }
+      const amber::bytecode::ConstantKind kind =
+          module.const_pool[const_id].kind;
+      if (kind != amber::bytecode::ConstantKind::Null &&
+          kind != amber::bytecode::ConstantKind::Bool &&
+          kind != amber::bytecode::ConstantKind::Integer) {
+        *reason = "non-scalar constants still use VM fallback";
+        return false;
+      }
+      break;
+    }
+    case Opcode::LoadNull:
+    case Opcode::LoadBool:
+    case Opcode::Move:
+    case Opcode::GetLast:
+    case Opcode::SetLast:
+    case Opcode::IAdd:
+    case Opcode::ISub:
+    case Opcode::ILt:
+    case Opcode::IGt:
+    case Opcode::IMul:
+    case Opcode::IDiv:
+    case Opcode::IMod:
+    case Opcode::IFloorDiv:
+    case Opcode::ILe:
+    case Opcode::IGe:
+    case Opcode::IEq:
+    case Opcode::INe:
+    case Opcode::ICmp:
+    case Opcode::IAddK:
+    case Opcode::ISubK:
+    case Opcode::ILtK:
+    case Opcode::IGtK:
+    case Opcode::IMulK:
+    case Opcode::IDivK:
+    case Opcode::IModK:
+    case Opcode::IFloorDivK:
+    case Opcode::ILeK:
+    case Opcode::IGeK:
+    case Opcode::IEqK:
+    case Opcode::INeK:
+    case Opcode::ICmpK:
+    case Opcode::Jump:
+    case Opcode::JumpIfTrue:
+    case Opcode::JumpIfFalse:
+    case Opcode::JumpIfNull:
+    case Opcode::Return:
+    case Opcode::Safepoint:
+    case Opcode::CloseUpvalues:
+      break;
+    case Opcode::MakeClosure: {
+      std::uint32_t ignored_dst = 0;
+      std::uint32_t code_id = 0;
+      std::uint32_t capture_count = 0;
+      if (!operand_u32_value(instruction, 0, &ignored_dst) ||
+          !operand_u32_value(instruction, 1, &code_id) ||
+          !operand_u32_value(instruction, 2, &capture_count) ||
+          capture_count != 0U) {
+        *reason = "closures with captures still use VM fallback";
+        return false;
+      }
+      break;
+    }
+    case Opcode::Call: {
+      std::uint32_t ignored_dst = 0;
+      std::uint32_t ignored_callee = 0;
+      std::uint32_t pos_count = 0;
+      if (!operand_u32_value(instruction, 0, &ignored_dst) ||
+          !operand_u32_value(instruction, 1, &ignored_callee) ||
+          !operand_u32_value(instruction, 2, &pos_count)) {
+        *reason = "invalid CALL operand";
+        return false;
+      }
+      const std::size_t kw_index = 3U + pos_count;
+      std::uint32_t kw_count = 0;
+      if (!operand_u32_value(instruction, kw_index, &kw_count) ||
+          kw_count != 0U || !operand_is_no_block(instruction, kw_index + 1U)) {
+        *reason = "keyword/block calls still use VM fallback";
+        return false;
+      }
+      break;
+    }
+    case Opcode::Send: {
+      std::uint32_t ignored_dst = 0;
+      std::uint32_t ignored_recv = 0;
+      std::uint32_t symbol_id = 0;
+      std::uint32_t pos_count = 0;
+      std::string selector;
+      if (!operand_u32_value(instruction, 0, &ignored_dst) ||
+          !operand_u32_value(instruction, 1, &ignored_recv) ||
+          !operand_u32_value(instruction, 2, &symbol_id) ||
+          !native_cpp_scalar_selector(module, symbol_id, &selector) ||
+          !operand_u32_value(instruction, 3, &pos_count) || pos_count != 1U) {
+        *reason = "non-integer SEND still uses VM fallback";
+        return false;
+      }
+      std::uint32_t kw_count = 0;
+      if (!operand_u32_value(instruction, 5, &kw_count) || kw_count != 0U ||
+          !operand_is_no_block(instruction, 6)) {
+        *reason = "keyword/block SEND still uses VM fallback";
+        return false;
+      }
+      break;
+    }
+    default:
+      *reason = "unsupported opcode for direct native C++: " +
+                amber::bytecode::opcode_name(instruction.opcode);
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string
+native_cpp_constant_expr(const amber::bytecode::Constant &constant) {
+  switch (constant.kind) {
+  case amber::bytecode::ConstantKind::Null:
+    return "NativeValue::nullv()";
+  case amber::bytecode::ConstantKind::Bool:
+    return std::string("NativeValue::boolean(") +
+           (constant.bool_value ? "true" : "false") + ")";
+  case amber::bytecode::ConstantKind::Integer:
+    return "NativeValue::integer(" + cpp_decimal_i64(constant.int_value) + ")";
+  default:
+    return "NativeValue::nullv()";
+  }
+}
+
+std::string
+emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
+                              const amber::bytecode::BcCode &code) {
+  std::ostringstream out;
+  const std::string fn = native_cpp_function_name(code.code_id);
+  out << "static NativeValue " << fn
+      << "(const std::vector<NativeValue> &args) {\n";
+  out << "  std::vector<NativeValue> r(" << code.reg_count << ");\n";
+  out << "  NativeValue last = NativeValue::nullv();\n";
+  out << "  for (std::size_t i = 0; i < args.size() && i < r.size(); ++i) "
+         "{ r[i] = args[i]; }\n";
+  if (code.instructions.empty()) {
+    out << "  return NativeValue::nullv();\n";
+    out << "}\n\n";
+    return out.str();
+  }
+  out << "  goto pc_0;\n";
+  for (std::size_t pc = 0; pc < code.instructions.size(); ++pc) {
+    const amber::bytecode::Instruction &instruction = code.instructions[pc];
+    using amber::bytecode::Opcode;
+    out << "pc_" << pc << ":\n";
+    switch (instruction.opcode) {
+    case Opcode::LoadK: {
+      std::uint32_t dst = 0;
+      std::uint32_t const_id = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &const_id);
+      out << "  r[" << dst
+          << "] = " << native_cpp_constant_expr(module.const_pool[const_id])
+          << ";\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::LoadNull: {
+      std::uint32_t dst = 0;
+      operand_u32_value(instruction, 0, &dst);
+      out << "  r[" << dst << "] = NativeValue::nullv();\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::LoadBool: {
+      std::uint32_t dst = 0;
+      std::uint32_t value = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &value);
+      out << "  r[" << dst << "] = NativeValue::boolean("
+          << (value != 0U ? "true" : "false") << ");\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::Move: {
+      std::uint32_t dst = 0;
+      std::uint32_t src = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &src);
+      out << "  r[" << dst << "] = r[" << src << "];\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::GetLast: {
+      std::uint32_t dst = 0;
+      operand_u32_value(instruction, 0, &dst);
+      out << "  r[" << dst << "] = last;\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::SetLast: {
+      std::uint32_t src = 0;
+      operand_u32_value(instruction, 0, &src);
+      out << "  last = r[" << src << "];\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::MakeClosure: {
+      std::uint32_t dst = 0;
+      std::uint32_t code_id = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &code_id);
+      out << "  r[" << dst << "] = NativeValue::closure(" << code_id << ");\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::Call: {
+      std::uint32_t dst = 0;
+      std::uint32_t callee = 0;
+      std::uint32_t pos_count = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &callee);
+      operand_u32_value(instruction, 2, &pos_count);
+      out << "  r[" << dst << "] = amber_native_call_code(closure_code(r["
+          << callee << "]), std::vector<NativeValue>{";
+      for (std::uint32_t index = 0; index < pos_count; ++index) {
+        std::uint32_t arg_reg = 0;
+        operand_u32_value(instruction, 3U + index, &arg_reg);
+        if (index != 0U) {
+          out << ", ";
+        }
+        out << "r[" << arg_reg << "]";
+      }
+      out << "});\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::Send: {
+      std::uint32_t dst = 0;
+      std::uint32_t recv = 0;
+      std::uint32_t symbol_id = 0;
+      std::uint32_t arg = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &recv);
+      operand_u32_value(instruction, 2, &symbol_id);
+      operand_u32_value(instruction, 4, &arg);
+      const std::string selector = module.symbols[symbol_id];
+      if (selector == "+") {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << recv
+            << "]) + as_int(r[" << arg << "]));\n";
+      } else if (selector == "-") {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << recv
+            << "]) - as_int(r[" << arg << "]));\n";
+      } else if (selector == "*") {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << recv
+            << "]) * as_int(r[" << arg << "]));\n";
+      } else if (selector == "/") {
+        out << "  if (as_int(r[" << arg << "]) == 0) throw NativeBailout();\n";
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << recv
+            << "]) / as_int(r[" << arg << "]));\n";
+      } else if (selector == "<") {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << recv
+            << "]) < as_int(r[" << arg << "]));\n";
+      } else if (selector == ">") {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << recv
+            << "]) > as_int(r[" << arg << "]));\n";
+      }
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::IAdd:
+    case Opcode::ISub:
+    case Opcode::ILt:
+    case Opcode::IGt:
+    case Opcode::IMul:
+    case Opcode::IDiv:
+    case Opcode::IMod:
+    case Opcode::IFloorDiv:
+    case Opcode::ILe:
+    case Opcode::IGe:
+    case Opcode::IEq:
+    case Opcode::INe:
+    case Opcode::ICmp: {
+      std::uint32_t dst = 0;
+      std::uint32_t lhs = 0;
+      std::uint32_t rhs = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &lhs);
+      operand_u32_value(instruction, 2, &rhs);
+      if (instruction.opcode == Opcode::IAdd) {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
+            << "]) + as_int(r[" << rhs << "]));\n";
+      } else if (instruction.opcode == Opcode::ISub) {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
+            << "]) - as_int(r[" << rhs << "]));\n";
+      } else if (instruction.opcode == Opcode::IMul) {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
+            << "]) * as_int(r[" << rhs << "]));\n";
+      } else if (instruction.opcode == Opcode::IDiv) {
+        out << "  if (as_int(r[" << rhs << "]) == 0) throw NativeBailout();\n";
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
+            << "]) / as_int(r[" << rhs << "]));\n";
+      } else if (instruction.opcode == Opcode::IMod) {
+        out << "  if (as_int(r[" << rhs << "]) == 0) throw NativeBailout();\n";
+        out << "  r[" << dst << "] = NativeValue::integer(floor_mod_int64("
+            << "as_int(r[" << lhs << "]), as_int(r[" << rhs << "])));\n";
+      } else if (instruction.opcode == Opcode::IFloorDiv) {
+        out << "  r[" << dst << "] = NativeValue::integer(floor_div_int64("
+            << "as_int(r[" << lhs << "]), as_int(r[" << rhs << "])));\n";
+      } else if (instruction.opcode == Opcode::ILe) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) <= as_int(r[" << rhs << "]));\n";
+      } else if (instruction.opcode == Opcode::IGe) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) >= as_int(r[" << rhs << "]));\n";
+      } else if (instruction.opcode == Opcode::IEq) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) == as_int(r[" << rhs << "]));\n";
+      } else if (instruction.opcode == Opcode::INe) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) != as_int(r[" << rhs << "]));\n";
+      } else if (instruction.opcode == Opcode::ICmp) {
+        out << "  r[" << dst << "] = NativeValue::integer(compare_int64("
+            << "as_int(r[" << lhs << "]), as_int(r[" << rhs << "])));\n";
+      } else if (instruction.opcode == Opcode::ILt) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) < as_int(r[" << rhs << "]));\n";
+      } else {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) > as_int(r[" << rhs << "]));\n";
+      }
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::IAddK:
+    case Opcode::ISubK:
+    case Opcode::ILtK:
+    case Opcode::IGtK:
+    case Opcode::IMulK:
+    case Opcode::IDivK:
+    case Opcode::IModK:
+    case Opcode::IFloorDivK:
+    case Opcode::ILeK:
+    case Opcode::IGeK:
+    case Opcode::IEqK:
+    case Opcode::INeK:
+    case Opcode::ICmpK: {
+      std::uint32_t dst = 0;
+      std::uint32_t lhs = 0;
+      std::uint32_t const_id = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &lhs);
+      operand_u32_value(instruction, 2, &const_id);
+      const std::int64_t rhs = module.const_pool[const_id].int_value;
+      if (instruction.opcode == Opcode::IAddK) {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
+            << "]) + " << cpp_decimal_i64(rhs) << ");\n";
+      } else if (instruction.opcode == Opcode::ISubK) {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
+            << "]) - " << cpp_decimal_i64(rhs) << ");\n";
+      } else if (instruction.opcode == Opcode::IMulK) {
+        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
+            << "]) * " << cpp_decimal_i64(rhs) << ");\n";
+      } else if (instruction.opcode == Opcode::IDivK) {
+        if (rhs == 0) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
+              << "]) / " << cpp_decimal_i64(rhs) << ");\n";
+        }
+      } else if (instruction.opcode == Opcode::IModK) {
+        if (rhs == 0) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          out << "  r[" << dst
+              << "] = NativeValue::integer(floor_mod_int64(as_int(r[" << lhs
+              << "]), " << cpp_decimal_i64(rhs) << "));\n";
+        }
+      } else if (instruction.opcode == Opcode::IFloorDivK) {
+        out << "  r[" << dst
+            << "] = NativeValue::integer(floor_div_int64(as_int(r[" << lhs
+            << "]), " << cpp_decimal_i64(rhs) << "));\n";
+      } else if (instruction.opcode == Opcode::ILeK) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) <= " << cpp_decimal_i64(rhs) << ");\n";
+      } else if (instruction.opcode == Opcode::IGeK) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) >= " << cpp_decimal_i64(rhs) << ");\n";
+      } else if (instruction.opcode == Opcode::IEqK) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) == " << cpp_decimal_i64(rhs) << ");\n";
+      } else if (instruction.opcode == Opcode::INeK) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) != " << cpp_decimal_i64(rhs) << ");\n";
+      } else if (instruction.opcode == Opcode::ICmpK) {
+        out << "  r[" << dst
+            << "] = NativeValue::integer(compare_int64(as_int(r[" << lhs
+            << "]), " << cpp_decimal_i64(rhs) << "));\n";
+      } else if (instruction.opcode == Opcode::ILtK) {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) < " << cpp_decimal_i64(rhs) << ");\n";
+      } else {
+        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
+            << "]) > " << cpp_decimal_i64(rhs) << ");\n";
+      }
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::Jump: {
+      std::uint32_t target = 0;
+      operand_u32_value(instruction, 0, &target);
+      out << "  goto pc_" << target << ";\n";
+      break;
+    }
+    case Opcode::JumpIfTrue:
+    case Opcode::JumpIfFalse:
+    case Opcode::JumpIfNull: {
+      std::uint32_t cond = 0;
+      std::uint32_t target = 0;
+      operand_u32_value(instruction, 0, &cond);
+      operand_u32_value(instruction, 1, &target);
+      if (instruction.opcode == Opcode::JumpIfTrue) {
+        out << "  if (truthy(r[" << cond << "])) goto pc_" << target << ";\n";
+      } else if (instruction.opcode == Opcode::JumpIfFalse) {
+        out << "  if (!truthy(r[" << cond << "])) goto pc_" << target << ";\n";
+      } else {
+        out << "  if (r[" << cond << "].tag == NativeValue::Tag::Null) "
+            << "goto pc_" << target << ";\n";
+      }
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::CloseUpvalues:
+    case Opcode::Safepoint:
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    case Opcode::Return: {
+      std::uint32_t src = 0;
+      operand_u32_value(instruction, 0, &src);
+      out << "  return r[" << src << "];\n";
+      break;
+    }
+    default:
+      out << "  throw NativeBailout();\n";
+      break;
+    }
+  }
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  return out.str();
+}
+
+std::string emit_embedded_hex_cpp(const std::vector<std::uint8_t> &bytes) {
+  const std::string hex = bytes_to_hex_text(bytes);
+  std::ostringstream out;
+  out << "static const char *kEmbeddedBytecodeHex =\n";
+  for (std::size_t i = 0; i < hex.size(); i += 96U) {
+    out << "  \"" << hex.substr(i, 96U) << "\"\n";
+  }
+  out << ";\n\n";
+  return out.str();
+}
+
+NativeCppBuildPlan
+build_native_cpp_plan(const RunnableModuleArtifact &artifact,
+                      const amber::bytecode::BcModule &module) {
+  NativeCppBuildPlan plan;
+  std::string first_reason;
+  for (const amber::bytecode::BcCode &code : module.code_objects) {
+    std::string reason;
+    if (native_cpp_code_supported(module, code, &reason)) {
+      plan.native_code_ids.insert(code.code_id);
+    } else if (first_reason.empty()) {
+      first_reason = "c" + std::to_string(code.code_id) + ": " + reason;
+    }
+  }
+
+  const std::uint32_t init_code_id =
+      module.init.has_entry_code_id ? module.init.entry_code_id : 0U;
+  std::uint32_t main_code_id = 0;
+  bool has_main = false;
+  if (const amber::bytecode::BcMethod *main_method =
+          zero_arg_method_by_name(module, "main")) {
+    main_code_id = main_method->entry_code_id;
+    has_main = true;
+  }
+  const bool init_native =
+      !module.init.has_entry_code_id ||
+      plan.native_code_ids.find(init_code_id) != plan.native_code_ids.end();
+  const bool main_native =
+      artifact.entry_mode != EntryExecutionMode::MainAfterInit ||
+      (has_main &&
+       plan.native_code_ids.find(main_code_id) != plan.native_code_ids.end());
+  plan.entry_native = init_native && main_native;
+  if (!plan.entry_native && first_reason.empty()) {
+    first_reason = "entry code is not native eligible";
+  }
+  plan.fallback_reason = first_reason;
+
+  std::ostringstream out;
+  out << "#include \"bytecode/format.h\"\n";
+  out << "#include \"runtime/vm.h\"\n\n";
+  out << "#include <cstdint>\n";
+  out << "#include <exception>\n";
+  out << "#include <iostream>\n";
+  out << "#include <optional>\n";
+  out << "#include <string>\n";
+  out << "#include <vector>\n\n";
+  out << "namespace {\n\n";
+  out << emit_embedded_hex_cpp(artifact.bytes);
+  out << "struct NativeBailout : public std::exception {\n";
+  out << "  const char *what() const noexcept override { return "
+         "\"native bailout\"; }\n";
+  out << "};\n\n";
+  out << "struct NativeValue {\n";
+  out << "  enum class Tag { Null, Bool, Integer, Closure };\n";
+  out << "  Tag tag = Tag::Null;\n";
+  out << "  bool bool_value = false;\n";
+  out << "  std::int64_t int_value = 0;\n";
+  out << "  std::uint32_t code_id = 0;\n";
+  out << "  static NativeValue nullv() { return {}; }\n";
+  out << "  static NativeValue boolean(bool value) { NativeValue out; out.tag "
+         "= "
+         "Tag::Bool; out.bool_value = value; return out; }\n";
+  out << "  static NativeValue integer(std::int64_t value) { NativeValue out; "
+         "out.tag = Tag::Integer; out.int_value = value; return out; }\n";
+  out << "  static NativeValue closure(std::uint32_t value) { NativeValue out; "
+         "out.tag = Tag::Closure; out.code_id = value; return out; }\n";
+  out << "};\n\n";
+  out << "static std::int64_t as_int(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Integer) { throw "
+         "NativeBailout(); }\n";
+  out << "  return value.int_value;\n";
+  out << "}\n\n";
+  out << "static std::uint32_t closure_code(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Closure) { throw "
+         "NativeBailout(); }\n";
+  out << "  return value.code_id;\n";
+  out << "}\n\n";
+  out << "static bool truthy(const NativeValue &value) {\n";
+  out << "  return value.tag != NativeValue::Tag::Null && "
+         "!(value.tag == NativeValue::Tag::Bool && !value.bool_value);\n";
+  out << "}\n\n";
+  out << "static std::int64_t compare_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  if (lhs < rhs) return -1;\n";
+  out << "  if (lhs > rhs) return 1;\n";
+  out << "  return 0;\n";
+  out << "}\n\n";
+  out << "static std::int64_t floor_div_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  if (rhs == 0) throw NativeBailout();\n";
+  out << "  std::int64_t quotient = lhs / rhs;\n";
+  out << "  const std::int64_t remainder = lhs % rhs;\n";
+  out << "  if (remainder != 0 && ((remainder < 0) != (rhs < 0))) "
+         "--quotient;\n";
+  out << "  return quotient;\n";
+  out << "}\n\n";
+  out << "static std::int64_t floor_mod_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  return lhs - floor_div_int64(lhs, rhs) * rhs;\n";
+  out << "}\n\n";
+  for (std::uint32_t code_id : plan.native_code_ids) {
+    out << "static NativeValue " << native_cpp_function_name(code_id)
+        << "(const std::vector<NativeValue> &args);\n";
+  }
+  out << "\nstatic NativeValue amber_native_call_code("
+         "std::uint32_t code_id, const std::vector<NativeValue> &args) {\n";
+  out << "  switch (code_id) {\n";
+  for (std::uint32_t code_id : plan.native_code_ids) {
+    out << "  case " << code_id << ": return "
+        << native_cpp_function_name(code_id) << "(args);\n";
+  }
+  out << "  default: throw NativeBailout();\n";
+  out << "  }\n";
+  out << "}\n\n";
+  for (const amber::bytecode::BcCode &code : module.code_objects) {
+    if (plan.native_code_ids.find(code.code_id) != plan.native_code_ids.end()) {
+      out << emit_native_cpp_code_function(module, code);
+    }
+  }
+  out << "static std::vector<std::uint8_t> embedded_bytecode() {\n";
+  out << "  const std::string hex(kEmbeddedBytecodeHex);\n";
+  out << "  std::vector<std::uint8_t> bytes;\n";
+  out << "  bytes.reserve(hex.size() / 2U);\n";
+  out << "  auto digit = [](char c) -> int {\n";
+  out << "    if (c >= '0' && c <= '9') return c - '0';\n";
+  out << "    if (c >= 'a' && c <= 'f') return 10 + c - 'a';\n";
+  out << "    if (c >= 'A' && c <= 'F') return 10 + c - 'A';\n";
+  out << "    return -1;\n";
+  out << "  };\n";
+  out << "  for (std::size_t i = 0; i + 1U < hex.size(); i += 2U) {\n";
+  out << "    bytes.push_back(static_cast<std::uint8_t>((digit(hex[i]) << "
+         "4U) | digit(hex[i + 1U])));\n";
+  out << "  }\n";
+  out << "  return bytes;\n";
+  out << "}\n\n";
+  out << "static const amber::bytecode::BcMethod *zero_arg_method_by_name("
+         "const amber::bytecode::BcModule &module, const std::string &name) "
+         "{\n";
+  out << "  for (const amber::bytecode::BcMethod &method : module.methods) {\n";
+  out << "    if (method.selector_sym_id < module.symbols.size() && "
+         "module.symbols[method.selector_sym_id] == name && "
+         "method.params.empty() && method.flags == 0) return &method;\n";
+  out << "  }\n";
+  out << "  return nullptr;\n";
+  out << "}\n\n";
+  out << "static void print_fault(const amber::runtime::ExecutionResult "
+         "&result) {\n";
+  out << "  if (!result.fault.has_value()) return;\n";
+  out << "  std::cerr << result.fault->error_name << \": \" << "
+         "result.fault->message << \"\\n\";\n";
+  out << "  if (!result.fault->trace_text.empty()) std::cerr << "
+         "result.fault->trace_text;\n";
+  out << "}\n\n";
+  out << "static bool should_print_vm_value(const amber::runtime::Value "
+         "&value) { return !value.is_null() && !value.is_closure(); }\n\n";
+  out << "static int run_vm_entry() {\n";
+  out << "  const std::vector<std::uint8_t> bytes = embedded_bytecode();\n";
+  out << "  amber::bytecode::DecodeResult decoded = "
+         "amber::bytecode::deserialize_module(bytes);\n";
+  out << "  if (!decoded.ok()) { std::cerr << "
+         "amber::bytecode::verify_errors_to_json(decoded.errors); return 1; "
+         "}\n";
+  out << "  amber::runtime::RuntimeWorld world(decoded.module);\n";
+  out << "  amber::runtime::ExecutionResult result;\n";
+  out << "  if (decoded.module.init.has_entry_code_id) {\n";
+  out << "    result = world.execute(decoded.module.init.entry_code_id);\n";
+  out << "    if (!result.ok()) { print_fault(result); return 1; }\n";
+  out << "  }\n";
+  if (artifact.entry_mode == EntryExecutionMode::MainAfterInit) {
+    out << "  const amber::bytecode::BcMethod *main_method = "
+           "zero_arg_method_by_name(decoded.module, \"main\");\n";
+    out << "  if (main_method == nullptr) { std::cerr << "
+           "\"EntryError: entry mode requires a zero-argument main() "
+           "method\\n\"; return 1; }\n";
+    out << "  result = world.execute(main_method->entry_code_id);\n";
+  }
+  out << "  if (!result.ok()) { print_fault(result); return 1; }\n";
+  out << "  if (should_print_vm_value(result.value)) std::cout << "
+         "amber::runtime::value_to_debug_string(result.value, "
+         "&decoded.module) << \"\\n\";\n";
+  out << "  return 0;\n";
+  out << "}\n\n";
+  out << "static void print_native_value(const NativeValue &value) {\n";
+  out << "  switch (value.tag) {\n";
+  out << "  case NativeValue::Tag::Null:\n";
+  out << "  case NativeValue::Tag::Closure:\n";
+  out << "    return;\n";
+  out << "  case NativeValue::Tag::Bool:\n";
+  out << "    std::cout << (value.bool_value ? \"true\" : \"false\") << "
+         "\"\\n\";\n";
+  out << "    return;\n";
+  out << "  case NativeValue::Tag::Integer:\n";
+  out << "    std::cout << value.int_value << \"\\n\";\n";
+  out << "    return;\n";
+  out << "  }\n";
+  out << "}\n\n";
+  out << "} // namespace\n\n";
+  out << "int main() {\n";
+  out << "  try {\n";
+  if (module.init.has_entry_code_id) {
+    out << "    NativeValue init_result = amber_native_call_code("
+        << init_code_id << ", std::vector<NativeValue>{});\n";
+    if (artifact.entry_mode == EntryExecutionMode::Init) {
+      out << "    print_native_value(init_result);\n";
+    } else {
+      out << "    (void)init_result;\n";
+    }
+  }
+  if (artifact.entry_mode == EntryExecutionMode::MainAfterInit) {
+    out << "    NativeValue result = amber_native_call_code(" << main_code_id
+        << ", std::vector<NativeValue>{});\n";
+    out << "    print_native_value(result);\n";
+  }
+  out << "    return 0;\n";
+  out << "  } catch (const NativeBailout &) {\n";
+  out << "    return run_vm_entry();\n";
+  out << "  } catch (const std::exception &error) {\n";
+  out << "    std::cerr << \"NativeCodeError: \" << error.what() << "
+         "\"\\n\";\n";
+  out << "    return 1;\n";
+  out << "  }\n";
+  out << "}\n";
+
+  plan.source = out.str();
+  return plan;
+}
+
+std::filesystem::path detect_native_runtime_root(const std::string &argv0) {
+  if (const char *env = std::getenv("AMBER_NATIVE_RUNTIME_ROOT")) {
+    const std::filesystem::path root(env);
+    if (std::filesystem::exists(root / "runtime" / "vm.cpp")) {
+      return root;
+    }
+  }
+  std::vector<std::filesystem::path> candidates;
+  candidates.push_back(std::filesystem::current_path());
+  try {
+    const std::filesystem::path executable =
+        std::filesystem::absolute(argv0).lexically_normal();
+    candidates.push_back(executable.parent_path().parent_path());
+    candidates.push_back(executable.parent_path().parent_path().parent_path());
+  } catch (const std::exception &) {
+  }
+  for (const std::filesystem::path &candidate : candidates) {
+    if (std::filesystem::exists(candidate / "runtime" / "vm.cpp") &&
+        std::filesystem::exists(candidate / "bytecode" / "format.cpp")) {
+      return candidate;
+    }
+  }
+  throw std::runtime_error(
+      "failed to locate Amber runtime sources for native build; set "
+      "AMBER_NATIVE_RUNTIME_ROOT");
+}
+
+std::string choose_native_cxx() {
+  if (const char *env = std::getenv("AMBER_NATIVE_CXX")) {
+    if (*env != '\0') {
+      return env;
+    }
+  }
+  if (const char *env = std::getenv("CXX")) {
+    if (*env != '\0') {
+      return env;
+    }
+  }
+  return "clang++";
+}
+
+std::string shell_command(const std::vector<std::string> &parts) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < parts.size(); ++i) {
+    if (i != 0U) {
+      out << " ";
+    }
+    out << shell_single_quote(parts[i]);
+  }
+  return out.str();
+}
+
+std::vector<std::string>
+native_runtime_sources(const std::filesystem::path &root) {
+  const std::vector<std::string> relative = {
+      "bytecode/format.cpp",      "frontend/lexer/token.cpp",
+      "profile/capabilities.cpp", "profile/effects.cpp",
+      "profile/replay.cpp",       "profile/data.cpp",
+      "profile/wasm_accel.cpp",   "profile/modern.cpp",
+      "package/package.cpp",      "runtime/vm.cpp",
+  };
+  std::vector<std::string> out;
+  out.reserve(relative.size());
+  for (const std::string &path : relative) {
+    out.push_back((root / path).string());
+  }
+  return out;
+}
+
+NativeExecutableBuildResult
+build_native_executable(const std::string &argv0,
+                        const RunnableModuleArtifact &artifact,
+                        const std::filesystem::path &output_path,
+                        const std::filesystem::path &native_source_path) {
+  NativeCppBuildPlan plan = build_native_cpp_plan(artifact, artifact.module);
+  const std::filesystem::path parent = output_path.parent_path();
+  if (!parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+  const std::filesystem::path source_parent = native_source_path.parent_path();
+  if (!source_parent.empty()) {
+    std::filesystem::create_directories(source_parent);
+  }
+  write_file(native_source_path.string(), plan.source);
+
+  const std::filesystem::path runtime_root = detect_native_runtime_root(argv0);
+  const std::string cxx = choose_native_cxx();
+  std::vector<std::string> command = {
+      cxx,
+      "-std=c++17",
+      "-O3",
+      "-DNDEBUG",
+      "-I",
+      runtime_root.string(),
+      native_source_path.string(),
+  };
+  const std::vector<std::string> runtime_sources =
+      native_runtime_sources(runtime_root);
+  command.insert(command.end(), runtime_sources.begin(), runtime_sources.end());
+  command.push_back("-pthread");
+  command.push_back("-o");
+  command.push_back(output_path.string());
+
+  const std::string rendered = shell_command(command);
+  const int exit_code = std::system(rendered.c_str());
+  if (exit_code != 0) {
+    throw std::runtime_error("native C++ build failed: " + rendered);
+  }
+
+  NativeExecutableBuildResult result;
+  result.output_path = output_path.string();
+  result.source_path = native_source_path.string();
+  result.hash = amber::lexer::sha256_hex(read_file(output_path.string()));
+  result.backend = plan.backend;
+  result.cxx = cxx;
+  result.native_code_count = plan.native_code_ids.size();
+  result.total_code_count = artifact.module.code_objects.size();
+  result.entry_native = plan.entry_native;
+  result.uses_bytecode_fallback = plan.uses_bytecode_fallback;
+  result.fallback_reason = plan.fallback_reason;
+  return result;
 }
 
 struct EmbeddedExecutable {
@@ -940,6 +1869,7 @@ int run_embedded_command(int argc, char **argv) {
 struct SourceBuildCliOptions {
   std::string out_path;
   std::string out_dir;
+  std::string target = "native";
 };
 
 SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
@@ -951,6 +1881,13 @@ SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
       options.out_path = argv[++i];
     } else if (arg == "--out-dir" && i + 1 < argc) {
       options.out_dir = argv[++i];
+    } else if (arg == "--target" && i + 1 < argc) {
+      options.target = argv[++i];
+      if (options.target != "native" && options.target != "native-debug" &&
+          options.target != "bytecode-wrapper") {
+        throw std::runtime_error("unknown source build target: " +
+                                 options.target);
+      }
     } else {
       throw std::runtime_error("unknown source build option: " + arg);
     }
@@ -958,15 +1895,15 @@ SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
   return options;
 }
 
-std::filesystem::path default_executable_path_for(
-    const std::string &source_path, const SourceBuildCliOptions &options) {
+std::filesystem::path
+default_executable_path_for(const std::string &source_path,
+                            const SourceBuildCliOptions &options) {
   if (!options.out_path.empty()) {
     return std::filesystem::path(options.out_path);
   }
   const std::filesystem::path source(source_path);
-  const std::string stem = source.stem().string().empty()
-                               ? "amber-program"
-                               : source.stem().string();
+  const std::string stem =
+      source.stem().string().empty() ? "amber-program" : source.stem().string();
   if (!options.out_dir.empty()) {
     return std::filesystem::path(options.out_dir) / stem;
   }
@@ -978,6 +1915,7 @@ std::filesystem::path default_executable_path_for(
 std::string executable_build_result_to_json(
     bool ok, const std::string &source_path, const std::string &output_path,
     const std::string &module_name, EntryExecutionMode entry_mode,
+    const std::string &target, const NativeExecutableBuildResult *native,
     const std::string &diagnostic = {}) {
   std::ostringstream out;
   out << "{\n";
@@ -986,7 +1924,29 @@ std::string executable_build_result_to_json(
   out << "  \"source\": \"" << json_escape(source_path) << "\",\n";
   out << "  \"output\": \"" << json_escape(output_path) << "\",\n";
   out << "  \"module\": \"" << json_escape(module_name) << "\",\n";
-  out << "  \"entry\": \"" << entry_mode_name(entry_mode) << "\"";
+  out << "  \"entry\": \"" << entry_mode_name(entry_mode) << "\",\n";
+  out << "  \"target\": \"" << json_escape(target) << "\",\n";
+  out << "  \"native_backend\": \""
+      << json_escape(native == nullptr ? "" : native->backend) << "\",\n";
+  out << "  \"native_source\": \""
+      << json_escape(native == nullptr ? "" : native->source_path) << "\",\n";
+  out << "  \"native_hash\": \""
+      << json_escape(native == nullptr ? "" : native->hash) << "\",\n";
+  out << "  \"native_cxx\": \""
+      << json_escape(native == nullptr ? "" : native->cxx) << "\",\n";
+  out << "  \"native_entry\": "
+      << (native != nullptr && native->entry_native ? "true" : "false")
+      << ",\n";
+  out << "  \"native_code_count\": "
+      << (native == nullptr ? 0U : native->native_code_count) << ",\n";
+  out << "  \"bytecode_code_count\": "
+      << (native == nullptr ? 0U : native->total_code_count) << ",\n";
+  out << "  \"bytecode_fallback\": "
+      << (native != nullptr && native->uses_bytecode_fallback ? "true"
+                                                              : "false")
+      << ",\n";
+  out << "  \"native_fallback_reason\": \""
+      << json_escape(native == nullptr ? "" : native->fallback_reason) << "\"";
   if (!ok) {
     out << ",\n  \"diagnostic\": \"" << json_escape(diagnostic) << "\"\n";
   } else {
@@ -1004,31 +1964,40 @@ int run_source_build_command(int argc, char **argv) {
   try {
     const RunnableModuleArtifact artifact =
         compile_source_to_runnable_module(source_path);
-    const std::string script =
-        render_executable_script(executable_amberc_ref(argv[0]), artifact);
     const std::filesystem::path parent = output_path.parent_path();
     if (!parent.empty()) {
       std::filesystem::create_directories(parent);
     }
-    write_file(output_path.string(), script);
-    std::filesystem::permissions(
-        output_path,
-        std::filesystem::perms::owner_read |
-            std::filesystem::perms::owner_write |
-            std::filesystem::perms::owner_exec |
-            std::filesystem::perms::group_read |
-            std::filesystem::perms::group_exec |
-            std::filesystem::perms::others_read |
-            std::filesystem::perms::others_exec,
-        std::filesystem::perm_options::replace);
+    NativeExecutableBuildResult native_result;
+    const NativeExecutableBuildResult *native_json = nullptr;
+    if (options.target == "bytecode-wrapper") {
+      const std::string script =
+          render_executable_script(executable_amberc_ref(argv[0]), artifact);
+      write_file(output_path.string(), script);
+      std::filesystem::permissions(output_path,
+                                   std::filesystem::perms::owner_read |
+                                       std::filesystem::perms::owner_write |
+                                       std::filesystem::perms::owner_exec |
+                                       std::filesystem::perms::group_read |
+                                       std::filesystem::perms::group_exec |
+                                       std::filesystem::perms::others_read |
+                                       std::filesystem::perms::others_exec,
+                                   std::filesystem::perm_options::replace);
+    } else {
+      const std::filesystem::path native_source_path =
+          output_path.string() + ".native.cpp";
+      native_result = build_native_executable(argv[0], artifact, output_path,
+                                              native_source_path);
+      native_json = &native_result;
+    }
     std::cout << executable_build_result_to_json(
         true, source_path, output_path.string(), artifact.module_name,
-        artifact.entry_mode);
+        artifact.entry_mode, options.target, native_json);
     return 0;
   } catch (const std::exception &error) {
     std::cout << executable_build_result_to_json(
         false, source_path, output_path.string(), {}, EntryExecutionMode::Init,
-        error.what());
+        options.target, nullptr, error.what());
     return 1;
   }
 }
@@ -1158,6 +2127,7 @@ int run_package_command(int argc, char **argv) {
 struct BuildCliOptions {
   std::string out_dir;
   std::string cache_dir;
+  std::string target = "both";
   bool cache_enabled = true;
 };
 
@@ -1169,6 +2139,12 @@ BuildCliOptions parse_build_options(int argc, char **argv, int start_index) {
       options.out_dir = argv[++i];
     } else if (arg == "--cache-dir" && i + 1 < argc) {
       options.cache_dir = argv[++i];
+    } else if (arg == "--target" && i + 1 < argc) {
+      options.target = argv[++i];
+      if (options.target != "bytecode" && options.target != "native" &&
+          options.target != "both") {
+        throw std::runtime_error("unknown build target: " + options.target);
+      }
     } else if (arg == "--no-cache") {
       options.cache_enabled = false;
     } else {
@@ -1335,6 +2311,7 @@ int run_build_command(int argc, char **argv) {
                                 : std::filesystem::path(options.cache_dir);
 
   amber::build::BuildSummary summary;
+  summary.target = options.target;
   summary.out_dir = out_dir.string();
   summary.cache_dir = cache_dir.string();
 
@@ -1368,6 +2345,52 @@ int run_build_command(int argc, char **argv) {
       summary.artifacts.push_back(build_one_module(
           module, manifest_dir, out_dir, cache_dir, parsed.manifest.profiles,
           stdlib_abis, options.cache_enabled));
+    }
+    if (options.target == "native" || options.target == "both") {
+      amber::build::BuildArtifactRecord *root_record = nullptr;
+      for (amber::build::BuildArtifactRecord &artifact : summary.artifacts) {
+        if (!artifact.stdlib && artifact.name == parsed.manifest.root_module) {
+          root_record = &artifact;
+          break;
+        }
+      }
+      if (root_record == nullptr) {
+        throw std::runtime_error("root build artifact is missing: " +
+                                 parsed.manifest.root_module);
+      }
+      const std::vector<std::uint8_t> root_bytes =
+          read_bytes(root_record->output_path);
+      amber::bytecode::DecodeResult decoded =
+          amber::bytecode::deserialize_module(root_bytes);
+      if (!decoded.ok()) {
+        throw std::runtime_error(
+            amber::bytecode::verify_errors_to_json(decoded.errors));
+      }
+      RunnableModuleArtifact root_artifact;
+      root_artifact.module_name = parsed.manifest.root_module;
+      root_artifact.entry_mode = default_entry_mode_for(true, decoded.module);
+      root_artifact.bytes = root_bytes;
+      root_artifact.module = std::move(decoded.module);
+      const std::filesystem::path native_output_path =
+          out_dir / safe_artifact_name(parsed.manifest.root_module);
+      const std::filesystem::path native_source_path =
+          out_dir /
+          (safe_artifact_name(parsed.manifest.root_module) + ".native.cpp");
+      const NativeExecutableBuildResult native_result = build_native_executable(
+          argv[0], root_artifact, native_output_path, native_source_path);
+      summary.native_output_path = native_result.output_path;
+      summary.native_backend = native_result.backend;
+      summary.native_hash = native_result.hash;
+      summary.native_launcher_source = native_result.source_path;
+      summary.native_cxx = native_result.cxx;
+      summary.native_bytecode_trampoline = native_result.uses_bytecode_fallback;
+      root_record->native_output_path = native_result.output_path;
+      root_record->native_hash = native_result.hash;
+      root_record->native_backend = native_result.backend;
+      root_record->native_eligible = native_result.entry_native;
+      root_record->native_fallback_reason = native_result.fallback_reason;
+      root_record->native_byte_size =
+          std::filesystem::file_size(native_output_path);
     }
     summary.ok = true;
     std::cout << amber::build::summary_to_json(summary);

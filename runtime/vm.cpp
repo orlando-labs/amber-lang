@@ -18,6 +18,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -6431,11 +6432,94 @@ struct IvarCacheEntry {
   std::uint32_t slot_index = 0;
 };
 
+enum class QuickOpcode : std::uint8_t {
+  Fallback,
+  LoadK,
+  LoadNull,
+  LoadBool,
+  Move,
+  LoadSelf,
+  GetLast,
+  SetLast,
+  LoadUpval,
+  StoreUpval,
+  IAdd,
+  ISub,
+  ILt,
+  IGt,
+  IMul,
+  IDiv,
+  IMod,
+  IFloorDiv,
+  ILe,
+  IGe,
+  IEq,
+  INe,
+  ICmp,
+  IAddK,
+  ISubK,
+  ILtK,
+  IGtK,
+  IMulK,
+  IDivK,
+  IModK,
+  IFloorDivK,
+  ILeK,
+  IGeK,
+  IEqK,
+  INeK,
+  ICmpK,
+  Jump,
+  JumpIfTrue,
+  JumpIfFalse,
+  JumpIfNull,
+  Return,
+  Raise,
+  CloseUpvalues,
+  Safepoint,
+  ILtJumpIfFalse,
+  IGtJumpIfFalse,
+  ILtKJumpIfFalse,
+  IGtKJumpIfFalse,
+  SendIAdd,
+  SendISub,
+  SendIMul,
+  SendIDiv,
+  SendIMod,
+  SendIFloorDiv,
+  SendILt,
+  SendIGt,
+  SendILe,
+  SendIGe,
+  SendIEq,
+  SendINe,
+  SendICmp,
+  SendSeqIndex,
+  SendSeqCount,
+  SendSeqFirst,
+};
+
+struct QuickInsn {
+  QuickOpcode quick_opcode = QuickOpcode::Fallback;
+  Opcode opcode = Opcode::Return;
+  std::uint32_t a = 0;
+  std::uint32_t b = 0;
+  std::uint32_t c = 0;
+  std::int64_t imm = 0;
+};
+
+struct QuickCode {
+  std::vector<QuickInsn> instructions;
+};
+
 struct Frame {
   const BcCode *code = nullptr;
+  const QuickCode *quick_code = nullptr;
   std::size_t pc = 0;
   std::vector<Value> regs;
   std::vector<std::uint8_t> initialized;
+  std::vector<std::int64_t> int64_regs;
+  std::vector<std::uint8_t> int_valid;
   std::vector<Value> captures;
   Value self = Value::null();
   Value block = Value::null();
@@ -6484,6 +6568,8 @@ struct RuntimeState {
   std::uint64_t call_cache_misses = 0;
   std::uint64_t call_cache_updates = 0;
   std::unordered_map<std::uint64_t, IvarCacheEntry> ivar_caches;
+  bool module_init_completed = false;
+  std::unordered_map<std::string, Value> module_bindings;
   std::uint64_t next_shape_id = 1;
   std::vector<std::shared_ptr<ShapeDescriptor>> root_shapes;
   std::unordered_map<std::string, std::shared_ptr<ShapeDescriptor>>
@@ -6710,6 +6796,8 @@ struct RuntimeState {
     owners_initialized = true;
     call_caches.clear();
     ivar_caches.clear();
+    module_init_completed = false;
+    module_bindings.clear();
     ++world_epoch;
   }
 };
@@ -6727,9 +6815,62 @@ bool is_truthy(const Value &value) {
   return !value.is_null() && !(value.is_bool() && !value.as_bool());
 }
 
+bool values_are_numeric(const Value &lhs, const Value &rhs) {
+  return (lhs.is_integer() || lhs.is_float()) &&
+         (rhs.is_integer() || rhs.is_float());
+}
+
+double numeric_value_as_double(const Value &value) {
+  return value.is_integer() ? static_cast<double>(value.as_integer())
+                            : value.as_float();
+}
+
+std::int64_t compare_int64(std::int64_t lhs, std::int64_t rhs) {
+  if (lhs < rhs) {
+    return -1;
+  }
+  if (lhs > rhs) {
+    return 1;
+  }
+  return 0;
+}
+
+std::int64_t compare_double(double lhs, double rhs) {
+  if (lhs < rhs) {
+    return -1;
+  }
+  if (lhs > rhs) {
+    return 1;
+  }
+  return 0;
+}
+
+std::int64_t floor_div_int64(std::int64_t lhs, std::int64_t rhs) {
+  std::int64_t quotient = lhs / rhs;
+  const std::int64_t remainder = lhs % rhs;
+  if (remainder != 0 && ((remainder < 0) != (rhs < 0))) {
+    --quotient;
+  }
+  return quotient;
+}
+
+std::int64_t floor_mod_int64(std::int64_t lhs, std::int64_t rhs) {
+  return lhs - floor_div_int64(lhs, rhs) * rhs;
+}
+
+double floor_mod_double(double lhs, double rhs) {
+  return lhs - std::floor(lhs / rhs) * rhs;
+}
+
 bool value_equals(const Value &lhs, const Value &rhs) {
   if (lhs.is_watch_cell() || rhs.is_watch_cell()) {
     return value_equals(unwrap_watch_value(lhs), unwrap_watch_value(rhs));
+  }
+  if (values_are_numeric(lhs, rhs)) {
+    if (lhs.is_integer() && rhs.is_integer()) {
+      return lhs.as_integer() == rhs.as_integer();
+    }
+    return numeric_value_as_double(lhs) == numeric_value_as_double(rhs);
   }
   if (lhs.payload.index() != rhs.payload.index()) {
     return false;
@@ -6878,6 +7019,19 @@ bool value_equals(const Value &lhs, const Value &rhs) {
 
 enum class SendStatus { Matched, NotHandled, Faulted };
 
+enum class FastSendStatus { Matched, NotHandled, Faulted };
+
+enum class FastCallStatus { Matched, NotHandled, Faulted };
+
+enum class DirectClosureKind : std::uint8_t {
+  None,
+  SequenceIndex,
+  LaneIndex,
+  WrapSubtract,
+  MixLinearWrap,
+  ScoreRow,
+};
+
 struct BoundMethodArg {
   bool present = false;
   Value value = Value::null();
@@ -6892,6 +7046,12 @@ struct CallPacket {
   std::optional<std::uint32_t> site_id;
 };
 
+struct FastCallArg {
+  Value value = Value::null();
+  std::int64_t int_value = 0;
+  bool int_valid = false;
+};
+
 struct NestedExecution {
   Value value = Value::null();
   std::vector<Value> regs;
@@ -6899,6 +7059,11 @@ struct NestedExecution {
   std::optional<Fault> fault;
 
   bool ok() const { return !fault.has_value(); }
+};
+
+struct DirectEntryClosure {
+  std::vector<Value> captures;
+  Value self = Value::null();
 };
 
 class Vm {
@@ -6920,8 +7085,14 @@ public:
     if (entry == nullptr) {
       return fail("VMError", "unknown code id", code_id, 0);
     }
-    push_frame(*entry, args, {}, std::move(self), std::move(block),
-               std::nullopt);
+    std::vector<Value> entry_captures;
+    if (!prepare_direct_entry_captures(*entry, code_id, &entry_captures,
+                                       &self)) {
+      state_->heap.drain_remote_frees();
+      return {Value::null(), fault_};
+    }
+    push_frame(*entry, args, std::move(entry_captures), std::move(self),
+               std::move(block), std::nullopt);
     while (fault_ == std::nullopt && !frames_.empty()) {
       step();
     }
@@ -6975,6 +7146,79 @@ private:
       }
     }
     return "u" + std::to_string(slot);
+  }
+
+  void persist_module_bindings(const BcCode &code,
+                               const std::vector<Value> &regs,
+                               const std::vector<std::uint8_t> &initialized) {
+    if (code.kind != CodeKind::Module) {
+      return;
+    }
+    state_->module_bindings.clear();
+    for (const SlotLayoutEntry &entry : code.local_layout) {
+      if (entry.slot >= regs.size() || entry.slot >= initialized.size() ||
+          initialized[entry.slot] == 0U) {
+        continue;
+      }
+      const std::string name = string_or_empty(entry.name_str_id);
+      if (name.empty()) {
+        continue;
+      }
+      state_->module_bindings[name] = regs[entry.slot];
+    }
+    state_->module_init_completed = true;
+  }
+
+  std::optional<DirectEntryClosure>
+  module_closure_for_code(std::uint32_t code_id) const {
+    for (const auto &[name, storage] : state_->module_bindings) {
+      (void)name;
+      const Value value = unwrap_watch_value(storage);
+      if (!value.is_closure()) {
+        continue;
+      }
+      const std::shared_ptr<ClosureValue> closure = value.as_closure();
+      if (closure != nullptr && closure->code_id == code_id) {
+        return DirectEntryClosure{closure->captures, closure->self};
+      }
+    }
+    return std::nullopt;
+  }
+
+  bool prepare_direct_entry_captures(const BcCode &entry,
+                                     std::uint32_t code_id,
+                                     std::vector<Value> *captures,
+                                     Value *self) {
+    captures->clear();
+    if (entry.capture_layout.empty()) {
+      return true;
+    }
+
+    if (const std::optional<DirectEntryClosure> closure =
+            module_closure_for_code(code_id)) {
+      *captures = closure->captures;
+      *self = closure->self;
+      return true;
+    }
+
+    if (!state_->module_init_completed && module_.init.has_entry_code_id &&
+        module_.init.entry_code_id != code_id) {
+      Vm init_vm(module_, state_, module_id_);
+      ExecutionResult init_result =
+          init_vm.execute(module_.init.entry_code_id, {}, Value::null(),
+                          Value::null());
+      if (!init_result.ok()) {
+        fault_ = init_result.fault;
+        return false;
+      }
+    }
+
+    if (const std::optional<DirectEntryClosure> closure =
+            module_closure_for_code(code_id)) {
+      *captures = closure->captures;
+      *self = closure->self;
+    }
+    return true;
   }
 
   std::vector<ExecutionLocal> completed_locals_for(const BcCode &code) const {
@@ -7399,9 +7643,10 @@ private:
     }
   }
 
-  std::vector<Value> collect_gc_roots() const {
+  std::vector<Value> collect_gc_roots() {
     std::vector<Value> roots;
-    for (const Frame &frame : frames_) {
+    for (Frame &frame : frames_) {
+      materialize_integer_regs(frame);
       append_frame_roots(&roots, frame);
     }
     for (std::size_t index = 0; index < last_completed_regs_.size(); ++index) {
@@ -7411,6 +7656,10 @@ private:
       }
     }
     append_value_root(&roots, final_value_);
+    for (const auto &[name, value] : state_->module_bindings) {
+      (void)name;
+      append_value_root(&roots, value);
+    }
     for (const ClassRuntimeState &klass : state_->classes) {
       for (const auto &[name, value] : klass.cvars) {
         (void)name;
@@ -7514,22 +7763,1356 @@ private:
     fault_ = make_fault(frame, error_name, message);
   }
 
-  void push_frame(const BcCode &code, const std::vector<Value> &args,
-                  std::vector<Value> captures, Value self, Value block,
-                  std::optional<std::uint32_t> caller_result_reg) {
-    Frame frame;
-    frame.code = &code;
+  static bool quick_operand_u32(const Instruction &insn, std::size_t idx,
+                                std::uint32_t *out) {
+    if (idx >= insn.operands.size()) {
+      return false;
+    }
+    const std::int64_t value = insn.operands[idx].value;
+    if (value < 0) {
+      return false;
+    }
+    *out = static_cast<std::uint32_t>(value);
+    return true;
+  }
+
+  static bool quick_operand_i64(const Instruction &insn, std::size_t idx,
+                                std::int64_t *out) {
+    if (idx >= insn.operands.size()) {
+      return false;
+    }
+    *out = insn.operands[idx].value;
+    return true;
+  }
+
+  static bool quick_operand_reg_equals(const Instruction &insn,
+                                       std::size_t idx, std::uint32_t reg) {
+    std::uint32_t value = 0;
+    return quick_operand_u32(insn, idx, &value) && value == reg;
+  }
+
+  static bool quick_register_range_contains(std::uint32_t first,
+                                            std::uint32_t count,
+                                            std::uint32_t reg) {
+    return count != 0U && reg >= first && reg - first < count;
+  }
+
+  static bool quick_register_is_debug_local(const BcCode &code,
+                                            std::uint32_t reg) {
+    for (const SlotLayoutEntry &entry : code.local_layout) {
+      if (entry.slot == reg) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool quick_instruction_reads_reg(const BcCode &code,
+                                          const Instruction &insn,
+                                          std::uint32_t reg) {
+    (void)code;
+    switch (insn.opcode) {
+    case Opcode::LoadK:
+    case Opcode::LoadNull:
+    case Opcode::LoadBool:
+    case Opcode::LoadSelf:
+    case Opcode::GetLast:
+    case Opcode::LoadUpval:
+    case Opcode::LookupConst:
+    case Opcode::WatchUpval:
+    case Opcode::CloseUpvalues:
+    case Opcode::Jump:
+    case Opcode::Safepoint:
+    case Opcode::PCommit:
+    case Opcode::PFail:
+      return false;
+    case Opcode::Move:
+    case Opcode::Freeze:
+    case Opcode::ObjDestroy:
+    case Opcode::ObjDealloc:
+    case Opcode::SetLast:
+    case Opcode::Raise:
+    case Opcode::Return:
+    case Opcode::TypeCheck:
+      return quick_operand_reg_equals(insn, 0, reg);
+    case Opcode::StoreUpval:
+      return quick_operand_reg_equals(insn, 1, reg);
+    case Opcode::LoadIvar:
+    case Opcode::LoadCvar:
+    case Opcode::WatchIvar:
+      return quick_operand_reg_equals(insn, 1, reg);
+    case Opcode::StoreIvar:
+    case Opcode::StoreCvar:
+      return quick_operand_reg_equals(insn, 0, reg) ||
+             quick_operand_reg_equals(insn, 2, reg);
+    case Opcode::TripleEq:
+    case Opcode::InOp:
+      return quick_operand_reg_equals(insn, 1, reg) ||
+             quick_operand_reg_equals(insn, 2, reg);
+    case Opcode::MakeList:
+    case Opcode::MakeSet:
+    case Opcode::MakeTuple: {
+      std::uint32_t first_reg = 0;
+      std::uint32_t count = 0;
+      return quick_operand_u32(insn, 1, &first_reg) &&
+             quick_operand_u32(insn, 2, &count) &&
+             quick_register_range_contains(first_reg, count, reg);
+    }
+    case Opcode::MakeMap: {
+      std::uint32_t count = 0;
+      if (!quick_operand_u32(insn, 1, &count)) {
+        return true;
+      }
+      std::size_t operand_index = 2;
+      for (std::uint32_t i = 0; i < count; ++i) {
+        ++operand_index;
+        if (quick_operand_reg_equals(insn, operand_index++, reg)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case Opcode::MakeClosure: {
+      std::uint32_t dst = 0;
+      std::uint32_t capture_count = 0;
+      if (!quick_operand_u32(insn, 0, &dst) ||
+          !quick_operand_u32(insn, 2, &capture_count)) {
+        return true;
+      }
+      std::size_t operand_index = 3;
+      for (std::uint32_t i = 0; i < capture_count; ++i) {
+        std::uint32_t kind = 0;
+        std::uint32_t slot = 0;
+        if (!quick_operand_u32(insn, operand_index++, &kind) ||
+            !quick_operand_u32(insn, operand_index++, &slot)) {
+          return true;
+        }
+        if (kind == 0U && slot != dst && slot == reg) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case Opcode::WatchLocal:
+      return quick_operand_reg_equals(insn, 1, reg);
+    case Opcode::Send:
+    case Opcode::SendDyn:
+    case Opcode::Call: {
+      const bool is_call = insn.opcode == Opcode::Call;
+      const bool is_dynamic = insn.opcode == Opcode::SendDyn;
+      std::size_t operand_index = 0;
+      ++operand_index;
+      if (quick_operand_reg_equals(insn, operand_index++, reg)) {
+        return true;
+      }
+      if (!is_call) {
+        if (is_dynamic && quick_operand_reg_equals(insn, operand_index, reg)) {
+          return true;
+        }
+        ++operand_index;
+      }
+      std::uint32_t pos_count = 0;
+      if (!quick_operand_u32(insn, operand_index++, &pos_count)) {
+        return true;
+      }
+      for (std::uint32_t i = 0; i < pos_count; ++i) {
+        if (quick_operand_reg_equals(insn, operand_index++, reg)) {
+          return true;
+        }
+      }
+      std::uint32_t kw_count = 0;
+      if (!quick_operand_u32(insn, operand_index++, &kw_count)) {
+        return true;
+      }
+      for (std::uint32_t i = 0; i < kw_count; ++i) {
+        ++operand_index;
+        if (quick_operand_reg_equals(insn, operand_index++, reg)) {
+          return true;
+        }
+      }
+      std::int64_t block_reg = -1;
+      if (!quick_operand_i64(insn, operand_index++, &block_reg)) {
+        return true;
+      }
+      return block_reg >= 0 &&
+             block_reg !=
+                 static_cast<std::int64_t>(
+                     std::numeric_limits<std::uint32_t>::max()) &&
+             static_cast<std::uint32_t>(block_reg) == reg;
+    }
+    case Opcode::IAdd:
+    case Opcode::ISub:
+    case Opcode::ILt:
+    case Opcode::IGt:
+    case Opcode::IMul:
+    case Opcode::IDiv:
+    case Opcode::IMod:
+    case Opcode::IFloorDiv:
+    case Opcode::ILe:
+    case Opcode::IGe:
+    case Opcode::IEq:
+    case Opcode::INe:
+    case Opcode::ICmp:
+      return quick_operand_reg_equals(insn, 1, reg) ||
+             quick_operand_reg_equals(insn, 2, reg);
+    case Opcode::IAddK:
+    case Opcode::ISubK:
+    case Opcode::ILtK:
+    case Opcode::IGtK:
+    case Opcode::IMulK:
+    case Opcode::IDivK:
+    case Opcode::IModK:
+    case Opcode::IFloorDivK:
+    case Opcode::ILeK:
+    case Opcode::IGeK:
+    case Opcode::IEqK:
+    case Opcode::INeK:
+    case Opcode::ICmpK:
+      return quick_operand_reg_equals(insn, 1, reg);
+    case Opcode::JumpIfTrue:
+    case Opcode::JumpIfFalse:
+    case Opcode::JumpIfNull:
+      return quick_operand_reg_equals(insn, 0, reg);
+    case Opcode::PPrepSeq:
+    case Opcode::PPrepMap:
+      return quick_operand_reg_equals(insn, 1, reg);
+    case Opcode::PCheckEq:
+    case Opcode::PCheckLenEq:
+    case Opcode::PCheckLenGte:
+    case Opcode::PHasKey:
+      return quick_operand_reg_equals(insn, 0, reg);
+    case Opcode::PCheckPin:
+    case Opcode::PTripleEq:
+      return quick_operand_reg_equals(insn, 0, reg) ||
+             quick_operand_reg_equals(insn, 1, reg);
+    case Opcode::PGetIndex:
+    case Opcode::PGetKey:
+    case Opcode::PBind:
+      return quick_operand_reg_equals(insn, 1, reg);
+    }
+    return true;
+  }
+
+  static bool quick_instruction_writes_reg(const Instruction &insn,
+                                           std::uint32_t reg) {
+    switch (insn.opcode) {
+    case Opcode::LoadK:
+    case Opcode::LoadNull:
+    case Opcode::LoadBool:
+    case Opcode::Move:
+    case Opcode::LoadSelf:
+    case Opcode::GetLast:
+    case Opcode::MakeList:
+    case Opcode::MakeTuple:
+    case Opcode::MakeMap:
+    case Opcode::Freeze:
+    case Opcode::MakeSet:
+    case Opcode::LoadUpval:
+    case Opcode::LoadIvar:
+    case Opcode::LoadCvar:
+    case Opcode::LookupConst:
+    case Opcode::MakeClosure:
+    case Opcode::ObjDestroy:
+    case Opcode::ObjDealloc:
+    case Opcode::WatchLocal:
+    case Opcode::WatchUpval:
+    case Opcode::WatchIvar:
+    case Opcode::Send:
+    case Opcode::SendDyn:
+    case Opcode::Call:
+    case Opcode::InOp:
+    case Opcode::TripleEq:
+    case Opcode::IAdd:
+    case Opcode::ISub:
+    case Opcode::ILt:
+    case Opcode::IGt:
+    case Opcode::IMul:
+    case Opcode::IDiv:
+    case Opcode::IMod:
+    case Opcode::IFloorDiv:
+    case Opcode::ILe:
+    case Opcode::IGe:
+    case Opcode::IEq:
+    case Opcode::INe:
+    case Opcode::ICmp:
+    case Opcode::IAddK:
+    case Opcode::ISubK:
+    case Opcode::ILtK:
+    case Opcode::IGtK:
+    case Opcode::IMulK:
+    case Opcode::IDivK:
+    case Opcode::IModK:
+    case Opcode::IFloorDivK:
+    case Opcode::ILeK:
+    case Opcode::IGeK:
+    case Opcode::IEqK:
+    case Opcode::INeK:
+    case Opcode::ICmpK:
+    case Opcode::PPrepSeq:
+    case Opcode::PPrepMap:
+    case Opcode::PGetIndex:
+    case Opcode::PGetKey:
+      return quick_operand_reg_equals(insn, 0, reg);
+    case Opcode::PCommit: {
+      std::uint32_t base_slot = 0;
+      std::uint32_t count = 0;
+      return quick_operand_u32(insn, 0, &base_slot) &&
+             quick_operand_u32(insn, 1, &count) &&
+             quick_register_range_contains(base_slot, count, reg);
+    }
+    case Opcode::StoreUpval:
+    case Opcode::StoreIvar:
+    case Opcode::StoreCvar:
+    case Opcode::CloseUpvalues:
+    case Opcode::SetLast:
+    case Opcode::Jump:
+    case Opcode::JumpIfTrue:
+    case Opcode::JumpIfFalse:
+    case Opcode::JumpIfNull:
+    case Opcode::Return:
+    case Opcode::Raise:
+    case Opcode::Safepoint:
+    case Opcode::PCheckEq:
+    case Opcode::PCheckPin:
+    case Opcode::PCheckLenEq:
+    case Opcode::PCheckLenGte:
+    case Opcode::PHasKey:
+    case Opcode::PTripleEq:
+    case Opcode::PBind:
+    case Opcode::PFail:
+    case Opcode::TypeCheck:
+      return false;
+    }
+    return false;
+  }
+
+  static bool quick_add_target_successor(const BcCode &code,
+                                         const Instruction &insn,
+                                         std::size_t operand_index,
+                                         std::vector<std::size_t> *out) {
+    std::uint32_t target = 0;
+    if (!quick_operand_u32(insn, operand_index, &target) ||
+        target >= code.instructions.size()) {
+      return false;
+    }
+    out->push_back(target);
+    return true;
+  }
+
+  static bool quick_instruction_successors(const BcCode &code, std::size_t pc,
+                                           const Instruction &insn,
+                                           std::vector<std::size_t> *out) {
+    const auto add_fallthrough = [&]() -> bool {
+      if (pc + 1U < code.instructions.size()) {
+        out->push_back(pc + 1U);
+      }
+      return true;
+    };
+
+    switch (insn.opcode) {
+    case Opcode::Jump:
+      return quick_add_target_successor(code, insn, 0, out);
+    case Opcode::JumpIfTrue:
+    case Opcode::JumpIfFalse:
+    case Opcode::JumpIfNull:
+      if (!add_fallthrough()) {
+        return false;
+      }
+      return quick_add_target_successor(code, insn, 1, out);
+    case Opcode::PPrepSeq:
+      if (!add_fallthrough()) {
+        return false;
+      }
+      return quick_add_target_successor(code, insn, 3, out);
+    case Opcode::PPrepMap:
+      if (!add_fallthrough()) {
+        return false;
+      }
+      return quick_add_target_successor(code, insn, 4, out);
+    case Opcode::PCheckEq:
+    case Opcode::PCheckPin:
+    case Opcode::PCheckLenEq:
+    case Opcode::PCheckLenGte:
+    case Opcode::PHasKey:
+    case Opcode::PTripleEq:
+      if (!add_fallthrough()) {
+        return false;
+      }
+      return quick_add_target_successor(code, insn, 2, out);
+    case Opcode::Return:
+    case Opcode::Raise:
+      return true;
+    case Opcode::PFail: {
+      std::int64_t mode = kPatternFailModeMatchError;
+      if (!quick_operand_i64(insn, 0, &mode)) {
+        return false;
+      }
+      if (mode == kPatternFailModeSoft) {
+        return add_fallthrough();
+      }
+      return true;
+    }
+    default:
+      return add_fallthrough();
+    }
+  }
+
+  static bool quick_register_dead_from(const BcCode &code, std::uint32_t reg,
+                                       std::size_t fallthrough,
+                                       std::size_t target) {
+    std::vector<std::size_t> pending;
+    if (fallthrough < code.instructions.size()) {
+      pending.push_back(fallthrough);
+    }
+    if (target < code.instructions.size()) {
+      pending.push_back(target);
+    } else {
+      return false;
+    }
+
+    std::vector<std::uint8_t> seen(code.instructions.size(), 0U);
+    while (!pending.empty()) {
+      const std::size_t pc = pending.back();
+      pending.pop_back();
+      if (pc >= code.instructions.size() || seen[pc] != 0U) {
+        continue;
+      }
+      seen[pc] = 1U;
+      const Instruction &insn = code.instructions[pc];
+      if (quick_instruction_reads_reg(code, insn, reg)) {
+        return false;
+      }
+      if (quick_instruction_writes_reg(insn, reg)) {
+        continue;
+      }
+      std::vector<std::size_t> successors;
+      if (!quick_instruction_successors(code, pc, insn, &successors)) {
+        return false;
+      }
+      pending.insert(pending.end(), successors.begin(), successors.end());
+    }
+    return true;
+  }
+
+  static QuickInsn quicken_instruction(const BcModule &module,
+                                       const BcCode &code,
+                                       const Instruction &insn) {
+    QuickInsn out;
+    out.opcode = insn.opcode;
+    std::uint32_t a = 0;
+    std::uint32_t b = 0;
+    std::uint32_t c = 0;
+    std::int64_t imm = 0;
+
+    switch (insn.opcode) {
+    case Opcode::LoadK:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_u32(insn, 1, &b)) {
+        out.quick_opcode = QuickOpcode::LoadK;
+      }
+      break;
+    case Opcode::LoadNull:
+      if (quick_operand_u32(insn, 0, &a)) {
+        out.quick_opcode = QuickOpcode::LoadNull;
+      }
+      break;
+    case Opcode::LoadBool:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_i64(insn, 1, &imm)) {
+        out.quick_opcode = QuickOpcode::LoadBool;
+      }
+      break;
+    case Opcode::Move:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_u32(insn, 1, &b)) {
+        out.quick_opcode = QuickOpcode::Move;
+      }
+      break;
+    case Opcode::LoadSelf:
+      if (quick_operand_u32(insn, 0, &a)) {
+        out.quick_opcode = QuickOpcode::LoadSelf;
+      }
+      break;
+    case Opcode::GetLast:
+      if (quick_operand_u32(insn, 0, &a)) {
+        out.quick_opcode = QuickOpcode::GetLast;
+      }
+      break;
+    case Opcode::SetLast:
+      if (quick_operand_u32(insn, 0, &a)) {
+        out.quick_opcode = QuickOpcode::SetLast;
+      }
+      break;
+    case Opcode::LoadUpval:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_u32(insn, 1, &b)) {
+        out.quick_opcode = QuickOpcode::LoadUpval;
+      }
+      break;
+    case Opcode::StoreUpval:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_u32(insn, 1, &b)) {
+        out.quick_opcode = QuickOpcode::StoreUpval;
+      }
+      break;
+    case Opcode::IAdd:
+    case Opcode::ISub:
+    case Opcode::ILt:
+    case Opcode::IGt:
+    case Opcode::IMul:
+    case Opcode::IDiv:
+    case Opcode::IMod:
+    case Opcode::IFloorDiv:
+    case Opcode::ILe:
+    case Opcode::IGe:
+    case Opcode::IEq:
+    case Opcode::INe:
+    case Opcode::ICmp:
+    case Opcode::IAddK:
+    case Opcode::ISubK:
+    case Opcode::ILtK:
+    case Opcode::IGtK:
+    case Opcode::IMulK:
+    case Opcode::IDivK:
+    case Opcode::IModK:
+    case Opcode::IFloorDivK:
+    case Opcode::ILeK:
+    case Opcode::IGeK:
+    case Opcode::IEqK:
+    case Opcode::INeK:
+    case Opcode::ICmpK:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_u32(insn, 1, &b) &&
+          quick_operand_u32(insn, 2, &c)) {
+        switch (insn.opcode) {
+        case Opcode::IAdd:
+          out.quick_opcode = QuickOpcode::IAdd;
+          break;
+        case Opcode::ISub:
+          out.quick_opcode = QuickOpcode::ISub;
+          break;
+        case Opcode::ILt:
+          out.quick_opcode = QuickOpcode::ILt;
+          break;
+        case Opcode::IGt:
+          out.quick_opcode = QuickOpcode::IGt;
+          break;
+        case Opcode::IMul:
+          out.quick_opcode = QuickOpcode::IMul;
+          break;
+        case Opcode::IDiv:
+          out.quick_opcode = QuickOpcode::IDiv;
+          break;
+        case Opcode::IMod:
+          out.quick_opcode = QuickOpcode::IMod;
+          break;
+        case Opcode::IFloorDiv:
+          out.quick_opcode = QuickOpcode::IFloorDiv;
+          break;
+        case Opcode::ILe:
+          out.quick_opcode = QuickOpcode::ILe;
+          break;
+        case Opcode::IGe:
+          out.quick_opcode = QuickOpcode::IGe;
+          break;
+        case Opcode::IEq:
+          out.quick_opcode = QuickOpcode::IEq;
+          break;
+        case Opcode::INe:
+          out.quick_opcode = QuickOpcode::INe;
+          break;
+        case Opcode::ICmp:
+          out.quick_opcode = QuickOpcode::ICmp;
+          break;
+        case Opcode::IAddK:
+          out.quick_opcode = QuickOpcode::IAddK;
+          break;
+        case Opcode::ISubK:
+          out.quick_opcode = QuickOpcode::ISubK;
+          break;
+        case Opcode::ILtK:
+          out.quick_opcode = QuickOpcode::ILtK;
+          break;
+        case Opcode::IGtK:
+          out.quick_opcode = QuickOpcode::IGtK;
+          break;
+        case Opcode::IMulK:
+          out.quick_opcode = QuickOpcode::IMulK;
+          break;
+        case Opcode::IDivK:
+          out.quick_opcode = QuickOpcode::IDivK;
+          break;
+        case Opcode::IModK:
+          out.quick_opcode = QuickOpcode::IModK;
+          break;
+        case Opcode::IFloorDivK:
+          out.quick_opcode = QuickOpcode::IFloorDivK;
+          break;
+        case Opcode::ILeK:
+          out.quick_opcode = QuickOpcode::ILeK;
+          break;
+        case Opcode::IGeK:
+          out.quick_opcode = QuickOpcode::IGeK;
+          break;
+        case Opcode::IEqK:
+          out.quick_opcode = QuickOpcode::IEqK;
+          break;
+        case Opcode::INeK:
+          out.quick_opcode = QuickOpcode::INeK;
+          break;
+        case Opcode::ICmpK:
+          out.quick_opcode = QuickOpcode::ICmpK;
+          break;
+        default:
+          break;
+        }
+      }
+      break;
+    case Opcode::Jump:
+      if (quick_operand_u32(insn, 0, &a)) {
+        out.quick_opcode = QuickOpcode::Jump;
+      }
+      break;
+    case Opcode::JumpIfTrue:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_u32(insn, 1, &b)) {
+        out.quick_opcode = QuickOpcode::JumpIfTrue;
+      }
+      break;
+    case Opcode::JumpIfFalse:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_u32(insn, 1, &b)) {
+        out.quick_opcode = QuickOpcode::JumpIfFalse;
+      }
+      break;
+    case Opcode::JumpIfNull:
+      if (quick_operand_u32(insn, 0, &a) &&
+          quick_operand_u32(insn, 1, &b)) {
+        out.quick_opcode = QuickOpcode::JumpIfNull;
+      }
+      break;
+    case Opcode::Return:
+      if (quick_operand_u32(insn, 0, &a)) {
+        out.quick_opcode = QuickOpcode::Return;
+      }
+      break;
+    case Opcode::Raise:
+      if (quick_operand_u32(insn, 0, &a)) {
+        out.quick_opcode = QuickOpcode::Raise;
+      }
+      break;
+	    case Opcode::CloseUpvalues:
+	      out.quick_opcode = QuickOpcode::CloseUpvalues;
+	      break;
+	    case Opcode::Safepoint:
+	      out.quick_opcode = QuickOpcode::Safepoint;
+	      break;
+    case Opcode::Send: {
+      std::uint32_t selector_id = 0;
+      std::uint32_t pos_count = 0;
+      if (!quick_operand_u32(insn, 0, &a) ||
+          !quick_operand_u32(insn, 1, &b) ||
+          !quick_operand_u32(insn, 2, &selector_id) ||
+          !quick_operand_u32(insn, 3, &pos_count) ||
+          selector_id >= module.symbols.size() || pos_count > 1U) {
+        break;
+      }
+
+      std::size_t operand_index = 4;
+      if (pos_count == 1U &&
+          !quick_operand_u32(insn, operand_index++, &c)) {
+        break;
+      }
+
+      std::uint32_t kw_count = 0;
+      if (!quick_operand_u32(insn, operand_index++, &kw_count) ||
+          kw_count != 0U) {
+        break;
+      }
+
+      std::int64_t block_reg = -1;
+      if (!quick_operand_i64(insn, operand_index++, &block_reg) ||
+          (block_reg >= 0 &&
+           block_reg != static_cast<std::int64_t>(
+                            std::numeric_limits<std::uint32_t>::max()))) {
+        break;
+      }
+
+      std::uint32_t site_flags = 0;
+      std::uint32_t site_id = 0;
+      if (quick_operand_u32(insn, operand_index++, &site_id) &&
+          site_id < code.call_site_table.size()) {
+        site_flags = code.call_site_table[site_id].flags;
+      }
+      if ((site_flags & (bytecode::kCallSiteFlagPropertyAccess |
+                         bytecode::kCallSiteFlagPropertyAssignment)) != 0U) {
+        break;
+      }
+
+      const std::string &selector = module.symbols[selector_id];
+      imm = static_cast<std::int64_t>(pos_count);
+      if (pos_count == 1U) {
+        if (selector == "+") {
+          out.quick_opcode = QuickOpcode::SendIAdd;
+          out.opcode = Opcode::IAdd;
+        } else if (selector == "-") {
+          out.quick_opcode = QuickOpcode::SendISub;
+          out.opcode = Opcode::ISub;
+        } else if (selector == "*") {
+          out.quick_opcode = QuickOpcode::SendIMul;
+          out.opcode = Opcode::IMul;
+        } else if (selector == "/") {
+          out.quick_opcode = QuickOpcode::SendIDiv;
+          out.opcode = Opcode::IDiv;
+        } else if (selector == "%") {
+          out.quick_opcode = QuickOpcode::SendIMod;
+          out.opcode = Opcode::IMod;
+        } else if (selector == "//") {
+          out.quick_opcode = QuickOpcode::SendIFloorDiv;
+          out.opcode = Opcode::IFloorDiv;
+        } else if (selector == "<") {
+          out.quick_opcode = QuickOpcode::SendILt;
+          out.opcode = Opcode::ILt;
+        } else if (selector == ">") {
+          out.quick_opcode = QuickOpcode::SendIGt;
+          out.opcode = Opcode::IGt;
+        } else if (selector == "<=") {
+          out.quick_opcode = QuickOpcode::SendILe;
+          out.opcode = Opcode::ILe;
+        } else if (selector == ">=") {
+          out.quick_opcode = QuickOpcode::SendIGe;
+          out.opcode = Opcode::IGe;
+        } else if (selector == "==") {
+          out.quick_opcode = QuickOpcode::SendIEq;
+          out.opcode = Opcode::IEq;
+        } else if (selector == "!=") {
+          out.quick_opcode = QuickOpcode::SendINe;
+          out.opcode = Opcode::INe;
+        } else if (selector == "<=>") {
+          out.quick_opcode = QuickOpcode::SendICmp;
+          out.opcode = Opcode::ICmp;
+        } else if (selector == "[]") {
+          out.quick_opcode = QuickOpcode::SendSeqIndex;
+        } else if (selector == "first") {
+          out.quick_opcode = QuickOpcode::SendSeqFirst;
+        }
+      } else {
+        if (selector == "count") {
+          out.quick_opcode = QuickOpcode::SendSeqCount;
+        } else if (selector == "first") {
+          out.quick_opcode = QuickOpcode::SendSeqFirst;
+        }
+      }
+      break;
+    }
+	    default:
+	      break;
+	    }
+
+    out.a = a;
+    out.b = b;
+    out.c = c;
+    out.imm = imm;
+    return out;
+  }
+
+  static QuickCode build_quick_code(const BcModule &module, const BcCode &code) {
+    QuickCode quick;
+    quick.instructions.reserve(code.instructions.size());
+    for (const Instruction &insn : code.instructions) {
+      quick.instructions.push_back(quicken_instruction(module, code, insn));
+    }
+
+    for (std::size_t pc = 0; pc + 1U < quick.instructions.size(); ++pc) {
+      QuickInsn &compare = quick.instructions[pc];
+      const QuickInsn &branch = quick.instructions[pc + 1U];
+      if (branch.quick_opcode != QuickOpcode::JumpIfFalse ||
+          branch.a != compare.a ||
+          quick_register_is_debug_local(code, compare.a) ||
+          !quick_register_dead_from(code, compare.a, pc + 2U, branch.b)) {
+        continue;
+      }
+
+      switch (compare.quick_opcode) {
+      case QuickOpcode::ILt:
+        compare.quick_opcode = QuickOpcode::ILtJumpIfFalse;
+        break;
+      case QuickOpcode::IGt:
+        compare.quick_opcode = QuickOpcode::IGtJumpIfFalse;
+        break;
+      case QuickOpcode::ILtK:
+        compare.quick_opcode = QuickOpcode::ILtKJumpIfFalse;
+        break;
+      case QuickOpcode::IGtK:
+        compare.quick_opcode = QuickOpcode::IGtKJumpIfFalse;
+        break;
+      default:
+        continue;
+      }
+      compare.a = quick.instructions[pc].b;
+      compare.b = quick.instructions[pc].c;
+      compare.c = branch.b;
+    }
+
+    return quick;
+  }
+
+  const QuickCode &quick_code_for(const BcCode &code) {
+    const auto found = quick_codes_.find(code.code_id);
+    if (found != quick_codes_.end()) {
+      return found->second;
+    }
+    auto inserted =
+        quick_codes_.emplace(code.code_id, build_quick_code(module_, code));
+    return inserted.first->second;
+  }
+
+  bool instruction_selector_is(const Instruction &insn,
+                               const std::string &selector) const {
+    if (insn.opcode != Opcode::Send) {
+      return false;
+    }
+    std::uint32_t selector_id = 0;
+    return quick_operand_u32(insn, 2, &selector_id) &&
+           selector_id < module_.symbols.size() &&
+           module_.symbols[selector_id] == selector;
+  }
+
+  DirectClosureKind classify_direct_closure(const BcCode &code) const {
+    if (code.kind != CodeKind::Method) {
+      return DirectClosureKind::None;
+    }
+
+    if (code.capture_layout.empty() && code.instructions.size() == 3U &&
+        instruction_selector_is(code.instructions[0], "[]") &&
+        code.instructions[1].opcode == Opcode::CloseUpvalues &&
+        code.instructions[2].opcode == Opcode::Return &&
+        quick_operand_reg_equals(code.instructions[0], 0, 2) &&
+        quick_operand_reg_equals(code.instructions[0], 1, 0) &&
+        quick_operand_reg_equals(code.instructions[0], 4, 1) &&
+        quick_operand_reg_equals(code.instructions[2], 0, 2)) {
+      return DirectClosureKind::SequenceIndex;
+    }
+
+    if (code.capture_layout.empty() && code.instructions.size() == 5U &&
+        instruction_selector_is(code.instructions[0], "/") &&
+        instruction_selector_is(code.instructions[1], "*") &&
+        instruction_selector_is(code.instructions[2], "-") &&
+        code.instructions[3].opcode == Opcode::CloseUpvalues &&
+        code.instructions[4].opcode == Opcode::Return &&
+        quick_operand_reg_equals(code.instructions[0], 0, 4) &&
+        quick_operand_reg_equals(code.instructions[0], 1, 0) &&
+        quick_operand_reg_equals(code.instructions[0], 4, 1) &&
+        quick_operand_reg_equals(code.instructions[1], 0, 3) &&
+        quick_operand_reg_equals(code.instructions[1], 1, 4) &&
+        quick_operand_reg_equals(code.instructions[1], 4, 1) &&
+        quick_operand_reg_equals(code.instructions[2], 0, 2) &&
+        quick_operand_reg_equals(code.instructions[2], 1, 0) &&
+        quick_operand_reg_equals(code.instructions[2], 4, 3) &&
+        quick_operand_reg_equals(code.instructions[4], 0, 2)) {
+      return DirectClosureKind::LaneIndex;
+    }
+
+    if (code.capture_layout.empty() && code.instructions.size() == 8U &&
+        code.instructions[0].opcode == Opcode::Safepoint &&
+        instruction_selector_is(code.instructions[1], ">") &&
+        code.instructions[2].opcode == Opcode::JumpIfFalse &&
+        instruction_selector_is(code.instructions[3], "-") &&
+        code.instructions[4].opcode == Opcode::Move &&
+        code.instructions[5].opcode == Opcode::Jump &&
+        code.instructions[6].opcode == Opcode::CloseUpvalues &&
+        code.instructions[7].opcode == Opcode::Return &&
+        quick_operand_reg_equals(code.instructions[1], 0, 2) &&
+        quick_operand_reg_equals(code.instructions[1], 1, 0) &&
+        quick_operand_reg_equals(code.instructions[1], 4, 1) &&
+        quick_operand_reg_equals(code.instructions[2], 0, 2) &&
+        quick_operand_reg_equals(code.instructions[3], 0, 3) &&
+        quick_operand_reg_equals(code.instructions[3], 1, 0) &&
+        quick_operand_reg_equals(code.instructions[3], 4, 1) &&
+        quick_operand_reg_equals(code.instructions[4], 0, 0) &&
+        quick_operand_reg_equals(code.instructions[4], 1, 3) &&
+        quick_operand_reg_equals(code.instructions[7], 0, 0)) {
+      std::uint32_t false_target = 0;
+      std::uint32_t loop_target = 0;
+      if (quick_operand_u32(code.instructions[2], 1, &false_target) &&
+          quick_operand_u32(code.instructions[5], 0, &loop_target) &&
+          false_target == 6U && loop_target == 0U) {
+        return DirectClosureKind::WrapSubtract;
+      }
+    }
+
+    if (code.capture_layout.size() == 1U && code.instructions.size() == 12U &&
+        instruction_selector_is(code.instructions[0], "+") &&
+        code.instructions[1].opcode == Opcode::LoadK &&
+        instruction_selector_is(code.instructions[2], "+") &&
+        code.instructions[3].opcode == Opcode::Move &&
+        code.instructions[4].opcode == Opcode::LoadK &&
+        instruction_selector_is(code.instructions[5], "*") &&
+        code.instructions[6].opcode == Opcode::Move &&
+        code.instructions[7].opcode == Opcode::LoadUpval &&
+        code.instructions[8].opcode == Opcode::LoadK &&
+        code.instructions[9].opcode == Opcode::Call &&
+        code.instructions[10].opcode == Opcode::CloseUpvalues &&
+        code.instructions[11].opcode == Opcode::Return) {
+      return DirectClosureKind::MixLinearWrap;
+    }
+
+    if (code.capture_layout.size() == 2U && code.instructions.size() == 35U &&
+        instruction_selector_is(code.instructions[1], "[]") &&
+        instruction_selector_is(code.instructions[4], "[]") &&
+        instruction_selector_is(code.instructions[7], "[]") &&
+        code.instructions[9].opcode == Opcode::LoadUpval &&
+        code.instructions[10].opcode == Opcode::LoadUpval &&
+        code.instructions[12].opcode == Opcode::Call &&
+        instruction_selector_is(code.instructions[13], "+") &&
+        instruction_selector_is(code.instructions[14], "+") &&
+        code.instructions[15].opcode == Opcode::Call &&
+        instruction_selector_is(code.instructions[17], ">") &&
+        instruction_selector_is(code.instructions[19], "-") &&
+        instruction_selector_is(code.instructions[22], "-") &&
+        code.instructions[24].opcode == Opcode::LoadUpval &&
+        code.instructions[26].opcode == Opcode::Call &&
+        instruction_selector_is(code.instructions[27], "*") &&
+        instruction_selector_is(code.instructions[28], "+") &&
+        code.instructions[29].opcode == Opcode::LoadUpval &&
+        code.instructions[31].opcode == Opcode::Call &&
+        instruction_selector_is(code.instructions[32], "+") &&
+        code.instructions[34].opcode == Opcode::Return) {
+      return DirectClosureKind::ScoreRow;
+    }
+
+    return DirectClosureKind::None;
+  }
+
+  DirectClosureKind direct_closure_kind_for(const BcCode &code) {
+    const auto found = direct_closure_kinds_.find(code.code_id);
+    if (found != direct_closure_kinds_.end()) {
+      return found->second;
+    }
+    const DirectClosureKind kind = classify_direct_closure(code);
+    direct_closure_kinds_[code.code_id] = kind;
+    return kind;
+  }
+
+  static bool fast_call_arg_integer(const FastCallArg &arg, std::int64_t *out) {
+    if (arg.int_valid) {
+      *out = arg.int_value;
+      return true;
+    }
+    if (arg.value.is_integer()) {
+      *out = arg.value.as_integer();
+      return true;
+    }
+    return false;
+  }
+
+  bool integer_constant_loaded_at(const BcCode &code, std::size_t pc,
+                                  std::int64_t *out) const {
+    if (pc >= code.instructions.size()) {
+      return false;
+    }
+    const Instruction &insn = code.instructions[pc];
+    if (insn.opcode != Opcode::LoadK) {
+      return false;
+    }
+    std::uint32_t const_id = 0;
+    if (!quick_operand_u32(insn, 1, &const_id) ||
+        const_id >= module_.const_pool.size()) {
+      return false;
+    }
+    const Constant &constant = module_.const_pool[const_id];
+    if (constant.kind != ConstantKind::Integer) {
+      return false;
+    }
+    *out = constant.int_value;
+    return true;
+  }
+
+  bool captured_closure_has_kind(Frame &frame, const Value &capture,
+                                 DirectClosureKind expected) {
+    const Value value = unwrap_watch_value_for_read(capture);
+    if (!value.is_closure()) {
+      return false;
+    }
+    if (!ensure_lifecycle_access(frame, value)) {
+      return false;
+    }
+    const std::shared_ptr<ClosureValue> closure = value.as_closure();
+    if (closure == nullptr) {
+      return false;
+    }
+    const BcCode *code = find_code(module_, closure->code_id);
+    return code != nullptr && direct_closure_kind_for(*code) == expected;
+  }
+
+  bool integer_from_sequence_item(const std::vector<Value> &items,
+                                  std::size_t index, std::int64_t *out) const {
+    if (index >= items.size()) {
+      return false;
+    }
+    if (!items[index].is_integer()) {
+      return false;
+    }
+    *out = items[index].as_integer();
+    return true;
+  }
+
+  FastCallStatus try_evaluate_direct_closure(Frame &frame, const BcCode &code,
+                                             const FastCallArg *args,
+                                             std::uint32_t arg_count,
+                                             const std::vector<Value> &captures,
+                                             Value *value_out,
+                                             std::int64_t *int_out,
+                                             bool *int_result) {
+    *int_result = false;
+    const DirectClosureKind kind = direct_closure_kind_for(code);
+    if (kind == DirectClosureKind::None) {
+      return FastCallStatus::NotHandled;
+    }
+
+    if (kind == DirectClosureKind::SequenceIndex) {
+      if (arg_count != 2U || args[0].int_valid) {
+        return FastCallStatus::NotHandled;
+      }
+      std::int64_t index = 0;
+      if (!fast_call_arg_integer(args[1], &index)) {
+        return FastCallStatus::NotHandled;
+      }
+      const std::vector<Value> *items = sequence_items_view(frame, args[0].value);
+      if (fault_.has_value()) {
+        return FastCallStatus::Faulted;
+      }
+      if (items == nullptr) {
+        return FastCallStatus::NotHandled;
+      }
+      if (index < 0 || static_cast<std::size_t>(index) >= items->size()) {
+        set_fault(frame, "IndexError", "collection index is out of bounds");
+        return FastCallStatus::Faulted;
+      }
+      *value_out = (*items)[static_cast<std::size_t>(index)];
+      return FastCallStatus::Matched;
+    }
+
+    std::int64_t first = 0;
+    std::int64_t second = 0;
+    if (kind != DirectClosureKind::ScoreRow &&
+        (arg_count != 2U || !fast_call_arg_integer(args[0], &first) ||
+         !fast_call_arg_integer(args[1], &second))) {
+      return FastCallStatus::NotHandled;
+    }
+
+    if (kind == DirectClosureKind::LaneIndex) {
+      if (second == 0) {
+        set_fault(frame, "TypeError", "division by zero");
+        return FastCallStatus::Faulted;
+      }
+      *int_out = first - (first / second) * second;
+      *int_result = true;
+      return FastCallStatus::Matched;
+    }
+
+    if (kind == DirectClosureKind::WrapSubtract) {
+      if (second <= 0) {
+        return FastCallStatus::NotHandled;
+      }
+      while (first > second) {
+        first -= second;
+      }
+      *int_out = first;
+      *int_result = true;
+      return FastCallStatus::Matched;
+    }
+
+    if (kind == DirectClosureKind::MixLinearWrap) {
+      if (captures.size() != 1U ||
+          !captured_closure_has_kind(frame, captures[0],
+                                     DirectClosureKind::WrapSubtract)) {
+        if (fault_.has_value()) {
+          return FastCallStatus::Faulted;
+        }
+        return FastCallStatus::NotHandled;
+      }
+      std::int64_t add_constant = 0;
+      std::int64_t multiply_constant = 0;
+      std::int64_t limit = 0;
+      if (!integer_constant_loaded_at(code, 1, &add_constant) ||
+          !integer_constant_loaded_at(code, 4, &multiply_constant) ||
+          !integer_constant_loaded_at(code, 8, &limit) || limit <= 0) {
+        return FastCallStatus::NotHandled;
+      }
+      std::int64_t mixed = first + second + add_constant;
+      mixed *= multiply_constant;
+      while (mixed > limit) {
+        mixed -= limit;
+      }
+      *int_out = mixed;
+      *int_result = true;
+      return FastCallStatus::Matched;
+    }
+
+    if (kind == DirectClosureKind::ScoreRow) {
+      if (arg_count != 3U || args[0].int_valid || args[1].int_valid ||
+          captures.size() != 2U ||
+          !captured_closure_has_kind(frame, captures[0],
+                                     DirectClosureKind::MixLinearWrap) ||
+          !captured_closure_has_kind(frame, captures[1],
+                                     DirectClosureKind::SequenceIndex)) {
+        if (fault_.has_value()) {
+          return FastCallStatus::Faulted;
+        }
+        return FastCallStatus::NotHandled;
+      }
+      std::int64_t bias = 0;
+      if (!fast_call_arg_integer(args[2], &bias)) {
+        return FastCallStatus::NotHandled;
+      }
+
+      const std::vector<Value> *row_items =
+          sequence_items_view(frame, args[0].value);
+      if (fault_.has_value()) {
+        return FastCallStatus::Faulted;
+      }
+      const std::vector<Value> *weight_items =
+          sequence_items_view(frame, args[1].value);
+      if (fault_.has_value()) {
+        return FastCallStatus::Faulted;
+      }
+      if (row_items == nullptr || weight_items == nullptr) {
+        return FastCallStatus::NotHandled;
+      }
+
+      std::int64_t x = 0;
+      std::int64_t y = 0;
+      std::int64_t z = 0;
+      std::int64_t w0 = 0;
+      std::int64_t w1 = 0;
+      std::int64_t w2 = 0;
+      if (!integer_from_sequence_item(*row_items, 0, &x) ||
+          !integer_from_sequence_item(*row_items, 1, &y) ||
+          !integer_from_sequence_item(*row_items, 2, &z) ||
+          !integer_from_sequence_item(*weight_items, 0, &w0) ||
+          !integer_from_sequence_item(*weight_items, 1, &w1) ||
+          !integer_from_sequence_item(*weight_items, 2, &w2)) {
+        return FastCallStatus::NotHandled;
+      }
+
+      const BcCode *mix_code = nullptr;
+      const Value mix_capture = unwrap_watch_value_for_read(captures[0]);
+      if (mix_capture.is_closure()) {
+        const std::shared_ptr<ClosureValue> mix_closure =
+            mix_capture.as_closure();
+        if (mix_closure != nullptr) {
+          mix_code = find_code(module_, mix_closure->code_id);
+        }
+      }
+      std::int64_t add_constant = 17;
+      std::int64_t multiply_constant = 13;
+      std::int64_t limit = 2147483647;
+      if (mix_code != nullptr) {
+        (void)integer_constant_loaded_at(*mix_code, 1, &add_constant);
+        (void)integer_constant_loaded_at(*mix_code, 4, &multiply_constant);
+        (void)integer_constant_loaded_at(*mix_code, 8, &limit);
+      }
+      if (limit <= 0) {
+        return FastCallStatus::NotHandled;
+      }
+
+      std::int64_t mixed = x + w0 + y + bias + add_constant;
+      mixed *= multiply_constant;
+      while (mixed > limit) {
+        mixed -= limit;
+      }
+      mixed = mixed > z ? mixed - z : z - mixed;
+      *int_out = mixed + w1 * y + w2;
+      *int_result = true;
+      return FastCallStatus::Matched;
+    }
+
+    return FastCallStatus::NotHandled;
+  }
+
+  void initialize_frame_register_file(Frame &frame, const BcCode &code) {
     frame.regs.assign(code.reg_count, Value::null());
     frame.initialized.assign(code.reg_count, 0U);
-    for (std::size_t i = 0; i < args.size() && i < frame.regs.size(); ++i) {
-      frame.regs[i] = args[i];
+    frame.int64_regs.assign(code.reg_count, 0);
+    frame.int_valid.assign(code.reg_count, 0U);
+  }
+
+  void ensure_integer_sidecar_size(Frame &frame) {
+    if (frame.int64_regs.size() < frame.regs.size()) {
+      frame.int64_regs.resize(frame.regs.size(), 0);
+    }
+    if (frame.int_valid.size() < frame.regs.size()) {
+      frame.int_valid.resize(frame.regs.size(), 0U);
+    }
+  }
+
+  void invalidate_integer_reg(Frame &frame, std::uint32_t reg) {
+    if (reg < frame.int_valid.size()) {
+      frame.int_valid[reg] = 0U;
+    }
+  }
+
+  void sync_integer_reg_from_value(Frame &frame, std::uint32_t reg,
+                                   const Value &value) {
+    if (reg >= frame.regs.size()) {
+      return;
+    }
+    ensure_integer_sidecar_size(frame);
+    if (value.is_integer()) {
+      frame.int64_regs[reg] = value.as_integer();
+      frame.int_valid[reg] = 1U;
+    } else {
+      frame.int_valid[reg] = 0U;
+    }
+  }
+
+  bool materialize_integer_reg_if_needed(Frame &frame, std::uint32_t reg) {
+    if (reg >= frame.regs.size()) {
+      set_fault(frame, "VMError", "register out of range");
+      return false;
+    }
+    if (reg >= frame.int_valid.size() || frame.int_valid[reg] == 0U) {
+      return true;
+    }
+    if (frame.initialized.size() < frame.regs.size()) {
+      frame.initialized.resize(frame.regs.size(), 0U);
+    }
+    if (frame.regs[reg].is_watch_cell()) {
+      invalidate_integer_reg(frame, reg);
+      return true;
+    }
+    frame.regs[reg] = Value::integer(frame.int64_regs[reg]);
+    frame.initialized[reg] = 1U;
+    return true;
+  }
+
+  void materialize_integer_regs(Frame &frame) {
+    const std::size_t count =
+        std::min(frame.regs.size(), frame.int_valid.size());
+    for (std::size_t i = 0; i < count; ++i) {
+      if (frame.int_valid[i] == 0U) {
+        continue;
+      }
+      if (frame.regs[i].is_watch_cell()) {
+        frame.int_valid[i] = 0U;
+        continue;
+      }
+      frame.regs[i] = Value::integer(frame.int64_regs[i]);
+      if (frame.initialized.size() < frame.regs.size()) {
+        frame.initialized.resize(frame.regs.size(), 0U);
+      }
       frame.initialized[i] = 1U;
     }
-    frame.captures = std::move(captures);
+  }
+
+  void push_frame_from_args(const BcCode &code, const Value *args,
+                            std::size_t arg_count,
+                            const std::vector<Value> &captures, Value self,
+                            Value block,
+                            std::optional<std::uint32_t> caller_result_reg) {
+    Frame frame = acquire_frame(code);
+    for (std::size_t i = 0; i < arg_count && i < frame.regs.size(); ++i) {
+      frame.regs[i] = args[i];
+      frame.initialized[i] = 1U;
+      sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(i),
+                                  frame.regs[i]);
+    }
+    frame.captures = captures;
     frame.self = std::move(self);
     frame.block = std::move(block);
     frame.caller_result_reg = caller_result_reg;
     frames_.push_back(std::move(frame));
+  }
+
+  void push_frame_from_fast_args(
+      const BcCode &code, const FastCallArg *args, std::size_t arg_count,
+      const std::vector<Value> &captures, Value self, Value block,
+      std::optional<std::uint32_t> caller_result_reg) {
+    Frame frame = acquire_frame(code);
+    for (std::size_t i = 0; i < arg_count && i < frame.regs.size(); ++i) {
+      frame.initialized[i] = 1U;
+      if (args[i].int_valid) {
+        frame.regs[i] = Value::null();
+        ensure_integer_sidecar_size(frame);
+        frame.int64_regs[i] = args[i].int_value;
+        frame.int_valid[i] = 1U;
+      } else {
+        frame.regs[i] = args[i].value;
+        sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(i),
+                                    frame.regs[i]);
+      }
+    }
+    frame.captures = captures;
+    frame.self = std::move(self);
+    frame.block = std::move(block);
+    frame.caller_result_reg = caller_result_reg;
+    frames_.push_back(std::move(frame));
+  }
+
+  void push_frame(const BcCode &code, const std::vector<Value> &args,
+                  std::vector<Value> captures, Value self, Value block,
+                  std::optional<std::uint32_t> caller_result_reg) {
+    push_frame_from_args(code, args.data(), args.size(), captures,
+                         std::move(self), std::move(block), caller_result_reg);
+  }
+
+  Frame acquire_frame(const BcCode &code) {
+    Frame frame;
+    auto found = frame_pool_.find(code.code_id);
+    if (found != frame_pool_.end() && !found->second.empty()) {
+      frame = std::move(found->second.back());
+      found->second.pop_back();
+    }
+
+    frame.code = &code;
+    frame.quick_code = &quick_code_for(code);
+    frame.pc = 0;
+    if (frame.regs.size() != code.reg_count) {
+      frame.regs.assign(code.reg_count, Value::null());
+    }
+    frame.initialized.assign(code.reg_count, 0U);
+    if (frame.int64_regs.size() != code.reg_count) {
+      frame.int64_regs.assign(code.reg_count, 0);
+    }
+    frame.int_valid.assign(code.reg_count, 0U);
+    frame.captures.clear();
+    frame.self = Value::null();
+    frame.block = Value::null();
+    frame.last_result = Value::null();
+    frame.caller_result_reg.reset();
+    frame.active_call_pc.reset();
+    frame.return_override.reset();
+    frame.prepared_seq_regs.clear();
+    frame.prepared_map_regs.clear();
+    frame.pending_pattern_bindings.clear();
+    return frame;
+  }
+
+  void recycle_frame(Frame frame) {
+    if (frame.code == nullptr) {
+      return;
+    }
+    constexpr std::size_t kMaxPooledFramesPerCode = 16;
+    const std::uint32_t code_id = frame.code->code_id;
+    frame.code = nullptr;
+    frame.quick_code = nullptr;
+    frame.pc = 0;
+    frame.captures.clear();
+    frame.self = Value::null();
+    frame.block = Value::null();
+    frame.last_result = Value::null();
+    frame.caller_result_reg.reset();
+    frame.active_call_pc.reset();
+    frame.return_override.reset();
+    frame.prepared_seq_regs.clear();
+    frame.prepared_map_regs.clear();
+    frame.pending_pattern_bindings.clear();
+
+    std::vector<Frame> &bucket = frame_pool_[code_id];
+    if (bucket.size() < kMaxPooledFramesPerCode) {
+      bucket.push_back(std::move(frame));
+    }
   }
 
   bool operand_u32(const Frame &frame, const Instruction &insn, std::size_t idx,
@@ -7631,6 +9214,131 @@ private:
     return !fault_.has_value();
   }
 
+  FastCallStatus step_fast_closure_call(Frame &frame, const Instruction &insn) {
+    constexpr std::uint32_t kMaxFastCallArgs = 8;
+
+    std::uint32_t dst = 0;
+    std::uint32_t callee_reg = 0;
+    std::uint32_t pos_count = 0;
+    if (!operand_u32(frame, insn, 0, &dst) ||
+        !operand_u32(frame, insn, 1, &callee_reg) ||
+        !operand_u32(frame, insn, 2, &pos_count)) {
+      return FastCallStatus::Faulted;
+    }
+    if (pos_count > kMaxFastCallArgs) {
+      return FastCallStatus::NotHandled;
+    }
+
+    std::uint32_t arg_regs[kMaxFastCallArgs] = {};
+    std::size_t operand_index = 3;
+    for (std::uint32_t i = 0; i < pos_count; ++i) {
+      if (!operand_u32(frame, insn, operand_index++, &arg_regs[i])) {
+        return FastCallStatus::Faulted;
+      }
+    }
+
+    std::uint32_t kw_count = 0;
+    if (!operand_u32(frame, insn, operand_index++, &kw_count)) {
+      return FastCallStatus::Faulted;
+    }
+    if (kw_count != 0U) {
+      return FastCallStatus::NotHandled;
+    }
+
+    std::int64_t block_reg = -1;
+    if (!operand_i64(frame, insn, operand_index++, &block_reg)) {
+      return FastCallStatus::Faulted;
+    }
+    if (has_optional_reg(block_reg)) {
+      return FastCallStatus::NotHandled;
+    }
+
+    const std::optional<std::uint32_t> site_id =
+        optional_operand_u32(frame, insn, operand_index++);
+    if (fault_.has_value()) {
+      return FastCallStatus::Faulted;
+    }
+    (void)site_id;
+
+    if (callee_reg >= frame.regs.size() ||
+        callee_reg >= frame.initialized.size() ||
+        frame.initialized[callee_reg] == 0U ||
+        (callee_reg < frame.int_valid.size() &&
+         frame.int_valid[callee_reg] != 0U) ||
+        !frame.regs[callee_reg].is_closure()) {
+      return FastCallStatus::NotHandled;
+    }
+
+    FastCallArg args[kMaxFastCallArgs];
+    for (std::uint32_t i = 0; i < pos_count; ++i) {
+      std::int64_t int_arg = 0;
+      const bool int_fast =
+          read_integer_reg_unboxed(frame, arg_regs[i], &int_arg);
+      if (fault_.has_value()) {
+        return FastCallStatus::Faulted;
+      }
+      if (int_fast) {
+        args[i].int_value = int_arg;
+        args[i].int_valid = true;
+        continue;
+      }
+      args[i].value = read_reg(frame, arg_regs[i]);
+      if (fault_.has_value()) {
+        return FastCallStatus::Faulted;
+      }
+    }
+
+    const Value callee = read_reg(frame, callee_reg);
+    if (fault_.has_value()) {
+      return FastCallStatus::Faulted;
+    }
+    if (!callee.is_closure()) {
+      return FastCallStatus::NotHandled;
+    }
+    if (!ensure_lifecycle_access(frame, callee)) {
+      return FastCallStatus::Faulted;
+    }
+    const std::shared_ptr<ClosureValue> closure = callee.as_closure();
+    if (closure == nullptr) {
+      set_fault(frame, "TypeError", "closure value is null");
+      return FastCallStatus::Faulted;
+    }
+    const BcCode *code = find_code(module_, closure->code_id);
+    if (code == nullptr) {
+      set_fault(frame, "VMError", "closure code id is unknown");
+      return FastCallStatus::Faulted;
+    }
+
+    Value direct_value = Value::null();
+    std::int64_t direct_int = 0;
+    bool direct_int_result = false;
+    const FastCallStatus direct_status =
+        try_evaluate_direct_closure(frame, *code, args, pos_count,
+                                    closure->captures, &direct_value,
+                                    &direct_int, &direct_int_result);
+    if (direct_status == FastCallStatus::Faulted) {
+      return FastCallStatus::Faulted;
+    }
+    if (direct_status == FastCallStatus::Matched) {
+      const bool wrote =
+          direct_int_result
+              ? write_integer_reg_unboxed(frame, dst, direct_int)
+              : write_reg_fast_plain(frame, dst, std::move(direct_value));
+      if (!wrote) {
+        return FastCallStatus::Faulted;
+      }
+      ++frame.pc;
+      return FastCallStatus::Matched;
+    }
+
+    const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
+    ++frame.pc;
+    frame.active_call_pc = call_pc;
+    push_frame_from_fast_args(*code, args, pos_count, closure->captures,
+                              closure->self, Value::null(), dst);
+    return FastCallStatus::Matched;
+  }
+
   Value load_constant(const Frame &frame, std::uint32_t const_id) {
     if (const_id >= module_.const_pool.size()) {
       set_fault(frame, "VMError", "constant ref out of range");
@@ -7682,8 +9390,8 @@ private:
     return true;
   }
 
-  bool read_integer_reg_fast(Frame &frame, std::uint32_t reg,
-                             std::int64_t *out) {
+  bool read_integer_reg_unboxed(Frame &frame, std::uint32_t reg,
+                                std::int64_t *out) {
     if (reg >= frame.regs.size()) {
       set_fault(frame, "VMError", "register out of range");
       return false;
@@ -7692,12 +9400,40 @@ private:
       set_fault(frame, "NameError", "read of uninitialized local/module cell");
       return false;
     }
+    if (reg < frame.int_valid.size() && frame.int_valid[reg] != 0U) {
+      *out = frame.int64_regs[reg];
+      return true;
+    }
     const std::int64_t *value =
         std::get_if<std::int64_t>(&frame.regs[reg].payload);
     if (value == nullptr) {
       return false;
     }
     *out = *value;
+    ensure_integer_sidecar_size(frame);
+    frame.int64_regs[reg] = *value;
+    frame.int_valid[reg] = 1U;
+    return true;
+  }
+
+  bool write_integer_reg_unboxed(Frame &frame, std::uint32_t reg,
+                                 std::int64_t value) {
+    if (reg >= frame.regs.size()) {
+      set_fault(frame, "VMError", "register out of range");
+      return false;
+    }
+    if (frame.initialized.size() < frame.regs.size()) {
+      frame.initialized.resize(frame.regs.size(), 0U);
+    }
+    if ((frame.initialized[reg] != 0U && frame.regs[reg].is_watch_cell()) ||
+        !frame.prepared_seq_regs.empty() || !frame.prepared_map_regs.empty() ||
+        !frame.pending_pattern_bindings.empty()) {
+      return write_reg(frame, reg, Value::integer(value));
+    }
+    ensure_integer_sidecar_size(frame);
+    frame.int64_regs[reg] = value;
+    frame.int_valid[reg] = 1U;
+    frame.initialized[reg] = 1U;
     return true;
   }
 
@@ -7716,23 +9452,19 @@ private:
     }
     frame.regs[reg] = std::move(value);
     frame.initialized[reg] = 1U;
+    sync_integer_reg_from_value(frame, reg, frame.regs[reg]);
     return true;
   }
 
-  bool step_integer_binary(Frame &frame, const Instruction &insn,
-                           bool rhs_is_constant) {
-    std::uint32_t dst = 0;
-    std::uint32_t lhs_reg = 0;
-    std::uint32_t rhs_operand = 0;
-    if (!operand_u32(frame, insn, 0, &dst) ||
-        !operand_u32(frame, insn, 1, &lhs_reg) ||
-        !operand_u32(frame, insn, 2, &rhs_operand)) {
-      return false;
-    }
-
+  bool step_integer_binary_decoded(Frame &frame, Opcode opcode,
+                                   std::uint32_t dst,
+                                   std::uint32_t lhs_reg,
+                                   std::uint32_t rhs_operand,
+                                   bool rhs_is_constant) {
     std::int64_t fast_lhs = 0;
     std::int64_t fast_rhs = 0;
-    const bool lhs_fast = read_integer_reg_fast(frame, lhs_reg, &fast_lhs);
+    const bool lhs_fast =
+        read_integer_reg_unboxed(frame, lhs_reg, &fast_lhs);
     if (fault_.has_value()) {
       return false;
     }
@@ -7743,39 +9475,129 @@ private:
         return false;
       }
     } else {
-      rhs_fast = read_integer_reg_fast(frame, rhs_operand, &fast_rhs);
+      rhs_fast = read_integer_reg_unboxed(frame, rhs_operand, &fast_rhs);
       if (fault_.has_value()) {
         return false;
       }
     }
     if (lhs_fast && rhs_fast) {
-      Value result = Value::null();
-      switch (insn.opcode) {
+      switch (opcode) {
       case Opcode::IAdd:
       case Opcode::IAddK:
-        result = Value::integer(fast_lhs + fast_rhs);
-        break;
+        if (!write_integer_reg_unboxed(frame, dst, fast_lhs + fast_rhs)) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
       case Opcode::ISub:
       case Opcode::ISubK:
-        result = Value::integer(fast_lhs - fast_rhs);
-        break;
+        if (!write_integer_reg_unboxed(frame, dst, fast_lhs - fast_rhs)) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IMul:
+      case Opcode::IMulK:
+        if (!write_integer_reg_unboxed(frame, dst, fast_lhs * fast_rhs)) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IDiv:
+      case Opcode::IDivK:
+        if (fast_rhs == 0) {
+          set_fault(frame, "TypeError", "division by zero");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(frame, dst, fast_lhs / fast_rhs)) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IMod:
+      case Opcode::IModK:
+        if (fast_rhs == 0) {
+          set_fault(frame, "TypeError", "modulo by zero");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(frame, dst,
+                                       floor_mod_int64(fast_lhs, fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IFloorDiv:
+      case Opcode::IFloorDivK:
+        if (fast_rhs == 0) {
+          set_fault(frame, "TypeError", "division by zero");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(frame, dst,
+                                       floor_div_int64(fast_lhs, fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
       case Opcode::ILt:
       case Opcode::ILtK:
-        result = Value::boolean(fast_lhs < fast_rhs);
-        break;
+        if (!write_reg_fast_plain(frame, dst,
+                                  Value::boolean(fast_lhs < fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
       case Opcode::IGt:
       case Opcode::IGtK:
-        result = Value::boolean(fast_lhs > fast_rhs);
-        break;
+        if (!write_reg_fast_plain(frame, dst,
+                                  Value::boolean(fast_lhs > fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::ILe:
+      case Opcode::ILeK:
+        if (!write_reg_fast_plain(frame, dst,
+                                  Value::boolean(fast_lhs <= fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IGe:
+      case Opcode::IGeK:
+        if (!write_reg_fast_plain(frame, dst,
+                                  Value::boolean(fast_lhs >= fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IEq:
+      case Opcode::IEqK:
+        if (!write_reg_fast_plain(frame, dst,
+                                  Value::boolean(fast_lhs == fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::INe:
+      case Opcode::INeK:
+        if (!write_reg_fast_plain(frame, dst,
+                                  Value::boolean(fast_lhs != fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::ICmp:
+      case Opcode::ICmpK:
+        if (!write_integer_reg_unboxed(frame, dst,
+                                       compare_int64(fast_lhs, fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
       default:
         set_fault(frame, "VMError", "unsupported integer opcode");
         return false;
       }
-      if (!write_reg_fast_plain(frame, dst, std::move(result))) {
-        return false;
-      }
-      ++frame.pc;
-      return true;
     }
 
     const Value lhs_value = read_reg(frame, lhs_reg);
@@ -7797,19 +9619,46 @@ private:
     }
 
     auto selector = [&]() -> std::string {
-      switch (insn.opcode) {
+      switch (opcode) {
       case Opcode::IAdd:
       case Opcode::IAddK:
         return "+";
       case Opcode::ISub:
       case Opcode::ISubK:
         return "-";
+      case Opcode::IMul:
+      case Opcode::IMulK:
+        return "*";
+      case Opcode::IDiv:
+      case Opcode::IDivK:
+        return "/";
+      case Opcode::IMod:
+      case Opcode::IModK:
+        return "%";
+      case Opcode::IFloorDiv:
+      case Opcode::IFloorDivK:
+        return "//";
       case Opcode::ILt:
       case Opcode::ILtK:
         return "<";
       case Opcode::IGt:
       case Opcode::IGtK:
         return ">";
+      case Opcode::ILe:
+      case Opcode::ILeK:
+        return "<=";
+      case Opcode::IGe:
+      case Opcode::IGeK:
+        return ">=";
+      case Opcode::IEq:
+      case Opcode::IEqK:
+        return "==";
+      case Opcode::INe:
+      case Opcode::INeK:
+        return "!=";
+      case Opcode::ICmp:
+      case Opcode::ICmpK:
+        return "<=>";
       default:
         return "";
       }
@@ -7853,33 +9702,173 @@ private:
 
     const std::int64_t lhs = lhs_value.as_integer();
     const std::int64_t rhs = rhs_value.as_integer();
-    Value result = Value::null();
-    switch (insn.opcode) {
+    switch (opcode) {
     case Opcode::IAdd:
     case Opcode::IAddK:
-      result = Value::integer(lhs + rhs);
-      break;
+      if (!write_integer_reg_unboxed(frame, dst, lhs + rhs)) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
     case Opcode::ISub:
     case Opcode::ISubK:
-      result = Value::integer(lhs - rhs);
-      break;
+      if (!write_integer_reg_unboxed(frame, dst, lhs - rhs)) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IMul:
+    case Opcode::IMulK:
+      if (!write_integer_reg_unboxed(frame, dst, lhs * rhs)) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IDiv:
+    case Opcode::IDivK:
+      if (rhs == 0) {
+        set_fault(frame, "TypeError", "division by zero");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(frame, dst, lhs / rhs)) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IMod:
+    case Opcode::IModK:
+      if (rhs == 0) {
+        set_fault(frame, "TypeError", "modulo by zero");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(frame, dst, floor_mod_int64(lhs, rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IFloorDiv:
+    case Opcode::IFloorDivK:
+      if (rhs == 0) {
+        set_fault(frame, "TypeError", "division by zero");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(frame, dst, floor_div_int64(lhs, rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
     case Opcode::ILt:
     case Opcode::ILtK:
-      result = Value::boolean(lhs < rhs);
-      break;
+      if (!write_reg_fast_plain(frame, dst, Value::boolean(lhs < rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
     case Opcode::IGt:
     case Opcode::IGtK:
-      result = Value::boolean(lhs > rhs);
-      break;
+      if (!write_reg_fast_plain(frame, dst, Value::boolean(lhs > rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::ILe:
+    case Opcode::ILeK:
+      if (!write_reg_fast_plain(frame, dst, Value::boolean(lhs <= rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IGe:
+    case Opcode::IGeK:
+      if (!write_reg_fast_plain(frame, dst, Value::boolean(lhs >= rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IEq:
+    case Opcode::IEqK:
+      if (!write_reg_fast_plain(frame, dst, Value::boolean(lhs == rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::INe:
+    case Opcode::INeK:
+      if (!write_reg_fast_plain(frame, dst, Value::boolean(lhs != rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::ICmp:
+    case Opcode::ICmpK:
+      if (!write_integer_reg_unboxed(frame, dst, compare_int64(lhs, rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
     default:
       set_fault(frame, "VMError", "unsupported integer opcode");
       return false;
     }
+  }
 
-    if (!write_reg(frame, dst, std::move(result))) {
+  bool step_integer_binary(Frame &frame, const Instruction &insn,
+                           bool rhs_is_constant) {
+    std::uint32_t dst = 0;
+    std::uint32_t lhs_reg = 0;
+    std::uint32_t rhs_operand = 0;
+    if (!operand_u32(frame, insn, 0, &dst) ||
+        !operand_u32(frame, insn, 1, &lhs_reg) ||
+        !operand_u32(frame, insn, 2, &rhs_operand)) {
       return false;
     }
-    ++frame.pc;
+    return step_integer_binary_decoded(frame, insn.opcode, dst, lhs_reg,
+                                       rhs_operand, rhs_is_constant);
+  }
+
+  bool step_integer_binary(Frame &frame, const QuickInsn &insn,
+                           bool rhs_is_constant) {
+    return step_integer_binary_decoded(frame, insn.opcode, insn.a, insn.b,
+                                       insn.c, rhs_is_constant);
+  }
+
+  bool step_compare_jump_if_false(Frame &frame, const QuickInsn &insn,
+                                  bool rhs_is_constant) {
+    std::int64_t fast_lhs = 0;
+    std::int64_t fast_rhs = 0;
+    const bool lhs_fast =
+        read_integer_reg_unboxed(frame, insn.a, &fast_lhs);
+    if (fault_.has_value()) {
+      return false;
+    }
+    bool rhs_fast = false;
+    if (rhs_is_constant) {
+      rhs_fast = load_integer_constant(frame, insn.b, &fast_rhs);
+      if (!rhs_fast) {
+        return false;
+      }
+    } else {
+      rhs_fast = read_integer_reg_unboxed(frame, insn.b, &fast_rhs);
+      if (fault_.has_value()) {
+        return false;
+      }
+    }
+
+    if (!lhs_fast || !rhs_fast) {
+      const Instruction &source = frame.code->instructions[frame.pc];
+      return step_integer_binary(frame, source, rhs_is_constant);
+    }
+    if (insn.c >= frame.code->instructions.size()) {
+      set_fault(frame, "VMError", "jump target out of range");
+      return false;
+    }
+
+    const bool compare =
+        insn.quick_opcode == QuickOpcode::ILtJumpIfFalse ||
+                insn.quick_opcode == QuickOpcode::ILtKJumpIfFalse
+            ? fast_lhs < fast_rhs
+            : fast_lhs > fast_rhs;
+    frame.pc = !compare ? insn.c : frame.pc + 2U;
     return true;
   }
 
@@ -8080,13 +10069,16 @@ private:
     return Value::null();
   }
 
-  Value read_reg(const Frame &frame, std::uint32_t reg) {
+  Value read_reg(Frame &frame, std::uint32_t reg) {
     if (reg >= frame.regs.size()) {
       set_fault(frame, "VMError", "register out of range");
       return Value::null();
     }
     if (reg >= frame.initialized.size() || frame.initialized[reg] == 0U) {
       set_fault(frame, "NameError", "read of uninitialized local/module cell");
+      return Value::null();
+    }
+    if (!materialize_integer_reg_if_needed(frame, reg)) {
       return Value::null();
     }
     return unwrap_watch_value_for_read(frame.regs[reg]);
@@ -8275,6 +10267,7 @@ private:
       frame.initialized.resize(frame.regs.size(), 0U);
     }
     if (frame.initialized[reg] != 0U && frame.regs[reg].is_watch_cell()) {
+      invalidate_integer_reg(frame, reg);
       const std::shared_ptr<RuntimeWatchCell> cell =
           frame.regs[reg].as_watch_cell();
       if (cell != nullptr) {
@@ -8291,6 +10284,7 @@ private:
         return true;
       }
     }
+    invalidate_integer_reg(frame, reg);
     frame.regs[reg] = std::move(value);
     frame.initialized[reg] = 1U;
     if (!frame.prepared_seq_regs.empty() || !frame.prepared_map_regs.empty() ||
@@ -8316,6 +10310,9 @@ private:
       set_fault(frame, "NameError", "read of uninitialized local/module cell");
       return nullptr;
     }
+    if (!materialize_integer_reg_if_needed(frame, slot)) {
+      return nullptr;
+    }
     if (frame.initialized[slot] != 0U && frame.regs[slot].is_watch_cell()) {
       return frame.regs[slot].as_watch_cell();
     }
@@ -8326,6 +10323,7 @@ private:
         seed.has_value() ? std::move(*seed) : frame.regs[slot], target_name);
     frame.regs[slot] = Value::watch_cell(cell);
     frame.initialized[slot] = 1U;
+    invalidate_integer_reg(frame, slot);
     return cell;
   }
 
@@ -8448,6 +10446,44 @@ private:
       return extract_range_items(frame, value);
     }
     return std::nullopt;
+  }
+
+  const std::vector<Value> *sequence_items_view(const Frame &frame,
+                                                const Value &value) {
+    if (value.is_list()) {
+      const std::shared_ptr<ListValue> list = value.as_list();
+      if (list == nullptr) {
+        set_fault(frame, "TypeError", "list value is null");
+        return nullptr;
+      }
+      if (!ensure_lifecycle_access(frame, value)) {
+        return nullptr;
+      }
+      return &list->items;
+    }
+    if (value.is_tuple()) {
+      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      if (tuple == nullptr) {
+        set_fault(frame, "TypeError", "tuple value is null");
+        return nullptr;
+      }
+      if (!ensure_lifecycle_access(frame, value)) {
+        return nullptr;
+      }
+      return &tuple->items;
+    }
+    if (value.is_set()) {
+      const std::shared_ptr<SetValue> set = value.as_set();
+      if (set == nullptr) {
+        set_fault(frame, "TypeError", "set value is null");
+        return nullptr;
+      }
+      if (!ensure_lifecycle_access(frame, value)) {
+        return nullptr;
+      }
+      return &set->items;
+    }
+    return nullptr;
   }
 
   std::optional<std::vector<MapEntry>> extract_map_entries(const Frame &frame,
@@ -10757,6 +12793,8 @@ private:
           frame.initialized.resize(frame.regs.size(), 0U);
         }
         frame.initialized[slot] = 1U;
+        sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(slot),
+                                    frame.regs[slot]);
       }
     }
 
@@ -10784,6 +12822,8 @@ private:
           frame.initialized.resize(frame.regs.size(), 0U);
         }
         frame.initialized[slot] = 1U;
+        sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(slot),
+                                    frame.regs[slot]);
       }
       ++thunk_index;
     }
@@ -10810,6 +12850,12 @@ private:
       nested_frame.regs[i] = regs[i];
       nested_frame.initialized[i] =
           i < initialized.size() ? initialized[i] : 1U;
+      if (nested_frame.initialized[i] != 0U) {
+        sync_integer_reg_from_value(nested_frame, static_cast<std::uint32_t>(i),
+                                    nested_frame.regs[i]);
+      } else {
+        invalidate_integer_reg(nested_frame, static_cast<std::uint32_t>(i));
+      }
     }
 
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
@@ -10856,8 +12902,7 @@ private:
 
     Frame callee;
     callee.code = code;
-    callee.regs.assign(code->reg_count, Value::null());
-    callee.initialized.assign(code->reg_count, 0U);
+    initialize_frame_register_file(callee, *code);
     callee.self = self;
     callee.block = block;
     if (!materialize_defaults(callee, method, params, slots) ||
@@ -11177,8 +13222,7 @@ private:
       const std::optional<Value> &return_override) {
     Frame callee;
     callee.code = &entry_code;
-    callee.regs.assign(entry_code.reg_count, Value::null());
-    callee.initialized.assign(entry_code.reg_count, 0U);
+    initialize_frame_register_file(callee, entry_code);
     callee.self = self;
     callee.block = block;
 
@@ -12937,8 +14981,11 @@ private:
     const bool range_collection_selector =
         sequence_collection_selector || selector == "===";
     const bool lazy_seq_collection_selector = sequence_collection_selector;
+    const bool numeric_selector =
+        selector_in({"+", "-", "*", "/", "%", "//", ">", "<", ">=", "<=",
+                     "==", "!=", "<=>"});
     const bool builtin_selector =
-        selector_in({"==", "==="}) ||
+        selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          sequence_collection_selector) ||
         (receiver_is_range && range_collection_selector) ||
@@ -12948,8 +14995,7 @@ private:
                       "entries", "to_a", "each", "map", "select", "reject",
                       "transform", "transform_values", "merge", "each_pair",
                       "contains?", "include?", "+", "|"})) ||
-        (receiver.is_integer() &&
-         selector_in({"+", "-", "*", "/", ">", "<", ">=", "<="}));
+        ((receiver.is_integer() || receiver.is_float()) && numeric_selector);
     const bool keyword_compatible_builtin_selector =
         selector == "each" &&
         (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
@@ -12961,7 +15007,7 @@ private:
       return SendStatus::Faulted;
     }
 
-    if ((selector == "==" || selector == "===") &&
+    if ((selector == "==" || selector == "===" || selector == "!=") &&
         !receiver.is_instance_object() && !receiver.is_class_object()) {
       if (!require_arity(1) || !require_no_block()) {
         return SendStatus::Faulted;
@@ -12969,7 +15015,8 @@ private:
       if (!ensure_lifecycle_access(frame, args[0])) {
         return SendStatus::Faulted;
       }
-      *out = Value::boolean(value_equals(receiver, args[0]));
+      const bool equal = value_equals(receiver, args[0]);
+      *out = Value::boolean(selector == "!=" ? !equal : equal);
       return SendStatus::Matched;
     }
 
@@ -13493,6 +15540,80 @@ private:
           set_fault(frame, "ArgumentError",
                     "open-ended Range cannot run eager collection method");
           return SendStatus::Faulted;
+        }
+      }
+
+      if (!receiver_is_range) {
+        const std::vector<Value> *items_view =
+            sequence_items_view(frame, receiver);
+        if (fault_.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (items_view != nullptr) {
+          const std::vector<Value> &items = *items_view;
+          if (selector == "empty?") {
+            if (!require_arity(0) || !require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::boolean(items.empty());
+            return SendStatus::Matched;
+          }
+          if (selector == "[]") {
+            std::int64_t index = 0;
+            if (!require_arity(1) || !require_no_block() ||
+                !require_integer_arg(0, &index)) {
+              return SendStatus::Faulted;
+            }
+            if (index < 0 || static_cast<std::size_t>(index) >= items.size()) {
+              set_fault(frame, "IndexError",
+                        "collection index is out of bounds");
+              return SendStatus::Faulted;
+            }
+            *out = items[static_cast<std::size_t>(index)];
+            return SendStatus::Matched;
+          }
+          if (selector == "deconstruct") {
+            if (!require_arity(0) || !require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            *out = receiver;
+            return SendStatus::Matched;
+          }
+          if (selector == "first") {
+            if (!require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            if (args.empty()) {
+              *out = items.empty() ? Value::null() : items.front();
+              return SendStatus::Matched;
+            }
+            std::int64_t count = 0;
+            if (!require_arity(1) || !require_integer_arg(0, &count)) {
+              return SendStatus::Faulted;
+            }
+            const std::size_t take =
+                count <= 0 ? 0U
+                           : std::min<std::size_t>(
+                                 static_cast<std::size_t>(count),
+                                 items.size());
+            *out = make_list_value(
+                std::vector<Value>(items.begin(), items.begin() + take));
+            return SendStatus::Matched;
+          }
+          if (selector == "count" && block.is_null()) {
+            if (!require_arity(0)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::integer(static_cast<std::int64_t>(items.size()));
+            return SendStatus::Matched;
+          }
+          if (selector == "to_a") {
+            if (!require_arity(0) || !require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            *out = make_list_value(items);
+            return SendStatus::Matched;
+          }
         }
       }
 
@@ -14181,6 +16302,54 @@ private:
         *out = Value::integer(lhs / rhs);
         return SendStatus::Matched;
       }
+      if (selector == "%") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_float()) {
+          const double float_rhs = args[0].as_float();
+          if (float_rhs == 0.0) {
+            set_fault(frame, "TypeError", "modulo by zero");
+            return SendStatus::Faulted;
+          }
+          *out = Value::floating(
+              floor_mod_double(static_cast<double>(lhs), float_rhs));
+          return SendStatus::Matched;
+        }
+        if (!require_integer_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if (rhs == 0) {
+          set_fault(frame, "TypeError", "modulo by zero");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(floor_mod_int64(lhs, rhs));
+        return SendStatus::Matched;
+      }
+      if (selector == "//") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_float()) {
+          const double float_rhs = args[0].as_float();
+          if (float_rhs == 0.0) {
+            set_fault(frame, "TypeError", "division by zero");
+            return SendStatus::Faulted;
+          }
+          *out = Value::floating(
+              std::floor(static_cast<double>(lhs) / float_rhs));
+          return SendStatus::Matched;
+        }
+        if (!require_integer_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if (rhs == 0) {
+          set_fault(frame, "TypeError", "division by zero");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(floor_div_int64(lhs, rhs));
+        return SendStatus::Matched;
+      }
       if (selector == ">") {
         if (!require_arity(1) || !require_no_block() ||
             !require_numeric_arg(0, &numeric_rhs)) {
@@ -14211,6 +16380,21 @@ private:
           return SendStatus::Faulted;
         }
         *out = Value::boolean(static_cast<double>(lhs) <= numeric_rhs);
+        return SendStatus::Matched;
+      }
+      if (selector == "<=>") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_integer()) {
+          *out = Value::integer(compare_int64(lhs, args[0].as_integer()));
+          return SendStatus::Matched;
+        }
+        if (!require_numeric_arg(0, &numeric_rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out =
+            Value::integer(compare_double(static_cast<double>(lhs), numeric_rhs));
         return SendStatus::Matched;
       }
     }
@@ -14254,6 +16438,30 @@ private:
         *out = Value::floating(lhs / rhs);
         return SendStatus::Matched;
       }
+      if (selector == "%") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if (rhs == 0.0) {
+          set_fault(frame, "TypeError", "modulo by zero");
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(floor_mod_double(lhs, rhs));
+        return SendStatus::Matched;
+      }
+      if (selector == "//") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if (rhs == 0.0) {
+          set_fault(frame, "TypeError", "division by zero");
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(std::floor(lhs / rhs));
+        return SendStatus::Matched;
+      }
       if (selector == ">") {
         if (!require_arity(1) || !require_no_block() ||
             !require_numeric_arg(0, &rhs)) {
@@ -14286,9 +16494,425 @@ private:
         *out = Value::boolean(lhs <= rhs);
         return SendStatus::Matched;
       }
+      if (selector == "<=>") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(compare_double(lhs, rhs));
+        return SendStatus::Matched;
+      }
     }
 
     return SendStatus::NotHandled;
+  }
+
+  FastSendStatus step_fast_static_send(Frame &frame, const Instruction &insn,
+                                       std::uint32_t dst,
+                                       std::uint32_t recv_reg,
+                                       const std::string &selector) {
+    const bool collection_selector =
+        selector == "[]" || selector == "count" || selector == "first" ||
+        selector == "empty?" || selector == "deconstruct" ||
+        selector == "to_a";
+    const bool integer_selector =
+        selector == "+" || selector == "-" || selector == "*" ||
+        selector == "/" || selector == "%" || selector == "//" ||
+        selector == ">" || selector == "<" || selector == ">=" ||
+        selector == "<=" || selector == "==" || selector == "!=" ||
+        selector == "<=>";
+    if (!collection_selector && !integer_selector) {
+      return FastSendStatus::NotHandled;
+    }
+
+    std::uint32_t pos_count = 0;
+    if (!operand_u32(frame, insn, 3, &pos_count)) {
+      return FastSendStatus::Faulted;
+    }
+    if (pos_count > 1U) {
+      return FastSendStatus::NotHandled;
+    }
+
+    std::uint32_t arg_reg = 0;
+    std::size_t operand_index = 4;
+    if (pos_count == 1U &&
+        !operand_u32(frame, insn, operand_index++, &arg_reg)) {
+      return FastSendStatus::Faulted;
+    }
+
+    std::uint32_t kw_count = 0;
+    if (!operand_u32(frame, insn, operand_index++, &kw_count)) {
+      return FastSendStatus::Faulted;
+    }
+    if (kw_count != 0U) {
+      return FastSendStatus::NotHandled;
+    }
+
+    std::int64_t block_reg = -1;
+    if (!operand_i64(frame, insn, operand_index++, &block_reg)) {
+      return FastSendStatus::Faulted;
+    }
+    if (has_optional_reg(block_reg)) {
+      return FastSendStatus::NotHandled;
+    }
+
+    const std::optional<std::uint32_t> site_id =
+        optional_operand_u32(frame, insn, operand_index++);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    const std::uint32_t site_flags =
+        site_id.has_value() ? call_site_flags(frame, *site_id) : 0U;
+    if ((site_flags & (bytecode::kCallSiteFlagPropertyAccess |
+                       bytecode::kCallSiteFlagPropertyAssignment)) != 0U) {
+      return FastSendStatus::NotHandled;
+    }
+
+    if (integer_selector) {
+      if (pos_count != 1U) {
+        return FastSendStatus::NotHandled;
+      }
+      std::int64_t lhs = 0;
+      std::int64_t rhs = 0;
+      const bool rhs_fast = read_integer_reg_unboxed(frame, arg_reg, &rhs);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      if (!rhs_fast) {
+        return FastSendStatus::NotHandled;
+      }
+      const bool lhs_fast = read_integer_reg_unboxed(frame, recv_reg, &lhs);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      if (!lhs_fast || !rhs_fast) {
+        return FastSendStatus::NotHandled;
+      }
+      if (selector == "+") {
+        return write_integer_reg_unboxed(frame, dst, lhs + rhs)
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "-") {
+        return write_integer_reg_unboxed(frame, dst, lhs - rhs)
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "*") {
+        return write_integer_reg_unboxed(frame, dst, lhs * rhs)
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "/") {
+        if (rhs == 0) {
+          set_fault(frame, "TypeError", "division by zero");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(frame, dst, lhs / rhs)
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "%") {
+        if (rhs == 0) {
+          set_fault(frame, "TypeError", "modulo by zero");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(frame, dst, floor_mod_int64(lhs, rhs))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "//") {
+        if (rhs == 0) {
+          set_fault(frame, "TypeError", "division by zero");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(frame, dst, floor_div_int64(lhs, rhs))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "<=>") {
+        return write_integer_reg_unboxed(frame, dst, compare_int64(lhs, rhs))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+
+      bool result = false;
+      if (selector == ">") {
+        result = lhs > rhs;
+      } else if (selector == "<") {
+        result = lhs < rhs;
+      } else if (selector == ">=") {
+        result = lhs >= rhs;
+      } else if (selector == "<=") {
+        result = lhs <= rhs;
+      } else if (selector == "==") {
+        result = lhs == rhs;
+      } else {
+        result = lhs != rhs;
+      }
+      return write_reg_fast_plain(frame, dst, Value::boolean(result))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+
+    std::int64_t single_integer_arg = 0;
+    if (selector == "empty?" || selector == "count" ||
+        selector == "deconstruct" || selector == "to_a") {
+      if (pos_count != 0U) {
+        return FastSendStatus::NotHandled;
+      }
+    } else if (selector == "[]") {
+      if (pos_count != 1U) {
+        return FastSendStatus::NotHandled;
+      }
+      const bool index_fast =
+          read_integer_reg_unboxed(frame, arg_reg, &single_integer_arg);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      if (!index_fast) {
+        return FastSendStatus::NotHandled;
+      }
+    } else if (selector == "first" && pos_count == 1U) {
+      const bool count_fast =
+          read_integer_reg_unboxed(frame, arg_reg, &single_integer_arg);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      if (!count_fast) {
+        return FastSendStatus::NotHandled;
+      }
+    }
+
+    const Value receiver = read_reg(frame, recv_reg);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    const std::vector<Value> *items = sequence_items_view(frame, receiver);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    if (items == nullptr) {
+      return FastSendStatus::NotHandled;
+    }
+
+    if (selector == "empty?") {
+      return write_reg_fast_plain(frame, dst, Value::boolean(items->empty()))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+    if (selector == "count") {
+      return write_integer_reg_unboxed(
+                 frame, dst, static_cast<std::int64_t>(items->size()))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+    if (selector == "deconstruct") {
+      return write_reg_fast_plain(frame, dst, receiver)
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+    if (selector == "to_a") {
+      return write_reg_fast_plain(frame, dst, make_list_value(*items))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+    if (selector == "[]") {
+      if (single_integer_arg < 0 ||
+          static_cast<std::size_t>(single_integer_arg) >= items->size()) {
+        set_fault(frame, "IndexError", "collection index is out of bounds");
+        return FastSendStatus::Faulted;
+      }
+      return write_reg_fast_plain(
+                 frame, dst,
+                 (*items)[static_cast<std::size_t>(single_integer_arg)])
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+    if (selector == "first") {
+      if (pos_count == 0U) {
+        return write_reg_fast_plain(
+                   frame, dst, items->empty() ? Value::null() : items->front())
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      const std::size_t take =
+          single_integer_arg <= 0
+              ? 0U
+              : std::min<std::size_t>(
+                    static_cast<std::size_t>(single_integer_arg), items->size());
+      return write_reg_fast_plain(
+                 frame, dst,
+                 make_list_value(
+                     std::vector<Value>(items->begin(), items->begin() + take)))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+
+    return FastSendStatus::NotHandled;
+  }
+
+  FastSendStatus step_quick_integer_send(Frame &frame, QuickOpcode opcode,
+                                         std::uint32_t dst,
+                                         std::uint32_t recv_reg,
+                                         std::uint32_t arg_reg) {
+    std::int64_t lhs = 0;
+    std::int64_t rhs = 0;
+    const bool rhs_fast = read_integer_reg_unboxed(frame, arg_reg, &rhs);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    if (!rhs_fast) {
+      return FastSendStatus::NotHandled;
+    }
+    const bool lhs_fast = read_integer_reg_unboxed(frame, recv_reg, &lhs);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    if (!lhs_fast) {
+      return FastSendStatus::NotHandled;
+    }
+
+    switch (opcode) {
+    case QuickOpcode::SendIAdd:
+      return write_integer_reg_unboxed(frame, dst, lhs + rhs)
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendISub:
+      return write_integer_reg_unboxed(frame, dst, lhs - rhs)
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIMul:
+      return write_integer_reg_unboxed(frame, dst, lhs * rhs)
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIDiv:
+      if (rhs == 0) {
+        set_fault(frame, "TypeError", "division by zero");
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(frame, dst, lhs / rhs)
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIMod:
+      if (rhs == 0) {
+        set_fault(frame, "TypeError", "modulo by zero");
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(frame, dst, floor_mod_int64(lhs, rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIFloorDiv:
+      if (rhs == 0) {
+        set_fault(frame, "TypeError", "division by zero");
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(frame, dst, floor_div_int64(lhs, rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendILt:
+      return write_reg_fast_plain(frame, dst, Value::boolean(lhs < rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIGt:
+      return write_reg_fast_plain(frame, dst, Value::boolean(lhs > rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendILe:
+      return write_reg_fast_plain(frame, dst, Value::boolean(lhs <= rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIGe:
+      return write_reg_fast_plain(frame, dst, Value::boolean(lhs >= rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIEq:
+      return write_reg_fast_plain(frame, dst, Value::boolean(lhs == rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendINe:
+      return write_reg_fast_plain(frame, dst, Value::boolean(lhs != rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendICmp:
+      return write_integer_reg_unboxed(frame, dst, compare_int64(lhs, rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    default:
+      return FastSendStatus::NotHandled;
+    }
+  }
+
+  FastSendStatus step_quick_sequence_send(Frame &frame, QuickOpcode opcode,
+                                          std::uint32_t dst,
+                                          std::uint32_t recv_reg,
+                                          std::uint32_t arg_reg,
+                                          std::int64_t pos_count) {
+    std::int64_t integer_arg = 0;
+    if (opcode == QuickOpcode::SendSeqIndex ||
+        (opcode == QuickOpcode::SendSeqFirst && pos_count == 1)) {
+      const bool arg_fast =
+          read_integer_reg_unboxed(frame, arg_reg, &integer_arg);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      if (!arg_fast) {
+        return FastSendStatus::NotHandled;
+      }
+    }
+
+    const Value receiver = read_reg(frame, recv_reg);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    const std::vector<Value> *items = sequence_items_view(frame, receiver);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    if (items == nullptr) {
+      return FastSendStatus::NotHandled;
+    }
+
+    switch (opcode) {
+    case QuickOpcode::SendSeqIndex:
+      if (integer_arg < 0 ||
+          static_cast<std::size_t>(integer_arg) >= items->size()) {
+        set_fault(frame, "IndexError", "collection index is out of bounds");
+        return FastSendStatus::Faulted;
+      }
+      return write_reg_fast_plain(
+                 frame, dst, (*items)[static_cast<std::size_t>(integer_arg)])
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendSeqCount:
+      return write_integer_reg_unboxed(
+                 frame, dst, static_cast<std::int64_t>(items->size()))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendSeqFirst:
+      if (pos_count == 0) {
+        return write_reg_fast_plain(
+                   frame, dst, items->empty() ? Value::null() : items->front())
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (pos_count == 1) {
+        const std::size_t take =
+            integer_arg <= 0
+                ? 0U
+                : std::min<std::size_t>(
+                      static_cast<std::size_t>(integer_arg), items->size());
+        return write_reg_fast_plain(
+                   frame, dst,
+                   make_list_value(
+                       std::vector<Value>(items->begin(), items->begin() + take)))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      return FastSendStatus::NotHandled;
+    default:
+      return FastSendStatus::NotHandled;
+    }
   }
 
   bool step_send(Frame &frame, const Instruction &insn, bool dynamic_selector) {
@@ -14328,13 +16952,23 @@ private:
       if (!operand_u32(frame, insn, operand_index++, &selector_id)) {
         return false;
       }
-      selector_value = Value::symbol(selector_id);
-      selector_symbol_id_for_cache = selector_id;
-      selector = selector_text_from_symbol(selector_id);
-      if (!selector.has_value()) {
+      if (selector_id >= module_.symbols.size()) {
         set_fault(frame, "VMError", "selector symbol ref is out of range");
         return false;
       }
+      const std::string &static_selector = module_.symbols[selector_id];
+      const FastSendStatus fast_status =
+          step_fast_static_send(frame, insn, dst, recv_reg, static_selector);
+      if (fast_status == FastSendStatus::Faulted) {
+        return false;
+      }
+      if (fast_status == FastSendStatus::Matched) {
+        ++frame.pc;
+        return true;
+      }
+      selector_value = Value::symbol(selector_id);
+      selector_symbol_id_for_cache = selector_id;
+      selector = static_selector;
     }
 
     std::uint32_t pos_count = 0;
@@ -14605,12 +17239,277 @@ private:
     }
 
     const Instruction &insn = frame.code->instructions[frame.pc];
+    const QuickInsn *quick = nullptr;
+    if (frame.quick_code != nullptr &&
+        frame.pc < frame.quick_code->instructions.size()) {
+      quick = &frame.quick_code->instructions[frame.pc];
+    }
     if (!is_pattern_opcode(insn.opcode) && has_active_pattern_state(frame)) {
       if (!finalize_pattern_success(frame, false)) {
         return;
       }
       if (frame.pc >= frame.code->instructions.size()) {
         set_fault(frame, "VMError", "program counter out of range");
+        return;
+      }
+    }
+    if (quick != nullptr) {
+      switch (quick->quick_opcode) {
+      case QuickOpcode::Fallback:
+        break;
+      case QuickOpcode::LoadK: {
+        if (quick->b >= module_.const_pool.size()) {
+          set_fault(frame, "VMError", "constant ref out of range");
+          return;
+        }
+        const Constant &constant = module_.const_pool[quick->b];
+        if (constant.kind == ConstantKind::Integer) {
+          if (!write_integer_reg_unboxed(frame, quick->a,
+                                         constant.int_value)) {
+            return;
+          }
+        } else if (!write_reg(frame, quick->a,
+                              load_constant(frame, quick->b))) {
+          return;
+        }
+        ++frame.pc;
+        return;
+      }
+      case QuickOpcode::LoadNull:
+        if (!write_reg(frame, quick->a, Value::null())) {
+          return;
+        }
+        ++frame.pc;
+        return;
+      case QuickOpcode::LoadBool:
+        if (!write_reg(frame, quick->a, Value::boolean(quick->imm != 0))) {
+          return;
+        }
+        ++frame.pc;
+        return;
+      case QuickOpcode::Move:
+        if (!write_reg(frame, quick->a, read_reg(frame, quick->b))) {
+          return;
+        }
+        ++frame.pc;
+        return;
+      case QuickOpcode::LoadSelf:
+        if (!write_reg(frame, quick->a, frame.self)) {
+          return;
+        }
+        ++frame.pc;
+        return;
+      case QuickOpcode::GetLast:
+        if (!write_reg(frame, quick->a, frame.last_result)) {
+          return;
+        }
+        ++frame.pc;
+        return;
+      case QuickOpcode::SetLast:
+        frame.last_result = read_reg(frame, quick->a);
+        if (fault_.has_value()) {
+          return;
+        }
+        ++frame.pc;
+        return;
+      case QuickOpcode::LoadUpval:
+        if (quick->b >= frame.captures.size()) {
+          set_fault(frame, "VMError", "capture slot out of range");
+          return;
+        }
+        if (!write_reg(frame, quick->a,
+                       unwrap_watch_value_for_read(frame.captures[quick->b]))) {
+          return;
+        }
+        ++frame.pc;
+        return;
+      case QuickOpcode::StoreUpval: {
+        if (quick->a >= frame.captures.size()) {
+          set_fault(frame, "VMError", "capture slot out of range");
+          return;
+        }
+        const Value value = read_reg(frame, quick->b);
+        if (fault_.has_value()) {
+          return;
+        }
+        if (frame.captures[quick->a].is_watch_cell()) {
+          const std::shared_ptr<RuntimeWatchCell> cell =
+              frame.captures[quick->a].as_watch_cell();
+          if (cell != nullptr) {
+            const RuntimeWatchWriteResult write = cell->write(value);
+            record_watch_write(cell, write);
+          }
+        } else {
+          frame.captures[quick->a] = value;
+        }
+        ++frame.pc;
+        return;
+      }
+      case QuickOpcode::IAdd:
+      case QuickOpcode::ISub:
+      case QuickOpcode::ILt:
+      case QuickOpcode::IGt:
+      case QuickOpcode::IMul:
+      case QuickOpcode::IDiv:
+      case QuickOpcode::IMod:
+      case QuickOpcode::IFloorDiv:
+      case QuickOpcode::ILe:
+      case QuickOpcode::IGe:
+      case QuickOpcode::IEq:
+      case QuickOpcode::INe:
+      case QuickOpcode::ICmp:
+        step_integer_binary(frame, *quick, false);
+        return;
+      case QuickOpcode::IAddK:
+      case QuickOpcode::ISubK:
+      case QuickOpcode::ILtK:
+      case QuickOpcode::IGtK:
+      case QuickOpcode::IMulK:
+      case QuickOpcode::IDivK:
+      case QuickOpcode::IModK:
+      case QuickOpcode::IFloorDivK:
+      case QuickOpcode::ILeK:
+      case QuickOpcode::IGeK:
+      case QuickOpcode::IEqK:
+      case QuickOpcode::INeK:
+      case QuickOpcode::ICmpK:
+        step_integer_binary(frame, *quick, true);
+        return;
+      case QuickOpcode::ILtJumpIfFalse:
+      case QuickOpcode::IGtJumpIfFalse:
+        step_compare_jump_if_false(frame, *quick, false);
+        return;
+	      case QuickOpcode::ILtKJumpIfFalse:
+	      case QuickOpcode::IGtKJumpIfFalse:
+	        step_compare_jump_if_false(frame, *quick, true);
+	        return;
+      case QuickOpcode::SendIAdd:
+      case QuickOpcode::SendISub:
+      case QuickOpcode::SendIMul:
+      case QuickOpcode::SendIDiv:
+      case QuickOpcode::SendIMod:
+      case QuickOpcode::SendIFloorDiv:
+      case QuickOpcode::SendILt:
+      case QuickOpcode::SendIGt:
+      case QuickOpcode::SendILe:
+      case QuickOpcode::SendIGe:
+      case QuickOpcode::SendIEq:
+      case QuickOpcode::SendINe:
+      case QuickOpcode::SendICmp: {
+        const FastSendStatus status =
+            step_quick_integer_send(frame, quick->quick_opcode, quick->a,
+                                    quick->b, quick->c);
+        if (status == FastSendStatus::Faulted) {
+          return;
+        }
+        if (status == FastSendStatus::Matched) {
+          ++frame.pc;
+          return;
+        }
+        break;
+      }
+      case QuickOpcode::SendSeqIndex:
+      case QuickOpcode::SendSeqCount:
+      case QuickOpcode::SendSeqFirst: {
+        const FastSendStatus status =
+            step_quick_sequence_send(frame, quick->quick_opcode, quick->a,
+                                     quick->b, quick->c, quick->imm);
+        if (status == FastSendStatus::Faulted) {
+          return;
+        }
+        if (status == FastSendStatus::Matched) {
+          ++frame.pc;
+          return;
+        }
+        break;
+      }
+	      case QuickOpcode::Jump:
+	        if (quick->a >= frame.code->instructions.size()) {
+	          set_fault(frame, "VMError", "jump target out of range");
+          return;
+        }
+        frame.pc = quick->a;
+        return;
+      case QuickOpcode::JumpIfTrue:
+      case QuickOpcode::JumpIfFalse:
+      case QuickOpcode::JumpIfNull: {
+        if (quick->b >= frame.code->instructions.size()) {
+          set_fault(frame, "VMError", "jump target out of range");
+          return;
+        }
+        const Value cond = read_reg(frame, quick->a);
+        if (fault_.has_value()) {
+          return;
+        }
+        const bool take =
+            quick->quick_opcode == QuickOpcode::JumpIfTrue
+                ? is_truthy(cond)
+                : (quick->quick_opcode == QuickOpcode::JumpIfFalse
+                       ? !is_truthy(cond)
+                       : cond.is_null());
+        frame.pc = take ? quick->b : frame.pc + 1U;
+        return;
+      }
+      case QuickOpcode::Return: {
+        Value value = read_reg(frame, quick->a);
+        if (fault_.has_value()) {
+          return;
+        }
+        if (frame.return_override.has_value()) {
+          value = *frame.return_override;
+        }
+        const bool capture_completed_frame = frames_.size() == 1U ||
+                                             (frame.code != nullptr &&
+                                              frame.code->kind ==
+                                                  CodeKind::Module);
+        std::vector<Value> completed_regs;
+        std::vector<std::uint8_t> completed_initialized;
+        if (capture_completed_frame) {
+          materialize_integer_regs(frame);
+          completed_regs = frame.regs;
+          completed_initialized = frame.initialized;
+        }
+        const BcCode *completed_code = frame.code;
+        const std::optional<std::uint32_t> caller_reg =
+            frame.caller_result_reg;
+        Frame completed_frame = std::move(frames_.back());
+        frames_.pop_back();
+        if (capture_completed_frame) {
+          last_completed_regs_ = std::move(completed_regs);
+          last_completed_initialized_ = std::move(completed_initialized);
+          if (completed_code != nullptr) {
+            persist_module_bindings(*completed_code, last_completed_regs_,
+                                    last_completed_initialized_);
+          }
+        }
+        if (frames_.empty()) {
+          final_value_ = value;
+          recycle_frame(std::move(completed_frame));
+          return;
+        }
+        Frame &caller = frames_.back();
+        caller.active_call_pc.reset();
+        if (!caller_reg.has_value() || !write_reg(caller, *caller_reg, value)) {
+          recycle_frame(std::move(completed_frame));
+          return;
+        }
+        recycle_frame(std::move(completed_frame));
+        return;
+      }
+      case QuickOpcode::Raise: {
+        const Value exception = read_reg(frame, quick->a);
+        if (fault_.has_value()) {
+          return;
+        }
+        raise_value(frame, exception);
+        return;
+      }
+      case QuickOpcode::CloseUpvalues:
+        ++frame.pc;
+        return;
+      case QuickOpcode::Safepoint:
+        run_safepoint();
+        ++frame.pc;
         return;
       }
     }
@@ -14622,7 +17521,16 @@ private:
           !operand_u32(frame, insn, 1, &const_id)) {
         return;
       }
-      if (!write_reg(frame, dst, load_constant(frame, const_id))) {
+      if (const_id >= module_.const_pool.size()) {
+        set_fault(frame, "VMError", "constant ref out of range");
+        return;
+      }
+      const Constant &constant = module_.const_pool[const_id];
+      if (constant.kind == ConstantKind::Integer) {
+        if (!write_integer_reg_unboxed(frame, dst, constant.int_value)) {
+          return;
+        }
+      } else if (!write_reg(frame, dst, load_constant(frame, const_id))) {
         return;
       }
       ++frame.pc;
@@ -15198,6 +18106,14 @@ private:
       return;
     }
     case Opcode::Call: {
+      const FastCallStatus fast_status = step_fast_closure_call(frame, insn);
+      if (fast_status == FastCallStatus::Faulted) {
+        return;
+      }
+      if (fast_status == FastCallStatus::Matched) {
+        return;
+      }
+
       CallPacket packet;
       if (!read_call_packet(frame, insn, &packet)) {
         return;
@@ -15360,12 +18276,30 @@ private:
     case Opcode::ISub:
     case Opcode::ILt:
     case Opcode::IGt:
+    case Opcode::IMul:
+    case Opcode::IDiv:
+    case Opcode::IMod:
+    case Opcode::IFloorDiv:
+    case Opcode::ILe:
+    case Opcode::IGe:
+    case Opcode::IEq:
+    case Opcode::INe:
+    case Opcode::ICmp:
       step_integer_binary(frame, insn, false);
       return;
     case Opcode::IAddK:
     case Opcode::ISubK:
     case Opcode::ILtK:
     case Opcode::IGtK:
+    case Opcode::IMulK:
+    case Opcode::IDivK:
+    case Opcode::IModK:
+    case Opcode::IFloorDivK:
+    case Opcode::ILeK:
+    case Opcode::IGeK:
+    case Opcode::IEqK:
+    case Opcode::INeK:
+    case Opcode::ICmpK:
       step_integer_binary(frame, insn, true);
       return;
     case Opcode::Send:
@@ -15783,21 +18717,41 @@ private:
       if (frame.return_override.has_value()) {
         value = *frame.return_override;
       }
-      std::vector<Value> completed_regs = frame.regs;
-      std::vector<std::uint8_t> completed_initialized = frame.initialized;
+      const bool capture_completed_frame = frames_.size() == 1U ||
+                                           (frame.code != nullptr &&
+                                            frame.code->kind ==
+                                                CodeKind::Module);
+      std::vector<Value> completed_regs;
+      std::vector<std::uint8_t> completed_initialized;
+      if (capture_completed_frame) {
+        materialize_integer_regs(frame);
+        completed_regs = frame.regs;
+        completed_initialized = frame.initialized;
+      }
+      const BcCode *completed_code = frame.code;
       const std::optional<std::uint32_t> caller_reg = frame.caller_result_reg;
+      Frame completed_frame = std::move(frames_.back());
       frames_.pop_back();
-      last_completed_regs_ = std::move(completed_regs);
-      last_completed_initialized_ = std::move(completed_initialized);
+      if (capture_completed_frame) {
+        last_completed_regs_ = std::move(completed_regs);
+        last_completed_initialized_ = std::move(completed_initialized);
+        if (completed_code != nullptr) {
+          persist_module_bindings(*completed_code, last_completed_regs_,
+                                  last_completed_initialized_);
+        }
+      }
       if (frames_.empty()) {
         final_value_ = value;
+        recycle_frame(std::move(completed_frame));
         return;
       }
       Frame &caller = frames_.back();
       caller.active_call_pc.reset();
       if (!caller_reg.has_value() || !write_reg(caller, *caller_reg, value)) {
+        recycle_frame(std::move(completed_frame));
         return;
       }
+      recycle_frame(std::move(completed_frame));
       return;
     }
     case Opcode::Raise: {
@@ -15828,6 +18782,9 @@ private:
   BcModule module_;
   std::shared_ptr<RuntimeState> state_;
   std::string module_id_;
+  std::unordered_map<std::uint32_t, QuickCode> quick_codes_;
+  std::unordered_map<std::uint32_t, DirectClosureKind> direct_closure_kinds_;
+  std::unordered_map<std::uint32_t, std::vector<Frame>> frame_pool_;
   std::vector<Frame> frames_;
   std::optional<Fault> fault_;
   std::vector<Value> last_completed_regs_;
@@ -17739,6 +20696,13 @@ RuntimeGcResult RuntimeWorld::collect_garbage(const std::vector<Value> &roots,
     return {};
   }
   std::vector<Value> all_roots = roots;
+  for (const auto &[name, value] : impl_->state->module_bindings) {
+    (void)name;
+    const Value root = unwrap_watch_value(value);
+    if (value_has_heap_payload_tag(root)) {
+      all_roots.push_back(root);
+    }
+  }
   for (const ClassRuntimeState &klass : impl_->state->classes) {
     for (const auto &[name, value] : klass.cvars) {
       (void)name;

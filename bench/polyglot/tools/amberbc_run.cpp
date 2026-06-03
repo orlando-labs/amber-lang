@@ -60,15 +60,24 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    const amber::bytecode::BcMethod *method =
-        method_by_name(decoded.module, entry);
-    if (method == nullptr) {
-      std::cerr << "missing entry method: " << entry << '\n';
-      return 1;
+    amber::runtime::ExecutionResult result;
+    if (entry == "__init__") {
+      if (!decoded.module.init.has_entry_code_id) {
+        std::cerr << "missing module init entry\n";
+        return 1;
+      }
+      result = amber::runtime::execute_code(decoded.module,
+                                            decoded.module.init.entry_code_id);
+    } else {
+      const amber::bytecode::BcMethod *method =
+          method_by_name(decoded.module, entry);
+      if (method == nullptr) {
+        std::cerr << "missing entry method: " << entry << '\n';
+        return 1;
+      }
+      result =
+          amber::runtime::execute_code(decoded.module, method->entry_code_id);
     }
-
-    amber::runtime::ExecutionResult result =
-        amber::runtime::execute_code(decoded.module, method->entry_code_id);
     if (!result.ok()) {
       std::cerr << result.fault->error_name << ": " << result.fault->message
                 << '\n';

@@ -1587,6 +1587,60 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x2D:
     opcode = Opcode::IGtK;
     return true;
+  case 0x50:
+    opcode = Opcode::IMul;
+    return true;
+  case 0x51:
+    opcode = Opcode::IDiv;
+    return true;
+  case 0x52:
+    opcode = Opcode::IMod;
+    return true;
+  case 0x53:
+    opcode = Opcode::IFloorDiv;
+    return true;
+  case 0x54:
+    opcode = Opcode::ILe;
+    return true;
+  case 0x55:
+    opcode = Opcode::IGe;
+    return true;
+  case 0x56:
+    opcode = Opcode::IEq;
+    return true;
+  case 0x57:
+    opcode = Opcode::INe;
+    return true;
+  case 0x58:
+    opcode = Opcode::ICmp;
+    return true;
+  case 0x59:
+    opcode = Opcode::IMulK;
+    return true;
+  case 0x5A:
+    opcode = Opcode::IDivK;
+    return true;
+  case 0x5B:
+    opcode = Opcode::IModK;
+    return true;
+  case 0x5C:
+    opcode = Opcode::IFloorDivK;
+    return true;
+  case 0x5D:
+    opcode = Opcode::ILeK;
+    return true;
+  case 0x5E:
+    opcode = Opcode::IGeK;
+    return true;
+  case 0x5F:
+    opcode = Opcode::IEqK;
+    return true;
+  case 0x60:
+    opcode = Opcode::INeK;
+    return true;
+  case 0x61:
+    opcode = Opcode::ICmpK;
+    return true;
   case 0x30:
     opcode = Opcode::Jump;
     return true;
@@ -3653,7 +3707,16 @@ InstructionFlow verify_instruction_flow(
   case Opcode::IAdd:
   case Opcode::ISub:
   case Opcode::ILt:
-  case Opcode::IGt: {
+  case Opcode::IGt:
+  case Opcode::IMul:
+  case Opcode::IDiv:
+  case Opcode::IMod:
+  case Opcode::IFloorDiv:
+  case Opcode::ILe:
+  case Opcode::IGe:
+  case Opcode::IEq:
+  case Opcode::INe:
+  case Opcode::ICmp: {
     if (operand_count_is(instruction, 3, errors)) {
       add_register_write(code, instruction, 0, flow, errors);
       add_register_read(code, instruction, 1, flow, errors);
@@ -3664,7 +3727,16 @@ InstructionFlow verify_instruction_flow(
   case Opcode::IAddK:
   case Opcode::ISubK:
   case Opcode::ILtK:
-  case Opcode::IGtK: {
+  case Opcode::IGtK:
+  case Opcode::IMulK:
+  case Opcode::IDivK:
+  case Opcode::IModK:
+  case Opcode::IFloorDivK:
+  case Opcode::ILeK:
+  case Opcode::IGeK:
+  case Opcode::IEqK:
+  case Opcode::INeK:
+  case Opcode::ICmpK: {
     if (operand_count_is(instruction, 3, errors)) {
       add_register_write(code, instruction, 0, flow, errors);
       add_register_read(code, instruction, 1, flow, errors);
@@ -4907,6 +4979,42 @@ std::string opcode_name(Opcode opcode) {
     return "ILTK";
   case Opcode::IGtK:
     return "IGTK";
+  case Opcode::IMul:
+    return "IMUL";
+  case Opcode::IDiv:
+    return "IDIV";
+  case Opcode::IMod:
+    return "IMOD";
+  case Opcode::IFloorDiv:
+    return "IFLOORDIV";
+  case Opcode::ILe:
+    return "ILE";
+  case Opcode::IGe:
+    return "IGE";
+  case Opcode::IEq:
+    return "IEQ";
+  case Opcode::INe:
+    return "INE";
+  case Opcode::ICmp:
+    return "ICMP";
+  case Opcode::IMulK:
+    return "IMULK";
+  case Opcode::IDivK:
+    return "IDIVK";
+  case Opcode::IModK:
+    return "IMODK";
+  case Opcode::IFloorDivK:
+    return "IFLOORDIVK";
+  case Opcode::ILeK:
+    return "ILEK";
+  case Opcode::IGeK:
+    return "IGEK";
+  case Opcode::IEqK:
+    return "IEQK";
+  case Opcode::INeK:
+    return "INEK";
+  case Opcode::ICmpK:
+    return "ICMPK";
   case Opcode::Jump:
     return "JUMP";
   case Opcode::JumpIfTrue:

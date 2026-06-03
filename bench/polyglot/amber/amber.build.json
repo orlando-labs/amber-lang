@@ -9,6 +9,7 @@
     {"name": "amber.core", "path": "stdlib/core.am", "bootstrap": "B2"}
   ],
   "modules": [
+    {"name": "bench.polyglot.calls_collections", "path": "src/calls_collections.am"},
     {"name": "bench.polyglot", "path": "src/main.am"}
   ]
 }

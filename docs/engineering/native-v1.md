@@ -49,10 +49,13 @@ Each object records:
 - focused conformance coverage for allocation, call, and back-edge safepoints
   that each carry matching root maps.
 
-The current reference runtime intentionally does not emit host machine code.
-`machine_code_blob` is a deterministic trampoline payload that lets the runtime
-validate all native-readiness metadata, check frozen-world assumptions, and
-execute through the existing verified bytecode VM.
+The `amber.native.v1` metadata layer still uses deterministic trampoline
+payloads. Separately, `amberc build` now has a `cpp-bytecode-direct-v1`
+executable backend for build artifacts: eligible bytecode functions are emitted
+as direct C++ functions and compiled by the host C++ toolchain, while unsupported
+bytecode remains available through an embedded verified VM fallback. This keeps
+the metadata contract stable while allowing build outputs to execute hot integer
+bytecode without VM dispatch.
 
 ## Runtime Bridge
 

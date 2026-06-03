@@ -553,8 +553,34 @@ void shift_token_spans_from_interpolation(std::vector<lexer::Token> *tokens,
 }
 
 bool is_operator_method_name(lexer::TokenKind kind) {
-  return kind == lexer::TokenKind::EqualEqual ||
-         kind == lexer::TokenKind::EqualEqualEqual;
+  return kind == lexer::TokenKind::Plus ||
+         kind == lexer::TokenKind::Minus ||
+         kind == lexer::TokenKind::Star ||
+         kind == lexer::TokenKind::Slash ||
+         kind == lexer::TokenKind::SlashSlash ||
+         kind == lexer::TokenKind::Percent ||
+         kind == lexer::TokenKind::EqualEqual ||
+         kind == lexer::TokenKind::EqualEqualEqual ||
+         kind == lexer::TokenKind::BangEqual ||
+         kind == lexer::TokenKind::Less ||
+         kind == lexer::TokenKind::LessEqual ||
+         kind == lexer::TokenKind::LessEqualGreater ||
+         kind == lexer::TokenKind::Greater ||
+         kind == lexer::TokenKind::GreaterEqual;
+}
+
+bool is_chain_comparison_op(const std::string &op) {
+  return op == "<" || op == "<=" || op == ">" || op == ">=";
+}
+
+int chain_comparison_direction(const std::string &op) {
+  if (op == "<" || op == "<=") {
+    return -1;
+  }
+  if (op == ">" || op == ">=") {
+    return 1;
+  }
+  return 0;
 }
 
 } // namespace
@@ -2094,6 +2120,10 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
     if (op_token.kind == lexer::TokenKind::Equal && !is_assignable(*left)) {
       error(op_token, "left side of assignment is not assignable");
     }
+    if (is_chain_comparison_op(info.op)) {
+      left = parse_comparison_chain(std::move(left), info, op_token, stop_mode);
+      continue;
+    }
     const int next_min =
         info.assoc == Assoc::Left ? info.precedence + 1 : info.precedence;
     std::unique_ptr<ast::Expr> right = parse_expression(next_min, stop_mode);
@@ -2117,6 +2147,68 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
   }
 
   return left;
+}
+
+std::unique_ptr<ast::Expr>
+Parser::parse_comparison_chain(std::unique_ptr<ast::Expr> left,
+                               const InfixInfo &first_info,
+                               const lexer::Token &first_op_token,
+                               StopMode stop_mode) {
+  const int direction = chain_comparison_direction(first_info.op);
+  const int next_min = first_info.assoc == Assoc::Left
+                           ? first_info.precedence + 1
+                           : first_info.precedence;
+  std::unique_ptr<ast::Expr> first_right =
+      parse_expression(next_min, stop_mode);
+
+  InfixInfo next_info{};
+  if (!infix_info(current().kind, &next_info) ||
+      !is_chain_comparison_op(next_info.op) ||
+      chain_comparison_direction(next_info.op) != direction ||
+      next_info.precedence != first_info.precedence) {
+    lexer::Span span = ast::join_spans(left->span, first_right->span);
+    auto binary = ast::make_expr("AstBinary", span);
+    binary->string_field("op", first_info.op);
+    binary->node_field("left", std::move(left));
+    binary->node_field("right", std::move(first_right));
+    return binary;
+  }
+
+  std::vector<std::unique_ptr<ast::Expr>> links;
+  auto first_link =
+      ast::make_expr("AstCompareLink",
+                     ast::join_spans(first_op_token.span, first_right->span));
+  first_link->string_field("op", first_info.op);
+  first_link->node_field("right", std::move(first_right));
+  links.push_back(std::move(first_link));
+
+  lexer::Span span = left->span;
+  while (true) {
+    InfixInfo info{};
+    if (!infix_info(current().kind, &info) ||
+        !is_chain_comparison_op(info.op) ||
+        chain_comparison_direction(info.op) != direction ||
+        info.precedence != first_info.precedence) {
+      break;
+    }
+    const lexer::Token op_token = advance();
+    const int link_next_min =
+        info.assoc == Assoc::Left ? info.precedence + 1 : info.precedence;
+    std::unique_ptr<ast::Expr> right =
+        parse_expression(link_next_min, stop_mode);
+    span = ast::join_spans(span, right->span);
+    auto link =
+        ast::make_expr("AstCompareLink",
+                       ast::join_spans(op_token.span, right->span));
+    link->string_field("op", info.op);
+    link->node_field("right", std::move(right));
+    links.push_back(std::move(link));
+  }
+
+  auto chain = ast::make_expr("AstCompareChain", span);
+  chain->node_field("first", std::move(left));
+  chain->list_field("links", std::move(links));
+  return chain;
 }
 
 std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
@@ -3024,6 +3116,9 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
   case lexer::TokenKind::GreaterEqual:
     *info = InfixInfo{4, Assoc::Left, ">="};
     return true;
+  case lexer::TokenKind::LessEqualGreater:
+    *info = InfixInfo{4, Assoc::Left, "<=>"};
+    return true;
   case lexer::TokenKind::KeywordIn:
     *info = InfixInfo{4, Assoc::Left, "in"};
     return true;
@@ -3041,6 +3136,9 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
     return true;
   case lexer::TokenKind::Slash:
     *info = InfixInfo{7, Assoc::Left, "/"};
+    return true;
+  case lexer::TokenKind::SlashSlash:
+    *info = InfixInfo{7, Assoc::Left, "//"};
     return true;
   case lexer::TokenKind::Percent:
     *info = InfixInfo{7, Assoc::Left, "%"};

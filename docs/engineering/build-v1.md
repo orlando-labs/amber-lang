@@ -52,14 +52,19 @@ amberc build src/main.am -o build/main
 ```
 
 Manifest builds emit `amber.build.result.v1` JSON with per-module source
-hashes, cache keys, artifact hashes, ABI hashes, output paths, and cache-hit
-state. A second identical build reuses cache entries while preserving
-byte-identical output artifacts.
+hashes, cache keys, artifact hashes, ABI hashes, output paths, native sidecar
+metadata, and cache-hit state. The default target is `both`: `.amberbc`
+artifacts remain deterministic cacheable sidecars, and the root module also
+gets a host native executable at `<out-dir>/<root-module>`. Use
+`--target bytecode` for bytecode-only builds.
 
 Single-file builds emit `amber.executable.build.v1` JSON and create an
-executable wrapper at `-o <path>`, `--out-dir <dir>/<source-stem>`, or the
-source path without the `.am` extension. The wrapper embeds the compiled
-`.amberbc` payload and re-enters `amberc run-embedded` to execute it.
+executable at `-o <path>`, `--out-dir <dir>/<source-stem>`, or the source path
+without the `.am` extension. The default target is `native`: eligible bytecode
+is lowered to generated C++ and compiled with `AMBER_NATIVE_CXX`, `CXX`, or
+`clang++`; unsupported bytecode remains correct through an embedded verified VM
+fallback. Use `--target bytecode-wrapper` for the legacy shell wrapper that
+re-enters `amberc run-embedded`.
 
 ## Conformance
 

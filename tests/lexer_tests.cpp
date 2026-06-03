@@ -199,6 +199,15 @@ void test_w13_comments_ranges_and_numbers() {
   }
 }
 
+void test_new_operator_tokens() {
+  expect_kinds("floor division, modulo, spaceship",
+               "a // b % c <=> d\n",
+               {TokenKind::Identifier, TokenKind::SlashSlash,
+                TokenKind::Identifier, TokenKind::Percent,
+                TokenKind::Identifier, TokenKind::LessEqualGreater,
+                TokenKind::Identifier, TokenKind::Newline, TokenKind::Eof});
+}
+
 void test_string_interpolation_lexing() {
   expect_kinds("interpolated string stays one token",
                "\"#{if ok then \"yes\" else \"no\"}\"\n",
@@ -233,6 +242,7 @@ int main() {
   test_property_keywords();
   test_unicode_identifier_forms();
   test_w13_comments_ranges_and_numbers();
+  test_new_operator_tokens();
   test_string_interpolation_lexing();
   std::cout << "lexer_tests: ok\n";
   return 0;

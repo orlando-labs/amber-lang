@@ -635,6 +635,51 @@ void test_w13_operator_lowering() {
          "range kwarg name");
 }
 
+void test_compare_chain_lowering() {
+  const amber::hir::Program program = lower_ok("def bounds(a, x, b):\n"
+                                               "  a < x <= b\n"
+                                               "  a > x >= b\n");
+  const amber::hir::Procedure *bounds = procedure_by_name(program, "bounds");
+  expect(bounds != nullptr, "bounds procedure exists");
+
+  const amber::ast::Expr *ascending_stmt =
+      list_item(*bounds->body, "items", 0);
+  const amber::ast::Expr *ascending =
+      ascending_stmt == nullptr ? nullptr : node_field(*ascending_stmt, "expr");
+  expect(ascending != nullptr && ascending->kind == "HCompareChain",
+         "ascending chain lowers to HCompareChain");
+  expect(node_field(*ascending, "first") != nullptr &&
+             node_field(*ascending, "first")->kind == "HLoadLocal",
+         "ascending first operand lowers");
+  const amber::ast::Expr *ascending_first_link =
+      list_item(*ascending, "links", 0);
+  const amber::ast::Expr *ascending_second_link =
+      list_item(*ascending, "links", 1);
+  expect(ascending_first_link != nullptr &&
+             string_field(*ascending_first_link, "op") == "<",
+         "ascending first link op");
+  expect(ascending_second_link != nullptr &&
+             string_field(*ascending_second_link, "op") == "<=",
+         "ascending second link op");
+
+  const amber::ast::Expr *descending_stmt =
+      list_item(*bounds->body, "items", 1);
+  const amber::ast::Expr *descending =
+      descending_stmt == nullptr ? nullptr : node_field(*descending_stmt, "expr");
+  expect(descending != nullptr && descending->kind == "HCompareChain",
+         "descending chain lowers to HCompareChain");
+  const amber::ast::Expr *descending_first_link =
+      list_item(*descending, "links", 0);
+  const amber::ast::Expr *descending_second_link =
+      list_item(*descending, "links", 1);
+  expect(descending_first_link != nullptr &&
+             string_field(*descending_first_link, "op") == ">",
+         "descending first link op");
+  expect(descending_second_link != nullptr &&
+             string_field(*descending_second_link, "op") == ">=",
+         "descending second link op");
+}
+
 void test_clause_method_lowering() {
   const amber::hir::Program program = lower_ok("def area(shape):\n"
                                                "  when Point(x, y):\n"
@@ -1366,6 +1411,7 @@ int main() {
   test_string_interpolation_lowering();
   test_shadowed_send_stays_call();
   test_w13_operator_lowering();
+  test_compare_chain_lowering();
   test_clause_method_lowering();
   test_case_pattern_lowering();
   test_case_matcher_expr_lowering();
