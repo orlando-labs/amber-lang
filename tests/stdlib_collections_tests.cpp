@@ -308,7 +308,8 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
        {"each", "map", "flat_map", "select", "reject", "reduce", "find", "any?",
         "all?", "none?", "first", "count", "to_a", "lazy", "group_by", "+", ">",
         "contains?", "include?", "===", "empty?", "[]", "Range", "low",
-        "high"}) {
+        "high", "collect", "collect_concat", "filter", "find_all", "detect",
+        "inject", "member?", "length", "size", "entries"}) {
     ensure_symbol_id(&module, symbol);
   }
   BcClass range_class;
@@ -368,6 +369,26 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
       make_unary_send_code(24, symbol_id_or_die(module, "[]")));
   module.code_objects.push_back(
       make_unary_send_code(30, symbol_id_or_die(module, "include?")));
+  module.code_objects.push_back(
+      make_send_code(31, symbol_id_or_die(module, "collect"), true));
+  module.code_objects.push_back(make_send_code(
+      32, symbol_id_or_die(module, "collect_concat"), true));
+  module.code_objects.push_back(
+      make_send_code(33, symbol_id_or_die(module, "filter"), true));
+  module.code_objects.push_back(
+      make_send_code(34, symbol_id_or_die(module, "find_all"), true));
+  module.code_objects.push_back(
+      make_send_code(35, symbol_id_or_die(module, "detect"), true));
+  module.code_objects.push_back(
+      make_send_code(36, symbol_id_or_die(module, "inject"), true));
+  module.code_objects.push_back(
+      make_unary_send_code(37, symbol_id_or_die(module, "member?")));
+  module.code_objects.push_back(
+      make_send_code(38, symbol_id_or_die(module, "length"), false));
+  module.code_objects.push_back(
+      make_send_code(39, symbol_id_or_die(module, "size"), false));
+  module.code_objects.push_back(
+      make_send_code(40, symbol_id_or_die(module, "entries"), false));
 
   BcCode reduce_init;
   reduce_init.code_id = 6;
@@ -650,6 +671,48 @@ void assert_sequence_protocol_for(const amber::bytecode::BcModule &module,
          label + " group_by high key");
   expect_integer_list(groups->entries[1].value, {2, 3},
                       label + " group_by high");
+
+  result = amber::runtime::execute_code(module, 31, {source, inc});
+  expect_ok(result, label + " collect alias");
+  expect_integer_list(result.value, {2, 3, 4}, label + " collect alias");
+
+  result = amber::runtime::execute_code(module, 32, {source, pairify});
+  expect_ok(result, label + " collect_concat alias");
+  expect_integer_list(result.value, {1, 2, 2, 3, 3, 4},
+                      label + " collect_concat alias");
+
+  result = amber::runtime::execute_code(module, 33, {source, gt_one});
+  expect_ok(result, label + " filter alias");
+  expect_integer_list(result.value, {2, 3}, label + " filter alias");
+
+  result = amber::runtime::execute_code(module, 34, {source, gt_one});
+  expect_ok(result, label + " find_all alias");
+  expect_integer_list(result.value, {2, 3}, label + " find_all alias");
+
+  result = amber::runtime::execute_code(module, 35, {source, gt_one});
+  expect_ok(result, label + " detect alias");
+  expect_integer(result.value, 2, label + " detect alias");
+
+  result = amber::runtime::execute_code(module, 36, {source, add});
+  expect_ok(result, label + " inject alias");
+  expect_integer(result.value, 6, label + " inject alias");
+
+  result = amber::runtime::execute_code(
+      module, 37, {source, amber::runtime::Value::integer(2)});
+  expect_ok(result, label + " member? alias");
+  expect_bool(result.value, true, label + " member? alias");
+
+  result = amber::runtime::execute_code(module, 38, {source});
+  expect_ok(result, label + " length alias");
+  expect_integer(result.value, 3, label + " length alias");
+
+  result = amber::runtime::execute_code(module, 39, {source});
+  expect_ok(result, label + " size alias");
+  expect_integer(result.value, 3, label + " size alias");
+
+  result = amber::runtime::execute_code(module, 40, {source});
+  expect_ok(result, label + " entries alias");
+  expect_integer_list(result.value, {1, 2, 3}, label + " entries alias");
 }
 
 void test_std001_sequence_protocol_matrix() {
@@ -864,8 +927,8 @@ amber::bytecode::BcModule make_std005_collection_ops_module() {
         "proper_superset?", "disjoint?", "contains?", "include?",
         "permutation", "combination", "merge", "&", "|", "+", "-", "^", "*",
         "<=", "<", ">=", ">", "concat", "take_while", "reverse", "sort",
-        "uniq", "each", "each_pair", "each_cons", "step", "alpha", "beta",
-        "gamma"}) {
+        "uniq", "each", "each_pair", "each_cons", "each_slice", "step",
+        "alpha", "beta", "gamma"}) {
     ensure_symbol_id(&module, symbol);
   }
   const std::uint32_t two = append_integer_const(&module, 2);
@@ -967,6 +1030,8 @@ amber::bytecode::BcModule make_std005_collection_ops_module() {
       make_unary_send_code(37, symbol_id_or_die(module, "|")));
   module.code_objects.push_back(
       make_unary_send_code(38, symbol_id_or_die(module, "+")));
+  module.code_objects.push_back(
+      make_unary_send_code(39, symbol_id_or_die(module, "each_slice")));
 
   BcCode merge_sum;
   merge_sum.code_id = 100;
@@ -1207,6 +1272,11 @@ void test_std005_collection_operations() {
   expect_ok(result, "Array#each step");
   expect_nested_integer_lists(result.value, {{1, 2}, {3, 4}},
                               "Array#each step");
+
+  result = amber::runtime::execute_code(module, 39, {four_items, integer(2)});
+  expect_ok(result, "Array#each_slice");
+  expect_nested_integer_lists(result.value, {{1, 2}, {3, 4}},
+                              "Array#each_slice");
 
   result = amber::runtime::execute_code(module, 37, {left_map, right_map});
   expect_ok(result, "Map#|");

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class Workload:
     ruby_source: str
     cpp_source: str
     cpp_binary: str
+    go_source: str
+    go_binary: str
 
 
 WORKLOADS = {
@@ -33,6 +36,8 @@ WORKLOADS = {
         ruby_source="main.rb",
         cpp_source="main.cpp",
         cpp_binary="main",
+        go_source="main.go",
+        go_binary="main",
     ),
     "calls-collections": Workload(
         name="calls-collections",
@@ -44,6 +49,8 @@ WORKLOADS = {
         ruby_source="calls_collections.rb",
         cpp_source="calls_collections.cpp",
         cpp_binary="calls_collections",
+        go_source="calls_collections.go",
+        go_binary="calls_collections",
     ),
 }
 
@@ -52,10 +59,17 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def run_command(command, cwd: Path, *, capture=True) -> subprocess.CompletedProcess:
+def run_command(
+    command, cwd: Path, *, capture=True, env: Optional[dict] = None
+) -> subprocess.CompletedProcess:
+    run_env = None
+    if env is not None:
+        run_env = os.environ.copy()
+        run_env.update({key: str(value) for key, value in env.items()})
     completed = subprocess.run(
         [str(part) for part in command],
         cwd=str(cwd),
+        env=run_env,
         text=True,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
@@ -82,6 +96,10 @@ def choose_cxx() -> str:
     raise RuntimeError("no C++ compiler found in PATH")
 
 
+def choose_go() -> Optional[str]:
+    return shutil.which("go")
+
+
 def ensure_amber_tools(root: Path) -> None:
     amberc = root / "build" / "amberc"
     iamber = root / "build" / "iamber"
@@ -92,6 +110,17 @@ def ensure_amber_tools(root: Path) -> None:
 
 def amber_artifact_path(build_dir: Path, workload: Workload) -> Path:
     return build_dir / "amber" / "out" / f"{workload.amber_module}.amberbc"
+
+
+def safe_artifact_name(value: str) -> str:
+    return "".join(
+        ch if ch.isalnum() or ch in "._-" else "_"
+        for ch in value
+    ) or "artifact"
+
+
+def amber_native_path(build_dir: Path, workload: Workload) -> Path:
+    return build_dir / "amber" / "native" / safe_artifact_name(workload.amber_module)
 
 
 def build_amber_bytecode(root: Path, build_dir: Path) -> None:
@@ -108,6 +137,8 @@ def build_amber_bytecode(root: Path, build_dir: Path) -> None:
             out_dir,
             "--cache-dir",
             cache_dir,
+            "--target",
+            "bytecode",
         ],
         root,
     )
@@ -117,6 +148,38 @@ def build_amber_bytecode(root: Path, build_dir: Path) -> None:
             raise RuntimeError(
                 f"expected Amber bytecode artifact is missing: {artifact}"
             )
+
+
+def build_amber_native_executable(
+    root: Path, build_dir: Path, workload: Workload
+) -> Path:
+    output = amber_native_path(build_dir, workload)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    source = root / "bench" / "polyglot" / "amber" / "src" / workload.amber_source
+    entry = "init" if workload.amber_entry == "__init__" else "main-only"
+    completed = run_command(
+        [
+            root / "build" / "amberc",
+            "build",
+            source,
+            "-o",
+            output,
+            "--entry",
+            entry,
+        ],
+        root,
+    )
+    build_result = json.loads(completed.stdout)
+    if build_result.get("status") != "ok":
+        raise RuntimeError(f"Amber native build failed: {completed.stdout}")
+    if build_result.get("native_backend") != "cpp-bytecode-direct-v1":
+        raise RuntimeError(
+            "Amber built benchmark expected native backend "
+            f"cpp-bytecode-direct-v1, got {build_result.get('native_backend')!r}"
+        )
+    if not output.exists():
+        raise RuntimeError(f"expected Amber native executable is missing: {output}")
+    return output
 
 
 def compile_cpp_program(
@@ -135,6 +198,25 @@ def compile_cpp_program(
             output,
         ],
         root,
+    )
+    return output
+
+
+def compile_go_program(root: Path, build_dir: Path, go: str, workload: Workload) -> Path:
+    output = build_dir / "go" / workload.go_binary
+    cache_dir = build_dir / "go-cache"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    run_command(
+        [
+            go,
+            "build",
+            "-o",
+            output,
+            root / "bench" / "polyglot" / "go" / workload.go_source,
+        ],
+        root,
+        env={"GOCACHE": cache_dir},
     )
     return output
 
@@ -254,12 +336,28 @@ def aggregate(
     return {
         "name": name,
         "command": [str(part) for part in command],
+        "available": True,
         "runs": len(good),
         "checksum": checksums[0] if checksums else "",
         "elapsed_s": elapsed,
         "mean_s": sum(elapsed) / len(elapsed),
         "best_s": min(elapsed),
         "peak_rss_mb": max(rss_values) if rss_values else None,
+    }
+
+
+def unavailable_result(name: str, reason: str) -> dict:
+    return {
+        "name": name,
+        "command": [],
+        "available": False,
+        "error": reason,
+        "runs": 0,
+        "checksum": "",
+        "elapsed_s": [],
+        "mean_s": None,
+        "best_s": None,
+        "peak_rss_mb": None,
     }
 
 
@@ -270,21 +368,32 @@ def print_table(results: list[dict]) -> None:
     )
     print("-" * 82)
     for result in results:
+        mean_s = (
+            f"{result['mean_s']:.4f}"
+            if result["mean_s"] is not None
+            else "n/a"
+        )
+        best_s = (
+            f"{result['best_s']:.4f}"
+            if result["best_s"] is not None
+            else "n/a"
+        )
         rss = (
             f"{result['peak_rss_mb']:.1f}"
             if result["peak_rss_mb"] is not None
             else "n/a"
         )
+        checksum = result["checksum"] or result.get("error", "n/a")
         print(
             f"{result['name']:<19} {result['runs']:>4} "
-            f"{result['mean_s']:>10.4f} {result['best_s']:>10.4f} "
-            f"{rss:>12} {result['checksum']:>18}"
+            f"{mean_s:>10} {best_s:>10} "
+            f"{rss:>12} {checksum:>18}"
         )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run the Amber/Python/Ruby/C++ polyglot benchmark."
+        description="Run the Amber/Python/Ruby/C++/Go polyglot benchmark."
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(
@@ -322,16 +431,29 @@ def main() -> int:
     build_dir.mkdir(parents=True, exist_ok=True)
 
     cxx = choose_cxx()
+    go = choose_go()
+    go_unavailable_reason = None
     if args.no_build:
-        amberbc = amber_artifact_path(build_dir, workload)
-        amberbc_runner = build_dir / "amberbc_run"
+        amber_built = amber_native_path(build_dir, workload)
         cpp_binary = build_dir / "cpp" / workload.cpp_binary
+        go_binary = build_dir / "go" / workload.go_binary
+        if not amber_built.exists():
+            raise RuntimeError(f"Amber native executable missing: {amber_built}")
+        if not go_binary.exists():
+            if go is None:
+                go_unavailable_reason = "go not found in PATH"
+            else:
+                go_unavailable_reason = f"go binary missing: {go_binary}"
     else:
         ensure_amber_tools(root)
         build_amber_bytecode(root, build_dir)
-        amberbc = amber_artifact_path(build_dir, workload)
-        amberbc_runner = compile_amberbc_runner(root, build_dir, cxx)
+        amber_built = build_amber_native_executable(root, build_dir, workload)
         cpp_binary = compile_cpp_program(root, build_dir, cxx, workload)
+        if go is None:
+            go_binary = None
+            go_unavailable_reason = "go not found in PATH"
+        else:
+            go_binary = compile_go_program(root, build_dir, go, workload)
 
     ruby = shutil.which("ruby")
     if ruby is None:
@@ -351,7 +473,7 @@ def main() -> int:
                 / workload.amber_source,
             ],
         ),
-        ("amber-built", [amberbc_runner, amberbc, workload.amber_entry]),
+        ("amber-built", [amber_built]),
         (
             "python",
             [
@@ -365,6 +487,8 @@ def main() -> int:
         ),
         ("cpp", [cpp_binary]),
     ]
+    if go_unavailable_reason is None:
+        programs.append(("go", [go_binary]))
 
     results = []
     for name, command in programs:
@@ -372,6 +496,8 @@ def main() -> int:
         results.append(
             aggregate(name, command, samples, workload.expected_checksum)
         )
+    if go_unavailable_reason is not None:
+        results.append(unavailable_result("go", go_unavailable_reason))
 
     print_table(results)
     default_json = (

@@ -8450,6 +8450,8 @@ private:
       }
 
       const std::string &selector = module.symbols[selector_id];
+      const std::string collection_selector =
+          canonical_collection_selector(selector);
       imm = static_cast<std::int64_t>(pos_count);
       if (pos_count == 1U) {
         if (selector == "+") {
@@ -8491,15 +8493,15 @@ private:
         } else if (selector == "<=>") {
           out.quick_opcode = QuickOpcode::SendICmp;
           out.opcode = Opcode::ICmp;
-        } else if (selector == "[]") {
+        } else if (collection_selector == "[]") {
           out.quick_opcode = QuickOpcode::SendSeqIndex;
-        } else if (selector == "first") {
+        } else if (collection_selector == "first") {
           out.quick_opcode = QuickOpcode::SendSeqFirst;
         }
       } else {
-        if (selector == "count") {
+        if (collection_selector == "count") {
           out.quick_opcode = QuickOpcode::SendSeqCount;
-        } else if (selector == "first") {
+        } else if (collection_selector == "first") {
           out.quick_opcode = QuickOpcode::SendSeqFirst;
         }
       }
@@ -10617,6 +10619,44 @@ private:
     return std::find_if(items.begin(), items.end(), [&](const Value &item) {
              return value_equals(item, needle);
            }) != items.end();
+  }
+
+  static std::string canonical_collection_selector(
+      const std::string &selector) {
+    if (selector == "collect") {
+      return "map";
+    }
+    if (selector == "collect_concat") {
+      return "flat_map";
+    }
+    if (selector == "filter" || selector == "find_all") {
+      return "select";
+    }
+    if (selector == "detect") {
+      return "find";
+    }
+    if (selector == "inject") {
+      return "reduce";
+    }
+    if (selector == "member?" || selector == "has_key?" ||
+        selector == "key?") {
+      return "include?";
+    }
+    if (selector == "each_slice") {
+      return "each";
+    }
+    if (selector == "entries") {
+      return "to_a";
+    }
+    if (selector == "length" || selector == "size") {
+      return "count";
+    }
+    return selector;
+  }
+
+  static bool collection_size_selector(const std::string &selector) {
+    const std::string canonical = canonical_collection_selector(selector);
+    return canonical == "count";
   }
 
   void append_unique_value(std::vector<Value> *items, const Value &value) {
@@ -14660,8 +14700,11 @@ private:
         set_fault(frame, "TypeError", "threaded collection is null");
         return SendStatus::Faulted;
       }
-      if (selector == "map" || selector == "select" || selector == "reject" ||
-          selector == "flat_map" || selector == "each") {
+      const std::string collection_selector =
+          canonical_collection_selector(selector);
+      if (collection_selector == "map" || collection_selector == "select" ||
+          collection_selector == "reject" ||
+          collection_selector == "flat_map" || collection_selector == "each") {
         if (!require_arity(0) || !kw_args.empty()) {
           if (!kw_args.empty()) {
             set_fault(frame, "TypeError",
@@ -14670,19 +14713,19 @@ private:
           return SendStatus::Faulted;
         }
         std::optional<NativeBlockInvoker> invoker = make_native_block_invoker(
-            frame, block, "threaded collection " + selector);
+            frame, block, "threaded collection " + collection_selector);
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }
         RuntimeFlowGatherResult result;
-        if (selector == "map") {
+        if (collection_selector == "map") {
           result =
               threaded->map([invoker = *invoker](const Value &value,
                                                  std::size_t index) mutable {
                 return invoker(std::vector<Value>{
                     value, Value::integer(static_cast<std::int64_t>(index))});
               });
-        } else if (selector == "select") {
+        } else if (collection_selector == "select") {
           result =
               threaded->select([invoker = *invoker](const Value &value,
                                                     std::size_t index) mutable {
@@ -14690,7 +14733,7 @@ private:
                     value, Value::integer(static_cast<std::int64_t>(index))});
                 return is_truthy(kept);
               });
-        } else if (selector == "reject") {
+        } else if (collection_selector == "reject") {
           result =
               threaded->reject([invoker = *invoker](const Value &value,
                                                     std::size_t index) mutable {
@@ -14698,7 +14741,7 @@ private:
                     value, Value::integer(static_cast<std::int64_t>(index))});
                 return is_truthy(rejected);
               });
-        } else if (selector == "flat_map") {
+        } else if (collection_selector == "flat_map") {
           result = threaded->flat_map(
               [invoker = *invoker](const Value &value,
                                    std::size_t index) mutable {
@@ -14722,7 +14765,8 @@ private:
         *out = make_list_value(std::move(result.values));
         return SendStatus::Matched;
       }
-      if (selector == "combination" || selector == "permutation") {
+      if (collection_selector == "combination" ||
+          collection_selector == "permutation") {
         if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
           if (!kw_args.empty()) {
             set_fault(frame, "TypeError",
@@ -14735,7 +14779,7 @@ private:
           return SendStatus::Faulted;
         }
         RuntimeFlowGatherResult result =
-            selector == "combination"
+            collection_selector == "combination"
                 ? threaded->combination(
                       static_cast<std::size_t>(args[0].as_integer()))
                 : threaded->permutation(
@@ -14845,6 +14889,19 @@ private:
       return false;
     };
 
+    const std::string collection_selector =
+        canonical_collection_selector(selector);
+    auto collection_selector_in =
+        [&](std::initializer_list<const char *> names) -> bool {
+      for (const char *name : names) {
+        if (collection_selector == name) {
+          return true;
+        }
+      }
+      return false;
+    };
+    const bool count_alias_accepts_block = selector == "count";
+
     auto require_receiver_live_after_block = [&]() -> bool {
       return ensure_lifecycle_access(frame, receiver);
     };
@@ -14948,35 +15005,37 @@ private:
     const bool receiver_is_range = value_is_range_instance(receiver);
     const bool receiver_is_lazy_seq = value_is_lazy_seq_instance(receiver);
     const bool sequence_set_operation_selector =
-        selector_in({"contains?",
-                     "include?",
-                     "union",
-                     "intersection",
-                     "difference",
-                     "left_difference",
-                     "symmetric_difference",
-                     "subset?",
-                     "proper_subset?",
-                     "superset?",
-                     "proper_superset?",
-                     "disjoint?",
-                     "permutation",
-                     "combination",
-                     "&",
-                     "|",
-                     "-",
-                     "^",
-                     "<=",
-                     "<",
-                     ">=",
-                     ">"});
+        collection_selector_in({"contains?",
+                                "include?",
+                                "union",
+                                "intersection",
+                                "difference",
+                                "left_difference",
+                                "symmetric_difference",
+                                "subset?",
+                                "proper_subset?",
+                                "superset?",
+                                "proper_superset?",
+                                "disjoint?",
+                                "permutation",
+                                "combination",
+                                "&",
+                                "|",
+                                "-",
+                                "^",
+                                "<=",
+                                "<",
+                                ">=",
+                                ">"});
     const bool sequence_extra_operation_selector =
-        selector_in({"+", "*", "concat", "take_while", "reverse", "sort",
-                     "uniq", "each_pair", "each_cons"});
+        collection_selector_in({"+", "*", "concat", "take_while", "reverse",
+                                "sort", "uniq", "each_pair", "each_cons"});
     const bool sequence_collection_selector =
-        selector_in({"empty?", "[]", "deconstruct", "first", "count", "to_a",
-                     "lazy", "each", "map", "flat_map", "select", "reject",
-                     "find", "group_by", "any?", "all?", "none?", "reduce"}) ||
+        collection_selector_in({"empty?", "[]", "deconstruct", "first",
+                                "count", "to_a", "lazy", "each", "map",
+                                "flat_map", "select", "reject", "find",
+                                "group_by", "any?", "all?", "none?",
+                                "reduce"}) ||
         sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
         sequence_collection_selector || selector == "===";
@@ -14991,13 +15050,15 @@ private:
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() &&
-         selector_in({"empty?", "[]", "deconstruct_keys", "keys", "values",
-                      "entries", "to_a", "each", "map", "select", "reject",
-                      "transform", "transform_values", "merge", "each_pair",
-                      "contains?", "include?", "+", "|"})) ||
+         collection_selector_in({"empty?", "[]", "deconstruct_keys", "keys",
+                                 "values", "entries", "to_a", "count",
+                                 "each", "map", "select", "reject",
+                                 "transform", "transform_values", "merge",
+                                 "each_pair", "contains?", "include?",
+                                 "value?", "has_value?", "+", "|"})) ||
         ((receiver.is_integer() || receiver.is_float()) && numeric_selector);
     const bool keyword_compatible_builtin_selector =
-        selector == "each" &&
+        collection_selector == "each" &&
         (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
          receiver_is_range || receiver_is_lazy_seq);
     if (!kw_args.empty() && builtin_selector &&
@@ -15021,7 +15082,7 @@ private:
     }
 
     if (receiver_is_lazy_seq && lazy_seq_collection_selector) {
-      if (selector == "lazy") {
+      if (collection_selector == "lazy") {
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -15030,7 +15091,7 @@ private:
       }
 
       const std::optional<LazySeqOpKind> op_kind =
-          lazy_seq_op_kind_for_selector(selector);
+          lazy_seq_op_kind_for_selector(collection_selector);
       if (op_kind.has_value()) {
         if (!require_arity(0)) {
           return SendStatus::Faulted;
@@ -15050,7 +15111,8 @@ private:
         return SendStatus::Faulted;
       }
 
-      if (selector == "to_a" || selector == "deconstruct") {
+      if (collection_selector == "to_a" ||
+          collection_selector == "deconstruct") {
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -15063,7 +15125,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "empty?") {
+      if (collection_selector == "empty?") {
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -15082,7 +15144,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "[]") {
+      if (collection_selector == "[]") {
         std::int64_t index = 0;
         if (!require_arity(1) || !require_no_block() ||
             !require_integer_arg(0, &index)) {
@@ -15117,7 +15179,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "first") {
+      if (collection_selector == "first") {
         if (!require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -15145,7 +15207,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "each" && args.empty() && kw_args.empty()) {
+      if (collection_selector == "each" && args.empty() && kw_args.empty()) {
         if (!require_arity(0) ||
             !require_lazy_seq_finite_source(frame, *state, "run each")) {
           return SendStatus::Faulted;
@@ -15169,8 +15231,9 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "count") {
+      if (collection_selector == "count") {
         if (!require_arity(0) ||
+            (!count_alias_accepts_block && !require_no_block()) ||
             !require_lazy_seq_finite_source(frame, *state, "count all items")) {
           return SendStatus::Faulted;
         }
@@ -15203,7 +15266,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "find") {
+      if (collection_selector == "find") {
         if (!require_arity(0)) {
           return SendStatus::Faulted;
         }
@@ -15233,7 +15296,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "group_by") {
+      if (collection_selector == "group_by") {
         if (!require_arity(0) ||
             !require_lazy_seq_finite_source(frame, *state, "group all items")) {
           return SendStatus::Faulted;
@@ -15293,7 +15356,8 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "any?" || selector == "all?" || selector == "none?") {
+      if (collection_selector == "any?" || collection_selector == "all?" ||
+          collection_selector == "none?") {
         if (!require_arity(0)) {
           return SendStatus::Faulted;
         }
@@ -15320,9 +15384,9 @@ private:
               const bool truthy = is_truthy(predicate);
               any_match = any_match || truthy;
               all_match = all_match && truthy;
-              if ((selector == "any?" && any_match) ||
-                  (selector == "all?" && !all_match) ||
-                  (selector == "none?" && any_match)) {
+              if ((collection_selector == "any?" && any_match) ||
+                  (collection_selector == "all?" && !all_match) ||
+                  (collection_selector == "none?" && any_match)) {
                 return LazySeqVisitStatus::Stop;
               }
               return LazySeqVisitStatus::Continue;
@@ -15330,9 +15394,9 @@ private:
         if (status == LazySeqVisitStatus::Faulted) {
           return SendStatus::Faulted;
         }
-        if (selector == "any?") {
+        if (collection_selector == "any?") {
           *out = Value::boolean(any_match);
-        } else if (selector == "all?") {
+        } else if (collection_selector == "all?") {
           *out = Value::boolean(!saw_any || all_match);
         } else {
           *out = Value::boolean(!any_match);
@@ -15340,7 +15404,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "reduce") {
+      if (collection_selector == "reduce") {
         if (args.size() > 1U) {
           set_fault(frame, "TypeError", "wrong builtin SEND arity");
           return SendStatus::Faulted;
@@ -15387,7 +15451,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (selector == "take_while") {
+      if (collection_selector == "take_while") {
         if (!args.empty() || block.is_null()) {
           set_fault(frame, "TypeError", "take_while requires block");
           return SendStatus::Faulted;
@@ -15420,14 +15484,16 @@ private:
 
       if (sequence_set_operation_selector ||
           sequence_extra_operation_selector ||
-          (selector == "each" && (!args.empty() || !kw_args.empty()))) {
+          (collection_selector == "each" &&
+           (!args.empty() || !kw_args.empty()))) {
         const std::optional<std::vector<Value>> items =
             materialize_lazy_seq_items(frame, *state, receiver, std::nullopt);
         if (!items.has_value()) {
           return SendStatus::Faulted;
         }
         const std::optional<Value> value = apply_sequence_set_operation(
-            frame, receiver, selector, *items, args, block, kw_args);
+            frame, receiver, collection_selector, *items, args, block,
+            kw_args);
         if (!value.has_value()) {
           return SendStatus::Faulted;
         }
@@ -15438,8 +15504,9 @@ private:
 
     if (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
         (receiver_is_range && range_collection_selector)) {
-      if (receiver_is_range && (selector == "contains?" ||
-                                selector == "include?" || selector == "===")) {
+      if (receiver_is_range &&
+          (collection_selector == "contains?" ||
+           collection_selector == "include?" || selector == "===")) {
         if (!require_arity(1) || !require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -15460,21 +15527,21 @@ private:
         const bool open_ended =
             !bounds->start.has_value() || !bounds->finish.has_value();
         if (open_ended) {
-          if (selector == "lazy") {
+          if (collection_selector == "lazy") {
             if (!require_arity(0) || !require_no_block()) {
               return SendStatus::Faulted;
             }
             *out = make_lazy_seq_value(receiver, {});
             return SendStatus::Matched;
           }
-          if (selector == "empty?") {
+          if (collection_selector == "empty?") {
             if (!require_arity(0) || !require_no_block()) {
               return SendStatus::Faulted;
             }
             *out = Value::boolean(false);
             return SendStatus::Matched;
           }
-          if (selector == "first") {
+          if (collection_selector == "first") {
             if (!require_no_block()) {
               return SendStatus::Faulted;
             }
@@ -15509,7 +15576,7 @@ private:
             *out = make_list_value(std::move(taken));
             return SendStatus::Matched;
           }
-          if (selector == "[]" && bounds->start.has_value()) {
+          if (collection_selector == "[]" && bounds->start.has_value()) {
             std::int64_t index = 0;
             if (!require_arity(1) || !require_no_block() ||
                 !require_integer_arg(0, &index)) {
@@ -15528,13 +15595,14 @@ private:
             *out = Value::integer(*bounds->start + index);
             return SendStatus::Matched;
           }
-          if ((selector == "any?" || selector == "all?" ||
-               selector == "none?") &&
+          if ((collection_selector == "any?" ||
+               collection_selector == "all?" ||
+               collection_selector == "none?") &&
               block.is_null()) {
             if (!require_arity(0)) {
               return SendStatus::Faulted;
             }
-            *out = Value::boolean(selector != "none?");
+            *out = Value::boolean(collection_selector != "none?");
             return SendStatus::Matched;
           }
           set_fault(frame, "ArgumentError",
@@ -15551,14 +15619,14 @@ private:
         }
         if (items_view != nullptr) {
           const std::vector<Value> &items = *items_view;
-          if (selector == "empty?") {
+          if (collection_selector == "empty?") {
             if (!require_arity(0) || !require_no_block()) {
               return SendStatus::Faulted;
             }
             *out = Value::boolean(items.empty());
             return SendStatus::Matched;
           }
-          if (selector == "[]") {
+          if (collection_selector == "[]") {
             std::int64_t index = 0;
             if (!require_arity(1) || !require_no_block() ||
                 !require_integer_arg(0, &index)) {
@@ -15572,14 +15640,14 @@ private:
             *out = items[static_cast<std::size_t>(index)];
             return SendStatus::Matched;
           }
-          if (selector == "deconstruct") {
+          if (collection_selector == "deconstruct") {
             if (!require_arity(0) || !require_no_block()) {
               return SendStatus::Faulted;
             }
             *out = receiver;
             return SendStatus::Matched;
           }
-          if (selector == "first") {
+          if (collection_selector == "first") {
             if (!require_no_block()) {
               return SendStatus::Faulted;
             }
@@ -15600,14 +15668,14 @@ private:
                 std::vector<Value>(items.begin(), items.begin() + take));
             return SendStatus::Matched;
           }
-          if (selector == "count" && block.is_null()) {
+          if (collection_selector == "count" && block.is_null()) {
             if (!require_arity(0)) {
               return SendStatus::Faulted;
             }
             *out = Value::integer(static_cast<std::int64_t>(items.size()));
             return SendStatus::Matched;
           }
-          if (selector == "to_a") {
+          if (collection_selector == "to_a") {
             if (!require_arity(0) || !require_no_block()) {
               return SendStatus::Faulted;
             }
@@ -15626,14 +15694,14 @@ private:
       }
       if (extracted.has_value()) {
         items = *extracted;
-        if (selector == "empty?") {
+        if (collection_selector == "empty?") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           *out = Value::boolean(items.empty());
           return SendStatus::Matched;
         }
-        if (selector == "[]") {
+        if (collection_selector == "[]") {
           std::int64_t index = 0;
           if (!require_arity(1) || !require_no_block() ||
               !require_integer_arg(0, &index)) {
@@ -15646,7 +15714,7 @@ private:
           *out = items[static_cast<std::size_t>(index)];
           return SendStatus::Matched;
         }
-        if (selector == "deconstruct") {
+        if (collection_selector == "deconstruct") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -15655,16 +15723,18 @@ private:
         }
         if (sequence_set_operation_selector ||
             sequence_extra_operation_selector ||
-            (selector == "each" && (!args.empty() || !kw_args.empty()))) {
+            (collection_selector == "each" &&
+             (!args.empty() || !kw_args.empty()))) {
           const std::optional<Value> value = apply_sequence_set_operation(
-              frame, receiver, selector, items, args, block, kw_args);
+              frame, receiver, collection_selector, items, args, block,
+              kw_args);
           if (!value.has_value()) {
             return SendStatus::Faulted;
           }
           *out = *value;
           return SendStatus::Matched;
         }
-        if (selector == "first") {
+        if (collection_selector == "first") {
           if (!require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -15684,8 +15754,11 @@ private:
               std::vector<Value>(items.begin(), items.begin() + take));
           return SendStatus::Matched;
         }
-        if (selector == "count") {
+        if (collection_selector == "count") {
           if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          if (!count_alias_accepts_block && !require_no_block()) {
             return SendStatus::Faulted;
           }
           if (block.is_null()) {
@@ -15709,21 +15782,21 @@ private:
           *out = Value::integer(count);
           return SendStatus::Matched;
         }
-        if (selector == "to_a") {
+        if (collection_selector == "to_a") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           *out = make_list_value(items);
           return SendStatus::Matched;
         }
-        if (selector == "lazy") {
+        if (collection_selector == "lazy") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           *out = make_lazy_seq_value(receiver, {});
           return SendStatus::Matched;
         }
-        if (selector == "each") {
+        if (collection_selector == "each") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
@@ -15738,13 +15811,15 @@ private:
           *out = receiver;
           return SendStatus::Matched;
         }
-        if (selector == "map" || selector == "select" || selector == "reject" ||
-            selector == "flat_map" || selector == "find" ||
-            selector == "group_by") {
+        if (collection_selector == "map" || collection_selector == "select" ||
+            collection_selector == "reject" ||
+            collection_selector == "flat_map" ||
+            collection_selector == "find" ||
+            collection_selector == "group_by") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
-          if (selector == "map") {
+          if (collection_selector == "map") {
             std::vector<Value> mapped;
             mapped.reserve(items.size());
             for (const Value &item : items) {
@@ -15761,7 +15836,7 @@ private:
             *out = make_list_value(std::move(mapped));
             return SendStatus::Matched;
           }
-          if (selector == "flat_map") {
+          if (collection_selector == "flat_map") {
             std::vector<Value> mapped;
             for (const Value &item : items) {
               const std::optional<Value> value =
@@ -15788,7 +15863,7 @@ private:
             *out = make_list_value(std::move(mapped));
             return SendStatus::Matched;
           }
-          if (selector == "find") {
+          if (collection_selector == "find") {
             for (const Value &item : items) {
               const std::optional<Value> predicate =
                   call_block_to_value(frame, block, {item});
@@ -15806,7 +15881,7 @@ private:
             *out = Value::null();
             return SendStatus::Matched;
           }
-          if (selector == "group_by") {
+          if (collection_selector == "group_by") {
             std::vector<std::pair<std::uint32_t, std::vector<Value>>> groups;
             for (const Value &item : items) {
               const std::optional<Value> key =
@@ -15866,15 +15941,16 @@ private:
               return SendStatus::Faulted;
             }
             const bool keep = is_truthy(*predicate);
-            if ((selector == "select" && keep) ||
-                (selector == "reject" && !keep)) {
+            if ((collection_selector == "select" && keep) ||
+                (collection_selector == "reject" && !keep)) {
               filtered.push_back(item);
             }
           }
           *out = make_list_value(std::move(filtered));
           return SendStatus::Matched;
         }
-        if (selector == "any?" || selector == "all?" || selector == "none?") {
+        if (collection_selector == "any?" || collection_selector == "all?" ||
+            collection_selector == "none?") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
@@ -15899,16 +15975,16 @@ private:
             any_match = any_match || truthy;
             all_match = all_match && truthy;
           }
-          if (selector == "any?") {
+          if (collection_selector == "any?") {
             *out = Value::boolean(any_match);
-          } else if (selector == "all?") {
+          } else if (collection_selector == "all?") {
             *out = Value::boolean(!saw_any || all_match);
           } else {
             *out = Value::boolean(!any_match);
           }
           return SendStatus::Matched;
         }
-        if (selector == "reduce") {
+        if (collection_selector == "reduce") {
           if (args.size() > 1U) {
             set_fault(frame, "TypeError", "wrong builtin SEND arity");
             return SendStatus::Faulted;
@@ -15954,14 +16030,44 @@ private:
         return SendStatus::Faulted;
       }
       if (extracted.has_value()) {
-        if (selector == "empty?") {
+        if (collection_selector == "empty?") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           *out = Value::boolean(extracted->empty());
           return SendStatus::Matched;
         }
-        if (selector == "contains?" || selector == "include?") {
+        if (collection_selector == "count") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          if (!count_alias_accepts_block && !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (block.is_null()) {
+            *out = Value::integer(
+                static_cast<std::int64_t>(extracted->size()));
+            return SendStatus::Matched;
+          }
+          std::int64_t count = 0;
+          for (const MapEntry &entry : *extracted) {
+            const std::optional<Value> predicate = call_block_to_value(
+                frame, block, {Value::symbol(entry.symbol_id), entry.value});
+            if (!predicate.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!require_receiver_live_after_block()) {
+              return SendStatus::Faulted;
+            }
+            if (is_truthy(*predicate)) {
+              ++count;
+            }
+          }
+          *out = Value::integer(count);
+          return SendStatus::Matched;
+        }
+        if (collection_selector == "contains?" ||
+            collection_selector == "include?") {
           if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -15993,7 +16099,20 @@ private:
           *out = Value::boolean(found);
           return SendStatus::Matched;
         }
-        if (selector == "[]") {
+        if (collection_selector == "value?" ||
+            collection_selector == "has_value?") {
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const bool found =
+              std::find_if(extracted->begin(), extracted->end(),
+                           [&](const MapEntry &entry) {
+                             return value_equals(entry.value, args[0]);
+                           }) != extracted->end();
+          *out = Value::boolean(found);
+          return SendStatus::Matched;
+        }
+        if (collection_selector == "[]") {
           if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -16033,7 +16152,7 @@ private:
           *out = found;
           return SendStatus::Matched;
         }
-        if (selector == "deconstruct_keys") {
+        if (collection_selector == "deconstruct_keys") {
           if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -16064,7 +16183,7 @@ private:
           *out = receiver;
           return SendStatus::Matched;
         }
-        if (selector == "keys") {
+        if (collection_selector == "keys") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -16076,7 +16195,7 @@ private:
           *out = make_list_value(std::move(keys));
           return SendStatus::Matched;
         }
-        if (selector == "values") {
+        if (collection_selector == "values") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -16088,7 +16207,8 @@ private:
           *out = make_list_value(std::move(values));
           return SendStatus::Matched;
         }
-        if (selector == "entries" || selector == "to_a") {
+        if (collection_selector == "entries" ||
+            collection_selector == "to_a") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -16101,11 +16221,12 @@ private:
           *out = make_list_value(std::move(entries));
           return SendStatus::Matched;
         }
-        if (selector == "each" || selector == "each_pair") {
+        if (collection_selector == "each" ||
+            collection_selector == "each_pair") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
-          if (block.is_null() && selector == "each_pair") {
+          if (block.is_null() && collection_selector == "each_pair") {
             std::vector<Value> entries;
             entries.reserve(extracted->size());
             for (const MapEntry &entry : *extracted) {
@@ -16129,7 +16250,7 @@ private:
           *out = receiver;
           return SendStatus::Matched;
         }
-        if (selector == "map") {
+        if (collection_selector == "map") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
@@ -16149,7 +16270,8 @@ private:
           *out = make_list_value(std::move(mapped));
           return SendStatus::Matched;
         }
-        if (selector == "select" || selector == "reject") {
+        if (collection_selector == "select" ||
+            collection_selector == "reject") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
@@ -16165,15 +16287,15 @@ private:
               return SendStatus::Faulted;
             }
             const bool keep = is_truthy(*predicate);
-            if ((selector == "select" && keep) ||
-                (selector == "reject" && !keep)) {
+            if ((collection_selector == "select" && keep) ||
+                (collection_selector == "reject" && !keep)) {
               filtered.push_back(entry);
             }
           }
           *out = make_symbol_map_value(std::move(filtered));
           return SendStatus::Matched;
         }
-        if (selector == "transform") {
+        if (collection_selector == "transform") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
@@ -16198,7 +16320,7 @@ private:
           *out = make_symbol_map_value(std::move(transformed));
           return SendStatus::Matched;
         }
-        if (selector == "transform_values") {
+        if (collection_selector == "transform_values") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
@@ -16218,7 +16340,8 @@ private:
           *out = make_symbol_map_value(std::move(transformed));
           return SendStatus::Matched;
         }
-        if (selector == "merge" || selector == "+" || selector == "|") {
+        if (collection_selector == "merge" || collection_selector == "+" ||
+            collection_selector == "|") {
           if (!require_arity(1)) {
             return SendStatus::Faulted;
           }
@@ -16511,17 +16634,19 @@ private:
                                        std::uint32_t dst,
                                        std::uint32_t recv_reg,
                                        const std::string &selector) {
-    const bool collection_selector =
-        selector == "[]" || selector == "count" || selector == "first" ||
-        selector == "empty?" || selector == "deconstruct" ||
-        selector == "to_a";
+    const std::string collection_selector =
+        canonical_collection_selector(selector);
+    const bool collection_fast_selector =
+        collection_selector == "[]" || collection_selector == "count" ||
+        collection_selector == "first" || collection_selector == "empty?" ||
+        collection_selector == "deconstruct" || collection_selector == "to_a";
     const bool integer_selector =
         selector == "+" || selector == "-" || selector == "*" ||
         selector == "/" || selector == "%" || selector == "//" ||
         selector == ">" || selector == "<" || selector == ">=" ||
         selector == "<=" || selector == "==" || selector == "!=" ||
         selector == "<=>";
-    if (!collection_selector && !integer_selector) {
+    if (!collection_fast_selector && !integer_selector) {
       return FastSendStatus::NotHandled;
     }
 
@@ -16656,12 +16781,12 @@ private:
     }
 
     std::int64_t single_integer_arg = 0;
-    if (selector == "empty?" || selector == "count" ||
-        selector == "deconstruct" || selector == "to_a") {
+    if (collection_selector == "empty?" || collection_selector == "count" ||
+        collection_selector == "deconstruct" || collection_selector == "to_a") {
       if (pos_count != 0U) {
         return FastSendStatus::NotHandled;
       }
-    } else if (selector == "[]") {
+    } else if (collection_selector == "[]") {
       if (pos_count != 1U) {
         return FastSendStatus::NotHandled;
       }
@@ -16673,7 +16798,7 @@ private:
       if (!index_fast) {
         return FastSendStatus::NotHandled;
       }
-    } else if (selector == "first" && pos_count == 1U) {
+    } else if (collection_selector == "first" && pos_count == 1U) {
       const bool count_fast =
           read_integer_reg_unboxed(frame, arg_reg, &single_integer_arg);
       if (fault_.has_value()) {
@@ -16696,28 +16821,28 @@ private:
       return FastSendStatus::NotHandled;
     }
 
-    if (selector == "empty?") {
+    if (collection_selector == "empty?") {
       return write_reg_fast_plain(frame, dst, Value::boolean(items->empty()))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
-    if (selector == "count") {
+    if (collection_selector == "count") {
       return write_integer_reg_unboxed(
                  frame, dst, static_cast<std::int64_t>(items->size()))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
-    if (selector == "deconstruct") {
+    if (collection_selector == "deconstruct") {
       return write_reg_fast_plain(frame, dst, receiver)
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
-    if (selector == "to_a") {
+    if (collection_selector == "to_a") {
       return write_reg_fast_plain(frame, dst, make_list_value(*items))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
-    if (selector == "[]") {
+    if (collection_selector == "[]") {
       if (single_integer_arg < 0 ||
           static_cast<std::size_t>(single_integer_arg) >= items->size()) {
         set_fault(frame, "IndexError", "collection index is out of bounds");
@@ -16729,7 +16854,7 @@ private:
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
-    if (selector == "first") {
+    if (collection_selector == "first") {
       if (pos_count == 0U) {
         return write_reg_fast_plain(
                    frame, dst, items->empty() ? Value::null() : items->front())
@@ -17074,6 +17199,21 @@ private:
         set_fault(frame, "TypeError",
                   "property access does not accept arguments or block");
         return false;
+      }
+      if (collection_size_selector(*selector)) {
+        Value result = Value::null();
+        const SendStatus scalar_status = try_apply_scalar_send(
+            frame, receiver, *selector, args, block, kw_args, &result);
+        if (scalar_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (scalar_status == SendStatus::Matched) {
+          if (!write_reg(frame, dst, std::move(result))) {
+            return false;
+          }
+          ++frame.pc;
+          return true;
+        }
       }
     }
     if (property_assignment) {

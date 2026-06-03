@@ -26,6 +26,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -48,7 +49,8 @@ void usage(std::ostream &out) {
   out << "usage:\n";
   out << "  amberc <file.am>\n";
   out << "  amberc build <file.am> [-o <path>] [--out-dir <dir>] "
-         "[--target native|native-debug|bytecode-wrapper]\n";
+         "[--target native|native-debug|bytecode-wrapper] "
+         "[--entry auto|init|main|main-only]\n";
   out << "  amberc lex <file>\n";
   out << "  amberc parse <file>\n";
   out << "  amberc parse-expr <file>\n";
@@ -672,10 +674,18 @@ zero_arg_method_by_name(const amber::bytecode::BcModule &module,
   return nullptr;
 }
 
-enum class EntryExecutionMode { Init, MainAfterInit };
+enum class EntryExecutionMode { Init, MainAfterInit, MainOnly };
 
 std::string entry_mode_name(EntryExecutionMode mode) {
-  return mode == EntryExecutionMode::MainAfterInit ? "main" : "init";
+  switch (mode) {
+  case EntryExecutionMode::Init:
+    return "init";
+  case EntryExecutionMode::MainAfterInit:
+    return "main";
+  case EntryExecutionMode::MainOnly:
+    return "main-only";
+  }
+  return "init";
 }
 
 EntryExecutionMode parse_entry_mode(const std::string &mode) {
@@ -685,7 +695,26 @@ EntryExecutionMode parse_entry_mode(const std::string &mode) {
   if (mode == "main") {
     return EntryExecutionMode::MainAfterInit;
   }
+  if (mode == "main-only") {
+    return EntryExecutionMode::MainOnly;
+  }
   throw std::runtime_error("unknown embedded executable entry mode: " + mode);
+}
+
+EntryExecutionMode parse_source_build_entry_mode(const std::string &mode) {
+  if (mode == "auto") {
+    throw std::runtime_error("internal auto entry mode should be resolved");
+  }
+  if (mode == "init") {
+    return EntryExecutionMode::Init;
+  }
+  if (mode == "main") {
+    return EntryExecutionMode::MainAfterInit;
+  }
+  if (mode == "main-only") {
+    return EntryExecutionMode::MainOnly;
+  }
+  throw std::runtime_error("unknown source build entry mode: " + mode);
 }
 
 EntryExecutionMode
@@ -706,6 +735,7 @@ struct RunnableModuleArtifact {
 
 RunnableModuleArtifact compile_source_to_runnable_module(
     const std::string &path,
+    const std::optional<EntryExecutionMode> forced_entry_mode = std::nullopt,
     const std::vector<amber::capability::CapabilityRequest> &capabilities =
         {}) {
   const std::string source = read_file(path);
@@ -752,8 +782,8 @@ RunnableModuleArtifact compile_source_to_runnable_module(
   const std::string module_name = has_package
                                       ? parse_result.module_name
                                       : synthetic_module_name_for_path(path);
-  const EntryExecutionMode entry_mode =
-      default_entry_mode_for(has_package, emit_result.module);
+  const EntryExecutionMode entry_mode = forced_entry_mode.value_or(
+      default_entry_mode_for(has_package, emit_result.module));
   add_module_attr(&emit_result.module, "amber.entry.module", module_name);
   add_module_attr(&emit_result.module, "amber.entry.source", path);
   add_module_attr(&emit_result.module, "amber.entry.mode",
@@ -781,14 +811,15 @@ execute_runnable_module(const amber::bytecode::BcModule &module,
                         EntryExecutionMode mode) {
   amber::runtime::RuntimeWorld world(module);
   amber::runtime::ExecutionResult init_result;
-  if (module.init.has_entry_code_id) {
+  if (mode != EntryExecutionMode::MainOnly && module.init.has_entry_code_id) {
     init_result = world.execute(module.init.entry_code_id);
     if (!init_result.ok()) {
       return init_result;
     }
   }
 
-  if (mode == EntryExecutionMode::MainAfterInit) {
+  if (mode == EntryExecutionMode::MainAfterInit ||
+      mode == EntryExecutionMode::MainOnly) {
     const amber::bytecode::BcMethod *main_method =
         zero_arg_method_by_name(module, "main");
     if (main_method == nullptr) {
@@ -1474,10 +1505,12 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
     has_main = true;
   }
   const bool init_native =
+      artifact.entry_mode == EntryExecutionMode::MainOnly ||
       !module.init.has_entry_code_id ||
       plan.native_code_ids.find(init_code_id) != plan.native_code_ids.end();
   const bool main_native =
-      artifact.entry_mode != EntryExecutionMode::MainAfterInit ||
+      (artifact.entry_mode != EntryExecutionMode::MainAfterInit &&
+       artifact.entry_mode != EntryExecutionMode::MainOnly) ||
       (has_main &&
        plan.native_code_ids.find(main_code_id) != plan.native_code_ids.end());
   plan.entry_native = init_native && main_native;
@@ -1613,11 +1646,21 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "}\n";
   out << "  amber::runtime::RuntimeWorld world(decoded.module);\n";
   out << "  amber::runtime::ExecutionResult result;\n";
-  out << "  if (decoded.module.init.has_entry_code_id) {\n";
-  out << "    result = world.execute(decoded.module.init.entry_code_id);\n";
-  out << "    if (!result.ok()) { print_fault(result); return 1; }\n";
-  out << "  }\n";
+  if (artifact.entry_mode != EntryExecutionMode::MainOnly) {
+    out << "  if (decoded.module.init.has_entry_code_id) {\n";
+    out << "    result = world.execute(decoded.module.init.entry_code_id);\n";
+    out << "    if (!result.ok()) { print_fault(result); return 1; }\n";
+    out << "  }\n";
+  }
   if (artifact.entry_mode == EntryExecutionMode::MainAfterInit) {
+    out << "  const amber::bytecode::BcMethod *main_method = "
+           "zero_arg_method_by_name(decoded.module, \"main\");\n";
+    out << "  if (main_method == nullptr) { std::cerr << "
+           "\"EntryError: entry mode requires a zero-argument main() "
+           "method\\n\"; return 1; }\n";
+    out << "  result = world.execute(main_method->entry_code_id);\n";
+  }
+  if (artifact.entry_mode == EntryExecutionMode::MainOnly) {
     out << "  const amber::bytecode::BcMethod *main_method = "
            "zero_arg_method_by_name(decoded.module, \"main\");\n";
     out << "  if (main_method == nullptr) { std::cerr << "
@@ -1648,7 +1691,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "} // namespace\n\n";
   out << "int main() {\n";
   out << "  try {\n";
-  if (module.init.has_entry_code_id) {
+  if (artifact.entry_mode != EntryExecutionMode::MainOnly &&
+      module.init.has_entry_code_id) {
     out << "    NativeValue init_result = amber_native_call_code("
         << init_code_id << ", std::vector<NativeValue>{});\n";
     if (artifact.entry_mode == EntryExecutionMode::Init) {
@@ -1657,7 +1701,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
       out << "    (void)init_result;\n";
     }
   }
-  if (artifact.entry_mode == EntryExecutionMode::MainAfterInit) {
+  if (artifact.entry_mode == EntryExecutionMode::MainAfterInit ||
+      artifact.entry_mode == EntryExecutionMode::MainOnly) {
     out << "    NativeValue result = amber_native_call_code(" << main_code_id
         << ", std::vector<NativeValue>{});\n";
     out << "    print_native_value(result);\n";
@@ -1870,6 +1915,7 @@ struct SourceBuildCliOptions {
   std::string out_path;
   std::string out_dir;
   std::string target = "native";
+  std::string entry = "auto";
 };
 
 SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
@@ -1887,6 +1933,13 @@ SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
           options.target != "bytecode-wrapper") {
         throw std::runtime_error("unknown source build target: " +
                                  options.target);
+      }
+    } else if (arg == "--entry" && i + 1 < argc) {
+      options.entry = argv[++i];
+      if (options.entry != "auto" && options.entry != "init" &&
+          options.entry != "main" && options.entry != "main-only") {
+        throw std::runtime_error("unknown source build entry mode: " +
+                                 options.entry);
       }
     } else {
       throw std::runtime_error("unknown source build option: " + arg);
@@ -1962,8 +2015,13 @@ int run_source_build_command(int argc, char **argv) {
   const std::filesystem::path output_path =
       default_executable_path_for(source_path, options);
   try {
+    const std::optional<EntryExecutionMode> forced_entry =
+        options.entry == "auto"
+            ? std::nullopt
+            : std::optional<EntryExecutionMode>(
+                  parse_source_build_entry_mode(options.entry));
     const RunnableModuleArtifact artifact =
-        compile_source_to_runnable_module(source_path);
+        compile_source_to_runnable_module(source_path, forced_entry);
     const std::filesystem::path parent = output_path.parent_path();
     if (!parent.empty()) {
       std::filesystem::create_directories(parent);
