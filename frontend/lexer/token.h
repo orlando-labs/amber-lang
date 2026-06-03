@@ -67,6 +67,7 @@ enum class TokenKind {
   At,
   AtAt,
 
+  KeywordAttr,
   KeywordAnd,
   KeywordBreak,
   KeywordCase,

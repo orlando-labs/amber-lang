@@ -199,6 +199,7 @@ bool def_stmt_clause_defs_mergeable(const ast::Expr &left,
 
 bool is_identifier_like_token(lexer::TokenKind kind) {
   return kind == lexer::TokenKind::Identifier ||
+         kind == lexer::TokenKind::KeywordAttr ||
          kind == lexer::TokenKind::KeywordProp ||
          kind == lexer::TokenKind::KeywordClassProp;
 }
@@ -361,6 +362,62 @@ std::unique_ptr<ast::Expr> make_synthetic_signature(const lexer::Span &span,
   }
   signature->list_field("params", std::move(params));
   return signature;
+}
+
+std::unique_ptr<ast::Expr> make_attr_setter_signature(const lexer::Span &span) {
+  auto signature = ast::make_expr("AstSignature", span);
+  std::vector<std::unique_ptr<ast::Expr>> params;
+  auto param = ast::make_expr("AstParam", span);
+  param->string_field("param_kind", "positional");
+  param->string_field("external_name", "value");
+  param->string_field("local_name", "value");
+  param->string_field("auto_assign_kind", "none");
+  param->string_field("type_expr", "");
+  params.push_back(std::move(param));
+  signature->list_field("params", std::move(params));
+  return signature;
+}
+
+std::unique_ptr<ast::Expr> make_attr_ivar(const std::string &field_name,
+                                          const lexer::Span &span) {
+  auto expr = ast::make_expr("AstIvar", span);
+  expr->string_field("name", field_name);
+  return expr;
+}
+
+std::unique_ptr<ast::Expr>
+make_attr_expr_stmt(std::unique_ptr<ast::Expr> expr) {
+  lexer::Span span = expr->span;
+  auto stmt = ast::make_expr("AstExprStmt", span);
+  stmt->node_field("expr", std::move(expr));
+  return stmt;
+}
+
+std::vector<std::unique_ptr<ast::Expr>>
+make_attr_getter_body(const std::string &field_name,
+                      const lexer::Span &field_span) {
+  std::vector<std::unique_ptr<ast::Expr>> body;
+  body.push_back(make_attr_expr_stmt(make_attr_ivar(field_name, field_span)));
+  return body;
+}
+
+std::vector<std::unique_ptr<ast::Expr>>
+make_attr_setter_body(const std::string &field_name,
+                      const lexer::Span &field_span) {
+  std::vector<std::unique_ptr<ast::Expr>> body;
+  auto assign = ast::make_expr("AstAssign", field_span);
+  assign->string_field("op", "=");
+  assign->node_field("left", make_attr_ivar(field_name, field_span));
+  auto value = ast::make_expr("AstName", field_span);
+  value->string_field("name", "value");
+  assign->node_field("right", std::move(value));
+  body.push_back(make_attr_expr_stmt(std::move(assign)));
+  return body;
+}
+
+bool attr_storage_stop_token(lexer::TokenKind kind) {
+  return kind == lexer::TokenKind::Newline ||
+         kind == lexer::TokenKind::Dedent || kind == lexer::TokenKind::Eof;
 }
 
 std::unique_ptr<ast::Expr>
@@ -719,6 +776,16 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
       return parse_prop_def(false);
     }
     break;
+  case lexer::TokenKind::KeywordAttr:
+    if (looks_like_attr_declaration()) {
+      if (context != BodyContext::Class && context != BodyContext::Mixin) {
+        error_code(current(), "E_ATTR_INVALID_CONTEXT",
+                   "attr declarations are only allowed in class or mixin "
+                   "bodies");
+      }
+      return parse_attr_def();
+    }
+    break;
   case lexer::TokenKind::KeywordClassMethod: {
     const lexer::Token start = advance();
     consume(lexer::TokenKind::KeywordDef, "expected 'def' after class_method");
@@ -995,6 +1062,96 @@ std::unique_ptr<ast::Expr> Parser::parse_prop_def(bool class_property) {
     node->node_field("setter_signature", std::move(suite.setter_signature));
   }
   node->list_field("setter_body", std::move(suite.setter_body));
+  return node;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_attr_def() {
+  const lexer::Token start = advance();
+
+  std::string mode = "get_only";
+  bool has_getter = true;
+  bool has_setter = false;
+  if (check(lexer::TokenKind::Identifier) &&
+      (current().lexeme == "var" || current().lexeme == "set") &&
+      (is_identifier_like_token(peek().kind) ||
+       peek().kind == lexer::TokenKind::KeywordFrom)) {
+    mode = current().lexeme == "var" ? "get_set" : "set_only";
+    has_getter = current().lexeme == "var";
+    has_setter = true;
+    advance();
+  }
+
+  bool has_name = false;
+  lexer::Token name = current();
+  if (is_identifier_like_token(current().kind)) {
+    name = advance();
+    has_name = true;
+  } else {
+    error_code(current(), "E_ATTR_EXPECTED_NAME",
+               "attribute declaration requires a member name");
+    if (!check(lexer::TokenKind::KeywordFrom) &&
+        !attr_storage_stop_token(current().kind)) {
+      advance();
+    }
+  }
+
+  const std::string attr_name = has_name ? name.lexeme : "";
+  std::string storage_field = attr_name;
+  lexer::Span storage_span = has_name ? name.span : start.span;
+  bool explicit_storage = false;
+
+  if (match(lexer::TokenKind::KeywordFrom)) {
+    explicit_storage = true;
+    const lexer::Token from = previous();
+    if (check(lexer::TokenKind::At)) {
+      const lexer::Token at = advance();
+      if (check(lexer::TokenKind::Identifier)) {
+        const lexer::Token field = advance();
+        storage_field = field.lexeme;
+        storage_span = ast::join_spans(at.span, field.span);
+      } else {
+        error_code(current(), "E_ATTR_EXPECTED_STORAGE_FIELD",
+                   "expected instance field after `from`");
+        storage_span = from.span;
+      }
+    } else if (attr_storage_stop_token(current().kind)) {
+      error_code(current(), "E_ATTR_EXPECTED_STORAGE_FIELD",
+                 "expected instance field after `from`");
+      storage_span = from.span;
+    } else {
+      error_code(current(), "E_ATTR_INVALID_STORAGE",
+                 "attribute storage must be an instance field token");
+      storage_span = current().span;
+      while (!attr_storage_stop_token(current().kind)) {
+        advance();
+      }
+    }
+  }
+
+  const lexer::Span end_span =
+      previous().span.end.offset >= start.span.start.offset ? previous().span
+                                                            : start.span;
+  auto node =
+      ast::make_expr("AstAttrDef", ast::join_spans(start.span, end_span));
+  node->string_field("name", attr_name);
+  node->string_field("attr_mode", mode);
+  node->string_field("storage_field", storage_field);
+  node->bool_field("explicit_storage", explicit_storage);
+  node->bool_field("grouped_descriptor", false);
+  node->bool_field("has_getter", has_getter);
+  node->bool_field("has_setter", has_setter);
+  node->list_field("getter_body",
+                   has_getter
+                       ? make_attr_getter_body(storage_field, storage_span)
+                       : std::vector<std::unique_ptr<ast::Expr>>{});
+  if (has_setter) {
+    node->node_field("setter_signature",
+                     make_attr_setter_signature(storage_span));
+    node->list_field("setter_body",
+                     make_attr_setter_body(storage_field, storage_span));
+  } else {
+    node->list_field("setter_body", {});
+  }
   return node;
 }
 
@@ -2044,6 +2201,19 @@ bool Parser::looks_like_property_declaration() const {
          after_name == lexer::TokenKind::LParen;
 }
 
+bool Parser::looks_like_attr_declaration() const {
+  if (!check(lexer::TokenKind::KeywordAttr)) {
+    return false;
+  }
+  if (peek().kind == lexer::TokenKind::KeywordFrom) {
+    return true;
+  }
+  if (is_identifier_like_token(peek().kind)) {
+    return true;
+  }
+  return false;
+}
+
 bool Parser::property_suite_starts_grouped() const {
   if (!check(lexer::TokenKind::Newline) ||
       peek().kind != lexer::TokenKind::Indent) {
@@ -2925,6 +3095,9 @@ bool Parser::is_stop_token(StopMode stop_mode) const {
 bool Parser::starts_primary() const {
   switch (current().kind) {
   case lexer::TokenKind::Identifier:
+  case lexer::TokenKind::KeywordAttr:
+  case lexer::TokenKind::KeywordProp:
+  case lexer::TokenKind::KeywordClassProp:
   case lexer::TokenKind::Placeholder:
   case lexer::TokenKind::LastValue:
   case lexer::TokenKind::Integer:
@@ -2951,6 +3124,9 @@ bool Parser::starts_primary() const {
 bool Parser::starts_bare_arg() const {
   switch (current().kind) {
   case lexer::TokenKind::Identifier:
+  case lexer::TokenKind::KeywordAttr:
+  case lexer::TokenKind::KeywordProp:
+  case lexer::TokenKind::KeywordClassProp:
   case lexer::TokenKind::Placeholder:
   case lexer::TokenKind::LastValue:
   case lexer::TokenKind::Integer:

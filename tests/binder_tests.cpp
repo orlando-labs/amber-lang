@@ -784,13 +784,17 @@ void test_property_bindings_and_conflicts() {
       bind_any("class User:\n"
                "  prop name: @name\n"
                "  def name(): @name\n");
-  expect_diagnostic_code(method_conflict, "AMB_PROP_NAME_CONFLICT");
+  expect_diagnostic_code(method_conflict, "E_MEMBER_NAME_CONFLICT");
 
-  amber::binder::BindResult field_conflict =
+  amber::binder::BindResult storage_separation =
       bind_any("class User:\n"
-               "  prop name: @name\n"
+               "  attr name\n"
                "  def init(@name): pass\n");
-  expect_diagnostic_code(field_conflict, "AMB_PROP_NAME_CONFLICT");
+  if (!storage_separation.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(
+        storage_separation.diagnostics);
+    std::exit(1);
+  }
 
   amber::binder::BindResult missing_setter = bind_any("prop answer: 42\n"
                                                       "answer = 7\n");
@@ -823,6 +827,17 @@ void test_property_bindings_and_conflicts() {
   expect(setter_signature != nullptr && setter_signature->params.size() == 1 &&
              setter_signature->params[0].local_name == "value",
          "property setter one-arg signature");
+
+  amber::binder::BindResult attr_conflict = bind_any("class User:\n"
+                                                     "  attr email\n"
+                                                     "  prop email: @email\n");
+  expect_diagnostic_code(attr_conflict, "E_MEMBER_NAME_CONFLICT");
+
+  amber::binder::BindResult attr_attr_conflict =
+      bind_any("class User:\n"
+               "  attr email\n"
+               "  attr var email\n");
+  expect_diagnostic_code(attr_attr_conflict, "E_MEMBER_NAME_CONFLICT");
 }
 
 } // namespace

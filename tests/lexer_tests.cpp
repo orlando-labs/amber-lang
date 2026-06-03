@@ -161,6 +161,17 @@ void test_property_keywords() {
                 TokenKind::Eof});
 }
 
+void test_attribute_keyword() {
+  expect_kinds("attribute keyword",
+               "attr email\n"
+               "attr var value from @raw_value\n",
+               {TokenKind::KeywordAttr, TokenKind::Identifier,
+                TokenKind::Newline, TokenKind::KeywordAttr,
+                TokenKind::Identifier, TokenKind::Identifier,
+                TokenKind::KeywordFrom, TokenKind::At, TokenKind::Identifier,
+                TokenKind::Newline, TokenKind::Eof});
+}
+
 void test_unicode_identifier_forms() {
   expect_kinds("unicode identifiers",
                "масса = α + β2\n"
@@ -240,6 +251,7 @@ int main() {
   test_pattern_punctuation();
   test_effect_row_punctuation();
   test_property_keywords();
+  test_attribute_keyword();
   test_unicode_identifier_forms();
   test_w13_comments_ranges_and_numbers();
   test_new_operator_tokens();

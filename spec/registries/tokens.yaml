@@ -48,6 +48,7 @@ tokens:
     - AT
     - AT_AT
   keywords:
+    - KEYWORD_ATTR
     - KEYWORD_AND
     - KEYWORD_BREAK
     - KEYWORD_CASE

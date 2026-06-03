@@ -42,11 +42,11 @@ Check with `make spec-sync-check`.
 | Registry | Lines | SHA-256 |
 | --- | ---: | --- |
 | `spec/registries/bytecode_sections.yaml` | 88 | `beb53d82556008ef1c60bfa9955722b05b2b87b9c2df74110484a93224dec7e9` |
-| `spec/registries/diagnostics.yaml` | 82 | `534d0f22d2719102585863d581a17300fb4b29ed5edac812d59ead5a6af995c2` |
+| `spec/registries/diagnostics.yaml` | 87 | `b05b9be68bb45ad9b3c78d1b3a3c50828a37cf3fee0d1e22bb534b44255a96a1` |
 | `spec/registries/opcodes.yaml` | 160 | `cfb1144ae9aa5ddfdc92cbf6244c6ebc57a50d4422fd41f61ac9b6516502c7f6` |
 | `spec/registries/prelude.yaml` | 329 | `23b6a897f9409ad8e8c615f741221c287beb5e85e744e8f19f48d1fbac607f14` |
 | `spec/registries/runtime_errors.yaml` | 45 | `91575e5aa6d37bf8de2b4111f2007daf2d51886a2fc9ca859e1cee21fed3df80` |
-| `spec/registries/tokens.yaml` | 105 | `d86e2981bd7830edd5d489e35fc1b33644d6c8ca5b7b9e715d71fe3ad8d04a27` |
+| `spec/registries/tokens.yaml` | 106 | `bf64b47e74f74a69869bea7fd59ced66591a79c47c9e46839adfd0cf8b5b0523` |
 
 ## Anchor Map
 

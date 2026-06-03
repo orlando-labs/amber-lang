@@ -155,6 +155,8 @@ const char *token_kind_name(TokenKind kind) {
     return "AT";
   case TokenKind::AtAt:
     return "AT_AT";
+  case TokenKind::KeywordAttr:
+    return "KEYWORD_ATTR";
   case TokenKind::KeywordAnd:
     return "KEYWORD_AND";
   case TokenKind::KeywordBreak:

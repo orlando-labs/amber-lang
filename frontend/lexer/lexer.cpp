@@ -867,6 +867,7 @@ bool Lexer::is_hex_digit(char c) {
 bool Lexer::is_keyword_text(const std::string &text, TokenKind *kind) {
   static const std::unordered_map<std::string_view, TokenKind> keywords = {
       {"and", TokenKind::KeywordAnd},
+      {"attr", TokenKind::KeywordAttr},
       {"break", TokenKind::KeywordBreak},
       {"case", TokenKind::KeywordCase},
       {"class", TokenKind::KeywordClass},

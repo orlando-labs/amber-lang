@@ -473,7 +473,8 @@ private:
           node_field(item, "signature"), list_field(item, "body"));
       return;
     }
-    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef" ||
+        item.kind == "AstAttrDef") {
       const std::string kind =
           item.kind == "AstClassPropDef" ? "class_property" : "property";
       if (bool_field(item, "has_getter")) {

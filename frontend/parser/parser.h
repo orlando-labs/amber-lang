@@ -78,6 +78,7 @@ private:
   parse_def_stmt(bool class_method,
                  const lexer::Token *start_override = nullptr);
   std::unique_ptr<ast::Expr> parse_prop_def(bool class_property);
+  std::unique_ptr<ast::Expr> parse_attr_def();
   PropertySuite parse_property_suite(const lexer::Span &fallback_span);
   PropertySuite parse_grouped_property_suite(const lexer::Span &fallback_span);
   void parse_property_arm(PropertySuite *suite);
@@ -115,6 +116,7 @@ private:
   const lexer::Token &consume_identifier_like(const std::string &message);
   std::string consume_identifier_text(const std::string &message);
   bool looks_like_property_declaration() const;
+  bool looks_like_attr_declaration() const;
   bool property_suite_starts_grouped() const;
   bool match_contextual(const char *text);
   bool starts_clause_body() const;

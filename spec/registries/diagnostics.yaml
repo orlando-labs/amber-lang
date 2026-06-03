@@ -32,6 +32,11 @@ diagnostics:
   - { code: AMB_PROP_SETTER_UNDEFINED, severity: error, phase: binder, condition: assignment to property with no setter support }
   - { code: AMB_PROP_IMPORT_CONFLICT, severity: error, phase: binder, condition: imported property conflicts with local binding }
   - { code: AMB_PROP_EXPORT_CONFLICT, severity: error, phase: binder, condition: exported property conflicts with export alias }
+  - { code: E_ATTR_EXPECTED_NAME, severity: error, phase: parser, condition: attribute declaration is missing its external member name }
+  - { code: E_ATTR_EXPECTED_STORAGE_FIELD, severity: error, phase: parser, condition: attribute from clause is missing a direct instance field token }
+  - { code: E_ATTR_INVALID_STORAGE, severity: error, phase: parser, condition: attribute storage target is not a direct instance field token }
+  - { code: E_ATTR_INVALID_CONTEXT, severity: error, phase: parser, condition: attribute declaration outside class or mixin body }
+  - { code: E_MEMBER_NAME_CONFLICT, severity: error, phase: binder, condition: external member name declared multiple times in one owner }
   - { code: B0001, severity: error, phase: binder, condition: duplicate lexical binding in one scope }
   - { code: B0002, severity: error, phase: binder, condition: wildcard underscore used as an ordinary binding or reference }
   - { code: E1001, severity: error, phase: pattern, condition: duplicate binding names in one pattern }

@@ -275,6 +275,15 @@ private:
     return binding.role == "property" || binding.role == "class_property";
   }
 
+  bool ast_is_property_decl(const ast::Expr &item) const {
+    return item.kind == "AstPropDef" || item.kind == "AstClassPropDef" ||
+           item.kind == "AstAttrDef";
+  }
+
+  bool ast_is_class_property_decl(const ast::Expr &item) const {
+    return item.kind == "AstClassPropDef";
+  }
+
   bool same_decl_span(const Binding &binding, const lexer::Span &span) const {
     return binding.span.file == span.file &&
            binding.span.start.offset == span.start.offset &&
@@ -288,8 +297,8 @@ private:
     if (Binding *existing = find_local_binding(scope_index, name)) {
       if (!same_decl_span(*existing, span) ||
           !binding_is_property(*existing) || existing->role != role) {
-        diagnostic("AMB_PROP_NAME_CONFLICT", "error", "binder",
-                   "property name conflicts with an existing declaration",
+        diagnostic("E_MEMBER_NAME_CONFLICT", "error", "binder",
+                   "external member '" + name + "' declared multiple times",
                    span);
       }
       existing->property_has_getter = has_getter;
@@ -309,8 +318,8 @@ private:
                                     const lexer::Span &span) {
     if (Binding *existing = find_local_binding(scope_index, name)) {
       if (binding_is_property(*existing)) {
-        diagnostic("AMB_PROP_NAME_CONFLICT", "error", "binder",
-                   "property name conflicts with an existing declaration",
+        diagnostic("E_MEMBER_NAME_CONFLICT", "error", "binder",
+                   "external member '" + name + "' declared multiple times",
                    span);
         return existing;
       }
@@ -372,12 +381,12 @@ private:
       declare_callable_binding(scope_index, name, role, item.span);
       return;
     }
-    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+    if (ast_is_property_decl(item)) {
       if (!property_allowed_in_scope(scope_index, item)) {
         return;
       }
       const std::string role =
-          item.kind == "AstClassPropDef" ? "class_property" : "property";
+          ast_is_class_property_decl(item) ? "class_property" : "property";
       declare_property_binding(scope_index, string_value(item, "name"), role,
                                item.span, bool_value(item, "has_getter"),
                                bool_value(item, "has_setter"));
@@ -457,7 +466,7 @@ private:
       visit_def(scope_index, item);
       return;
     }
-    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+    if (ast_is_property_decl(item)) {
       visit_property_def(scope_index, item);
       return;
     }
@@ -544,6 +553,9 @@ private:
     if (item.kind == "AstClassPropDef") {
       return scope_kind == "class";
     }
+    if (item.kind == "AstAttrDef") {
+      return scope_kind == "class" || scope_kind == "mixin";
+    }
     return scope_kind == "module" || scope_kind == "class" ||
            scope_kind == "mixin";
   }
@@ -555,9 +567,15 @@ private:
                  "class_prop is only allowed in class body", item.span);
       return;
     }
-    if (item.kind == "AstPropDef" &&
-        scope_kind != "module" && scope_kind != "class" &&
+    if (item.kind == "AstAttrDef" && scope_kind != "class" &&
         scope_kind != "mixin") {
+      diagnostic("E_ATTR_INVALID_CONTEXT", "error", "binder",
+                 "attr declarations are only allowed in class or mixin bodies",
+                 item.span);
+      return;
+    }
+    if (item.kind == "AstPropDef" && scope_kind != "module" &&
+        scope_kind != "class" && scope_kind != "mixin") {
       diagnostic("AMB_PROP_INVALID_CONTEXT", "error", "binder",
                  "property declarations are not allowed in function or block "
                  "bodies",
@@ -567,7 +585,7 @@ private:
 
   void visit_property_def(int parent_scope, const ast::Expr &item) {
     const std::string name = string_value(item, "name");
-    const bool class_property = item.kind == "AstClassPropDef";
+    const bool class_property = ast_is_class_property_decl(item);
     if (!property_allowed_in_scope(parent_scope, item)) {
       diagnose_property_context(parent_scope, item);
       return;
@@ -681,15 +699,6 @@ private:
         const int field_scope = nearest_object_scope(owner_scope);
         const std::string field_name = auto_assign_kind + local_name;
         const int target_scope = field_scope >= 0 ? field_scope : function_scope;
-        if (auto_assign_kind == "@") {
-          if (Binding *property = find_local_binding(target_scope, local_name);
-              property != nullptr && binding_is_property(*property)) {
-            diagnostic("AMB_PROP_NAME_CONFLICT", "error", "binder",
-                       "property name conflicts with a generated field "
-                       "accessor",
-                       param->span);
-          }
-        }
         declare_binding(target_scope, field_name,
                         auto_assign_kind == "@" ? "ivar" : "cvar", "field",
                         param->span, false);

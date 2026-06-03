@@ -1392,6 +1392,23 @@ void test_property_lowering() {
   expect(setter_send != nullptr &&
              string_field(*setter_send, "selector") == "full_name=",
          "member assignment carries property_assignment marker");
+
+  const amber::hir::Program attr_program =
+      lower_ok("class Box:\n"
+               "  attr var value from @raw_value\n");
+  const amber::ast::Expr *box_class = module_item_by_name(attr_program, "Box");
+  expect(box_class != nullptr && box_class->kind == "HClass",
+         "attr class exists");
+  const amber::ast::Expr *value_getter = list_item(*box_class, "body", 0);
+  expect(value_getter != nullptr && value_getter->kind == "HMethod",
+         "attr getter lowers to HMethod");
+  expect(bool_field(*value_getter, "property_getter"),
+         "attr getter property flag");
+  const amber::ast::Expr *value_setter = list_item(*box_class, "body", 1);
+  expect(value_setter != nullptr && value_setter->kind == "HMethod",
+         "attr setter lowers to HMethod");
+  expect(bool_field(*value_setter, "property_setter"),
+         "attr setter property flag");
 }
 
 } // namespace

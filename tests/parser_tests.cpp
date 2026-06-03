@@ -654,6 +654,108 @@ void test_property_forms() {
          "class property kind");
 }
 
+void test_attribute_forms() {
+  amber::parser::ParseModuleResult result =
+      parse_module_raw("class User:\n"
+                       "  attr email\n"
+                       "  attr var name from @raw_name\n"
+                       "  attr set password\n");
+  if (!result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
+    std::exit(1);
+  }
+
+  const amber::ast::ListField &body = list_field(*result.items[0], "body");
+  expect(body.values.size() == 3, "attribute class body item count");
+
+  const Expr &email = *body.values[0];
+  expect(email.kind == "AstAttrDef", "getter-only attr kind");
+  expect(string_field(email, "name") == "email", "attr name");
+  expect(string_field(email, "attr_mode") == "get_only",
+         "getter-only attr mode");
+  expect(string_field(email, "storage_field") == "email",
+         "default attr storage");
+  expect(bool_field(email, "has_getter") && !bool_field(email, "has_setter"),
+         "getter-only attr flags");
+  const Expr &email_get =
+      node_field(*list_field(email, "getter_body").values[0], "expr");
+  expect(email_get.kind == "AstIvar" &&
+             string_field(email_get, "name") == "email",
+         "getter-only attr synthetic getter body");
+
+  const Expr &name = *body.values[1];
+  expect(name.kind == "AstAttrDef", "read-write attr kind");
+  expect(string_field(name, "attr_mode") == "get_set", "read-write attr mode");
+  expect(string_field(name, "storage_field") == "raw_name",
+         "explicit attr storage");
+  expect(bool_field(name, "explicit_storage"), "explicit storage marker");
+  expect(bool_field(name, "has_getter") && bool_field(name, "has_setter"),
+         "read-write attr flags");
+  expect(node_field(name, "setter_signature").kind == "AstSignature",
+         "attr setter signature");
+  expect(list_field(name, "setter_body").values.size() == 1,
+         "attr setter body");
+
+  const Expr &password = *body.values[2];
+  expect(string_field(password, "attr_mode") == "set_only",
+         "setter-only attr mode");
+  expect(!bool_field(password, "has_getter") &&
+             bool_field(password, "has_setter"),
+         "setter-only attr flags");
+}
+
+void test_attribute_diagnostics() {
+  amber::parser::ParseModuleResult missing_name =
+      parse_module_raw("class User:\n"
+                       "  attr from @email\n");
+  expect(!missing_name.ok(), "attr missing name rejected");
+  expect(!missing_name.diagnostics.empty() &&
+             missing_name.diagnostics[0].code == "E_ATTR_EXPECTED_NAME",
+         "attr missing name diagnostic");
+
+  amber::parser::ParseModuleResult missing_storage =
+      parse_module_raw("class User:\n"
+                       "  attr email from\n");
+  expect(!missing_storage.ok(), "attr missing storage rejected");
+  expect(!missing_storage.diagnostics.empty() &&
+             missing_storage.diagnostics[0].code ==
+                 "E_ATTR_EXPECTED_STORAGE_FIELD",
+         "attr missing storage diagnostic");
+
+  amber::parser::ParseModuleResult invalid_storage =
+      parse_module_raw("class User:\n"
+                       "  attr email from self.email\n");
+  expect(!invalid_storage.ok(), "attr invalid storage rejected");
+  expect(!invalid_storage.diagnostics.empty() &&
+             invalid_storage.diagnostics[0].code == "E_ATTR_INVALID_STORAGE",
+         "attr invalid storage diagnostic");
+
+  amber::parser::ParseModuleResult invalid_call_storage =
+      parse_module_raw("class User:\n"
+                       "  attr email from foo()\n");
+  expect(!invalid_call_storage.ok(), "attr call storage rejected");
+  expect(!invalid_call_storage.diagnostics.empty() &&
+             invalid_call_storage.diagnostics[0].code ==
+                 "E_ATTR_INVALID_STORAGE",
+         "attr call storage diagnostic");
+
+  amber::parser::ParseModuleResult invalid_class_storage =
+      parse_module_raw("class User:\n"
+                       "  attr email from @@shared\n");
+  expect(!invalid_class_storage.ok(), "attr class storage rejected");
+  expect(!invalid_class_storage.diagnostics.empty() &&
+             invalid_class_storage.diagnostics[0].code ==
+                 "E_ATTR_INVALID_STORAGE",
+         "attr class storage diagnostic");
+
+  amber::parser::ParseModuleResult invalid_context =
+      parse_module_raw("attr email\n");
+  expect(!invalid_context.ok(), "top-level attr rejected");
+  expect(!invalid_context.diagnostics.empty() &&
+             invalid_context.diagnostics[0].code == "E_ATTR_INVALID_CONTEXT",
+         "attr invalid context diagnostic");
+}
+
 void test_property_parameter_diagnostic() {
   amber::parser::ParseModuleResult result = parse_module_raw("prop f(x): x\n");
   expect(!result.ok(), "property parameter list rejected");
@@ -686,13 +788,15 @@ void test_property_keywords_are_contextual_names() {
   amber::parser::ParseModuleResult result =
       parse_module_raw("prop = 1\n"
                        "class_prop = prop\n"
-                       "box.prop\n");
+                       "attr = class_prop\n"
+                       "box.prop\n"
+                       "box.attr\n");
   if (!result.ok()) {
     std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
     std::exit(1);
   }
 
-  expect(result.items.size() == 3, "contextual property keyword item count");
+  expect(result.items.size() == 5, "contextual property keyword item count");
   const Expr &first_assign = node_field(*result.items[0], "expr");
   expect(first_assign.kind == "AstAssign", "prop assignment parses");
   expect(string_field(node_field(first_assign, "left"), "name") == "prop",
@@ -703,8 +807,14 @@ void test_property_keywords_are_contextual_names() {
   expect(string_field(node_field(second_assign, "left"), "name") ==
              "class_prop",
          "class_prop keyword remains name outside declaration form");
-  expect(result.items[2]->kind == "AstExprStmt",
+  const Expr &third_assign = node_field(*result.items[2], "expr");
+  expect(third_assign.kind == "AstAssign", "attr assignment parses");
+  expect(string_field(node_field(third_assign, "left"), "name") == "attr",
+         "attr keyword remains name outside declaration form");
+  expect(result.items[3]->kind == "AstExprStmt",
          "member named prop parses as expression statement");
+  expect(result.items[4]->kind == "AstExprStmt",
+         "member named attr parses as expression statement");
 }
 
 void test_control_flow_forms() {
@@ -814,6 +924,8 @@ int main() {
   test_pattern_assignment_and_block_param_patterns();
   test_module_forms();
   test_property_forms();
+  test_attribute_forms();
+  test_attribute_diagnostics();
   test_property_parameter_diagnostic();
   test_property_grouped_diagnostics_and_context();
   test_property_keywords_are_contextual_names();

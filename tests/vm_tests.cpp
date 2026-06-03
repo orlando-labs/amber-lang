@@ -1252,6 +1252,30 @@ void test_execute_emitted_properties() {
   expect(exec.ok(), "class property setter execution failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 204,
          "class property setter should update class-side value");
+
+  emit_result =
+      emit_ok("class User:\n"
+              "  def init(@email): pass\n"
+              "  attr email\n"
+              "User(\"ada@example.test\").email == \"ada@example.test\"\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "getter-only attr execution failed");
+  expect(exec.value.is_bool() && exec.value.as_bool(),
+         "getter-only attr should read default storage");
+
+  emit_result =
+      emit_ok("class Box:\n"
+              "  def init(initial): @raw_value = initial\n"
+              "  attr var value from @raw_value\n"
+              "box = Box(4)\n"
+              "assigned = (box.value = 9)\n"
+              "box.value + assigned\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "read-write attr execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 18,
+         "read-write attr should use explicit storage and return rhs");
 }
 
 void test_bare_member_def_is_not_implicit_call() {

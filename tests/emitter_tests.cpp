@@ -694,11 +694,13 @@ void test_property_emission() {
               "  prop full_name:\n"
               "    get: @first\n"
               "    set(value): @first = value\n"
+              "class Box:\n"
+              "  attr var value\n"
               "user.full_name\n"
               "user.full_name = \"Ada\"\n");
 
-  expect(emit_result.module.methods.size() == 3,
-         "module getter and instance property methods emitted");
+  expect(emit_result.module.methods.size() == 5,
+         "module getter, property, and attr methods emitted");
   expect((emit_result.module.methods[0].flags &
           amber::bytecode::kMethodFlagPropertyGetter) != 0U,
          "module property getter flag emitted");
@@ -714,6 +716,12 @@ void test_property_emission() {
   expect((emit_result.module.methods[2].flags &
           amber::bytecode::kMethodFlagInstance) != 0U,
          "instance property setter keeps dispatch flag");
+  expect((emit_result.module.methods[3].flags &
+          amber::bytecode::kMethodFlagPropertyGetter) != 0U,
+         "attr getter flag emitted");
+  expect((emit_result.module.methods[4].flags &
+          amber::bytecode::kMethodFlagPropertySetter) != 0U,
+         "attr setter flag emitted");
   expect(module_contains_callsite_flag(
              emit_result.module,
              amber::bytecode::kCallSiteFlagPropertyAccess),

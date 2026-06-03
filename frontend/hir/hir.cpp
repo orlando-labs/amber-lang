@@ -166,6 +166,15 @@ bool binding_is_property(const binder::Binding &binding) {
   return binding.role == "property" || binding.role == "class_property";
 }
 
+bool ast_is_property_decl(const ast::Expr &item) {
+  return item.kind == "AstPropDef" || item.kind == "AstClassPropDef" ||
+         item.kind == "AstAttrDef";
+}
+
+bool ast_is_class_property_decl(const ast::Expr &item) {
+  return item.kind == "AstClassPropDef";
+}
+
 bool signature_param_has_auto_assign(const binder::ParamDescriptor &param) {
   return param.auto_assign_kind == "@" || param.auto_assign_kind == "@@";
 }
@@ -492,7 +501,7 @@ private:
            item.kind != "AstExportStmt" && item.kind != "AstClassDef" &&
            item.kind != "AstMixinDef" && item.kind != "AstDefStmt" &&
            item.kind != "AstClassMethodDef" && item.kind != "AstClauseDef" &&
-           item.kind != "AstPropDef" && item.kind != "AstClassPropDef";
+           !ast_is_property_decl(item);
   }
 
   bool is_module_callable_decl(const ast::Expr &item) const {
@@ -767,8 +776,7 @@ private:
     for (const std::unique_ptr<ast::Expr> &item : items_) {
       if (item->kind == "AstClassDef" || item->kind == "AstMixinDef" ||
           item->kind == "AstDefStmt" || item->kind == "AstClassMethodDef" ||
-          item->kind == "AstClauseDef" || item->kind == "AstPropDef" ||
-          item->kind == "AstClassPropDef") {
+          item->kind == "AstClauseDef" || ast_is_property_decl(*item)) {
         append_lowered_item_decls(&nodes, *item, "module");
       }
     }
@@ -792,9 +800,9 @@ private:
   lower_item_decl_list(const ast::Expr &item,
                        const std::string &dispatch_side) {
     std::vector<std::unique_ptr<Node>> nodes;
-    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+    if (ast_is_property_decl(item)) {
       const std::string method_dispatch_side =
-          item.kind == "AstClassPropDef" ? "class" : dispatch_side;
+          ast_is_class_property_decl(item) ? "class" : dispatch_side;
       if (bool_value(item, "has_getter")) {
         nodes.push_back(
             lower_property_accessor_decl(item, method_dispatch_side, false));
@@ -877,7 +885,7 @@ private:
   lower_property_accessor_decl(const ast::Expr &item,
                                const std::string &dispatch_side,
                                bool setter) {
-    const bool class_property = item.kind == "AstClassPropDef";
+    const bool class_property = ast_is_class_property_decl(item);
     const std::string base_name = string_value(item, "name");
     const std::string selector = setter ? base_name + "=" : base_name;
     const std::string scope_kind =
@@ -1445,7 +1453,7 @@ private:
         item.kind == "AstExtendStmt") {
       return lower_item_decl(item, "module");
     }
-    if (item.kind == "AstPropDef" || item.kind == "AstClassPropDef") {
+    if (ast_is_property_decl(item)) {
       auto node = make_node("HUnsupported", item.span);
       node->string_field("source_kind", item.kind);
       return node;
