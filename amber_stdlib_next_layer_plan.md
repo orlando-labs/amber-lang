@@ -682,6 +682,10 @@ moved = move(value)
   set-like operations, finite `LazySeq` materializes these operations, and
   `Map#merge` / `Map#+` / `Map#|` preserve insertion order with right-wins or
   block-resolved conflicts.
+- Ruby-friendly aliases are covered for collections: `collect`,
+  `collect_concat`, `filter`, `find_all`, `detect`, `inject`, `member?`,
+  `each_slice`, `entries`, and `count` / `length` / `size`; the size trio is
+  also available as read-only collection properties.
 - `STD-006` Collection error registry and edge cases. Done: the collection
   error surface is pinned to `EmptyCollectionError`, `IndexError`, `KeyError`,
   `ArgumentError`, and `TypeError`; ordinary sequence/range/lazy indexing now

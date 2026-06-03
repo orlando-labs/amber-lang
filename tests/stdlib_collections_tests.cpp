@@ -1303,7 +1303,9 @@ amber::bytecode::BcModule make_map_protocol_module() {
   for (const std::string &symbol :
        {"keys", "values", "entries", "to_a", "each", "map", "select", "reject",
         "transform", "transform_values", "[]", "contains?", "include?", "+",
-        ">", "==", "alpha", "beta", "gamma", "missing"}) {
+        ">", "==", "count", "length", "size", "key?", "has_key?", "member?",
+        "value?", "has_value?", "collect", "filter", "find_all", "alpha",
+        "beta", "gamma", "missing"}) {
     ensure_symbol_id(&module, symbol);
   }
   append_string(&module, "beta");
@@ -1339,6 +1341,28 @@ amber::bytecode::BcModule make_map_protocol_module() {
       make_unary_send_code(12, symbol_id_or_die(module, "contains?")));
   module.code_objects.push_back(
       make_unary_send_code(13, symbol_id_or_die(module, "include?")));
+  module.code_objects.push_back(
+      make_send_code(14, symbol_id_or_die(module, "count"), false));
+  module.code_objects.push_back(
+      make_send_code(15, symbol_id_or_die(module, "length"), false));
+  module.code_objects.push_back(
+      make_send_code(16, symbol_id_or_die(module, "size"), false));
+  module.code_objects.push_back(
+      make_unary_send_code(17, symbol_id_or_die(module, "key?")));
+  module.code_objects.push_back(
+      make_unary_send_code(18, symbol_id_or_die(module, "has_key?")));
+  module.code_objects.push_back(
+      make_unary_send_code(19, symbol_id_or_die(module, "member?")));
+  module.code_objects.push_back(
+      make_unary_send_code(20, symbol_id_or_die(module, "value?")));
+  module.code_objects.push_back(
+      make_unary_send_code(21, symbol_id_or_die(module, "has_value?")));
+  module.code_objects.push_back(
+      make_send_code(22, symbol_id_or_die(module, "collect"), true));
+  module.code_objects.push_back(
+      make_send_code(23, symbol_id_or_die(module, "filter"), true));
+  module.code_objects.push_back(
+      make_send_code(24, symbol_id_or_die(module, "find_all"), true));
 
   BcCode value_gt_one;
   value_gt_one.code_id = 100;
@@ -1539,6 +1563,60 @@ void test_std001_map_protocol_matrix() {
   expect_ok(result, "Map#transform");
   expect_symbol_map_entries(module, result.value, {{"beta", 2}, {"gamma", 3}},
                             "Map#transform");
+
+  result = amber::runtime::execute_code(module, 14, {map});
+  expect_ok(result, "Map#count");
+  expect_integer(result.value, 2, "Map#count");
+
+  result = amber::runtime::execute_code(module, 15, {map});
+  expect_ok(result, "Map#length");
+  expect_integer(result.value, 2, "Map#length");
+
+  result = amber::runtime::execute_code(module, 16, {map});
+  expect_ok(result, "Map#size");
+  expect_integer(result.value, 2, "Map#size");
+
+  result = amber::runtime::execute_code(
+      module, 17,
+      {map, amber::runtime::Value::symbol(symbol_id_or_die(module, "alpha"))});
+  expect_ok(result, "Map#key?");
+  expect_bool(result.value, true, "Map#key?");
+
+  result = amber::runtime::execute_code(
+      module, 18,
+      {map, amber::runtime::Value::symbol(symbol_id_or_die(module, "alpha"))});
+  expect_ok(result, "Map#has_key?");
+  expect_bool(result.value, true, "Map#has_key?");
+
+  result = amber::runtime::execute_code(
+      module, 19,
+      {map, amber::runtime::Value::symbol(symbol_id_or_die(module, "alpha"))});
+  expect_ok(result, "Map#member?");
+  expect_bool(result.value, true, "Map#member?");
+
+  result = amber::runtime::execute_code(
+      module, 20, {map, amber::runtime::Value::integer(2)});
+  expect_ok(result, "Map#value?");
+  expect_bool(result.value, true, "Map#value?");
+
+  result = amber::runtime::execute_code(
+      module, 21, {map, amber::runtime::Value::integer(2)});
+  expect_ok(result, "Map#has_value?");
+  expect_bool(result.value, true, "Map#has_value?");
+
+  result = amber::runtime::execute_code(module, 22, {map, map_value_plus_one});
+  expect_ok(result, "Map#collect alias");
+  expect_integer_list(result.value, {2, 3}, "Map#collect alias");
+
+  result = amber::runtime::execute_code(module, 23, {map, value_gt_one});
+  expect_ok(result, "Map#filter alias");
+  expect_symbol_map_entries(module, result.value, {{"beta", 2}},
+                            "Map#filter alias");
+
+  result = amber::runtime::execute_code(module, 24, {map, value_gt_one});
+  expect_ok(result, "Map#find_all alias");
+  expect_symbol_map_entries(module, result.value, {{"beta", 2}},
+                            "Map#find_all alias");
 }
 
 void test_std001_empty_map_edges() {
@@ -1561,6 +1639,18 @@ void test_std001_empty_map_edges() {
   result = amber::runtime::execute_code(module, 3, {empty});
   expect_ok(result, "empty Map#entries");
   expect_integer_list(result.value, {}, "empty Map#entries");
+
+  result = amber::runtime::execute_code(module, 14, {empty});
+  expect_ok(result, "empty Map#count");
+  expect_integer(result.value, 0, "empty Map#count");
+
+  result = amber::runtime::execute_code(module, 15, {empty});
+  expect_ok(result, "empty Map#length");
+  expect_integer(result.value, 0, "empty Map#length");
+
+  result = amber::runtime::execute_code(module, 16, {empty});
+  expect_ok(result, "empty Map#size");
+  expect_integer(result.value, 0, "empty Map#size");
 
   result = amber::runtime::execute_code(module, 5, {empty, map_value_plus_one});
   expect_ok(result, "empty Map#each");

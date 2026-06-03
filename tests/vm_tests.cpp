@@ -185,6 +185,36 @@ void test_execute_emitted_collection_literals() {
                  symbol_id_or_die(map_result.module, "ok"),
          "symbol literal map value");
 
+  amber::bytecode::EmitResult size_property_result =
+      emit_ok("items = [1, 2, 3]\n"
+              "lookup = {a: 1, b: 2}\n"
+              "[items.count, items.length, items.size, items.count(), "
+              "items.length(), items.size(), lookup.count, lookup.length, "
+              "lookup.size]\n");
+  amber::runtime::ExecutionResult size_property_exec =
+      amber::runtime::execute_code(
+          size_property_result.module,
+          size_property_result.module.init.entry_code_id);
+  expect(size_property_exec.ok(),
+         "collection size property execution failed");
+  const std::shared_ptr<amber::runtime::ListValue> size_parts =
+      size_property_exec.value.as_list();
+  expect(size_parts != nullptr && size_parts->items.size() == 9,
+         "collection size property result shape");
+  for (const amber::runtime::Value &value : size_parts->items) {
+    expect(value.is_integer() && value.as_integer() >= 2 &&
+               value.as_integer() <= 3,
+           "collection size property part");
+  }
+  for (std::size_t i = 0; i < 6; ++i) {
+    expect(size_parts->items[i].as_integer() == 3,
+           "sequence count/length/size property value");
+  }
+  for (std::size_t i = 6; i < 9; ++i) {
+    expect(size_parts->items[i].as_integer() == 2,
+           "map count/length/size property value");
+  }
+
   amber::bytecode::EmitResult inline_if_result =
       emit_ok("if false then 1 else 2\n");
   amber::runtime::ExecutionResult inline_if_exec = amber::runtime::execute_code(
