@@ -10638,8 +10638,8 @@ private:
     if (selector == "inject") {
       return "reduce";
     }
-    if (selector == "member?" || selector == "has_key?" ||
-        selector == "key?") {
+    if (selector == "member?" || selector == "includes?" ||
+        selector == "has_key?" || selector == "key?") {
       return "include?";
     }
     if (selector == "each_slice") {

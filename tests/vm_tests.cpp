@@ -215,6 +215,38 @@ void test_execute_emitted_collection_literals() {
            "map count/length/size property value");
   }
 
+  amber::bytecode::EmitResult member_op_result =
+      emit_ok("items = [1, 2, 3]\n"
+              "lookup = {alpha: 1, beta: 2}\n"
+              "[2 in items, items.contains?(2), items.include?(2), "
+              "items.member?(2), items.includes?(2), 4 in items, "
+              ":alpha in lookup, lookup.contains?(:alpha), "
+              "lookup.include?(:alpha), lookup.member?(:alpha), "
+              "lookup.includes?(:alpha), :missing in lookup]\n");
+  amber::runtime::ExecutionResult member_op_exec =
+      amber::runtime::execute_code(member_op_result.module,
+                                   member_op_result.module.init.entry_code_id);
+  expect(member_op_exec.ok(), "member op execution failed");
+  const std::shared_ptr<amber::runtime::ListValue> member_parts =
+      member_op_exec.value.as_list();
+  expect(member_parts != nullptr && member_parts->items.size() == 12,
+         "member op result shape");
+  for (std::size_t i = 0; i < member_parts->items.size(); ++i) {
+    expect(member_parts->items[i].is_bool(), "member op part should be bool");
+  }
+  for (std::size_t i = 0; i < 5; ++i) {
+    expect(member_parts->items[i].as_bool(),
+           "sequence member op aliases should agree");
+  }
+  expect(!member_parts->items[5].as_bool(),
+         "sequence member op should reject absent value");
+  for (std::size_t i = 6; i < 11; ++i) {
+    expect(member_parts->items[i].as_bool(),
+           "map member op aliases should agree");
+  }
+  expect(!member_parts->items[11].as_bool(),
+         "map member op should reject absent key");
+
   amber::bytecode::EmitResult inline_if_result =
       emit_ok("if false then 1 else 2\n");
   amber::runtime::ExecutionResult inline_if_exec = amber::runtime::execute_code(
