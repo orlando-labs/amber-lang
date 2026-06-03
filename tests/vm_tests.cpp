@@ -2251,6 +2251,45 @@ void test_runtime_watch_local_storage_replacement() {
          "execution local exposes unwrapped watched value");
 }
 
+void test_runtime_integer_specialized_op_preserves_watch_local_write() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+  module.strings = {"x"};
+  const std::uint32_t one_id = append_integer_const(&module, 1);
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Module;
+  code.reg_count = 2;
+  code.local_layout.push_back({0, 0, 0, 0});
+  code.instructions.push_back({Opcode::LoadK, {{0, false}, {one_id, false}}});
+  code.instructions.push_back(
+      {Opcode::WatchLocal, {{1, false}, {0, false}, {0, false}}});
+  code.instructions.push_back(
+      {Opcode::IAddK, {{0, false}, {0, false}, {one_id, false}}});
+  code.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects.push_back(code);
+
+  amber::runtime::RuntimeWorld world(module);
+  const amber::runtime::ExecutionResult exec =
+      world.execute(code.code_id);
+  expect(exec.ok(), "watched integer add should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 2,
+         "watched integer add returns updated value");
+  expect(exec.watch_events.size() == 2,
+         "watched integer add records binding and write events");
+  expect(exec.watch_events[1].kind == "watch.write",
+         "watched integer add records write event");
+  expect(exec.watch_events[1].target_name == "x",
+         "watched integer add writes watched local");
+  expect(exec.watch_events[1].new_value.is_integer() &&
+             exec.watch_events[1].new_value.as_integer() == 2,
+         "watched integer add records new value");
+}
+
 void test_runtime_watch_capture_uses_shared_storage_cell() {
   using namespace amber::bytecode;
 
@@ -6688,6 +6727,7 @@ int main() {
   test_manual_make_map();
   test_execute_emitted_block_map_suffixes();
   test_runtime_watch_local_storage_replacement();
+  test_runtime_integer_specialized_op_preserves_watch_local_write();
   test_runtime_watch_capture_uses_shared_storage_cell();
   test_runtime_watch_ivar_records_object_revision_events();
   test_runtime_dependency_capture_records_binding_reads();

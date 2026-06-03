@@ -7682,6 +7682,43 @@ private:
     return true;
   }
 
+  bool read_integer_reg_fast(Frame &frame, std::uint32_t reg,
+                             std::int64_t *out) {
+    if (reg >= frame.regs.size()) {
+      set_fault(frame, "VMError", "register out of range");
+      return false;
+    }
+    if (reg >= frame.initialized.size() || frame.initialized[reg] == 0U) {
+      set_fault(frame, "NameError", "read of uninitialized local/module cell");
+      return false;
+    }
+    const std::int64_t *value =
+        std::get_if<std::int64_t>(&frame.regs[reg].payload);
+    if (value == nullptr) {
+      return false;
+    }
+    *out = *value;
+    return true;
+  }
+
+  bool write_reg_fast_plain(Frame &frame, std::uint32_t reg, Value value) {
+    if (reg >= frame.regs.size()) {
+      set_fault(frame, "VMError", "register out of range");
+      return false;
+    }
+    if (frame.initialized.size() < frame.regs.size()) {
+      frame.initialized.resize(frame.regs.size(), 0U);
+    }
+    if ((frame.initialized[reg] != 0U && frame.regs[reg].is_watch_cell()) ||
+        !frame.prepared_seq_regs.empty() || !frame.prepared_map_regs.empty() ||
+        !frame.pending_pattern_bindings.empty()) {
+      return write_reg(frame, reg, std::move(value));
+    }
+    frame.regs[reg] = std::move(value);
+    frame.initialized[reg] = 1U;
+    return true;
+  }
+
   bool step_integer_binary(Frame &frame, const Instruction &insn,
                            bool rhs_is_constant) {
     std::uint32_t dst = 0;
@@ -7691,6 +7728,54 @@ private:
         !operand_u32(frame, insn, 1, &lhs_reg) ||
         !operand_u32(frame, insn, 2, &rhs_operand)) {
       return false;
+    }
+
+    std::int64_t fast_lhs = 0;
+    std::int64_t fast_rhs = 0;
+    const bool lhs_fast = read_integer_reg_fast(frame, lhs_reg, &fast_lhs);
+    if (fault_.has_value()) {
+      return false;
+    }
+    bool rhs_fast = false;
+    if (rhs_is_constant) {
+      rhs_fast = load_integer_constant(frame, rhs_operand, &fast_rhs);
+      if (!rhs_fast) {
+        return false;
+      }
+    } else {
+      rhs_fast = read_integer_reg_fast(frame, rhs_operand, &fast_rhs);
+      if (fault_.has_value()) {
+        return false;
+      }
+    }
+    if (lhs_fast && rhs_fast) {
+      Value result = Value::null();
+      switch (insn.opcode) {
+      case Opcode::IAdd:
+      case Opcode::IAddK:
+        result = Value::integer(fast_lhs + fast_rhs);
+        break;
+      case Opcode::ISub:
+      case Opcode::ISubK:
+        result = Value::integer(fast_lhs - fast_rhs);
+        break;
+      case Opcode::ILt:
+      case Opcode::ILtK:
+        result = Value::boolean(fast_lhs < fast_rhs);
+        break;
+      case Opcode::IGt:
+      case Opcode::IGtK:
+        result = Value::boolean(fast_lhs > fast_rhs);
+        break;
+      default:
+        set_fault(frame, "VMError", "unsupported integer opcode");
+        return false;
+      }
+      if (!write_reg_fast_plain(frame, dst, std::move(result))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
     }
 
     const Value lhs_value = read_reg(frame, lhs_reg);
@@ -8196,17 +8281,24 @@ private:
         const RuntimeWatchWriteResult write = cell->write(std::move(value));
         record_watch_write(cell, write);
         frame.initialized[reg] = 1U;
-        frame.prepared_seq_regs.erase(reg);
-        frame.prepared_map_regs.erase(reg);
-        frame.pending_pattern_bindings.erase(reg);
+        if (!frame.prepared_seq_regs.empty() ||
+            !frame.prepared_map_regs.empty() ||
+            !frame.pending_pattern_bindings.empty()) {
+          frame.prepared_seq_regs.erase(reg);
+          frame.prepared_map_regs.erase(reg);
+          frame.pending_pattern_bindings.erase(reg);
+        }
         return true;
       }
     }
     frame.regs[reg] = std::move(value);
     frame.initialized[reg] = 1U;
-    frame.prepared_seq_regs.erase(reg);
-    frame.prepared_map_regs.erase(reg);
-    frame.pending_pattern_bindings.erase(reg);
+    if (!frame.prepared_seq_regs.empty() || !frame.prepared_map_regs.empty() ||
+        !frame.pending_pattern_bindings.empty()) {
+      frame.prepared_seq_regs.erase(reg);
+      frame.prepared_map_regs.erase(reg);
+      frame.pending_pattern_bindings.erase(reg);
+    }
     return true;
   }
 
