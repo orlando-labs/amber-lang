@@ -120,6 +120,28 @@ constexpr short kFooterLabelColor = 5;
 constexpr short kFooterStatusColor = 6;
 constexpr short kLineNumberColor = 7;
 constexpr short kErrorHighlightColor = 8;
+constexpr short kSyntaxKeywordColor = 9;
+constexpr short kSyntaxLiteralColor = 10;
+constexpr short kSyntaxStringColor = 11;
+constexpr short kSyntaxOperatorColor = 12;
+constexpr short kSyntaxCommentColor = 13;
+constexpr short kSyntaxSpecialColor = 14;
+
+enum class SyntaxStyle {
+  Plain,
+  Keyword,
+  Literal,
+  String,
+  Operator,
+  Comment,
+  Special,
+};
+
+struct SyntaxSpan {
+  std::size_t start_offset = 0;
+  std::size_t end_offset = 0;
+  SyntaxStyle style = SyntaxStyle::Plain;
+};
 
 std::string read_file(const std::string &path) {
   std::ifstream input(path, std::ios::binary);
@@ -135,6 +157,130 @@ amber::lexer::LexResult lex_source(const std::string &source,
                                    const std::string &path) {
   amber::lexer::Lexer lexer(source, path);
   return lexer.lex();
+}
+
+bool is_keyword_token(amber::lexer::TokenKind kind) {
+  return static_cast<int>(kind) >=
+             static_cast<int>(amber::lexer::TokenKind::KeywordAnd) &&
+         static_cast<int>(kind) <=
+             static_cast<int>(amber::lexer::TokenKind::KeywordWhile);
+}
+
+bool is_literal_token(amber::lexer::TokenKind kind) {
+  switch (kind) {
+  case amber::lexer::TokenKind::Integer:
+  case amber::lexer::TokenKind::Float:
+  case amber::lexer::TokenKind::KeywordFalse:
+  case amber::lexer::TokenKind::KeywordNull:
+  case amber::lexer::TokenKind::KeywordTrue:
+    return true;
+  default:
+    return false;
+  }
+}
+
+SyntaxStyle syntax_style_for_token(amber::lexer::TokenKind kind) {
+  switch (kind) {
+  case amber::lexer::TokenKind::Eof:
+  case amber::lexer::TokenKind::Newline:
+  case amber::lexer::TokenKind::Indent:
+  case amber::lexer::TokenKind::Dedent:
+  case amber::lexer::TokenKind::Identifier:
+    return SyntaxStyle::Plain;
+  default:
+    break;
+  }
+
+  if (kind == amber::lexer::TokenKind::String) {
+    return SyntaxStyle::String;
+  }
+  if (kind == amber::lexer::TokenKind::Placeholder ||
+      kind == amber::lexer::TokenKind::LastValue) {
+    return SyntaxStyle::Special;
+  }
+  if (is_literal_token(kind)) {
+    return SyntaxStyle::Literal;
+  }
+  if (is_keyword_token(kind)) {
+    return SyntaxStyle::Keyword;
+  }
+  return SyntaxStyle::Operator;
+}
+
+bool comment_starts_at_for_highlight(const std::string &source,
+                                     std::size_t offset) {
+  if (offset >= source.size() || source[offset] != '#') {
+    return false;
+  }
+  if (offset == 0U) {
+    return true;
+  }
+
+  std::size_t line_start = offset;
+  while (line_start > 0U && source[line_start - 1U] != '\n' &&
+         source[line_start - 1U] != '\r') {
+    --line_start;
+  }
+
+  bool first_non_space = true;
+  for (std::size_t i = line_start; i < offset; ++i) {
+    if (source[i] != ' ' && source[i] != '\t') {
+      first_non_space = false;
+      break;
+    }
+  }
+  if (first_non_space) {
+    return true;
+  }
+
+  const char previous = source[offset - 1U];
+  return previous == ' ' || previous == '\t';
+}
+
+void append_comment_syntax_spans(std::vector<SyntaxSpan> *spans,
+                                 const std::string &source,
+                                 std::size_t start_offset,
+                                 std::size_t end_offset) {
+  if (spans == nullptr || start_offset >= source.size()) {
+    return;
+  }
+  end_offset = std::min(end_offset, source.size());
+  std::size_t cursor = start_offset;
+  while (cursor < end_offset) {
+    if (comment_starts_at_for_highlight(source, cursor)) {
+      std::size_t comment_end = cursor;
+      while (comment_end < end_offset && source[comment_end] != '\n' &&
+             source[comment_end] != '\r') {
+        ++comment_end;
+      }
+      spans->push_back(SyntaxSpan{cursor, comment_end, SyntaxStyle::Comment});
+      cursor = comment_end;
+      continue;
+    }
+    ++cursor;
+  }
+}
+
+std::vector<SyntaxSpan> syntax_spans_for_source(const std::string &source) {
+  std::vector<SyntaxSpan> spans;
+  amber::lexer::LexResult result = lex_source(source, "<iamber-highlight>");
+  std::size_t previous_end = 0;
+  for (const amber::lexer::Token &token : result.tokens) {
+    const std::size_t start = std::min(token.span.start.offset, source.size());
+    const std::size_t end = std::min(token.span.end.offset, source.size());
+    if (start > previous_end) {
+      append_comment_syntax_spans(&spans, source, previous_end, start);
+    }
+    const SyntaxStyle style = syntax_style_for_token(token.kind);
+    if (style != SyntaxStyle::Plain && start < end) {
+      spans.push_back(SyntaxSpan{start, end, style});
+    }
+    previous_end = std::max(previous_end, end);
+  }
+  if (previous_end < source.size()) {
+    append_comment_syntax_spans(&spans, source, previous_end, source.size());
+  }
+  return spans;
 }
 
 std::vector<amber::lexer::Diagnostic>
@@ -802,6 +948,16 @@ std::vector<std::string> split_lines(const std::string &text) {
   return lines;
 }
 
+std::vector<std::size_t> line_start_offsets(const std::string &text) {
+  std::vector<std::size_t> offsets{0U};
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '\n') {
+      offsets.push_back(i + 1U);
+    }
+  }
+  return offsets;
+}
+
 std::pair<int, int> cursor_line_column(const std::string &text,
                                        std::size_t cursor) {
   int line = 0;
@@ -1215,6 +1371,51 @@ int error_frame_attr() {
                       : A_BOLD | A_UNDERLINE;
 }
 
+int syntax_attr(SyntaxStyle style) {
+  if (!has_colors()) {
+    switch (style) {
+    case SyntaxStyle::Keyword:
+    case SyntaxStyle::Special:
+      return A_BOLD;
+    case SyntaxStyle::Comment:
+      return A_DIM;
+    default:
+      return A_NORMAL;
+    }
+  }
+
+  switch (style) {
+  case SyntaxStyle::Keyword:
+    return COLOR_PAIR(kSyntaxKeywordColor) | A_BOLD;
+  case SyntaxStyle::Literal:
+    return COLOR_PAIR(kSyntaxLiteralColor);
+  case SyntaxStyle::String:
+    return COLOR_PAIR(kSyntaxStringColor);
+  case SyntaxStyle::Operator:
+    return COLOR_PAIR(kSyntaxOperatorColor);
+  case SyntaxStyle::Comment:
+    return COLOR_PAIR(kSyntaxCommentColor) | A_DIM;
+  case SyntaxStyle::Special:
+    return COLOR_PAIR(kSyntaxSpecialColor) | A_BOLD;
+  case SyntaxStyle::Plain:
+    return A_NORMAL;
+  }
+  return A_NORMAL;
+}
+
+SyntaxStyle syntax_style_at_offset(const std::vector<SyntaxSpan> &spans,
+                                   std::size_t offset) {
+  for (const SyntaxSpan &span : spans) {
+    if (offset < span.start_offset) {
+      return SyntaxStyle::Plain;
+    }
+    if (offset >= span.start_offset && offset < span.end_offset) {
+      return span.style;
+    }
+  }
+  return SyntaxStyle::Plain;
+}
+
 std::pair<int, int> highlighted_columns_for_line(const CodeErrorRange &range,
                                                  int line_index,
                                                  int line_length) {
@@ -1264,7 +1465,9 @@ ErrorColumnStyle error_column_style_for(const Cell &cell, bool selected_cell,
 
 void draw_code_text_line(WINDOW *window, int y, int x, int width,
                          const std::string &text, const Cell &cell,
-                         bool selected_cell, int line_index) {
+                         bool selected_cell, int line_index,
+                         std::size_t line_start_offset,
+                         const std::vector<SyntaxSpan> &syntax_spans) {
   if (width <= 0) {
     return;
   }
@@ -1289,6 +1492,12 @@ void draw_code_text_line(WINDOW *window, int y, int x, int width,
       wattron(window, error_highlight_attr());
     } else if (style == ErrorColumnStyle::Framed) {
       wattron(window, error_frame_attr());
+    } else if (column < line_length) {
+      const SyntaxStyle syntax_style = syntax_style_at_offset(
+          syntax_spans, line_start_offset + static_cast<std::size_t>(column));
+      if (syntax_style != SyntaxStyle::Plain) {
+        wattron(window, syntax_attr(syntax_style));
+      }
     }
     const char ch =
         column < line_length ? text[static_cast<std::size_t>(column)] : ' ';
@@ -1297,6 +1506,12 @@ void draw_code_text_line(WINDOW *window, int y, int x, int width,
       wattroff(window, error_highlight_attr());
     } else if (style == ErrorColumnStyle::Framed) {
       wattroff(window, error_frame_attr());
+    } else if (column < line_length) {
+      const SyntaxStyle syntax_style = syntax_style_at_offset(
+          syntax_spans, line_start_offset + static_cast<std::size_t>(column));
+      if (syntax_style != SyntaxStyle::Plain) {
+        wattroff(window, syntax_attr(syntax_style));
+      }
     }
   }
 }
@@ -1451,6 +1666,9 @@ void draw_cell_code(WINDOW *window, Session *session, std::size_t index,
   Cell &cell = session->cells[index];
   const bool selected = index == session->selected;
   const std::vector<std::string> lines = split_lines(cell.source);
+  const std::vector<std::size_t> line_offsets = line_start_offsets(cell.source);
+  const std::vector<SyntaxSpan> syntax_spans =
+      syntax_spans_for_source(cell.source);
   const int text_width = code_width - 2;
   const int detail_rows = cell_detail_row_count(cell, height, text_width);
   const int detail_start = height - 1 - detail_rows;
@@ -1486,8 +1704,12 @@ void draw_cell_code(WINDOW *window, Session *session, std::size_t index,
     wattron(window, line_number_attr());
     mvwaddnstr(window, row + 1, 1, prefix.str().c_str(), code_width - 2);
     wattroff(window, line_number_attr());
+    const std::size_t line_start =
+        line_index < static_cast<int>(line_offsets.size())
+            ? line_offsets[static_cast<std::size_t>(line_index)]
+            : cell.source.size();
     draw_code_text_line(window, row + 1, 6, code_width - 7, lines[line_index],
-                        cell, selected, line_index);
+                        cell, selected, line_index, line_start, syntax_spans);
   }
 
   wattron(window, A_DIM);
@@ -1869,6 +2091,12 @@ int run_curses_console() {
     init_pair(kFooterStatusColor, COLOR_BLACK, COLOR_WHITE);
     init_pair(kLineNumberColor, COLOR_WHITE, -1);
     init_pair(kErrorHighlightColor, COLOR_WHITE, COLOR_RED);
+    init_pair(kSyntaxKeywordColor, COLOR_CYAN, -1);
+    init_pair(kSyntaxLiteralColor, COLOR_YELLOW, -1);
+    init_pair(kSyntaxStringColor, COLOR_GREEN, -1);
+    init_pair(kSyntaxOperatorColor, COLOR_MAGENTA, -1);
+    init_pair(kSyntaxCommentColor, COLOR_WHITE, -1);
+    init_pair(kSyntaxSpecialColor, COLOR_BLUE, -1);
   }
 
   bool edit_mode = false;
