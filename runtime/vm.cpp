@@ -7018,8 +7018,22 @@ constexpr std::uint32_t kMethodFlagPropertyGetter =
     amber::bytecode::kMethodFlagPropertyGetter;
 constexpr std::uint32_t kMethodFlagPropertySetter =
     amber::bytecode::kMethodFlagPropertySetter;
+constexpr std::uint32_t kNativeSyntheticClassIndex =
+    std::numeric_limits<std::uint32_t>::max();
+constexpr const char *kNativeRangeMarker = "__amber_range";
 constexpr std::int64_t kPatternFailModeSoft = 0;
 constexpr std::int64_t kPatternFailModeMatchError = 1;
+
+bool instance_is_native_range(
+    const std::shared_ptr<InstanceValue> &instance) {
+  if (instance == nullptr ||
+      instance->class_index != kNativeSyntheticClassIndex) {
+    return false;
+  }
+  const auto marker = instance->ivars.find(kNativeRangeMarker);
+  return marker != instance->ivars.end() && marker->second.is_bool() &&
+         marker->second.as_bool();
+}
 
 const char *native_type_name(RuntimeNativeTypeKind kind) {
   switch (kind) {
@@ -7069,6 +7083,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Null";
   case RuntimeNativeTypeKind::Object:
     return "Object";
+  case RuntimeNativeTypeKind::Range:
+    return "Range";
   }
   return "NativeType";
 }
@@ -7424,7 +7440,9 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
       out << " " << lifecycle << ">";
       return out.str();
     }
-    if (context->module != nullptr &&
+    if (instance_is_native_range(instance)) {
+      out << " Range";
+    } else if (context->module != nullptr &&
         instance->class_index < context->module->classes.size()) {
       const std::uint32_t symbol_id =
           context->module->classes[instance->class_index].class_name_sym_id;
@@ -11323,6 +11341,9 @@ private:
     if (path == "Map") {
       return Value::native_type(RuntimeNativeTypeKind::Map);
     }
+    if (path == "Range") {
+      return Value::native_type(RuntimeNativeTypeKind::Range);
+    }
     if (path == "Null") {
       return Value::native_type(RuntimeNativeTypeKind::Null);
     }
@@ -12737,6 +12758,9 @@ private:
     if (instance == nullptr) {
       return false;
     }
+    if (instance_is_native_range(instance)) {
+      return true;
+    }
     const std::optional<std::string> class_name =
         class_name_for_index(instance->class_index);
     return class_name.has_value() && *class_name == "Range";
@@ -12847,18 +12871,29 @@ private:
       set_fault(frame, "TypeError", "Range value is null");
       return std::nullopt;
     }
-    if (!ensure_instance_layout(frame, instance)) {
-      return std::nullopt;
+    std::optional<Value> start;
+    std::optional<Value> finish;
+    std::optional<Value> inclusive_end;
+    std::optional<Value> step;
+    if (instance_is_native_range(instance)) {
+      auto native_ivar_or_null = [&](const std::string &name) {
+        const auto found = instance->ivars.find(name);
+        return found == instance->ivars.end() ? Value::null() : found->second;
+      };
+      start = native_ivar_or_null("start");
+      finish = native_ivar_or_null("finish");
+      inclusive_end = native_ivar_or_null("inclusive_end");
+      step = native_ivar_or_null("step");
+    } else {
+      if (!ensure_instance_layout(frame, instance)) {
+        return std::nullopt;
+      }
+      start = load_instance_ivar_or_null(frame, instance, "start");
+      finish = load_instance_ivar_or_null(frame, instance, "finish");
+      inclusive_end =
+          load_instance_ivar_or_null(frame, instance, "inclusive_end");
+      step = load_instance_ivar_or_null(frame, instance, "step");
     }
-
-    const std::optional<Value> start =
-        load_instance_ivar_or_null(frame, instance, "start");
-    const std::optional<Value> finish =
-        load_instance_ivar_or_null(frame, instance, "finish");
-    const std::optional<Value> inclusive_end =
-        load_instance_ivar_or_null(frame, instance, "inclusive_end");
-    const std::optional<Value> step =
-        load_instance_ivar_or_null(frame, instance, "step");
     if (fault_.has_value()) {
       return std::nullopt;
     }
@@ -13064,7 +13099,7 @@ private:
   Value make_lazy_seq_value(const Value &source,
                             const std::vector<LazySeqOp> &ops) {
     std::shared_ptr<InstanceValue> instance =
-        make_instance_value(std::numeric_limits<std::uint32_t>::max());
+        make_instance_value(kNativeSyntheticClassIndex);
     instance->ivars["__amber_lazy_seq"] = Value::boolean(true);
     instance->ivars["__amber_lazy_source"] = source;
     instance->ivars["__amber_lazy_ops"] = encode_lazy_seq_ops(ops);
@@ -16150,6 +16185,32 @@ private:
             std::make_shared<RuntimeLogger>(writer, level, color_mode));
         return SendStatus::Matched;
       }
+      if (kind == RuntimeNativeTypeKind::Range) {
+        if (selector != "new") {
+          return SendStatus::NotHandled;
+        }
+        if (!require_arity(2) ||
+            !reject_unknown_keywords(frame, kw_args,
+                                     {"inclusive_end", "step"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        auto range = make_instance_value(kNativeSyntheticClassIndex);
+        range->ivars[kNativeRangeMarker] = Value::boolean(true);
+        range->ivars["start"] = args[0];
+        range->ivars["finish"] = args[1];
+        range->ivars["inclusive_end"] =
+            keyword_arg_value(kw_args, "inclusive_end")
+                .value_or(Value::boolean(true));
+        range->ivars["step"] =
+            keyword_arg_value(kw_args, "step").value_or(Value::null());
+        const Value range_value = Value::instance(std::move(range));
+        if (!extract_range_bounds(frame, range_value).has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = range_value;
+        return SendStatus::Matched;
+      }
       if (is_conversion_type(kind)) {
         if (selector != "cast" && selector != "new" && selector != "parse") {
           return SendStatus::NotHandled;
@@ -17475,7 +17536,7 @@ private:
     const bool lazy_seq_collection_selector = sequence_collection_selector;
     const bool numeric_selector =
         selector_in({"+", "-", "*", "/", "%", "//", ">", "<",
-                     ">=", "<=", "==", "!=", "<=>"});
+                     ">=", "<=", "==", "!=", "<=>", "u+", "u-"});
     const bool integer_times_selector =
         receiver.is_integer() && selector == "times";
     const bool builtin_selector =
@@ -18882,6 +18943,24 @@ private:
         *out = Value::null();
         return SendStatus::Matched;
       }
+      if (selector == "u+") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = receiver;
+        return SendStatus::Matched;
+      }
+      if (selector == "u-") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (lhs == std::numeric_limits<std::int64_t>::min()) {
+          set_fault(frame, "ArgumentError", "integer unary negation overflows");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(-lhs);
+        return SendStatus::Matched;
+      }
       if (selector == "+") {
         if (!require_arity(1) || !require_no_block()) {
           return SendStatus::Faulted;
@@ -19047,6 +19126,20 @@ private:
     if (receiver.is_float()) {
       const double lhs = receiver.as_float();
       double rhs = 0.0;
+      if (selector == "u+") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = receiver;
+        return SendStatus::Matched;
+      }
+      if (selector == "u-") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(-lhs);
+        return SendStatus::Matched;
+      }
       if (selector == "+") {
         if (!require_arity(1) || !require_no_block() ||
             !require_numeric_arg(0, &rhs)) {
@@ -23707,7 +23800,10 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
       out << " " << lifecycle << ">";
       return out.str();
     }
-    if (module != nullptr && instance->class_index < module->classes.size()) {
+    if (instance_is_native_range(instance)) {
+      out << " Range";
+    } else if (module != nullptr &&
+               instance->class_index < module->classes.size()) {
       const std::uint32_t symbol_id =
           module->classes[instance->class_index].class_name_sym_id;
       if (debug_symbols != nullptr && symbol_id < debug_symbols->size()) {

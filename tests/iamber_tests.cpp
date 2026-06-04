@@ -90,6 +90,22 @@ void test_compound_assignment_eval() {
   expect(view.result == "3", "compound assignment should return updated value");
 }
 
+void test_range_literal_uses_native_prelude() {
+  std::vector<Cell> cells;
+  cells.push_back(make_cell("(0..5)\n"));
+
+  EvalView view = evaluate_prefix(cells, 0);
+  expect(view.ok, "range literal should evaluate without a local Range class");
+  expect(view.result == "<instance Range>",
+         "range literal should use the native Range prelude");
+
+  cells[0] = make_cell("(0..5).array\n");
+  view = evaluate_prefix(cells, 0);
+  expect(view.ok, "native Range literal should materialize");
+  expect(view.result == "[0, 1, 2, 3, 4, 5]",
+         "range literal should materialize through the native prelude");
+}
+
 void test_cyclic_watch_dependency_blocks_self_write() {
   std::vector<Cell> cells;
   cells.push_back(make_cell("x = 2\n"));
@@ -138,6 +154,7 @@ int main() {
   test_prefix_eval_keeps_current_cell_output();
   test_independent_cell_uses_isolated_eval();
   test_compound_assignment_eval();
+  test_range_literal_uses_native_prelude();
   test_cyclic_watch_dependency_blocks_self_write();
   test_evaluate_from_blocks_cyclic_watch_cell();
   std::cout << "iamber_tests ok\n";

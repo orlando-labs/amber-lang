@@ -128,7 +128,8 @@ enum class RuntimeNativeTypeKind {
   Set,
   Map,
   Null,
-  Object
+  Object,
+  Range
 };
 
 struct NativeTypeValue {

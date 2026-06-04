@@ -1222,7 +1222,7 @@ bool is_native_prelude_name(const std::string &name) {
   static const std::set<std::string> names = {
       "Amber", "Array", "Atomic", "Barrier", "Bool", "Channel",
       "Flow",  "Float", "Int",    "Kernel",  "Map",  "Mutex",
-      "Null",  "Object", "Set",    "Str",     "Symbol",
+      "Null",  "Object", "Range",  "Set",     "Str",     "Symbol",
       "ThreadedCollection", "Tuple", "io", "p", "pp", "print", "task"};
   return names.count(name) != 0U;
 }

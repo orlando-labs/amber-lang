@@ -137,6 +137,45 @@ void test_execute_module_init_calls_top_level_def() {
          "module init should return top-level function result");
 }
 
+void test_execute_native_range_literal() {
+  amber::bytecode::EmitResult emit_result = emit_ok("(0..5).array\n");
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "native Range prelude literal execution failed");
+  expect(exec.value.is_list(), "native Range literal should materialize");
+  const std::shared_ptr<amber::runtime::ListValue> items = exec.value.as_list();
+  expect(items != nullptr && items->items.size() == 6,
+         "native Range literal materialized item count");
+  for (std::size_t i = 0; i < items->items.size(); ++i) {
+    expect(items->items[i].is_integer() &&
+               items->items[i].as_integer() ==
+                   static_cast<std::int64_t>(i),
+           "native Range literal materialized item");
+  }
+
+  emit_result = emit_ok("(5..1:-2).array\n");
+  const amber::runtime::ExecutionResult descending =
+      amber::runtime::execute_code(emit_result.module,
+                                   emit_result.module.init.entry_code_id);
+  expect(descending.ok(), "native descending Range literal execution failed");
+  const std::shared_ptr<amber::runtime::ListValue> descending_items =
+      descending.value.as_list();
+  expect(descending_items != nullptr && descending_items->items.size() == 3,
+         "native descending Range materialized item count");
+  expect(descending_items->items[0].as_integer() == 5 &&
+             descending_items->items[1].as_integer() == 3 &&
+             descending_items->items[2].as_integer() == 1,
+         "native descending Range materialized values");
+
+  emit_result = emit_ok("(0..5).lazy()\n");
+  const amber::runtime::ExecutionResult lazy = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(lazy.ok(), "native Range lazy conversion failed");
+  expect(amber::runtime::value_to_debug_string(lazy.value, &emit_result.module)
+                 .find("Range") == std::string::npos,
+         "native LazySeq should not be classified as a Range");
+}
+
 void test_execute_emitted_collection_literals() {
   amber::bytecode::EmitResult list_result = emit_ok("[1, 2 + 3]\n");
   amber::runtime::ExecutionResult list_exec = amber::runtime::execute_code(
@@ -7318,6 +7357,7 @@ void test_manual_raise_unhandled_fault_trace() {
 int main() {
   test_execute_emitted_method();
   test_execute_module_init_calls_top_level_def();
+  test_execute_native_range_literal();
   test_execute_emitted_collection_literals();
   test_runtime_string_interpolation_and_conversions();
   test_runtime_text_output_helpers_and_io_sinks();

@@ -413,6 +413,7 @@ void test_unresolved_name_diagnostics() {
                                       "pp([1, 2])\n"
                                       "Amber.stringify(123)\n"
                                       "io.Buffer.new()\n"
+                                      "Range.new(1, 2, inclusive_end: true)\n"
                                       "Str(42)\n");
   expect(native_prelude.empty(),
          "native prelude names are not reported as undefined");
