@@ -237,6 +237,10 @@ test: build
 	grep -q '"native_entry": true' $(BUILD_DIR)/w14-main-exe-build.json
 	$(BUILD_DIR)/w14-main-exe > $(BUILD_DIR)/w14-main-exe.out
 	grep -q '^42$$' $(BUILD_DIR)/w14-main-exe.out
+	$(BUILD_DIR)/amberc build bench/polyglot/amber/src/calls_collections.am --entry init -o $(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native-build.json
+	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/calls-collections-native-build.json
+	$(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native.out
+	grep -q '^2047795430$$' $(BUILD_DIR)/calls-collections-native.out
 	$(BUILD_DIR)/ambertest run corpus
 
 conformance: $(BUILD_DIR)/ambertest

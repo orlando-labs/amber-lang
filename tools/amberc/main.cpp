@@ -982,11 +982,17 @@ bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
          *selector == "/" || *selector == "<" || *selector == ">";
 }
 
+bool native_cpp_collection_selector(const std::string &selector,
+                                    std::uint32_t pos_count) {
+  return (selector == "[]" && pos_count == 1U) ||
+         ((selector == "count" || selector == "first") && pos_count == 0U);
+}
+
 bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                                const amber::bytecode::BcCode &code,
                                std::string *reason) {
-  if (!code.handler_table.empty() || !code.capture_layout.empty()) {
-    *reason = "exceptions and captures still use VM fallback";
+  if (!code.handler_table.empty()) {
+    *reason = "exceptions still use VM fallback";
     return false;
   }
   for (std::size_t pc = 0; pc < code.instructions.size(); ++pc) {
@@ -1040,6 +1046,9 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
     case Opcode::Move:
     case Opcode::GetLast:
     case Opcode::SetLast:
+    case Opcode::MakeList:
+    case Opcode::LoadUpval:
+    case Opcode::StoreUpval:
     case Opcode::IAdd:
     case Opcode::ISub:
     case Opcode::ILt:
@@ -1080,10 +1089,20 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       std::uint32_t capture_count = 0;
       if (!operand_u32_value(instruction, 0, &ignored_dst) ||
           !operand_u32_value(instruction, 1, &code_id) ||
-          !operand_u32_value(instruction, 2, &capture_count) ||
-          capture_count != 0U) {
-        *reason = "closures with captures still use VM fallback";
+          !operand_u32_value(instruction, 2, &capture_count)) {
+        *reason = "invalid MAKE_CLOSURE operand";
         return false;
+      }
+      std::size_t operand_index = 3U;
+      for (std::uint32_t capture_i = 0; capture_i < capture_count; ++capture_i) {
+        std::uint32_t kind = 0;
+        std::uint32_t slot = 0;
+        if (!operand_u32_value(instruction, operand_index++, &kind) ||
+            !operand_u32_value(instruction, operand_index++, &slot) ||
+            kind > 1U) {
+          *reason = "invalid MAKE_CLOSURE capture operand";
+          return false;
+        }
       }
       break;
     }
@@ -1115,14 +1134,24 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       if (!operand_u32_value(instruction, 0, &ignored_dst) ||
           !operand_u32_value(instruction, 1, &ignored_recv) ||
           !operand_u32_value(instruction, 2, &symbol_id) ||
-          !native_cpp_scalar_selector(module, symbol_id, &selector) ||
-          !operand_u32_value(instruction, 3, &pos_count) || pos_count != 1U) {
-        *reason = "non-integer SEND still uses VM fallback";
+          symbol_id >= module.symbols.size() ||
+          !operand_u32_value(instruction, 3, &pos_count)) {
+        *reason = "invalid SEND operand";
         return false;
       }
+      selector = module.symbols[symbol_id];
+      const bool scalar =
+          native_cpp_scalar_selector(module, symbol_id, &selector) &&
+          pos_count == 1U;
+      if (!scalar && !native_cpp_collection_selector(selector, pos_count)) {
+        *reason = "unsupported SEND still uses VM fallback";
+        return false;
+      }
+      const std::size_t kw_index = 4U + pos_count;
       std::uint32_t kw_count = 0;
-      if (!operand_u32_value(instruction, 5, &kw_count) || kw_count != 0U ||
-          !operand_is_no_block(instruction, 6)) {
+      if (!operand_u32_value(instruction, kw_index, &kw_count) ||
+          kw_count != 0U ||
+          !operand_is_no_block(instruction, kw_index + 1U)) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
       }
@@ -1152,17 +1181,76 @@ native_cpp_constant_expr(const amber::bytecode::Constant &constant) {
   }
 }
 
+bool native_cpp_code_uses_local_capture_cells(
+    const amber::bytecode::BcCode &code) {
+  for (const amber::bytecode::Instruction &instruction : code.instructions) {
+    if (instruction.opcode != amber::bytecode::Opcode::MakeClosure) {
+      continue;
+    }
+    std::uint32_t capture_count = 0;
+    if (!operand_u32_value(instruction, 2, &capture_count)) {
+      continue;
+    }
+    std::size_t operand_index = 3U;
+    for (std::uint32_t capture_i = 0; capture_i < capture_count; ++capture_i) {
+      std::uint32_t kind = 0;
+      std::uint32_t slot = 0;
+      if (!operand_u32_value(instruction, operand_index++, &kind) ||
+          !operand_u32_value(instruction, operand_index++, &slot)) {
+        break;
+      }
+      (void)slot;
+      if (kind == 0U) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 std::string
 emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                               const amber::bytecode::BcCode &code) {
   std::ostringstream out;
   const std::string fn = native_cpp_function_name(code.code_id);
+  const bool uses_local_capture_cells =
+      native_cpp_code_uses_local_capture_cells(code);
+  const auto read_reg_expr = [uses_local_capture_cells](std::uint32_t reg) {
+    if (uses_local_capture_cells) {
+      return "read_reg(frame, " + std::to_string(reg) + ")";
+    }
+    return "frame.regs[" + std::to_string(reg) + "]";
+  };
+  const auto write_reg_stmt = [&](std::uint32_t reg, const std::string &expr) {
+    if (uses_local_capture_cells) {
+      out << "  write_reg(frame, " << reg << ", " << expr << ");\n";
+    } else {
+      out << "  frame.regs[" << reg << "] = " << expr << ";\n";
+    }
+  };
   out << "static NativeValue " << fn
-      << "(const std::vector<NativeValue> &args) {\n";
-  out << "  std::vector<NativeValue> r(" << code.reg_count << ");\n";
-  out << "  NativeValue last = NativeValue::nullv();\n";
-  out << "  for (std::size_t i = 0; i < args.size() && i < r.size(); ++i) "
-         "{ r[i] = args[i]; }\n";
+      << "(std::initializer_list<NativeValue> args, "
+         "NativeClosure *current_closure) {\n";
+  out << "  std::array<NativeValue, " << code.reg_count << "> regs{};\n";
+  if (uses_local_capture_cells) {
+    out << "  std::array<NativeCell *, " << code.reg_count
+        << "> local_cells{};\n";
+    out << "  NativeFrame frame(regs.data(), local_cells.data(), regs.size(), "
+           "current_closure);\n";
+  } else {
+    out << "  NativeFrame frame(regs.data(), nullptr, regs.size(), "
+           "current_closure);\n";
+  }
+  out << "  std::size_t arg_index = 0;\n";
+  out << "  for (const NativeValue &arg : args) {\n";
+  out << "    if (arg_index >= frame.reg_count) break;\n";
+  if (uses_local_capture_cells) {
+    out << "    write_reg(frame, static_cast<std::uint32_t>(arg_index++), "
+           "arg);\n";
+  } else {
+    out << "    frame.regs[arg_index++] = arg;\n";
+  }
+  out << "  }\n";
   if (code.instructions.empty()) {
     out << "  return NativeValue::nullv();\n";
     out << "}\n\n";
@@ -1179,16 +1267,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t const_id = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &const_id);
-      out << "  r[" << dst
-          << "] = " << native_cpp_constant_expr(module.const_pool[const_id])
-          << ";\n";
+      write_reg_stmt(dst, native_cpp_constant_expr(module.const_pool[const_id]));
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
     case Opcode::LoadNull: {
       std::uint32_t dst = 0;
       operand_u32_value(instruction, 0, &dst);
-      out << "  r[" << dst << "] = NativeValue::nullv();\n";
+      write_reg_stmt(dst, "NativeValue::nullv()");
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
@@ -1197,8 +1283,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t value = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &value);
-      out << "  r[" << dst << "] = NativeValue::boolean("
-          << (value != 0U ? "true" : "false") << ");\n";
+      write_reg_stmt(
+          dst, std::string("NativeValue::boolean(") +
+                   (value != 0U ? "true" : "false") + ")");
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
@@ -1207,30 +1294,113 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t src = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &src);
-      out << "  r[" << dst << "] = r[" << src << "];\n";
+      write_reg_stmt(dst, read_reg_expr(src));
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::MakeList: {
+      std::uint32_t dst = 0;
+      std::uint32_t first_reg = 0;
+      std::uint32_t count = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &first_reg);
+      operand_u32_value(instruction, 2, &count);
+      std::ostringstream expr;
+      expr << "NativeValue::list(std::vector<NativeValue>{";
+      for (std::uint32_t index = 0; index < count; ++index) {
+        if (index != 0U) {
+          expr << ", ";
+        }
+        expr << read_reg_expr(first_reg + index);
+      }
+      expr << "})";
+      write_reg_stmt(dst, expr.str());
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
     case Opcode::GetLast: {
       std::uint32_t dst = 0;
       operand_u32_value(instruction, 0, &dst);
-      out << "  r[" << dst << "] = last;\n";
+      write_reg_stmt(dst, "frame.last");
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
     case Opcode::SetLast: {
       std::uint32_t src = 0;
       operand_u32_value(instruction, 0, &src);
-      out << "  last = r[" << src << "];\n";
+      out << "  frame.last = " << read_reg_expr(src) << ";\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::LoadUpval: {
+      std::uint32_t dst = 0;
+      std::uint32_t slot = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &slot);
+      write_reg_stmt(dst, "read_capture(frame, " + std::to_string(slot) + ")");
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::StoreUpval: {
+      std::uint32_t slot = 0;
+      std::uint32_t src = 0;
+      operand_u32_value(instruction, 0, &slot);
+      operand_u32_value(instruction, 1, &src);
+      out << "  write_capture(frame, " << slot << ", " << read_reg_expr(src)
+          << ");\n";
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
     case Opcode::MakeClosure: {
       std::uint32_t dst = 0;
       std::uint32_t code_id = 0;
+      std::uint32_t capture_count = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &code_id);
-      out << "  r[" << dst << "] = NativeValue::closure(" << code_id << ");\n";
+      operand_u32_value(instruction, 2, &capture_count);
+      bool self_capture = false;
+      std::size_t operand_index = 3U;
+      for (std::uint32_t capture_i = 0; capture_i < capture_count; ++capture_i) {
+        std::uint32_t kind = 0;
+        std::uint32_t slot = 0;
+        operand_u32_value(instruction, operand_index++, &kind);
+        operand_u32_value(instruction, operand_index++, &slot);
+        self_capture = self_capture || (kind == 0U && slot == dst);
+      }
+      out << "  {\n";
+      out << "    NativeClosure *next_closure = make_native_closure();\n";
+      out << "    next_closure->code_id = " << code_id << ";\n";
+      out << "    next_closure->self = frame.self;\n";
+      out << "    next_closure->captures.reserve(" << capture_count << ");\n";
+      out << "    NativeValue closure_value = "
+             "NativeValue::closure(next_closure);\n";
+      if (self_capture) {
+        if (uses_local_capture_cells) {
+          out << "    write_reg(frame, " << dst << ", closure_value);\n";
+        } else {
+          out << "    frame.regs[" << dst << "] = closure_value;\n";
+        }
+      }
+      operand_index = 3U;
+      for (std::uint32_t capture_i = 0; capture_i < capture_count; ++capture_i) {
+        std::uint32_t kind = 0;
+        std::uint32_t slot = 0;
+        operand_u32_value(instruction, operand_index++, &kind);
+        operand_u32_value(instruction, operand_index++, &slot);
+        if (kind == 0U) {
+          out << "    next_closure->captures.push_back(local_cell(frame, "
+              << slot << "));\n";
+        } else {
+          out << "    next_closure->captures.push_back(capture_cell(frame, "
+              << slot << "));\n";
+        }
+      }
+      if (uses_local_capture_cells) {
+        out << "    write_reg(frame, " << dst << ", closure_value);\n";
+      } else {
+        out << "    frame.regs[" << dst << "] = closure_value;\n";
+      }
+      out << "  }\n";
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
@@ -1241,17 +1411,19 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &callee);
       operand_u32_value(instruction, 2, &pos_count);
-      out << "  r[" << dst << "] = amber_native_call_code(closure_code(r["
-          << callee << "]), std::vector<NativeValue>{";
+      std::ostringstream expr;
+      expr << "amber_native_call_closure(" << read_reg_expr(callee)
+           << ", {";
       for (std::uint32_t index = 0; index < pos_count; ++index) {
         std::uint32_t arg_reg = 0;
         operand_u32_value(instruction, 3U + index, &arg_reg);
         if (index != 0U) {
-          out << ", ";
+          expr << ", ";
         }
-        out << "r[" << arg_reg << "]";
+        expr << read_reg_expr(arg_reg);
       }
-      out << "});\n";
+      expr << "})";
+      write_reg_stmt(dst, expr.str());
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
@@ -1259,31 +1431,49 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t dst = 0;
       std::uint32_t recv = 0;
       std::uint32_t symbol_id = 0;
+      std::uint32_t pos_count = 0;
       std::uint32_t arg = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &recv);
       operand_u32_value(instruction, 2, &symbol_id);
-      operand_u32_value(instruction, 4, &arg);
+      operand_u32_value(instruction, 3, &pos_count);
+      if (pos_count != 0U) {
+        operand_u32_value(instruction, 4, &arg);
+      }
       const std::string selector = module.symbols[symbol_id];
       if (selector == "+") {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << recv
-            << "]) + as_int(r[" << arg << "]));\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(recv) + ") + as_int(" +
+                                read_reg_expr(arg) + "))");
       } else if (selector == "-") {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << recv
-            << "]) - as_int(r[" << arg << "]));\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(recv) + ") - as_int(" +
+                                read_reg_expr(arg) + "))");
       } else if (selector == "*") {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << recv
-            << "]) * as_int(r[" << arg << "]));\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(recv) + ") * as_int(" +
+                                read_reg_expr(arg) + "))");
       } else if (selector == "/") {
-        out << "  if (as_int(r[" << arg << "]) == 0) throw NativeBailout();\n";
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << recv
-            << "]) / as_int(r[" << arg << "]));\n";
+        out << "  if (as_int(" << read_reg_expr(arg)
+            << ") == 0) throw NativeBailout();\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(recv) + ") / as_int(" +
+                                read_reg_expr(arg) + "))");
       } else if (selector == "<") {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << recv
-            << "]) < as_int(r[" << arg << "]));\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(recv) + ") < as_int(" +
+                                read_reg_expr(arg) + "))");
       } else if (selector == ">") {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << recv
-            << "]) > as_int(r[" << arg << "]));\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(recv) + ") > as_int(" +
+                                read_reg_expr(arg) + "))");
+      } else if (selector == "[]") {
+        write_reg_stmt(dst, "native_list_at(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
+      } else if (selector == "count") {
+        write_reg_stmt(dst, "native_list_count(" + read_reg_expr(recv) + ")");
+      } else if (selector == "first") {
+        write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ")");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -1308,46 +1498,61 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 1, &lhs);
       operand_u32_value(instruction, 2, &rhs);
       if (instruction.opcode == Opcode::IAdd) {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
-            << "]) + as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(lhs) + ") + as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else if (instruction.opcode == Opcode::ISub) {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
-            << "]) - as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(lhs) + ") - as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else if (instruction.opcode == Opcode::IMul) {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
-            << "]) * as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(lhs) + ") * as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else if (instruction.opcode == Opcode::IDiv) {
-        out << "  if (as_int(r[" << rhs << "]) == 0) throw NativeBailout();\n";
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
-            << "]) / as_int(r[" << rhs << "]));\n";
+        out << "  if (as_int(" << read_reg_expr(rhs)
+            << ") == 0) throw NativeBailout();\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(lhs) + ") / as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else if (instruction.opcode == Opcode::IMod) {
-        out << "  if (as_int(r[" << rhs << "]) == 0) throw NativeBailout();\n";
-        out << "  r[" << dst << "] = NativeValue::integer(floor_mod_int64("
-            << "as_int(r[" << lhs << "]), as_int(r[" << rhs << "])));\n";
+        out << "  if (as_int(" << read_reg_expr(rhs)
+            << ") == 0) throw NativeBailout();\n";
+        write_reg_stmt(dst, "NativeValue::integer(floor_mod_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::IFloorDiv) {
-        out << "  r[" << dst << "] = NativeValue::integer(floor_div_int64("
-            << "as_int(r[" << lhs << "]), as_int(r[" << rhs << "])));\n";
+        write_reg_stmt(dst, "NativeValue::integer(floor_div_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::ILe) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) <= as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") <= as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else if (instruction.opcode == Opcode::IGe) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) >= as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") >= as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else if (instruction.opcode == Opcode::IEq) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) == as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") == as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else if (instruction.opcode == Opcode::INe) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) != as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") != as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else if (instruction.opcode == Opcode::ICmp) {
-        out << "  r[" << dst << "] = NativeValue::integer(compare_int64("
-            << "as_int(r[" << lhs << "]), as_int(r[" << rhs << "])));\n";
+        write_reg_stmt(dst, "NativeValue::integer(compare_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::ILt) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) < as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") < as_int(" +
+                                read_reg_expr(rhs) + "))");
       } else {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) > as_int(r[" << rhs << "]));\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") > as_int(" +
+                                read_reg_expr(rhs) + "))");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -1373,55 +1578,66 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 2, &const_id);
       const std::int64_t rhs = module.const_pool[const_id].int_value;
       if (instruction.opcode == Opcode::IAddK) {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
-            << "]) + " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(lhs) + ") + " +
+                                cpp_decimal_i64(rhs) + ")");
       } else if (instruction.opcode == Opcode::ISubK) {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
-            << "]) - " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(lhs) + ") - " +
+                                cpp_decimal_i64(rhs) + ")");
       } else if (instruction.opcode == Opcode::IMulK) {
-        out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
-            << "]) * " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                read_reg_expr(lhs) + ") * " +
+                                cpp_decimal_i64(rhs) + ")");
       } else if (instruction.opcode == Opcode::IDivK) {
         if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
-          out << "  r[" << dst << "] = NativeValue::integer(as_int(r[" << lhs
-              << "]) / " << cpp_decimal_i64(rhs) << ");\n";
+          write_reg_stmt(dst, "NativeValue::integer(as_int(" +
+                                  read_reg_expr(lhs) + ") / " +
+                                  cpp_decimal_i64(rhs) + ")");
         }
       } else if (instruction.opcode == Opcode::IModK) {
         if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
-          out << "  r[" << dst
-              << "] = NativeValue::integer(floor_mod_int64(as_int(r[" << lhs
-              << "]), " << cpp_decimal_i64(rhs) << "));\n";
+          write_reg_stmt(dst,
+                         "NativeValue::integer(floor_mod_int64(as_int(" +
+                             read_reg_expr(lhs) + "), " + cpp_decimal_i64(rhs) +
+                             "))");
         }
       } else if (instruction.opcode == Opcode::IFloorDivK) {
-        out << "  r[" << dst
-            << "] = NativeValue::integer(floor_div_int64(as_int(r[" << lhs
-            << "]), " << cpp_decimal_i64(rhs) << "));\n";
+        write_reg_stmt(dst, "NativeValue::integer(floor_div_int64(as_int(" +
+                                read_reg_expr(lhs) + "), " +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::ILeK) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) <= " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") <= " +
+                                cpp_decimal_i64(rhs) + ")");
       } else if (instruction.opcode == Opcode::IGeK) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) >= " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") >= " +
+                                cpp_decimal_i64(rhs) + ")");
       } else if (instruction.opcode == Opcode::IEqK) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) == " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") == " +
+                                cpp_decimal_i64(rhs) + ")");
       } else if (instruction.opcode == Opcode::INeK) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) != " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") != " +
+                                cpp_decimal_i64(rhs) + ")");
       } else if (instruction.opcode == Opcode::ICmpK) {
-        out << "  r[" << dst
-            << "] = NativeValue::integer(compare_int64(as_int(r[" << lhs
-            << "]), " << cpp_decimal_i64(rhs) << "));\n";
+        write_reg_stmt(dst, "NativeValue::integer(compare_int64(as_int(" +
+                                read_reg_expr(lhs) + "), " +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::ILtK) {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) < " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") < " +
+                                cpp_decimal_i64(rhs) + ")");
       } else {
-        out << "  r[" << dst << "] = NativeValue::boolean(as_int(r[" << lhs
-            << "]) > " << cpp_decimal_i64(rhs) << ");\n";
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(lhs) + ") > " +
+                                cpp_decimal_i64(rhs) + ")");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -1440,11 +1656,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 0, &cond);
       operand_u32_value(instruction, 1, &target);
       if (instruction.opcode == Opcode::JumpIfTrue) {
-        out << "  if (truthy(r[" << cond << "])) goto pc_" << target << ";\n";
+        out << "  if (truthy(" << read_reg_expr(cond) << ")) goto pc_" << target
+            << ";\n";
       } else if (instruction.opcode == Opcode::JumpIfFalse) {
-        out << "  if (!truthy(r[" << cond << "])) goto pc_" << target << ";\n";
+        out << "  if (!truthy(" << read_reg_expr(cond) << ")) goto pc_" << target
+            << ";\n";
       } else {
-        out << "  if (r[" << cond << "].tag == NativeValue::Tag::Null) "
+        out << "  if (" << read_reg_expr(cond)
+            << ".tag == NativeValue::Tag::Null) "
             << "goto pc_" << target << ";\n";
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
@@ -1457,7 +1676,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     case Opcode::Return: {
       std::uint32_t src = 0;
       operand_u32_value(instruction, 0, &src);
-      out << "  return r[" << src << "];\n";
+      out << "  return " << read_reg_expr(src) << ";\n";
       break;
     }
     default:
@@ -1504,29 +1723,61 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
     main_code_id = main_method->entry_code_id;
     has_main = true;
   }
+  const auto direct_entry_native = [&](std::uint32_t code_id) {
+    if (plan.native_code_ids.find(code_id) == plan.native_code_ids.end()) {
+      return false;
+    }
+    for (const amber::bytecode::BcCode &code : module.code_objects) {
+      if (code.code_id == code_id) {
+        return code.capture_layout.empty();
+      }
+    }
+    return false;
+  };
+  const auto direct_entry_has_captures = [&](std::uint32_t code_id) {
+    for (const amber::bytecode::BcCode &code : module.code_objects) {
+      if (code.code_id == code_id) {
+        return !code.capture_layout.empty();
+      }
+    }
+    return false;
+  };
   const bool init_native =
       artifact.entry_mode == EntryExecutionMode::MainOnly ||
       !module.init.has_entry_code_id ||
-      plan.native_code_ids.find(init_code_id) != plan.native_code_ids.end();
+      direct_entry_native(init_code_id);
   const bool main_native =
       (artifact.entry_mode != EntryExecutionMode::MainAfterInit &&
        artifact.entry_mode != EntryExecutionMode::MainOnly) ||
-      (has_main &&
-       plan.native_code_ids.find(main_code_id) != plan.native_code_ids.end());
+      (has_main && direct_entry_native(main_code_id));
   plan.entry_native = init_native && main_native;
   if (!plan.entry_native && first_reason.empty()) {
-    first_reason = "entry code is not native eligible";
+    const bool init_requires_captures =
+        artifact.entry_mode != EntryExecutionMode::MainOnly &&
+        module.init.has_entry_code_id && direct_entry_has_captures(init_code_id);
+    const bool main_requires_captures =
+        (artifact.entry_mode == EntryExecutionMode::MainAfterInit ||
+         artifact.entry_mode == EntryExecutionMode::MainOnly) &&
+        has_main && direct_entry_has_captures(main_code_id);
+    first_reason = init_requires_captures || main_requires_captures
+                       ? "direct entry with captures requires VM materialization"
+                       : "entry code is not native eligible";
   }
   plan.fallback_reason = first_reason;
 
   std::ostringstream out;
   out << "#include \"bytecode/format.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
+  out << "#include <array>\n";
   out << "#include <cstdint>\n";
   out << "#include <exception>\n";
+  out << "#include <initializer_list>\n";
   out << "#include <iostream>\n";
+  out << "#include <memory>\n";
   out << "#include <optional>\n";
+  out << "#include <sstream>\n";
   out << "#include <string>\n";
+  out << "#include <utility>\n";
   out << "#include <vector>\n\n";
   out << "namespace {\n\n";
   out << emit_embedded_hex_cpp(artifact.bytes);
@@ -1534,34 +1785,141 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  const char *what() const noexcept override { return "
          "\"native bailout\"; }\n";
   out << "};\n\n";
+  out << "struct NativeList;\n";
+  out << "struct NativeClosure;\n";
+  out << "struct NativeCell;\n\n";
   out << "struct NativeValue {\n";
-  out << "  enum class Tag { Null, Bool, Integer, Closure };\n";
-  out << "  Tag tag = Tag::Null;\n";
-  out << "  bool bool_value = false;\n";
-  out << "  std::int64_t int_value = 0;\n";
-  out << "  std::uint32_t code_id = 0;\n";
+  out << "  enum class Tag { Null, Bool, Integer, List, Closure };\n";
+  out << "  Tag tag;\n";
+  out << "  union { std::int64_t scalar_value; void *heap_value; };\n";
+  out << "  NativeValue() : tag(Tag::Null), scalar_value(0) {}\n";
   out << "  static NativeValue nullv() { return {}; }\n";
   out << "  static NativeValue boolean(bool value) { NativeValue out; out.tag "
          "= "
-         "Tag::Bool; out.bool_value = value; return out; }\n";
+         "Tag::Bool; out.scalar_value = value ? 1 : 0; return out; }\n";
   out << "  static NativeValue integer(std::int64_t value) { NativeValue out; "
-         "out.tag = Tag::Integer; out.int_value = value; return out; }\n";
-  out << "  static NativeValue closure(std::uint32_t value) { NativeValue out; "
-         "out.tag = Tag::Closure; out.code_id = value; return out; }\n";
+         "out.tag = Tag::Integer; out.scalar_value = value; return out; }\n";
+  out << "  static NativeValue list(std::vector<NativeValue> items);\n";
+  out << "  static NativeValue closure(NativeClosure *value);\n";
   out << "};\n\n";
+  out << "struct NativeList { std::vector<NativeValue> items; };\n";
+  out << "struct NativeCell { NativeValue value; };\n";
+  out << "struct NativeClosure {\n";
+  out << "  std::uint32_t code_id = 0;\n";
+  out << "  std::vector<NativeCell *> captures;\n";
+  out << "  NativeValue self = NativeValue::nullv();\n";
+  out << "};\n\n";
+  out << "struct NativeArena {\n";
+  out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
+  out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
+  out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
+  out << "};\n";
+  out << "static NativeArena native_arena;\n\n";
+  out << "NativeValue NativeValue::list(std::vector<NativeValue> items) {\n";
+  out << "  NativeValue out; out.tag = Tag::List;\n";
+  out << "  auto list = std::make_unique<NativeList>();\n";
+  out << "  list->items = std::move(items); out.heap_value = list.get();\n";
+  out << "  native_arena.lists.push_back(std::move(list)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::closure(NativeClosure *value) {\n";
+  out << "  NativeValue out; out.tag = Tag::Closure;\n";
+  out << "  out.heap_value = value; return out;\n";
+  out << "}\n\n";
+  out << "static NativeClosure *make_native_closure() {\n";
+  out << "  auto value = std::make_unique<NativeClosure>();\n";
+  out << "  NativeClosure *raw = value.get();\n";
+  out << "  native_arena.closures.push_back(std::move(value)); return raw;\n";
+  out << "}\n";
+  out << "static NativeCell *make_native_cell(NativeValue value) {\n";
+  out << "  auto cell = std::make_unique<NativeCell>(); cell->value = value;\n";
+  out << "  NativeCell *raw = cell.get();\n";
+  out << "  native_arena.cells.push_back(std::move(cell)); return raw;\n";
+  out << "}\n\n";
+  out << "struct NativeFrame {\n";
+  out << "  NativeValue *regs = nullptr;\n";
+  out << "  NativeCell **local_cells = nullptr;\n";
+  out << "  std::size_t reg_count = 0;\n";
+  out << "  NativeClosure *closure = nullptr;\n";
+  out << "  NativeValue self = NativeValue::nullv();\n";
+  out << "  NativeValue last = NativeValue::nullv();\n";
+  out << "  NativeFrame(NativeValue *frame_regs, NativeCell **frame_cells, "
+         "std::size_t frame_reg_count, NativeClosure *current)\n";
+  out << "      : regs(frame_regs), local_cells(frame_cells), "
+         "reg_count(frame_reg_count), closure(current) {\n";
+  out << "    if (closure != nullptr) self = closure->self;\n";
+  out << "  }\n";
+  out << "};\n\n";
+  out << "static NativeValue read_reg(const NativeFrame &frame, "
+         "std::uint32_t slot) {\n";
+  out << "  if (slot >= frame.reg_count) throw NativeBailout();\n";
+  out << "  if (frame.local_cells != nullptr && "
+         "frame.local_cells[slot] != nullptr) "
+         "return frame.local_cells[slot]->value;\n";
+  out << "  return frame.regs[slot];\n";
+  out << "}\n";
+  out << "static void write_reg(NativeFrame &frame, std::uint32_t slot, "
+         "NativeValue value) {\n";
+  out << "  if (slot >= frame.reg_count) throw NativeBailout();\n";
+  out << "  frame.regs[slot] = value;\n";
+  out << "  if (frame.local_cells != nullptr && "
+         "frame.local_cells[slot] != nullptr) "
+         "frame.local_cells[slot]->value = std::move(value);\n";
+  out << "}\n";
+  out << "static NativeCell *local_cell(NativeFrame &frame, "
+         "std::uint32_t slot) {\n";
+  out << "  if (slot >= frame.reg_count || frame.local_cells == nullptr) "
+         "throw NativeBailout();\n";
+  out << "  if (frame.local_cells[slot] == nullptr) {\n";
+  out << "    frame.local_cells[slot] = make_native_cell(frame.regs[slot]);\n";
+  out << "  }\n";
+  out << "  return frame.local_cells[slot];\n";
+  out << "}\n";
+  out << "static NativeCell *capture_cell(const NativeFrame &frame, "
+         "std::uint32_t slot) {\n";
+  out << "  if (frame.closure == nullptr || "
+         "slot >= frame.closure->captures.size() || "
+         "frame.closure->captures[slot] == nullptr) throw NativeBailout();\n";
+  out << "  return frame.closure->captures[slot];\n";
+  out << "}\n";
+  out << "static NativeValue read_capture(const NativeFrame &frame, "
+         "std::uint32_t slot) { return capture_cell(frame, slot)->value; }\n";
+  out << "static void write_capture(const NativeFrame &frame, std::uint32_t slot, "
+         "NativeValue value) { capture_cell(frame, slot)->value = "
+         "std::move(value); }\n\n";
   out << "static std::int64_t as_int(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Integer) { throw "
          "NativeBailout(); }\n";
-  out << "  return value.int_value;\n";
+  out << "  return value.scalar_value;\n";
   out << "}\n\n";
-  out << "static std::uint32_t closure_code(const NativeValue &value) {\n";
-  out << "  if (value.tag != NativeValue::Tag::Closure) { throw "
-         "NativeBailout(); }\n";
-  out << "  return value.code_id;\n";
+  out << "static const NativeList &as_list(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::List || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeList *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static NativeClosure *as_closure(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Closure || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return static_cast<NativeClosure *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static NativeValue native_list_at(const NativeValue &value, "
+         "const NativeValue &index_value) {\n";
+  out << "  const auto &items = as_list(value).items;\n";
+  out << "  const std::int64_t index = as_int(index_value);\n";
+  out << "  if (index < 0 || static_cast<std::size_t>(index) >= items.size()) "
+         "throw NativeBailout();\n";
+  out << "  return items[static_cast<std::size_t>(index)];\n";
+  out << "}\n";
+  out << "static NativeValue native_list_count(const NativeValue &value) {\n";
+  out << "  return NativeValue::integer("
+         "static_cast<std::int64_t>(as_list(value).items.size()));\n";
+  out << "}\n";
+  out << "static NativeValue native_list_first(const NativeValue &value) {\n";
+  out << "  const auto &items = as_list(value).items;\n";
+  out << "  return items.empty() ? NativeValue::nullv() : items.front();\n";
   out << "}\n\n";
   out << "static bool truthy(const NativeValue &value) {\n";
   out << "  return value.tag != NativeValue::Tag::Null && "
-         "!(value.tag == NativeValue::Tag::Bool && !value.bool_value);\n";
+         "!(value.tag == NativeValue::Tag::Bool && value.scalar_value == 0);\n";
   out << "}\n\n";
   out << "static std::int64_t compare_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
@@ -1584,17 +1942,24 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   for (std::uint32_t code_id : plan.native_code_ids) {
     out << "static NativeValue " << native_cpp_function_name(code_id)
-        << "(const std::vector<NativeValue> &args);\n";
+        << "(std::initializer_list<NativeValue> args, "
+           "NativeClosure *current_closure);\n";
   }
   out << "\nstatic NativeValue amber_native_call_code("
-         "std::uint32_t code_id, const std::vector<NativeValue> &args) {\n";
+         "std::uint32_t code_id, std::initializer_list<NativeValue> args, "
+         "NativeClosure *current_closure) {\n";
   out << "  switch (code_id) {\n";
   for (std::uint32_t code_id : plan.native_code_ids) {
     out << "  case " << code_id << ": return "
-        << native_cpp_function_name(code_id) << "(args);\n";
+        << native_cpp_function_name(code_id) << "(args, current_closure);\n";
   }
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
+  out << "}\n\n";
+  out << "static NativeValue amber_native_call_closure("
+         "const NativeValue &value, std::initializer_list<NativeValue> args) {\n";
+  out << "  NativeClosure *closure = as_closure(value);\n";
+  out << "  return amber_native_call_code(closure->code_id, args, closure);\n";
   out << "}\n\n";
   for (const amber::bytecode::BcCode &code : module.code_objects) {
     if (plan.native_code_ids.find(code.code_id) != plan.native_code_ids.end()) {
@@ -1674,19 +2039,31 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "&decoded.module) << \"\\n\";\n";
   out << "  return 0;\n";
   out << "}\n\n";
-  out << "static void print_native_value(const NativeValue &value) {\n";
+  out << "static std::string native_value_to_debug_string("
+         "const NativeValue &value) {\n";
   out << "  switch (value.tag) {\n";
-  out << "  case NativeValue::Tag::Null:\n";
-  out << "  case NativeValue::Tag::Closure:\n";
-  out << "    return;\n";
-  out << "  case NativeValue::Tag::Bool:\n";
-  out << "    std::cout << (value.bool_value ? \"true\" : \"false\") << "
-         "\"\\n\";\n";
-  out << "    return;\n";
-  out << "  case NativeValue::Tag::Integer:\n";
-  out << "    std::cout << value.int_value << \"\\n\";\n";
-  out << "    return;\n";
+  out << "  case NativeValue::Tag::Null: return \"null\";\n";
+  out << "  case NativeValue::Tag::Bool: return value.scalar_value != 0 ? "
+         "\"true\" : \"false\";\n";
+  out << "  case NativeValue::Tag::Integer: return "
+         "std::to_string(value.scalar_value);\n";
+  out << "  case NativeValue::Tag::Closure: return \"<closure>\";\n";
+  out << "  case NativeValue::Tag::List: {\n";
+  out << "    const auto &items = as_list(value).items;\n";
+  out << "    std::ostringstream text; text << \"[\";\n";
+  out << "    for (std::size_t i = 0; i < items.size(); ++i) {\n";
+  out << "      if (i != 0U) text << \", \";\n";
+  out << "      text << native_value_to_debug_string(items[i]);\n";
+  out << "    }\n";
+  out << "    text << \"]\"; return text.str();\n";
   out << "  }\n";
+  out << "  }\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n";
+  out << "static void print_native_value(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::Null || "
+         "value.tag == NativeValue::Tag::Closure) return;\n";
+  out << "  std::cout << native_value_to_debug_string(value) << \"\\n\";\n";
   out << "}\n\n";
   out << "} // namespace\n\n";
   out << "int main() {\n";
@@ -1694,7 +2071,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   if (artifact.entry_mode != EntryExecutionMode::MainOnly &&
       module.init.has_entry_code_id) {
     out << "    NativeValue init_result = amber_native_call_code("
-        << init_code_id << ", std::vector<NativeValue>{});\n";
+        << init_code_id << ", {}, nullptr);\n";
     if (artifact.entry_mode == EntryExecutionMode::Init) {
       out << "    print_native_value(init_result);\n";
     } else {
@@ -1704,7 +2081,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   if (artifact.entry_mode == EntryExecutionMode::MainAfterInit ||
       artifact.entry_mode == EntryExecutionMode::MainOnly) {
     out << "    NativeValue result = amber_native_call_code(" << main_code_id
-        << ", std::vector<NativeValue>{});\n";
+        << ", {}, nullptr);\n";
     out << "    print_native_value(result);\n";
   }
   out << "    return 0;\n";

@@ -210,14 +210,12 @@ python3 bench/polyglot/run_benchmark.py \
   --build-dir /private/tmp/amber_polyglot_calls_results
 ```
 
-Latest local rerun after fixing `amber-built` preparation on 2026-06-03
-(Darwin arm64, `go version go1.26.4 darwin/arm64`). The previous latest table
-did not show native acceleration because the runner still measured
-`amberbc_run <file.amberbc>` for `amber-built`. The runner now prepares an
-`amberc build <file.am>` native executable for each workload and measures that
-binary. It passes `--entry main-only` for the arithmetic workload to match the
-old direct `amberbc_run ... main` entry, and `--entry init` for
-`calls-collections` to match the old module-init entry.
+Latest local rerun after adding the captured-closure ABI and native list fast
+path on 2026-06-04 (Darwin arm64, `go version go1.26.4 darwin/arm64`). The
+runner prepares an `amberc build <file.am>` native executable for each workload
+and now rejects builds whose selected entry is not native or whose native code
+count does not cover every bytecode code object. It passes `--entry main-only`
+for the arithmetic workload and `--entry init` for `calls-collections`.
 
 The measured tables below are stable `--no-build` reruns against fresh native
 executables and language binaries built immediately before the rerun. All
@@ -228,12 +226,12 @@ Arithmetic:
 ```text
 program             runs     mean_s     best_s  peak_rss_mb           checksum
 ----------------------------------------------------------------------------------
-amber-interpreted     10     0.1490     0.1443          3.7    715609516598740
-amber-built           10     0.0051     0.0048          1.4    715609516598740
-python                10     0.1265     0.1229         14.7    715609516598740
-ruby                  10     0.0811     0.0797         15.9    715609516598740
-cpp                   10     0.0046     0.0044          1.4    715609516598740
-go                    10     0.0068     0.0065          4.0    715609516598740
+amber-interpreted     10     0.1557     0.1409          3.7    715609516598740
+amber-built           10     0.0042     0.0040          1.5    715609516598740
+python                10     0.1170     0.1152         14.7    715609516598740
+ruby                  10     0.0734     0.0723         15.9    715609516598740
+cpp                   10     0.0037     0.0036          1.4    715609516598740
+go                    10     0.0058     0.0056          4.1    715609516598740
 ```
 
 Calls and collections:
@@ -241,22 +239,22 @@ Calls and collections:
 ```text
 program             runs     mean_s     best_s  peak_rss_mb           checksum
 ----------------------------------------------------------------------------------
-amber-interpreted     10     0.0110     0.0105          5.1         2047795430
-amber-built           10     0.0101     0.0097          3.5         2047795430
-python                10     0.0213     0.0208         15.1         2047795430
-ruby                  10     0.0308     0.0297         16.0         2047795430
-cpp                   10     0.0026     0.0024          1.3         2047795430
-go                    10     0.0032     0.0030          4.1         2047795430
+amber-interpreted     10     0.0099     0.0096          5.1         2047795430
+amber-built           10     0.0032     0.0030          1.5         2047795430
+python                10     0.0185     0.0173         15.1         2047795430
+ruby                  10     0.0280     0.0265         16.0         2047795430
+cpp                   10     0.0020     0.0019          1.3         2047795430
+go                    10     0.0025     0.0024          4.0         2047795430
 ```
 
-The arithmetic `amber-built` executable reports `native_entry: true` and
-`native_code_count: 2`, so the hot loop executes through generated C++ instead
-of VM bytecode dispatch. The `calls-collections` executable is prepared through
-the same native build path, but its build report currently has
-`native_entry: false` with fallback reason
-`c1: closures with captures still use VM fallback`; the workload is dominated
-by closures/captures and collection operations outside the current direct native
-subset.
+The arithmetic executable reports full native coverage for 2/2 code objects.
+The `calls-collections` executable reports full native coverage for 10/10 code
+objects: module-init closures use shared native capture cells, closure calls
+stay in generated C++, and list literals plus `[]`, `count`, and `first` use
+the direct list path. Its `amber-built` mean improved from the previous
+`0.0101s` fallback result to `0.0032s`, about 3.2x faster and close to the Go
+result. Stack-backed native register frames also improved arithmetic from the
+previous `0.0051s` mean to `0.0042s`.
 
 Commands used:
 
@@ -264,19 +262,19 @@ Commands used:
 python3 bench/polyglot/run_benchmark.py \
   --workload arithmetic \
   --repeats 10 \
-  --build-dir /private/tmp/amber_polyglot_native_fix_arith_final
+  --build-dir /private/tmp/amber_polyglot_native_closure_lists_arith
 python3 bench/polyglot/run_benchmark.py \
   --workload arithmetic \
   --repeats 10 \
   --no-build \
-  --build-dir /private/tmp/amber_polyglot_native_fix_arith_final
+  --build-dir /private/tmp/amber_polyglot_native_closure_lists_arith
 python3 bench/polyglot/run_benchmark.py \
   --workload calls-collections \
   --repeats 10 \
-  --build-dir /private/tmp/amber_polyglot_native_fix_calls_final
+  --build-dir /private/tmp/amber_polyglot_native_closure_lists_calls_final
 python3 bench/polyglot/run_benchmark.py \
   --workload calls-collections \
   --repeats 10 \
   --no-build \
-  --build-dir /private/tmp/amber_polyglot_native_fix_calls_final
+  --build-dir /private/tmp/amber_polyglot_native_closure_lists_calls_final
 ```

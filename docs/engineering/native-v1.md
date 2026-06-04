@@ -55,7 +55,15 @@ executable backend for build artifacts: eligible bytecode functions are emitted
 as direct C++ functions and compiled by the host C++ toolchain, while unsupported
 bytecode remains available through an embedded verified VM fallback. This keeps
 the metadata contract stable while allowing build outputs to execute hot integer
-bytecode without VM dispatch.
+bytecode without VM dispatch. The direct subset includes captured closures with
+shared mutable capture cells, closure calls, list literals, and read-only list
+operations `[]`, `count`, and `first`. Generated functions keep register frames
+in fixed-size stack storage; closure, capture-cell, and list objects live in a
+process-lifetime native arena. Exception handlers, dynamic dispatch outside the
+direct selector subset, watch operations, and object lifecycle operations still
+use the VM fallback. Capture-bearing code is native when invoked through a
+native closure; a direct entry that needs captures is reported as non-native
+until the backend can materialize that entry closure.
 
 ## Runtime Bridge
 

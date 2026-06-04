@@ -177,6 +177,19 @@ def build_amber_native_executable(
             "Amber built benchmark expected native backend "
             f"cpp-bytecode-direct-v1, got {build_result.get('native_backend')!r}"
         )
+    if build_result.get("native_entry") is not True:
+        raise RuntimeError(
+            "Amber built benchmark entry is not native: "
+            f"{build_result.get('native_fallback_reason')}"
+        )
+    native_code_count = build_result.get("native_code_count")
+    bytecode_code_count = build_result.get("bytecode_code_count")
+    if native_code_count != bytecode_code_count:
+        raise RuntimeError(
+            "Amber built benchmark requires full native coverage, got "
+            f"{native_code_count}/{bytecode_code_count} code objects: "
+            f"{build_result.get('native_fallback_reason')}"
+        )
     if not output.exists():
         raise RuntimeError(f"expected Amber native executable is missing: {output}")
     return output
