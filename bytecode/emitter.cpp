@@ -3389,14 +3389,15 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
       return dst;
     }
     std::vector<InstructionOperand> operands;
+    const std::string selector = bool_field(expr, "optional") ? "[]?" : "[]";
     operands.push_back({dst, false});
     operands.push_back({compile_expr(*receiver), false});
-    operands.push_back({owner_->intern_symbol("[]"), false});
+    operands.push_back({owner_->intern_symbol(selector), false});
     operands.push_back({1, false});
     operands.push_back({compile_expr(*index_expr), false});
     operands.push_back({0, false});
     operands.push_back({-1, true});
-    const std::uint32_t site_id = emit_call_site(current_pc(), "[]");
+    const std::uint32_t site_id = emit_call_site(current_pc(), selector);
     operands.push_back({site_id, false});
     emit_instruction(Opcode::Send, std::move(operands), expr.span);
     return dst;

@@ -2834,6 +2834,94 @@ void test_execute_emitted_block_map_suffixes() {
                       "explicit param indented map block");
 }
 
+void test_execute_emitted_v20_5_array_generation_and_optional_access() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "generated = Array.of(4) |i|:\n"
+      "  i + 1\n"
+      "implicit = Array.of(3):\n"
+      "  _1 * 2\n"
+      "built = Array.build(3) |i|:\n"
+      "  i + 10\n"
+      "filled = Array.filled(4, false)\n"
+      "numbers = [10, 20, 30]\n"
+      "m = {a: 1, b: null}\n"
+      "[generated[0], generated[3], implicit[2], built[1], filled[0], "
+      "numbers[?0], numbers[?2], numbers[?3], numbers[?-1], "
+      "numbers.has_index?(2), numbers.has_index?(3), m[?:a], m[?:b], "
+      "m[?:c], m.contains?(:b), m.contains?(:c)]\n");
+  expect(exec.ok(), "v20.5 array/optional access probe should execute");
+  expect(exec.value.is_list(), "v20.5 probe should return list");
+  const std::shared_ptr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 16,
+         "v20.5 probe result shape");
+  const std::vector<std::int64_t> int_indices = {0, 1, 2, 3, 5, 6, 8, 11};
+  const std::vector<std::int64_t> int_values = {1, 4, 4, 11, 10, 30, 30, 1};
+  for (std::size_t i = 0; i < int_indices.size(); ++i) {
+    const std::size_t index = static_cast<std::size_t>(int_indices[i]);
+    expect(values->items[index].is_integer() &&
+               values->items[index].as_integer() == int_values[i],
+           "v20.5 integer result " + std::to_string(index));
+  }
+  expect(values->items[4].is_bool() && !values->items[4].as_bool(),
+         "Array.filled repeats false value");
+  expect(values->items[7].is_null(), "array optional out of bounds is null");
+  expect(values->items[9].is_bool() && values->items[9].as_bool(),
+         "Array#has_index? present");
+  expect(values->items[10].is_bool() && !values->items[10].as_bool(),
+         "Array#has_index? absent");
+  expect(values->items[12].is_null(), "map optional stored null is null");
+  expect(values->items[13].is_null(), "map optional missing key is null");
+  expect(values->items[14].is_bool() && values->items[14].as_bool(),
+         "Map#contains? sees stored null key");
+  expect(values->items[15].is_bool() && !values->items[15].as_bool(),
+         "Map#contains? rejects missing key");
+
+  const amber::runtime::ExecutionResult fresh =
+      execute_emitted_init("Array.of(2):\n"
+                           "  []\n");
+  expect(fresh.ok() && fresh.value.is_list(),
+         "Array.of should create nested arrays");
+  const std::shared_ptr<amber::runtime::ListValue> fresh_items =
+      fresh.value.as_list();
+  expect(fresh_items != nullptr && fresh_items->items.size() == 2 &&
+             fresh_items->items[0].is_list() &&
+             fresh_items->items[1].is_list() &&
+             fresh_items->items[0].as_list() != fresh_items->items[1].as_list(),
+         "Array.of evaluates block once per slot");
+
+  const amber::runtime::ExecutionResult shared =
+      execute_emitted_init("Array.filled(2, [])\n");
+  expect(shared.ok() && shared.value.is_list(),
+         "Array.filled should create outer array");
+  const std::shared_ptr<amber::runtime::ListValue> shared_items =
+      shared.value.as_list();
+  expect(shared_items != nullptr && shared_items->items.size() == 2 &&
+             shared_items->items[0].is_list() &&
+             shared_items->items[1].is_list() &&
+             shared_items->items[0].as_list() ==
+                 shared_items->items[1].as_list(),
+         "Array.filled repeats the same value reference");
+
+  const amber::runtime::ExecutionResult missing_block =
+      execute_emitted_init("Array.of(1)\n");
+  expect(!missing_block.ok() && missing_block.fault.has_value() &&
+             missing_block.fault->error_name == "ArgumentError",
+         "Array.of without block reports ArgumentError");
+
+  const amber::runtime::ExecutionResult negative =
+      execute_emitted_init("Array.filled(-1, 0)\n");
+  expect(!negative.ok() && negative.fault.has_value() &&
+             negative.fault->error_name == "ArgumentError",
+         "Array.filled negative length reports ArgumentError");
+
+  const amber::runtime::ExecutionResult non_int =
+      execute_emitted_init("Array.filled(\"2\", 0)\n");
+  expect(!non_int.ok() && non_int.fault.has_value() &&
+             non_int.fault->error_name == "TypeError",
+         "Array.filled non-Int length reports TypeError");
+}
+
 void test_runtime_watch_local_storage_replacement() {
   const amber::bytecode::EmitResult emit_result = emit_ok("x = 1\n"
                                                           "Kernel.watch(x)\n"
@@ -7421,6 +7509,7 @@ int main() {
   test_runtime_modern_profile_metadata();
   test_manual_make_map();
   test_execute_emitted_block_map_suffixes();
+  test_execute_emitted_v20_5_array_generation_and_optional_access();
   test_runtime_watch_local_storage_replacement();
   test_runtime_integer_specialized_op_preserves_watch_local_write();
   test_runtime_compare_branch_preserves_debug_local();

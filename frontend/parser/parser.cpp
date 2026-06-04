@@ -2140,7 +2140,8 @@ std::unique_ptr<ast::Expr> Parser::try_parse_pattern_assignment() {
   Parser left_parser(left_tokens);
   ParseResult left_parse = left_parser.parse_expression_unit();
   if (left_parse.ok() && left_parse.expr != nullptr &&
-      is_assignable(*left_parse.expr)) {
+      (is_assignable(*left_parse.expr) ||
+       is_optional_bracket_access(*left_parse.expr))) {
     return nullptr;
   }
 
@@ -2310,7 +2311,11 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
         peek().kind == lexer::TokenKind::Equal) {
       const lexer::Token op_token = advance();
       advance();
-      if (!is_assignable(*left)) {
+      if (is_optional_bracket_access(*left)) {
+        error_code(op_token, "E_OPTIONAL_BRACKET_ASSIGNMENT",
+                   "optional bracket access is read-only; use strict "
+                   "`receiver[key] = value`");
+      } else if (!is_assignable(*left)) {
         error(op_token, "left side of assignment is not assignable");
       }
       std::unique_ptr<ast::Expr> right = parse_expression(1, stop_mode);
@@ -2330,8 +2335,14 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
     const lexer::Token op_token = advance();
     const bool range_op = op_token.kind == lexer::TokenKind::DotDot ||
                           op_token.kind == lexer::TokenKind::DotDotDot;
-    if (op_token.kind == lexer::TokenKind::Equal && !is_assignable(*left)) {
-      error(op_token, "left side of assignment is not assignable");
+    if (op_token.kind == lexer::TokenKind::Equal) {
+      if (is_optional_bracket_access(*left)) {
+        error_code(op_token, "E_OPTIONAL_BRACKET_ASSIGNMENT",
+                   "optional bracket access is read-only; use strict "
+                   "`receiver[key] = value`");
+      } else if (!is_assignable(*left)) {
+        error(op_token, "left side of assignment is not assignable");
+      }
     }
     if (is_chain_comparison_op(info.op)) {
       left = parse_comparison_chain(std::move(left), info, op_token, stop_mode);
@@ -2985,11 +2996,15 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
       return chain;
     }
     if (match(lexer::TokenKind::LBracket)) {
+      const bool optional = match(lexer::TokenKind::Question);
       std::unique_ptr<ast::Expr> index = parse_expression(1, stop_mode);
       const lexer::Token close =
           consume(lexer::TokenKind::RBracket, "expected ']' after index");
       auto tail = ast::make_expr("AstTailSafeIndex",
                                  ast::join_spans(dot.span, close.span));
+      if (optional) {
+        tail->bool_field("optional", true);
+      }
       tail->node_field("index_expr", std::move(index));
       auto chain = ensure_postfix_chain(std::move(expr));
       append_postfix_tail(*chain, std::move(tail));
@@ -3025,11 +3040,15 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
   }
   if (match(lexer::TokenKind::LBracket)) {
     const lexer::Token open = previous();
+    const bool optional = match(lexer::TokenKind::Question);
     std::unique_ptr<ast::Expr> index = parse_expression(1, stop_mode);
     const lexer::Token close =
         consume(lexer::TokenKind::RBracket, "expected ']' after index");
     auto tail =
         ast::make_expr("AstTailIndex", ast::join_spans(open.span, close.span));
+    if (optional) {
+      tail->bool_field("optional", true);
+    }
     tail->node_field("index_expr", std::move(index));
     auto chain = ensure_postfix_chain(std::move(expr));
     append_postfix_tail(*chain, std::move(tail));
@@ -3353,7 +3372,14 @@ bool Parser::is_assignable(const ast::Expr &expr) const {
   if (tail == nullptr) {
     return false;
   }
-  return tail->kind == "AstTailDotMember" || tail->kind == "AstTailIndex";
+  return tail->kind == "AstTailDotMember" ||
+         (tail->kind == "AstTailIndex" && !bool_value(*tail, "optional"));
+}
+
+bool Parser::is_optional_bracket_access(const ast::Expr &expr) const {
+  const ast::Expr *tail = last_postfix_tail(expr);
+  return tail != nullptr && tail->kind == "AstTailIndex" &&
+         bool_value(*tail, "optional");
 }
 
 bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {

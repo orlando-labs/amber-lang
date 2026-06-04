@@ -121,6 +121,11 @@ struct CellDependencyInfo {
   std::set<std::string> writes;
 };
 
+struct DependencyScanState {
+  CellDependencyInfo *info = nullptr;
+  std::set<std::string> local_bindings;
+};
+
 constexpr short kBorderEditColor = 1;
 constexpr short kBorderErrorColor = 2;
 constexpr short kBorderRunningColor = 3;
@@ -548,27 +553,34 @@ std::string ast_string_value(const amber::ast::Expr &expr,
   return {};
 }
 
-void collect_dependency_reads(const amber::ast::Expr &expr,
-                              CellDependencyInfo *info);
-
-void collect_dependency_write_target(const amber::ast::Expr &expr,
-                                     CellDependencyInfo *info) {
-  if (info == nullptr) {
-    return;
-  }
+std::optional<std::string>
+dependency_binding_name(const amber::ast::Expr &expr) {
   if (expr.kind == "AstName") {
-    info->writes.insert(ast_string_value(expr, "name"));
-    return;
+    return ast_string_value(expr, "name");
   }
   if (expr.kind == "AstIvar") {
-    info->writes.insert("@" + ast_string_value(expr, "name"));
-    return;
+    return "@" + ast_string_value(expr, "name");
   }
   if (expr.kind == "AstCvar") {
-    info->writes.insert("@@" + ast_string_value(expr, "name"));
+    return "@@" + ast_string_value(expr, "name");
+  }
+  return std::nullopt;
+}
+
+void collect_dependency_reads(const amber::ast::Expr &expr,
+                              DependencyScanState *state);
+
+void collect_dependency_write_target(const amber::ast::Expr &expr,
+                                     DependencyScanState *state) {
+  if (state == nullptr || state->info == nullptr) {
     return;
   }
-  collect_dependency_reads(expr, info);
+  if (std::optional<std::string> binding = dependency_binding_name(expr)) {
+    state->info->writes.insert(*binding);
+    state->local_bindings.insert(std::move(*binding));
+    return;
+  }
+  collect_dependency_reads(expr, state);
 }
 
 bool dependency_scan_skips_body(const amber::ast::Expr &expr) {
@@ -579,52 +591,47 @@ bool dependency_scan_skips_body(const amber::ast::Expr &expr) {
 }
 
 void collect_dependency_reads(const amber::ast::Expr &expr,
-                              CellDependencyInfo *info) {
-  if (info == nullptr || dependency_scan_skips_body(expr)) {
+                              DependencyScanState *state) {
+  if (state == nullptr || state->info == nullptr ||
+      dependency_scan_skips_body(expr)) {
     return;
   }
-  if (expr.kind == "AstName") {
-    info->reads.insert(ast_string_value(expr, "name"));
-    return;
-  }
-  if (expr.kind == "AstIvar") {
-    info->reads.insert("@" + ast_string_value(expr, "name"));
-    return;
-  }
-  if (expr.kind == "AstCvar") {
-    info->reads.insert("@@" + ast_string_value(expr, "name"));
+  if (std::optional<std::string> binding = dependency_binding_name(expr)) {
+    if (state->local_bindings.count(*binding) == 0U) {
+      state->info->reads.insert(std::move(*binding));
+    }
     return;
   }
   if (expr.kind == "AstAssign") {
     const amber::ast::Expr *left = ast_node_field(expr, "left");
     const amber::ast::Expr *right = ast_node_field(expr, "right");
     if (ast_string_value(expr, "op") != "=" && left != nullptr) {
-      collect_dependency_reads(*left, info);
+      collect_dependency_reads(*left, state);
     }
     if (right != nullptr) {
-      collect_dependency_reads(*right, info);
+      collect_dependency_reads(*right, state);
     }
     if (left != nullptr) {
-      collect_dependency_write_target(*left, info);
+      collect_dependency_write_target(*left, state);
     }
     return;
   }
   if (expr.kind == "AstPatternAssign") {
     if (const amber::ast::Expr *right = ast_node_field(expr, "right")) {
-      collect_dependency_reads(*right, info);
+      collect_dependency_reads(*right, state);
     }
     return;
   }
 
   for (const amber::ast::NodeField &field : expr.node_fields) {
     if (field.value != nullptr) {
-      collect_dependency_reads(*field.value, info);
+      collect_dependency_reads(*field.value, state);
     }
   }
   for (const amber::ast::ListField &field : expr.list_fields) {
     for (const std::unique_ptr<amber::ast::Expr> &value : field.values) {
       if (value != nullptr) {
-        collect_dependency_reads(*value, info);
+        collect_dependency_reads(*value, state);
       }
     }
   }
@@ -641,9 +648,11 @@ CellDependencyInfo dependency_info_for_cell(const Cell &cell) {
   if (!parse_result.ok()) {
     return info;
   }
+  DependencyScanState state;
+  state.info = &info;
   for (const std::unique_ptr<amber::ast::Expr> &item : parse_result.items) {
     if (item != nullptr) {
-      collect_dependency_reads(*item, &info);
+      collect_dependency_reads(*item, &state);
     }
   }
   return info;

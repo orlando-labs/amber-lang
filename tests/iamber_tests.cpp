@@ -106,6 +106,19 @@ void test_range_literal_uses_native_prelude() {
          "range literal should materialize through the native prelude");
 }
 
+void test_cell_can_read_binding_initialized_earlier_in_cell() {
+  std::vector<Cell> cells;
+  cells.push_back(make_cell("h = {}\n"
+                            "h[?:key]\n"));
+
+  expect(!cyclic_watch_error_for_cell(cells, 0).has_value(),
+         "same-cell read after initialization should not be cyclic watch");
+
+  const EvalView view = evaluate_prefix(cells, 0);
+  expect(view.ok, "same-cell optional map lookup should evaluate");
+  expect(view.result == "null", "missing optional map key should return null");
+}
+
 void test_cyclic_watch_dependency_blocks_self_write() {
   std::vector<Cell> cells;
   cells.push_back(make_cell("x = 2\n"));
@@ -155,6 +168,7 @@ int main() {
   test_independent_cell_uses_isolated_eval();
   test_compound_assignment_eval();
   test_range_literal_uses_native_prelude();
+  test_cell_can_read_binding_initialized_earlier_in_cell();
   test_cyclic_watch_dependency_blocks_self_write();
   test_evaluate_from_blocks_cyclic_watch_cell();
   std::cout << "iamber_tests ok\n";

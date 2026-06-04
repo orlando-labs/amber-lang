@@ -387,6 +387,19 @@ void test_safe_call_and_index_lowering() {
          "HSafeIndex removed from final HIR");
 }
 
+void test_optional_index_lowering() {
+  const amber::hir::Program program = lower_ok("def probe(xs, i):\n"
+                                               "  xs[?i]\n");
+  const amber::hir::Procedure *probe = procedure_by_name(program, "probe");
+  expect(probe != nullptr, "optional index procedure exists");
+  const amber::ast::Expr *stmt = list_item(*probe->body, "items", 0);
+  expect(stmt != nullptr, "optional index stmt exists");
+  const amber::ast::Expr *expr = node_field(*stmt, "expr");
+  expect(expr != nullptr && expr->kind == "HIndex",
+         "optional bracket lowers to HIndex");
+  expect(bool_field(*expr, "optional"), "optional HIndex marker");
+}
+
 void test_builtin_send_lowering() {
   const amber::hir::Program program =
       lower_ok("def invoke(recv, selector, value):\n"
@@ -1481,6 +1494,7 @@ int main() {
   test_module_clause_def_materializes_callable_binding();
   test_safe_navigation_lowering();
   test_safe_call_and_index_lowering();
+  test_optional_index_lowering();
   test_builtin_send_lowering();
   test_kernel_watch_lowering();
   test_collection_literal_lowering();

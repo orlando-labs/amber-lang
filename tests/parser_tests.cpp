@@ -109,6 +109,16 @@ bool has_diagnostic(const amber::parser::ParseResult &result,
   return false;
 }
 
+bool has_diagnostic(const amber::parser::ParseModuleResult &result,
+                    const std::string &code) {
+  for (const amber::lexer::Diagnostic &diagnostic : result.diagnostics) {
+    if (diagnostic.code == code) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void test_precedence() {
   std::unique_ptr<Expr> expr = parse_ok("x + 1 * 2\n");
   expect(expr->kind == "AstBinary", "top-level binary");
@@ -209,6 +219,31 @@ void test_safe_nav_and_index() {
   expect(tails.values[2]->kind == "AstTailSafeMember",
          "second safe member tail");
   expect(string_field(*tails.values[2], "name") == "name", "safe member name");
+}
+
+void test_optional_bracket_access() {
+  std::unique_ptr<Expr> expr = parse_ok("xs[?i]\n");
+  expect(expr->kind == "AstPostfixChain", "optional index postfix chain");
+  const amber::ast::ListField &tails = list_field(*expr, "tails");
+  expect(tails.values.size() == 1, "optional index tail count");
+  expect(tails.values[0]->kind == "AstTailIndex", "optional index tail kind");
+  expect(bool_field(*tails.values[0], "optional"), "optional index marker");
+  expect(node_field(*tails.values[0], "index_expr").kind == "AstName",
+         "optional index expression");
+
+  std::unique_ptr<Expr> negative = parse_ok("xs[?-1]\n");
+  const amber::ast::ListField &negative_tails = list_field(*negative, "tails");
+  expect(bool_field(*negative_tails.values[0], "optional"),
+         "optional negative index marker");
+
+  amber::parser::ParseResult assignment = parse_raw("xs[?i] = 1\n");
+  expect(has_diagnostic(assignment, "E_OPTIONAL_BRACKET_ASSIGNMENT"),
+         "optional index assignment diagnostic");
+
+  amber::parser::ParseModuleResult module_assignment =
+      parse_module_raw("xs[?i] = 1\n");
+  expect(has_diagnostic(module_assignment, "E_OPTIONAL_BRACKET_ASSIGNMENT"),
+         "optional index assignment module diagnostic");
 }
 
 void test_inline_block_chain_boundary() {
@@ -981,6 +1016,7 @@ int main() {
   test_comparison_chains();
   test_bare_call();
   test_safe_nav_and_index();
+  test_optional_bracket_access();
   test_inline_block_chain_boundary();
   test_indented_block_suffix_body();
   test_indented_postfix_continuation();

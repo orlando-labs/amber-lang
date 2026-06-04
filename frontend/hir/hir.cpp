@@ -2171,6 +2171,9 @@ private:
         }
         auto node = make_node("HIndex", node_span);
         node->node_field("receiver", std::move(receiver));
+        if (bool_value(tail, "optional")) {
+          node->bool_field("optional", true);
+        }
         if (const ast::Expr *index_expr = node_field(tail, "index_expr")) {
           node->node_field("index_expr", lower_expr(*index_expr));
         }

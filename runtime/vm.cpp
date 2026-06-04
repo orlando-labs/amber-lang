@@ -12079,6 +12079,16 @@ private:
     return static_cast<std::size_t>(normalized);
   }
 
+  static std::optional<std::size_t> optional_sequence_index(std::int64_t index,
+                                                            std::size_t size) {
+    const std::int64_t size_i64 = static_cast<std::int64_t>(size);
+    const std::int64_t normalized = index < 0 ? size_i64 + index : index;
+    if (normalized < 0 || static_cast<std::uint64_t>(normalized) >= size) {
+      return std::nullopt;
+    }
+    return static_cast<std::size_t>(normalized);
+  }
+
   std::optional<std::vector<Value>>
   slice_sequence_items_by_range(const Frame &frame,
                                 const std::vector<Value> &items,
@@ -16211,6 +16221,66 @@ private:
         *out = range_value;
         return SendStatus::Matched;
       }
+      if (kind == RuntimeNativeTypeKind::Array &&
+          (selector == "of" || selector == "build")) {
+        if (!require_arity(1)) {
+          return SendStatus::Faulted;
+        }
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError",
+                    "Array." + selector + " does not accept keywords");
+          return SendStatus::Faulted;
+        }
+        if (block.is_null()) {
+          set_fault(frame, "ArgumentError",
+                    "Array." + selector + " requires a block");
+          return SendStatus::Faulted;
+        }
+        if (!args[0].is_integer()) {
+          set_fault(frame, "TypeError", "array length must be Int");
+          return SendStatus::Faulted;
+        }
+        const std::int64_t length = args[0].as_integer();
+        if (length < 0) {
+          set_fault(frame, "ArgumentError",
+                    "array length must be non-negative");
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> items;
+        items.reserve(static_cast<std::size_t>(length));
+        for (std::int64_t index = 0; index < length; ++index) {
+          const std::optional<Value> value =
+              call_block_to_value(frame, block, {Value::integer(index)});
+          if (!value.has_value()) {
+            return SendStatus::Faulted;
+          }
+          items.push_back(*value);
+        }
+        *out = make_list_value(std::move(items));
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Array && selector == "filled") {
+        if (!require_arity(2) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Array.filled does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!args[0].is_integer()) {
+          set_fault(frame, "TypeError", "array length must be Int");
+          return SendStatus::Faulted;
+        }
+        const std::int64_t length = args[0].as_integer();
+        if (length < 0) {
+          set_fault(frame, "ArgumentError",
+                    "array length must be non-negative");
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> items(static_cast<std::size_t>(length), args[1]);
+        *out = make_list_value(std::move(items));
+        return SendStatus::Matched;
+      }
       if (is_conversion_type(kind)) {
         if (selector != "cast" && selector != "new" && selector != "parse") {
           return SendStatus::NotHandled;
@@ -17526,10 +17596,11 @@ private:
         collection_selector_in({"+", "*", "concat", "take_while", "reverse",
                                 "sort", "uniq", "each_pair", "each_cons"});
     const bool sequence_collection_selector =
-        collection_selector_in({"empty?", "[]", "deconstruct", "first", "count",
-                                "to_a", "lazy", "each", "map", "flat_map",
-                                "select", "reject", "find", "group_by", "any?",
-                                "all?", "none?", "reduce"}) ||
+        collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
+                                "deconstruct", "first",  "count", "to_a",
+                                "lazy",        "each",   "map",   "flat_map",
+                                "select",      "reject", "find",  "group_by",
+                                "any?",        "all?",   "none?", "reduce"}) ||
         sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
         sequence_collection_selector || selector == "===";
@@ -17547,6 +17618,7 @@ private:
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() && collection_selector_in({"empty?",
                                                       "[]",
+                                                      "[]?",
                                                       "deconstruct_keys",
                                                       "keys",
                                                       "values",
@@ -17656,13 +17728,17 @@ private:
         return SendStatus::Matched;
       }
 
-      if (collection_selector == "[]") {
+      if (collection_selector == "[]" || collection_selector == "[]?") {
         std::int64_t index = 0;
         if (!require_arity(1) || !require_no_block() ||
             !require_integer_arg(0, &index)) {
           return SendStatus::Faulted;
         }
         if (index < 0) {
+          if (collection_selector == "[]?") {
+            *out = Value::null();
+            return SendStatus::Matched;
+          }
           set_fault(frame, "IndexError", "LazySeq index is out of bounds");
           return SendStatus::Faulted;
         }
@@ -17684,6 +17760,10 @@ private:
           return SendStatus::Faulted;
         }
         if (!found_value) {
+          if (collection_selector == "[]?") {
+            *out = Value::null();
+            return SendStatus::Matched;
+          }
           set_fault(frame, "IndexError", "LazySeq index is out of bounds");
           return SendStatus::Faulted;
         }
@@ -18156,11 +18236,16 @@ private:
             *out = Value::boolean(items.empty());
             return SendStatus::Matched;
           }
-          if (collection_selector == "[]") {
+          if (collection_selector == "[]" || collection_selector == "[]?") {
             if (!require_arity(1) || !require_no_block()) {
               return SendStatus::Faulted;
             }
             if (value_is_range_instance(args[0])) {
+              if (collection_selector == "[]?") {
+                set_fault(frame, "TypeError",
+                          "optional collection index expects Int");
+                return SendStatus::Faulted;
+              }
               const std::optional<std::vector<Value>> sliced =
                   slice_sequence_items_by_range(frame, items, args[0]);
               if (!sliced.has_value()) {
@@ -18173,6 +18258,13 @@ private:
             if (!require_integer_arg(0, &index)) {
               return SendStatus::Faulted;
             }
+            if (collection_selector == "[]?") {
+              const std::optional<std::size_t> normalized =
+                  optional_sequence_index(index, items.size());
+              *out =
+                  normalized.has_value() ? items[*normalized] : Value::null();
+              return SendStatus::Matched;
+            }
             const std::optional<std::size_t> normalized =
                 normalize_sequence_index(frame, index, items.size(),
                                          "collection");
@@ -18180,6 +18272,16 @@ private:
               return SendStatus::Faulted;
             }
             *out = items[*normalized];
+            return SendStatus::Matched;
+          }
+          if (collection_selector == "has_index?") {
+            std::int64_t index = 0;
+            if (!require_arity(1) || !require_no_block() ||
+                !require_integer_arg(0, &index)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::boolean(
+                optional_sequence_index(index, items.size()).has_value());
             return SendStatus::Matched;
           }
           if (collection_selector == "deconstruct") {
@@ -18242,11 +18344,16 @@ private:
           *out = Value::boolean(items.empty());
           return SendStatus::Matched;
         }
-        if (collection_selector == "[]") {
+        if (collection_selector == "[]" || collection_selector == "[]?") {
           if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
           if (value_is_range_instance(args[0])) {
+            if (collection_selector == "[]?") {
+              set_fault(frame, "TypeError",
+                        "optional collection index expects Int");
+              return SendStatus::Faulted;
+            }
             const std::optional<std::vector<Value>> sliced =
                 slice_sequence_items_by_range(frame, items, args[0]);
             if (!sliced.has_value()) {
@@ -18260,8 +18367,18 @@ private:
             return SendStatus::Faulted;
           }
           if (receiver_is_range && index < 0) {
+            if (collection_selector == "[]?") {
+              *out = Value::null();
+              return SendStatus::Matched;
+            }
             set_fault(frame, "IndexError", "Range index is out of bounds");
             return SendStatus::Faulted;
+          }
+          if (collection_selector == "[]?") {
+            const std::optional<std::size_t> normalized =
+                optional_sequence_index(index, items.size());
+            *out = normalized.has_value() ? items[*normalized] : Value::null();
+            return SendStatus::Matched;
           }
           const std::optional<std::size_t> normalized =
               normalize_sequence_index(frame, index, items.size(),
@@ -18270,6 +18387,20 @@ private:
             return SendStatus::Faulted;
           }
           *out = items[*normalized];
+          return SendStatus::Matched;
+        }
+        if (collection_selector == "has_index?") {
+          std::int64_t index = 0;
+          if (!require_arity(1) || !require_no_block() ||
+              !require_integer_arg(0, &index)) {
+            return SendStatus::Faulted;
+          }
+          if (receiver_is_range && index < 0) {
+            *out = Value::boolean(false);
+            return SendStatus::Matched;
+          }
+          *out = Value::boolean(
+              optional_sequence_index(index, items.size()).has_value());
           return SendStatus::Matched;
         }
         if (collection_selector == "deconstruct") {
@@ -18669,7 +18800,7 @@ private:
           *out = Value::boolean(found);
           return SendStatus::Matched;
         }
-        if (collection_selector == "[]") {
+        if (collection_selector == "[]" || collection_selector == "[]?") {
           if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -18690,6 +18821,10 @@ private:
             return SendStatus::Faulted;
           }
           if (!key_symbol_id.has_value()) {
+            if (collection_selector == "[]?") {
+              *out = Value::null();
+              return SendStatus::Matched;
+            }
             set_fault(frame, "KeyError", "map key is absent");
             return SendStatus::Faulted;
           }
@@ -18703,6 +18838,10 @@ private:
             }
           }
           if (!found_key) {
+            if (collection_selector == "[]?") {
+              *out = Value::null();
+              return SendStatus::Matched;
+            }
             set_fault(frame, "KeyError", "map key is absent");
             return SendStatus::Faulted;
           }

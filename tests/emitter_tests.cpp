@@ -410,6 +410,18 @@ void test_pattern_assignment_emission() {
          "pattern assignment emits P_COMMIT");
 }
 
+void test_optional_index_emission() {
+  const amber::bytecode::EmitResult emit_result = emit_ok("def lookup(xs, i):\n"
+                                                          "  xs[?i]\n");
+  const amber::bytecode::BcCode *code = code_by_id(
+      emit_result.module, emit_result.module.methods[0].entry_code_id);
+  expect(code != nullptr, "optional index code exists");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::Send),
+         "optional index emits SEND");
+  expect(contains_symbol(emit_result.module, "[]?"),
+         "optional index interns []? selector");
+}
+
 void test_matcher_expr_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("def choose(x, limit):\n"
@@ -845,6 +857,7 @@ int main() {
   test_last_result_elision_without_explicit_last_value();
   test_explicit_last_value_preserves_last_result_updates();
   test_pattern_assignment_emission();
+  test_optional_index_emission();
   test_matcher_expr_emission();
   test_dynamic_pattern_emission();
   test_clause_method_emission();

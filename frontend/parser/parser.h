@@ -172,6 +172,7 @@ private:
   bool can_accept_bare_call(const ast::Expr &expr) const;
   bool can_accept_direct_block_suffix(const ast::Expr &expr) const;
   bool is_assignable(const ast::Expr &expr) const;
+  bool is_optional_bracket_access(const ast::Expr &expr) const;
   bool infix_info(lexer::TokenKind kind, InfixInfo *info) const;
   bool compound_assignment_op(lexer::TokenKind kind, const char **op) const;
   bool is_method_name_token(const lexer::Token &token) const;
