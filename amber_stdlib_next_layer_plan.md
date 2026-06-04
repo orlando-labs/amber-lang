@@ -748,12 +748,21 @@ Detailed project see in amber_threading_async_api_project_v1.md
 - `STD-016` Auto-parallel collections iteration/combination/permutation
   methods. Done: `RuntimeThreadedCollection` provides the runtime-facing
   facade for `[1, 2, 3].threaded(3).map: ...` style lowering, backed by
-  `RuntimeFlowModule`; it supports ordered `each`, `map`, `select`, `reject`,
-  `flat_map`, `combination(count)`, and `permutation(count)`, preserves checked
-  isolation by default, supports explicit unchecked mode via `RuntimeFlowOptions`,
-  surfaces worker failures through the existing flow failure policies, records
-  threaded collection and flow stats, and `stdlib_task_tests` covers ordered
+  `RuntimeFlowModule`; `.parallel(...)` is an alias for `.threaded(...)`.
+  It supports ordered `each`, `map`, `select`, `reject`, `flat_map`,
+  `combination(count)`, and `permutation(count)`, preserves checked isolation by
+  default, supports explicit unchecked mode via `RuntimeFlowOptions`, surfaces
+  worker failures through the existing flow failure policies, and records
+  threaded collection and flow stats. Collection threading now accepts
+  `scatter:` policy selection: `:atomic` / `:dynamic` is the default and runs up
+  to worker-count tasks over a shared atomic item index; `:chunks` / `:fixed`
+  runs fixed contiguous chunks with one task per worker; `:items` keeps the
+  legacy per-item task mode for compatibility and diagnostics. Runtime logging
+  keeps the native `thread=` id in task log context, alongside annotation and
+  `task=` when present, so threaded/parallel workers remain attributable in
+  stderr and buffered logger output. `stdlib_task_tests` covers ordered
   transforms, auto-parallel each, generated combinations/permutations,
+  scatter-policy task counts, `.parallel` source-level lowering,
   checked/unchecked isolation, result shareability rejection, and failure
   collection.
 
