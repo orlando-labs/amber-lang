@@ -740,6 +740,30 @@ private:
     return code_id;
   }
 
+  std::uint32_t emit_type_hook_code(const lexer::Span &span,
+                                    const std::string &mode,
+                                    const std::string &name,
+                                    const std::string &type_expr) {
+    const std::uint32_t code_id = allocate_code_id();
+    const std::uint32_t hook_const_id =
+        intern_type_hook(mode, name, type_expr);
+
+    BcCode code;
+    code.code_id = code_id;
+    code.kind = CodeKind::Block;
+    code.reg_count = 1;
+    code.local_layout.push_back(
+        {0, intern_string(name.empty() ? "value" : name),
+         intern_string("param"), intern_string("local")});
+    code.instructions.push_back(
+        {Opcode::TypeCheck, {{0, false}, {hook_const_id, false}}});
+    code.instructions.push_back({Opcode::Return, {{0, false}}});
+    code.source_spans.push_back({0, 2, span});
+
+    module_.code_objects.push_back(std::move(code));
+    return code_id;
+  }
+
   std::uint32_t emit_clause_pattern_code(const hir::Procedure &procedure,
                                          const ast::Expr &clause) {
     const std::uint32_t code_id = allocate_code_id();
@@ -1003,8 +1027,9 @@ private:
             method.params.push_back(entry);
             const std::string type_expr = string_field(*param, "type_expr");
             if (!type_expr.empty()) {
-              method.type_hook_ids.push_back(intern_type_hook(
-                  "parameter", string_field(*param, "local_name"), type_expr));
+              method.type_hook_ids.push_back(emit_type_hook_code(
+                  param->span, "parameter", string_field(*param, "local_name"),
+                  type_expr));
             }
             continue;
           }
@@ -1012,8 +1037,9 @@ private:
           method.params.push_back(entry);
           const std::string type_expr = string_field(*param, "type_expr");
           if (!type_expr.empty()) {
-            method.type_hook_ids.push_back(intern_type_hook(
-                "parameter", string_field(*param, "local_name"), type_expr));
+            method.type_hook_ids.push_back(emit_type_hook_code(
+                param->span, "parameter", string_field(*param, "local_name"),
+                type_expr));
           }
           const ast::Expr *default_expr = node_field(*param, "default_expr");
           if (default_expr == nullptr) {
@@ -1028,8 +1054,9 @@ private:
       const std::string return_type_expr =
           string_field(*signature, "return_type_expr");
       if (!return_type_expr.empty()) {
-        method.type_hook_ids.push_back(intern_type_hook(
-            "return", string_field(item, "name"), return_type_expr));
+        method.type_hook_ids.push_back(emit_type_hook_code(
+            item.span, "return", string_field(item, "name"),
+            return_type_expr));
       }
     }
 

@@ -282,6 +282,39 @@ void test_default_thunk_emission() {
          "default thunk emits RETURN");
 }
 
+void test_type_hook_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("def f(x as Int) -> Int:\n"
+              "  x\n");
+  expect(emit_result.module.methods.size() == 1,
+         "expected one typed method");
+  const amber::bytecode::BcMethod &method = emit_result.module.methods[0];
+  expect(method.type_hook_ids.size() == 2,
+         "parameter and return type hooks emitted");
+
+  for (std::uint32_t hook_code_id : method.type_hook_ids) {
+    const amber::bytecode::BcCode *hook_code =
+        code_by_id(emit_result.module, hook_code_id);
+    expect(hook_code != nullptr, "type hook code exists");
+    expect(hook_code->kind == amber::bytecode::CodeKind::Block,
+           "type hook code kind");
+    expect(hook_code->reg_count == 1, "type hook value register exists");
+    expect(contains_opcode(*hook_code, amber::bytecode::Opcode::TypeCheck),
+           "type hook emits TYPECHECK");
+    expect(contains_opcode(*hook_code, amber::bytecode::Opcode::Return),
+           "type hook emits RETURN");
+  }
+
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), "typed method bytecode round-trips through verifier");
+  expect(decoded.module.methods.size() == 1,
+         "typed method survives round-trip");
+  expect(decoded.module.methods[0].type_hook_ids.size() == 2,
+         "type hook ids survive round-trip");
+}
+
 void test_keyword_param_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("class Config:\n"
@@ -806,6 +839,7 @@ int main() {
   test_loop_and_safepoint();
   test_closure_capture_emission();
   test_default_thunk_emission();
+  test_type_hook_emission();
   test_keyword_param_emission();
   test_case_emission();
   test_last_result_elision_without_explicit_last_value();
