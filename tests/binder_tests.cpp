@@ -406,6 +406,16 @@ void test_unresolved_name_diagnostics() {
                                       "send(receiver, \"tick\")\n");
   expect(reflective_send.empty(),
          "reflective send builtin is not reported as undefined");
+
+  std::vector<amber::lexer::Diagnostic> native_prelude =
+      unresolved_name_diagnostics_for("print \"hello\"\n"
+                                      "p(\"debug\")\n"
+                                      "pp([1, 2])\n"
+                                      "Amber.stringify(123)\n"
+                                      "io.Buffer.new()\n"
+                                      "Str(42)\n");
+  expect(native_prelude.empty(),
+         "native prelude names are not reported as undefined");
 }
 
 void test_default_ordering_diagnostics() {

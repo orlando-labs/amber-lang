@@ -1281,6 +1281,43 @@ void test_direct_capture_lowering() {
   expect(string_field(*captured_arg, "slot") == "u0", "captured param slot");
 }
 
+void test_indented_block_suffix_lowering() {
+  const amber::hir::Program program =
+      lower_ok("def offsetter(values, delta):\n"
+               "  values.map |x|:\n"
+               "    doubled = x * 2\n"
+               "    doubled + delta\n");
+  const amber::hir::Procedure *offsetter =
+      procedure_by_name(program, "offsetter");
+  expect(offsetter != nullptr, "indented block owner procedure exists");
+
+  const amber::ast::Expr *stmt = list_item(*offsetter->body, "items", 0);
+  expect(stmt != nullptr, "indented block owner statement exists");
+  const amber::ast::Expr *send_expr = node_field(*stmt, "expr");
+  expect(send_expr != nullptr && send_expr->kind == "HSend",
+         "indented block map call lowers to HSend");
+  const amber::ast::Expr *closure = node_field(*send_expr, "block");
+  expect(closure != nullptr && closure->kind == "HClosure",
+         "indented block lowers to HClosure");
+  const amber::ast::Expr *capture = list_item(*closure, "captures", 0);
+  expect(capture != nullptr && capture->kind == "HCapture",
+         "indented block closure capture exists");
+  expect(string_field(*capture, "name") == "delta",
+         "indented block captures outer local");
+
+  const amber::hir::Procedure *block =
+      procedure_by_id(program, string_field(*closure, "procedure"));
+  expect(block != nullptr, "indented block procedure exists");
+  const amber::ast::Expr *first = list_item(*block->body, "items", 0);
+  const amber::ast::Expr *second = list_item(*block->body, "items", 1);
+  expect(first != nullptr && first->kind == "HLastSet",
+         "indented block first statement lowers");
+  expect(second != nullptr && second->kind == "HLastSet",
+         "indented block second statement lowers");
+  expect(list_item(*block->body, "items", 2) == nullptr,
+         "indented block procedure has two statements");
+}
+
 void test_nested_capture_propagation() {
   const amber::hir::Program program = lower_ok("def nest(xs, α):\n"
                                                "  xs.map: _1.filter: α\n");
@@ -1440,6 +1477,7 @@ int main() {
   test_default_param_lowering();
   test_dynamic_pattern_without_with_lowering();
   test_direct_capture_lowering();
+  test_indented_block_suffix_lowering();
   test_nested_capture_propagation();
   test_property_lowering();
   std::cout << "hir_tests: ok\n";

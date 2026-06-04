@@ -11,6 +11,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <queue>
@@ -31,6 +32,9 @@ thread_local std::uint64_t tls_runtime_strand_id = 0;
 thread_local std::uint64_t tls_runtime_task_id = 0;
 thread_local const std::atomic<bool> *tls_runtime_task_cancel_flag = nullptr;
 thread_local std::uint32_t tls_runtime_task_sync_depth = 0;
+thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stdout;
+thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stderr;
+std::atomic<std::uint64_t> g_runtime_output_order{1};
 
 class RuntimeTaskScope {
 public:
@@ -5932,6 +5936,221 @@ RuntimeHeap &default_runtime_heap() {
   return heap;
 }
 
+namespace {
+
+enum class RuntimeTextWriterKind { HostStdout, HostStderr, Buffer, CellStream };
+
+RuntimeTextWriteResult text_write_ok() { return {}; }
+
+RuntimeTextWriteResult text_write_error(std::string error_name,
+                                        std::string message) {
+  RuntimeTextWriteResult result;
+  result.ok = false;
+  result.error_name = std::move(error_name);
+  result.message = std::move(message);
+  return result;
+}
+
+} // namespace
+
+class RuntimeTextWriter::Impl {
+public:
+  Impl(RuntimeTextWriterKind writer_kind, std::string writer_stream)
+      : kind(writer_kind), stream(std::move(writer_stream)) {}
+
+  RuntimeTextWriterKind kind = RuntimeTextWriterKind::Buffer;
+  std::string stream;
+  mutable std::mutex mutex;
+  bool closed = false;
+  std::string buffer;
+  std::vector<RuntimeTextOutputEvent> events;
+};
+
+RuntimeTextWriter::RuntimeTextWriter()
+    : impl_(std::make_shared<Impl>(RuntimeTextWriterKind::Buffer, "")) {}
+
+RuntimeTextWriter::RuntimeTextWriter(RuntimeTextWriter &&) noexcept = default;
+
+RuntimeTextWriter &
+RuntimeTextWriter::operator=(RuntimeTextWriter &&) noexcept = default;
+
+RuntimeTextWriter::~RuntimeTextWriter() = default;
+
+std::shared_ptr<RuntimeTextWriter> RuntimeTextWriter::host_stdout() {
+  static std::shared_ptr<RuntimeTextWriter> writer = [] {
+    auto out = std::make_shared<RuntimeTextWriter>();
+    out->impl_ = std::make_shared<Impl>(RuntimeTextWriterKind::HostStdout,
+                                        "stdout");
+    return out;
+  }();
+  return writer;
+}
+
+std::shared_ptr<RuntimeTextWriter> RuntimeTextWriter::host_stderr() {
+  static std::shared_ptr<RuntimeTextWriter> writer = [] {
+    auto out = std::make_shared<RuntimeTextWriter>();
+    out->impl_ = std::make_shared<Impl>(RuntimeTextWriterKind::HostStderr,
+                                        "stderr");
+    return out;
+  }();
+  return writer;
+}
+
+std::shared_ptr<RuntimeTextWriter> RuntimeTextWriter::buffer() {
+  return std::make_shared<RuntimeTextWriter>();
+}
+
+std::shared_ptr<RuntimeTextWriter>
+RuntimeTextWriter::cell_stream(std::string stream_name) {
+  auto out = std::make_shared<RuntimeTextWriter>();
+  out->impl_ = std::make_shared<Impl>(RuntimeTextWriterKind::CellStream,
+                                      std::move(stream_name));
+  return out;
+}
+
+RuntimeTextWriteResult
+RuntimeTextWriter::write_str(const std::string &text) {
+  if (impl_ == nullptr) {
+    return text_write_error("IOError", "text writer is not initialized");
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->closed) {
+    return text_write_error("ClosedResourceError", "text writer is closed");
+  }
+  switch (impl_->kind) {
+  case RuntimeTextWriterKind::HostStdout:
+    std::cout << text;
+    if (!std::cout.good()) {
+      return text_write_error("IOError", "stdout write failed");
+    }
+    return text_write_ok();
+  case RuntimeTextWriterKind::HostStderr:
+    std::cerr << text;
+    if (!std::cerr.good()) {
+      return text_write_error("IOError", "stderr write failed");
+    }
+    return text_write_ok();
+  case RuntimeTextWriterKind::Buffer:
+    impl_->buffer += text;
+    return text_write_ok();
+  case RuntimeTextWriterKind::CellStream:
+    impl_->buffer += text;
+    impl_->events.push_back(RuntimeTextOutputEvent{
+        impl_->stream.empty() ? "stdout" : impl_->stream, text,
+        g_runtime_output_order.fetch_add(1, std::memory_order_relaxed)});
+    return text_write_ok();
+  }
+  return text_write_error("IOError", "unknown text writer kind");
+}
+
+RuntimeTextWriteResult RuntimeTextWriter::write_line(const std::string &text) {
+  RuntimeTextWriteResult result = write_str(text);
+  if (!result.ok) {
+    return result;
+  }
+  return write_str("\n");
+}
+
+RuntimeTextWriteResult RuntimeTextWriter::flush() {
+  if (impl_ == nullptr) {
+    return text_write_error("IOError", "text writer is not initialized");
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->closed) {
+    return text_write_error("ClosedResourceError", "text writer is closed");
+  }
+  if (impl_->kind == RuntimeTextWriterKind::HostStdout) {
+    std::cout.flush();
+    if (!std::cout.good()) {
+      return text_write_error("IOError", "stdout flush failed");
+    }
+  } else if (impl_->kind == RuntimeTextWriterKind::HostStderr) {
+    std::cerr.flush();
+    if (!std::cerr.good()) {
+      return text_write_error("IOError", "stderr flush failed");
+    }
+  }
+  return text_write_ok();
+}
+
+RuntimeTextWriteResult RuntimeTextWriter::close() {
+  if (impl_ == nullptr) {
+    return text_write_error("IOError", "text writer is not initialized");
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->closed = true;
+  return text_write_ok();
+}
+
+bool RuntimeTextWriter::closed() const {
+  if (impl_ == nullptr) {
+    return true;
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->closed;
+}
+
+bool RuntimeTextWriter::buffered() const {
+  if (impl_ == nullptr) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->kind == RuntimeTextWriterKind::Buffer ||
+         impl_->kind == RuntimeTextWriterKind::CellStream;
+}
+
+std::string RuntimeTextWriter::to_string() const {
+  if (impl_ == nullptr) {
+    return {};
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->buffer;
+}
+
+std::vector<RuntimeTextOutputEvent> RuntimeTextWriter::events() const {
+  if (impl_ == nullptr) {
+    return {};
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->events;
+}
+
+std::string RuntimeTextWriter::stream_name() const {
+  if (impl_ == nullptr) {
+    return {};
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->stream;
+}
+
+std::shared_ptr<RuntimeTextWriter> current_runtime_stdout() {
+  return tls_runtime_stdout != nullptr ? tls_runtime_stdout
+                                       : RuntimeTextWriter::host_stdout();
+}
+
+std::shared_ptr<RuntimeTextWriter> current_runtime_stderr() {
+  return tls_runtime_stderr != nullptr ? tls_runtime_stderr
+                                       : RuntimeTextWriter::host_stderr();
+}
+
+RuntimeOutputScope::RuntimeOutputScope(
+    std::shared_ptr<RuntimeTextWriter> stdout_writer,
+    std::shared_ptr<RuntimeTextWriter> stderr_writer)
+    : previous_stdout_(tls_runtime_stdout),
+      previous_stderr_(tls_runtime_stderr) {
+  if (stdout_writer != nullptr) {
+    tls_runtime_stdout = std::move(stdout_writer);
+  }
+  if (stderr_writer != nullptr) {
+    tls_runtime_stderr = std::move(stderr_writer);
+  }
+}
+
+RuntimeOutputScope::~RuntimeOutputScope() {
+  tls_runtime_stdout = std::move(previous_stdout_);
+  tls_runtime_stderr = std::move(previous_stderr_);
+}
+
 Value Value::null() { return {std::monostate{}}; }
 
 Value Value::boolean(bool value) { return {value}; }
@@ -5964,6 +6183,10 @@ Value Value::native_type(RuntimeNativeTypeKind kind) {
   return {NativeTypeValue{kind}};
 }
 
+Value Value::native_function(RuntimeNativeFunctionKind kind) {
+  return {NativeFunctionValue{kind}};
+}
+
 Value Value::task_module(std::shared_ptr<RuntimeTaskModule> value) {
   return {std::move(value)};
 }
@@ -5994,6 +6217,10 @@ Value Value::flow_module(std::shared_ptr<RuntimeFlowModule> value) {
 
 Value Value::threaded_collection(
     std::shared_ptr<RuntimeThreadedCollection> value) {
+  return {std::move(value)};
+}
+
+Value Value::text_writer(std::shared_ptr<RuntimeTextWriter> value) {
   return {std::move(value)};
 }
 
@@ -6057,6 +6284,10 @@ bool Value::is_native_type() const {
   return std::holds_alternative<NativeTypeValue>(payload);
 }
 
+bool Value::is_native_function() const {
+  return std::holds_alternative<NativeFunctionValue>(payload);
+}
+
 bool Value::is_task_module() const {
   return std::holds_alternative<std::shared_ptr<RuntimeTaskModule>>(payload);
 }
@@ -6088,6 +6319,10 @@ bool Value::is_flow_module() const {
 bool Value::is_threaded_collection() const {
   return std::holds_alternative<std::shared_ptr<RuntimeThreadedCollection>>(
       payload);
+}
+
+bool Value::is_text_writer() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeTextWriter>>(payload);
 }
 
 bool Value::is_watch_cell() const {
@@ -6142,6 +6377,10 @@ NativeTypeValue Value::as_native_type() const {
   return std::get<NativeTypeValue>(payload);
 }
 
+NativeFunctionValue Value::as_native_function() const {
+  return std::get<NativeFunctionValue>(payload);
+}
+
 std::shared_ptr<RuntimeTaskModule> Value::as_task_module() const {
   return std::get<std::shared_ptr<RuntimeTaskModule>>(payload);
 }
@@ -6173,6 +6412,10 @@ std::shared_ptr<RuntimeFlowModule> Value::as_flow_module() const {
 std::shared_ptr<RuntimeThreadedCollection>
 Value::as_threaded_collection() const {
   return std::get<std::shared_ptr<RuntimeThreadedCollection>>(payload);
+}
+
+std::shared_ptr<RuntimeTextWriter> Value::as_text_writer() const {
+  return std::get<std::shared_ptr<RuntimeTextWriter>>(payload);
 }
 
 std::shared_ptr<RuntimeWatchCell> Value::as_watch_cell() const {
@@ -6237,6 +6480,12 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Flow";
   case RuntimeNativeTypeKind::ThreadedCollection:
     return "ThreadedCollection";
+  case RuntimeNativeTypeKind::Kernel:
+    return "Kernel";
+  case RuntimeNativeTypeKind::Io:
+    return "io";
+  case RuntimeNativeTypeKind::TextBuffer:
+    return "io.Buffer";
   case RuntimeNativeTypeKind::Amber:
     return "Amber";
   case RuntimeNativeTypeKind::Str:
@@ -6263,6 +6512,503 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Object";
   }
   return "NativeType";
+}
+
+const char *native_function_name(RuntimeNativeFunctionKind kind) {
+  switch (kind) {
+  case RuntimeNativeFunctionKind::Print:
+    return "print";
+  case RuntimeNativeFunctionKind::P:
+    return "p";
+  case RuntimeNativeFunctionKind::Pp:
+    return "pp";
+  }
+  return "native_function";
+}
+
+struct RuntimeStringifyContext {
+  const BcModule *module = nullptr;
+  const std::vector<std::string> *runtime_strings = nullptr;
+  const std::vector<std::string> *runtime_symbols = nullptr;
+  RuntimePrettyPrintOptions options;
+  std::unordered_set<const void *> active;
+};
+
+const std::vector<std::string> *
+string_table_for(const RuntimeStringifyContext &context) {
+  return context.runtime_strings != nullptr &&
+                 !context.runtime_strings->empty()
+             ? context.runtime_strings
+             : (context.module == nullptr ? nullptr : &context.module->strings);
+}
+
+const std::vector<std::string> *
+symbol_table_for(const RuntimeStringifyContext &context) {
+  return context.runtime_symbols != nullptr &&
+                 !context.runtime_symbols->empty()
+             ? context.runtime_symbols
+             : (context.module == nullptr ? nullptr : &context.module->symbols);
+}
+
+std::optional<std::string>
+string_text_for(const RuntimeStringifyContext &context,
+                std::uint32_t string_id) {
+  const std::vector<std::string> *strings = string_table_for(context);
+  if (strings == nullptr || string_id >= strings->size()) {
+    return std::nullopt;
+  }
+  return (*strings)[string_id];
+}
+
+std::optional<std::string>
+symbol_text_for(const RuntimeStringifyContext &context,
+                std::uint32_t symbol_id) {
+  const std::vector<std::string> *symbols = symbol_table_for(context);
+  if (symbols == nullptr || symbol_id >= symbols->size()) {
+    return std::nullopt;
+  }
+  return (*symbols)[symbol_id];
+}
+
+std::string escape_string_literal(const std::string &text) {
+  std::string out;
+  out.reserve(text.size() + 2U);
+  for (unsigned char c : text) {
+    switch (c) {
+    case '\\':
+      out += "\\\\";
+      break;
+    case '"':
+      out += "\\\"";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      if (c < 0x20U) {
+        constexpr char hex[] = "0123456789abcdef";
+        out += "\\x";
+        out.push_back(hex[(c >> 4U) & 0xFU]);
+        out.push_back(hex[c & 0xFU]);
+      } else {
+        out.push_back(static_cast<char>(c));
+      }
+      break;
+    }
+  }
+  return out;
+}
+
+std::string indent_text(std::size_t depth) {
+  return std::string(depth * 2U, ' ');
+}
+
+std::string lifecycle_debug_label(const ObjHeader &header);
+
+std::string type_label_for_cycle(const Value &value) {
+  if (value.is_list()) {
+    return "Array";
+  }
+  if (value.is_tuple()) {
+    return "Tuple";
+  }
+  if (value.is_set()) {
+    return "Set";
+  }
+  if (value.is_map()) {
+    return "Map";
+  }
+  if (value.is_instance_object()) {
+    return "Object";
+  }
+  if (value.is_closure()) {
+    return "Closure";
+  }
+  return "Object";
+}
+
+const void *heap_identity_for(const Value &value) {
+  if (value.is_list()) {
+    return value.as_list().get();
+  }
+  if (value.is_tuple()) {
+    return value.as_tuple().get();
+  }
+  if (value.is_set()) {
+    return value.as_set().get();
+  }
+  if (value.is_map()) {
+    return value.as_map().get();
+  }
+  if (value.is_instance_object()) {
+    return value.as_instance_object().get();
+  }
+  if (value.is_closure()) {
+    return value.as_closure().get();
+  }
+  return nullptr;
+}
+
+class RuntimeStringifyGuard {
+public:
+  RuntimeStringifyGuard(RuntimeStringifyContext *context, const void *identity)
+      : context_(context), identity_(identity) {
+    if (context_ != nullptr && identity_ != nullptr) {
+      inserted_ = context_->active.insert(identity_).second;
+    }
+  }
+
+  RuntimeStringifyGuard(const RuntimeStringifyGuard &) = delete;
+  RuntimeStringifyGuard &operator=(const RuntimeStringifyGuard &) = delete;
+
+  ~RuntimeStringifyGuard() {
+    if (context_ != nullptr && identity_ != nullptr && inserted_) {
+      context_->active.erase(identity_);
+    }
+  }
+
+  bool inserted() const { return inserted_; }
+
+private:
+  RuntimeStringifyContext *context_ = nullptr;
+  const void *identity_ = nullptr;
+  bool inserted_ = true;
+};
+
+std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
+                                         const Value &value,
+                                         RuntimeStringifyMode mode,
+                                         std::size_t depth);
+
+std::string compact_join_values(RuntimeStringifyContext *context,
+                                const std::vector<Value> &items,
+                                RuntimeStringifyMode mode,
+                                std::size_t depth) {
+  std::ostringstream out;
+  const std::size_t limit = std::min(items.size(), context->options.max_items);
+  for (std::size_t i = 0; i < limit; ++i) {
+    if (i != 0U) {
+      out << ", ";
+    }
+    out << runtime_stringify_value_impl(context, items[i], mode, depth + 1U);
+  }
+  if (items.size() > limit) {
+    if (limit != 0U) {
+      out << ", ";
+    }
+    out << "... " << (items.size() - limit) << " more";
+  }
+  return out.str();
+}
+
+std::string pretty_join_values(RuntimeStringifyContext *context,
+                               const std::vector<Value> &items,
+                               RuntimeStringifyMode mode, std::size_t depth) {
+  std::ostringstream out;
+  const std::size_t limit = std::min(items.size(), context->options.max_items);
+  for (std::size_t i = 0; i < limit; ++i) {
+    out << indent_text(depth + 1U)
+        << runtime_stringify_value_impl(context, items[i], mode, depth + 1U)
+        << ",\n";
+  }
+  if (items.size() > limit) {
+    out << indent_text(depth + 1U) << "... " << (items.size() - limit)
+        << " more,\n";
+  }
+  return out.str();
+}
+
+std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
+                                         const Value &value,
+                                         RuntimeStringifyMode mode,
+                                         std::size_t depth) {
+  if (value.is_null()) {
+    return "null";
+  }
+  if (value.is_bool()) {
+    return value.as_bool() ? "true" : "false";
+  }
+  if (value.is_integer()) {
+    return std::to_string(value.as_integer());
+  }
+  if (value.is_float()) {
+    std::ostringstream out;
+    out << value.as_float();
+    return out.str();
+  }
+  if (value.is_symbol()) {
+    const std::optional<std::string> text =
+        symbol_text_for(*context, value.as_symbol().symbol_id);
+    if (!text.has_value()) {
+      return mode == RuntimeStringifyMode::Display ? "<invalid-symbol>"
+                                                   : ":<invalid>";
+    }
+    return mode == RuntimeStringifyMode::Display ? *text : ":" + *text;
+  }
+  if (value.is_string()) {
+    const std::optional<std::string> text =
+        string_text_for(*context, value.as_string().string_id);
+    if (!text.has_value()) {
+      return mode == RuntimeStringifyMode::Display ? "<invalid-string>"
+                                                   : "\"<invalid>\"";
+    }
+    if (mode == RuntimeStringifyMode::Display) {
+      return *text;
+    }
+    return "\"" + escape_string_literal(*text) + "\"";
+  }
+  if (value.is_native_type()) {
+    return std::string("<type ") +
+           native_type_name(value.as_native_type().kind) + ">";
+  }
+  if (value.is_native_function()) {
+    return std::string("<function ") +
+           native_function_name(value.as_native_function().kind) + ">";
+  }
+  if (value.is_text_writer()) {
+    const std::shared_ptr<RuntimeTextWriter> writer = value.as_text_writer();
+    if (writer == nullptr) {
+      return "<io.TextWriter null>";
+    }
+    if (writer->buffered()) {
+      return "<io.Buffer>";
+    }
+    const std::string stream = writer->stream_name();
+    return stream.empty() ? "<io.TextWriter>" : "<io.TextWriter " + stream + ">";
+  }
+
+  const void *identity = heap_identity_for(value);
+  if (identity != nullptr && context->active.find(identity) !=
+                                 context->active.end()) {
+    return "#<cycle " + type_label_for_cycle(value) + ">";
+  }
+  if (identity != nullptr && depth >= context->options.max_depth) {
+    return "#<max-depth " + type_label_for_cycle(value) + ">";
+  }
+  RuntimeStringifyGuard guard(context, identity);
+  if (identity != nullptr && !guard.inserted()) {
+    return "#<cycle " + type_label_for_cycle(value) + ">";
+  }
+
+  if (value.is_class_object()) {
+    const ClassObjectValue klass = value.as_class_object();
+    std::ostringstream out;
+    out << "<class";
+    if (context->module != nullptr &&
+        klass.class_index < context->module->classes.size()) {
+      const std::uint32_t symbol_id =
+          context->module->classes[klass.class_index].class_name_sym_id;
+      const std::optional<std::string> name =
+          symbol_text_for(*context, symbol_id);
+      out << " " << (name.has_value() ? *name : "?");
+    } else {
+      out << " #" << klass.class_index;
+    }
+    out << ">";
+    return out.str();
+  }
+  if (value.is_watch_cell()) {
+    const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();
+    if (cell == nullptr) {
+      return "<watch-cell null>";
+    }
+    const RuntimeWatchCellSnapshot snapshot = cell->snapshot();
+    std::ostringstream out;
+    out << "<watch-cell #" << snapshot.cell_id << " r" << snapshot.revision
+        << " "
+        << runtime_stringify_value_impl(context, snapshot.value, mode,
+                                        depth + 1U)
+        << ">";
+    return out.str();
+  }
+  if (value.is_watch_handle()) {
+    const std::shared_ptr<RuntimeWatchHandle> handle = value.as_watch_handle();
+    if (handle == nullptr) {
+      return "<watch null>";
+    }
+    const RuntimeWatchCellSnapshot snapshot = handle->snapshot();
+    std::ostringstream out;
+    out << "<watch #" << handle->handle_id();
+    if (snapshot.cell_id != 0) {
+      out << " cell:" << snapshot.cell_id << " r" << snapshot.revision;
+    }
+    out << ">";
+    return out.str();
+  }
+  if (value.is_closure()) {
+    const std::shared_ptr<ClosureValue> closure = value.as_closure();
+    if (closure == nullptr) {
+      return "<closure null>";
+    }
+    const std::string lifecycle = lifecycle_debug_label(closure->header);
+    return lifecycle.empty() ? "<closure c" + std::to_string(closure->code_id) +
+                                   ">"
+                             : "<" + lifecycle + " closure>";
+  }
+  if (value.is_instance_object()) {
+    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    std::ostringstream out;
+    out << "<instance";
+    if (instance == nullptr) {
+      out << " null>";
+      return out.str();
+    }
+    const std::string lifecycle = lifecycle_debug_label(instance->header);
+    if (!lifecycle.empty()) {
+      out << " " << lifecycle << ">";
+      return out.str();
+    }
+    if (context->module != nullptr &&
+        instance->class_index < context->module->classes.size()) {
+      const std::uint32_t symbol_id =
+          context->module->classes[instance->class_index].class_name_sym_id;
+      const std::optional<std::string> name =
+          symbol_text_for(*context, symbol_id);
+      out << " " << (name.has_value() ? *name : "?");
+    } else {
+      out << " #" << instance->class_index;
+    }
+    out << ">";
+    return out.str();
+  }
+  if (value.is_list()) {
+    const std::shared_ptr<ListValue> list = value.as_list();
+    if (list == nullptr) {
+      return "[<null-list>]";
+    }
+    const std::string lifecycle = lifecycle_debug_label(list->header);
+    if (!lifecycle.empty()) {
+      return "[<" + lifecycle + "-list>]";
+    }
+    if (mode == RuntimeStringifyMode::Pretty && !list->items.empty()) {
+      std::ostringstream out;
+      out << "[\n" << pretty_join_values(context, list->items, mode, depth)
+          << indent_text(depth) << "]";
+      return out.str();
+    }
+    return "[" + compact_join_values(context, list->items, mode, depth) + "]";
+  }
+  if (value.is_tuple()) {
+    const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+    if (tuple == nullptr) {
+      return "(<null-tuple>)";
+    }
+    const std::string lifecycle = lifecycle_debug_label(tuple->header);
+    if (!lifecycle.empty()) {
+      return "(<" + lifecycle + "-tuple>)";
+    }
+    if (mode == RuntimeStringifyMode::Pretty && !tuple->items.empty()) {
+      std::ostringstream out;
+      out << "(\n" << pretty_join_values(context, tuple->items, mode, depth)
+          << indent_text(depth) << ")";
+      return out.str();
+    }
+    return "(" + compact_join_values(context, tuple->items, mode, depth) + ")";
+  }
+  if (value.is_set()) {
+    const std::shared_ptr<SetValue> set = value.as_set();
+    if (set == nullptr) {
+      return "{<null-set>}";
+    }
+    const std::string lifecycle = lifecycle_debug_label(set->header);
+    if (!lifecycle.empty()) {
+      return "{<" + lifecycle + "-set>}";
+    }
+    if (set->items.empty()) {
+      return "Set{}";
+    }
+    if (mode == RuntimeStringifyMode::Pretty) {
+      std::ostringstream out;
+      out << "{\n" << pretty_join_values(context, set->items, mode, depth)
+          << indent_text(depth) << "}";
+      return out.str();
+    }
+    std::string body = compact_join_values(context, set->items, mode, depth);
+    if (set->items.size() == 1U) {
+      body += ",";
+    }
+    return "{" + body + "}";
+  }
+  if (value.is_map()) {
+    const std::shared_ptr<MapValue> map = value.as_map();
+    if (map == nullptr) {
+      return "{<null-map>}";
+    }
+    const std::string lifecycle = lifecycle_debug_label(map->header);
+    if (!lifecycle.empty()) {
+      return "{<" + lifecycle + "-map>}";
+    }
+    if (map->entries.empty()) {
+      return "{}";
+    }
+    std::ostringstream out;
+    if (mode == RuntimeStringifyMode::Pretty) {
+      out << "{\n";
+      const std::size_t limit =
+          std::min(map->entries.size(), context->options.max_items);
+      for (std::size_t i = 0; i < limit; ++i) {
+        const std::optional<std::string> key =
+            symbol_text_for(*context, map->entries[i].symbol_id);
+        out << indent_text(depth + 1U)
+            << (key.has_value() ? *key
+                                : "#" + std::to_string(map->entries[i].symbol_id))
+            << ": "
+            << runtime_stringify_value_impl(context, map->entries[i].value,
+                                            mode, depth + 1U)
+            << ",\n";
+      }
+      if (map->entries.size() > limit) {
+        out << indent_text(depth + 1U) << "... "
+            << (map->entries.size() - limit) << " more,\n";
+      }
+      out << indent_text(depth) << "}";
+      return out.str();
+    }
+    out << "{";
+    const std::size_t limit =
+        std::min(map->entries.size(), context->options.max_items);
+    for (std::size_t i = 0; i < limit; ++i) {
+      if (i != 0U) {
+        out << ", ";
+      }
+      const std::optional<std::string> key =
+          symbol_text_for(*context, map->entries[i].symbol_id);
+      out << (key.has_value() ? *key
+                              : "#" + std::to_string(map->entries[i].symbol_id))
+          << ": "
+          << runtime_stringify_value_impl(context, map->entries[i].value, mode,
+                                          depth + 1U);
+    }
+    if (map->entries.size() > limit) {
+      if (limit != 0U) {
+        out << ", ";
+      }
+      out << "... " << (map->entries.size() - limit) << " more";
+    }
+    out << "}";
+    return out.str();
+  }
+  return "<unknown>";
+}
+
+std::string runtime_stringify_value(
+    const Value &value, RuntimeStringifyMode mode,
+    const BcModule *module = nullptr,
+    const std::vector<std::string> *runtime_strings = nullptr,
+    const std::vector<std::string> *runtime_symbols = nullptr,
+    RuntimePrettyPrintOptions options = {}) {
+  RuntimeStringifyContext context;
+  context.module = module;
+  context.runtime_strings = runtime_strings;
+  context.runtime_symbols = runtime_symbols;
+  context.options = options;
+  return runtime_stringify_value_impl(&context, value, mode, 0);
 }
 
 bool value_has_heap_payload_tag(const Value &value) {
@@ -6900,6 +7646,9 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   if (lhs.is_native_type()) {
     return lhs.as_native_type().kind == rhs.as_native_type().kind;
   }
+  if (lhs.is_native_function()) {
+    return lhs.as_native_function().kind == rhs.as_native_function().kind;
+  }
   if (lhs.is_closure()) {
     return lhs.as_closure() == rhs.as_closure();
   }
@@ -6926,6 +7675,9 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   }
   if (lhs.is_threaded_collection()) {
     return lhs.as_threaded_collection() == rhs.as_threaded_collection();
+  }
+  if (lhs.is_text_writer()) {
+    return lhs.as_text_writer() == rhs.as_text_writer();
   }
   if (lhs.is_watch_handle()) {
     return lhs.as_watch_handle() == rhs.as_watch_handle();
@@ -9924,6 +10676,24 @@ private:
   std::optional<Value>
   lookup_native_prelude_constant(const std::vector<std::string> &segments) {
     const std::string path = join_path_segments(segments);
+    if (path == "print") {
+      return Value::native_function(RuntimeNativeFunctionKind::Print);
+    }
+    if (path == "p") {
+      return Value::native_function(RuntimeNativeFunctionKind::P);
+    }
+    if (path == "pp") {
+      return Value::native_function(RuntimeNativeFunctionKind::Pp);
+    }
+    if (path == "Kernel") {
+      return Value::native_type(RuntimeNativeTypeKind::Kernel);
+    }
+    if (path == "io") {
+      return Value::native_type(RuntimeNativeTypeKind::Io);
+    }
+    if (path == "io.Buffer") {
+      return Value::native_type(RuntimeNativeTypeKind::TextBuffer);
+    }
     if (path == "Amber") {
       return Value::native_type(RuntimeNativeTypeKind::Amber);
     }
@@ -11986,11 +12756,9 @@ private:
           std::string("<type ") +
           native_type_name(value.as_native_type().kind) + ">")));
     }
-    const std::string text = value_to_debug_string(value, &module_);
-    if (value.is_string()) {
-      return conversion_ok(value);
-    }
-    return conversion_ok(Value::string(intern_runtime_string(text)));
+    return conversion_ok(Value::string(intern_runtime_string(
+        runtime_stringify_value(value, RuntimeStringifyMode::Display,
+                                &module_))));
   }
 
   ConversionResult convert_value_to_native_type(const Frame &frame,
@@ -13244,6 +14012,23 @@ private:
       return true;
     }
 
+    if (callee.is_native_function()) {
+      Value result = Value::null();
+      const SendStatus status = apply_kernel_output_helper(
+          frame, callee.as_native_function().kind, pos_args, block, kw_args,
+          &result);
+      if (status == SendStatus::Faulted) {
+        return false;
+      }
+      if (status == SendStatus::Matched) {
+        if (!write_reg(frame, dst, std::move(result))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
+    }
+
     if (callee.is_class_object()) {
       const std::uint32_t class_index = callee.as_class_object().class_index;
       auto instance = make_instance_value(class_index);
@@ -14024,6 +14809,168 @@ private:
     return false;
   }
 
+  bool set_fault_from_text_write_result(const Frame &frame,
+                                        const RuntimeTextWriteResult &result) {
+    if (result.ok) {
+      return true;
+    }
+    set_fault(frame, result.error_name.empty() ? "IOError" : result.error_name,
+              result.message.empty() ? "text writer failed" : result.message);
+    return false;
+  }
+
+  std::optional<std::shared_ptr<RuntimeTextWriter>>
+  text_writer_from_value(const Frame &frame, const Value &value,
+                         const std::string &context) {
+    if (!value.is_text_writer()) {
+      set_fault(frame, "TypeError", context + " expects text writer");
+      return std::nullopt;
+    }
+    std::shared_ptr<RuntimeTextWriter> writer = value.as_text_writer();
+    if (writer == nullptr) {
+      set_fault(frame, "TypeError", context + " text writer is null");
+      return std::nullopt;
+    }
+    return writer;
+  }
+
+  bool size_keyword_value(const Frame &frame, const Value &value,
+                          const std::string &name, std::size_t *out) {
+    if (!value.is_integer() || value.as_integer() < 0) {
+      set_fault(frame, "TypeError", name + " must be non-negative Integer");
+      return false;
+    }
+    *out = static_cast<std::size_t>(value.as_integer());
+    return true;
+  }
+
+  bool apply_pretty_options(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      RuntimePrettyPrintOptions *options) {
+    if (const std::optional<Value> max_width =
+            keyword_arg_value(kw_args, "max_width")) {
+      if (!size_keyword_value(frame, *max_width, "max_width",
+                              &options->max_width)) {
+        return false;
+      }
+    }
+    if (const std::optional<Value> max_depth =
+            keyword_arg_value(kw_args, "max_depth")) {
+      if (!size_keyword_value(frame, *max_depth, "max_depth",
+                              &options->max_depth)) {
+        return false;
+      }
+    }
+    if (const std::optional<Value> max_items =
+            keyword_arg_value(kw_args, "max_items")) {
+      if (!size_keyword_value(frame, *max_items, "max_items",
+                              &options->max_items)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  std::optional<RuntimeStringifyMode>
+  stringify_mode_from_value(const Frame &frame, const Value &mode) {
+    std::optional<std::string> mode_text;
+    if (mode.is_symbol()) {
+      mode_text = selector_text_from_symbol(mode.as_symbol().symbol_id);
+    } else if (mode.is_string()) {
+      mode_text = string_text_from_id(mode.as_string().string_id);
+    }
+    if (!mode_text.has_value()) {
+      set_fault(frame, "TypeError",
+                "Amber.stringify mode must be :display, :inspect, or :pretty");
+      return std::nullopt;
+    }
+    if (*mode_text == "display") {
+      return RuntimeStringifyMode::Display;
+    }
+    if (*mode_text == "inspect") {
+      return RuntimeStringifyMode::Inspect;
+    }
+    if (*mode_text == "pretty") {
+      return RuntimeStringifyMode::Pretty;
+    }
+    set_fault(frame, "TypeError",
+              "Amber.stringify mode must be :display, :inspect, or :pretty");
+    return std::nullopt;
+  }
+
+  Value string_value_from_text(std::string text) {
+    return Value::string(intern_runtime_string(text));
+  }
+
+  SendStatus apply_kernel_output_helper(
+      const Frame &frame, RuntimeNativeFunctionKind kind,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) {
+    if (!block.is_null()) {
+      set_fault(frame, "TypeError", "output helper does not accept block");
+      return SendStatus::Faulted;
+    }
+    const bool pretty = kind == RuntimeNativeFunctionKind::Pp;
+    if (!reject_unknown_keywords(frame, kw_args,
+                                 pretty ? std::initializer_list<const char *>{
+                                              "to", "max_width", "max_depth",
+                                              "max_items"}
+                                        : std::initializer_list<const char *>{
+                                              "to"})) {
+      return SendStatus::Faulted;
+    }
+
+    std::shared_ptr<RuntimeTextWriter> writer = current_runtime_stdout();
+    if (const std::optional<Value> to = keyword_arg_value(kw_args, "to")) {
+      const std::optional<std::shared_ptr<RuntimeTextWriter>> explicit_writer =
+          text_writer_from_value(frame, *to, "to:");
+      if (!explicit_writer.has_value()) {
+        return SendStatus::Faulted;
+      }
+      writer = *explicit_writer;
+    }
+
+    RuntimePrettyPrintOptions options;
+    if (pretty && !apply_pretty_options(frame, kw_args, &options)) {
+      return SendStatus::Faulted;
+    }
+
+    RuntimeStringifyMode mode = RuntimeStringifyMode::Display;
+    if (kind == RuntimeNativeFunctionKind::P) {
+      mode = RuntimeStringifyMode::Inspect;
+    } else if (kind == RuntimeNativeFunctionKind::Pp) {
+      mode = RuntimeStringifyMode::Pretty;
+    }
+
+    if (kind == RuntimeNativeFunctionKind::Print && args.empty()) {
+      if (!set_fault_from_text_write_result(frame, writer->write_str("\n"))) {
+        return SendStatus::Faulted;
+      }
+    } else {
+      for (const Value &arg : args) {
+        const std::string text =
+            runtime_stringify_value(arg, mode, &module_, nullptr, nullptr,
+                                    options);
+        if (!set_fault_from_text_write_result(frame,
+                                              writer->write_str(text)) ||
+            !set_fault_from_text_write_result(frame, writer->write_str("\n"))) {
+          return SendStatus::Faulted;
+        }
+      }
+    }
+
+    if (kind == RuntimeNativeFunctionKind::Print || args.empty()) {
+      *out = Value::null();
+    } else if (args.size() == 1U) {
+      *out = args.front();
+    } else {
+      *out = make_tuple_value(args);
+    }
+    return SendStatus::Matched;
+  }
+
   SendStatus try_apply_native_stdlib_send(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
@@ -14051,30 +14998,135 @@ private:
           return SendStatus::NotHandled;
         }
         if (!require_arity(1) ||
-            !reject_unknown_keywords(frame, kw_args, {"mode"}) ||
+            !reject_unknown_keywords(frame, kw_args,
+                                     {"mode", "max_width", "max_depth",
+                                      "max_items"}) ||
             !require_no_block()) {
           return SendStatus::Faulted;
         }
-        const std::optional<Value> mode = keyword_arg_value(kw_args, "mode");
-        if (mode.has_value()) {
-          std::optional<std::string> mode_text;
-          if (mode->is_symbol()) {
-            mode_text = selector_text_from_symbol(mode->as_symbol().symbol_id);
-          } else if (mode->is_string()) {
-            mode_text = string_text_from_id(mode->as_string().string_id);
-          }
-          if (!mode_text.has_value() || *mode_text != "display") {
-            set_fault(frame, "TypeError",
-                      "Amber.stringify mode must be :display");
+        RuntimeStringifyMode stringify_mode = RuntimeStringifyMode::Display;
+        const std::optional<Value> mode_arg =
+            keyword_arg_value(kw_args, "mode");
+        if (mode_arg.has_value()) {
+          const std::optional<RuntimeStringifyMode> parsed =
+              stringify_mode_from_value(frame, *mode_arg);
+          if (!parsed.has_value()) {
             return SendStatus::Faulted;
           }
+          stringify_mode = *parsed;
         }
-        ConversionResult converted = display_string_value(args[0]);
-        if (!converted.ok) {
-          set_fault(frame, converted.error_name, converted.message);
+        RuntimePrettyPrintOptions options;
+        if (!apply_pretty_options(frame, kw_args, &options)) {
           return SendStatus::Faulted;
         }
-        *out = converted.value;
+        *out = string_value_from_text(runtime_stringify_value(
+            args[0], stringify_mode, &module_, nullptr, nullptr, options));
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Kernel) {
+        if (selector == "print") {
+          return apply_kernel_output_helper(frame, RuntimeNativeFunctionKind::Print,
+                                            args, block, kw_args, out);
+        }
+        if (selector == "p") {
+          return apply_kernel_output_helper(frame, RuntimeNativeFunctionKind::P,
+                                            args, block, kw_args, out);
+        }
+        if (selector == "pp") {
+          return apply_kernel_output_helper(frame, RuntimeNativeFunctionKind::Pp,
+                                            args, block, kw_args, out);
+        }
+        return SendStatus::NotHandled;
+      }
+      if (kind == RuntimeNativeTypeKind::Io) {
+        if (selector == "Buffer") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "io.Buffer does not accept keywords");
+            }
+            return SendStatus::Faulted;
+          }
+          *out = Value::native_type(RuntimeNativeTypeKind::TextBuffer);
+          return SendStatus::Matched;
+        }
+        if (selector == "current_stdout" || selector == "stdout") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "io.stdout does not accept keywords");
+            }
+            return SendStatus::Faulted;
+          }
+          *out = Value::text_writer(current_runtime_stdout());
+          return SendStatus::Matched;
+        }
+        if (selector == "current_stderr" || selector == "stderr") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "io.stderr does not accept keywords");
+            }
+            return SendStatus::Faulted;
+          }
+          *out = Value::text_writer(current_runtime_stderr());
+          return SendStatus::Matched;
+        }
+        if (selector == "with_output") {
+          if (!require_arity(0) ||
+              !reject_unknown_keywords(frame, kw_args,
+                                       {"stdout", "stderr"})) {
+            return SendStatus::Faulted;
+          }
+          std::shared_ptr<RuntimeTextWriter> stdout_writer;
+          std::shared_ptr<RuntimeTextWriter> stderr_writer;
+          if (const std::optional<Value> stdout_kw =
+                  keyword_arg_value(kw_args, "stdout")) {
+            const std::optional<std::shared_ptr<RuntimeTextWriter>> writer =
+                text_writer_from_value(frame, *stdout_kw, "stdout:");
+            if (!writer.has_value()) {
+              return SendStatus::Faulted;
+            }
+            stdout_writer = *writer;
+          }
+          if (const std::optional<Value> stderr_kw =
+                  keyword_arg_value(kw_args, "stderr")) {
+            const std::optional<std::shared_ptr<RuntimeTextWriter>> writer =
+                text_writer_from_value(frame, *stderr_kw, "stderr:");
+            if (!writer.has_value()) {
+              return SendStatus::Faulted;
+            }
+            stderr_writer = *writer;
+          }
+          std::optional<NativeBlockInvoker> invoker =
+              make_native_block_invoker(frame, block, "io.with_output");
+          if (!invoker.has_value()) {
+            return SendStatus::Faulted;
+          }
+          try {
+            RuntimeOutputScope scope(std::move(stdout_writer),
+                                     std::move(stderr_writer));
+            *out = (*invoker)(std::vector<Value>{});
+          } catch (const RuntimeTaskFailure &failure) {
+            set_fault(frame, failure.error_name(), failure.message());
+            return SendStatus::Faulted;
+          }
+          return SendStatus::Matched;
+        }
+        return SendStatus::NotHandled;
+      }
+      if (kind == RuntimeNativeTypeKind::TextBuffer) {
+        if (selector != "new") {
+          return SendStatus::NotHandled;
+        }
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "io.Buffer.new does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::text_writer(RuntimeTextWriter::buffer());
         return SendStatus::Matched;
       }
       if (is_conversion_type(kind)) {
@@ -14208,6 +15260,120 @@ private:
       }
     }
 
+    if (receiver.is_text_writer()) {
+      std::shared_ptr<RuntimeTextWriter> writer = receiver.as_text_writer();
+      if (writer == nullptr) {
+        set_fault(frame, "TypeError", "text writer is null");
+        return SendStatus::Faulted;
+      }
+      auto require_string_arg = [&](std::size_t index,
+                                    std::string *text) -> bool {
+        if (index >= args.size() || !args[index].is_string()) {
+          set_fault(frame, "TypeError", "text writer expects Str argument");
+          return false;
+        }
+        const std::optional<std::string> raw =
+            string_text_from_id(args[index].as_string().string_id);
+        if (!raw.has_value()) {
+          set_fault(frame, "VMError", "string ref is invalid");
+          return false;
+        }
+        *text = *raw;
+        return true;
+      };
+
+      if (selector == "write_str") {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "write_str does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        std::string text;
+        if (!require_string_arg(0, &text)) {
+          return SendStatus::Faulted;
+        }
+        if (!set_fault_from_text_write_result(frame, writer->write_str(text))) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "write_line") {
+        if ((args.size() > 1U) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "write_line does not accept keywords");
+          } else if (args.size() > 1U) {
+            set_fault(frame, "TypeError",
+                      "write_line accepts zero or one argument");
+          }
+          return SendStatus::Faulted;
+        }
+        std::string text;
+        if (!args.empty() && !require_string_arg(0, &text)) {
+          return SendStatus::Faulted;
+        }
+        if (!set_fault_from_text_write_result(frame,
+                                              writer->write_line(text))) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "flush") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "flush does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!set_fault_from_text_write_result(frame, writer->flush())) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "close") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "close does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!set_fault_from_text_write_result(frame, writer->close())) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "closed?") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "closed? does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(writer->closed());
+        return SendStatus::Matched;
+      }
+      if (selector == "to_str" || selector == "str") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "to_str does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!writer->buffered()) {
+          set_fault(frame, "TypeError", "to_str requires buffered writer");
+          return SendStatus::Faulted;
+        }
+        *out = string_value_from_text(writer->to_string());
+        return SendStatus::Matched;
+      }
+    }
+
     if (receiver.is_task_module()) {
       const std::shared_ptr<RuntimeTaskModule> task = receiver.as_task_module();
       if (task == nullptr) {
@@ -14237,13 +15403,22 @@ private:
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }
-        RuntimeTaskHandle handle =
-            selector == "async" ? task->async([invoker = *invoker]() mutable {
+        const std::shared_ptr<RuntimeTextWriter> inherited_stdout =
+            current_runtime_stdout();
+        const std::shared_ptr<RuntimeTextWriter> inherited_stderr =
+            current_runtime_stderr();
+        auto task_function =
+            [invoker = *invoker, inherited_stdout, inherited_stderr]() mutable {
+              RuntimeOutputScope output_scope(inherited_stdout,
+                                              inherited_stderr);
               return invoker(std::vector<Value>{});
-            })
-                                : task->spawn([invoker = *invoker]() mutable {
-                                    return invoker(std::vector<Value>{});
-                                  });
+            };
+        RuntimeTaskHandle handle;
+        if (selector == "async") {
+          handle = task->async(std::move(task_function));
+        } else {
+          handle = task->spawn(std::move(task_function));
+        }
         *out = Value::task_handle(
             std::make_shared<RuntimeTaskHandle>(std::move(handle)));
         return SendStatus::Matched;
@@ -17236,6 +18411,21 @@ private:
                   "property access does not accept arguments or block");
         return false;
       }
+      if (receiver.is_native_type()) {
+        Value result = Value::null();
+        const SendStatus scalar_status = try_apply_scalar_send(
+            frame, receiver, *selector, args, block, kw_args, &result);
+        if (scalar_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (scalar_status == SendStatus::Matched) {
+          if (!write_reg(frame, dst, std::move(result))) {
+            return false;
+          }
+          ++frame.pc;
+          return true;
+        }
+      }
       if (collection_size_selector(*selector)) {
         Value result = Value::null();
         const SendStatus scalar_status = try_apply_scalar_send(
@@ -18338,6 +19528,23 @@ private:
         push_frame(*code, packet.pos_args, closure->captures, closure->self,
                    packet.block, packet.dst);
         return;
+      }
+
+      if (packet.callee.is_native_function()) {
+        Value result = Value::null();
+        const SendStatus status = apply_kernel_output_helper(
+            frame, packet.callee.as_native_function().kind, packet.pos_args,
+            packet.block, packet.kw_args, &result);
+        if (status == SendStatus::Faulted) {
+          return;
+        }
+        if (status == SendStatus::Matched) {
+          if (!write_reg(frame, packet.dst, std::move(result))) {
+            return;
+          }
+          ++frame.pc;
+          return;
+        }
       }
 
       if (packet.callee.is_native_type()) {
@@ -21110,6 +22317,22 @@ std::string value_to_debug_string(const Value &value,
   if (value.is_native_type()) {
     return std::string("<type ") +
            native_type_name(value.as_native_type().kind) + ">";
+  }
+  if (value.is_native_function()) {
+    return std::string("<function ") +
+           native_function_name(value.as_native_function().kind) + ">";
+  }
+  if (value.is_text_writer()) {
+    const std::shared_ptr<RuntimeTextWriter> writer = value.as_text_writer();
+    if (writer == nullptr) {
+      return "<io.TextWriter null>";
+    }
+    if (writer->buffered()) {
+      return "<io.Buffer>";
+    }
+    const std::string stream = writer->stream_name();
+    return stream.empty() ? "<io.TextWriter>"
+                          : "<io.TextWriter " + stream + ">";
   }
   if (value.is_watch_cell()) {
     const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();

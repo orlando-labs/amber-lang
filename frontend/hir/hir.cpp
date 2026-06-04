@@ -2282,6 +2282,10 @@ private:
         wrapper->node_field("expr", clone_node(*body_expr));
         synthetic_items_.push_back(std::move(wrapper));
         body_items.push_back(synthetic_items_.back().get());
+      } else if (const ast::ListField *body_list = list_field(expr, "body")) {
+        for (const std::unique_ptr<ast::Expr> &item : body_list->values) {
+          body_items.push_back(item.get());
+        }
       }
       const std::string procedure_id = lower_procedure(
           scope_index, "__block__", "closure", "__block__", signature,

@@ -23,6 +23,8 @@ lowered into ordinary call/member nodes:
 - index tails are `AstTailIndex` and `AstTailSafeIndex`;
 - block suffixes are preserved as `AstTailBlockSuffix` immediately after the
   call/member segment they bind to;
+- inline block suffixes store `AstBlock.body` as a single expression node, while
+  indented block suffixes store `AstBlock.body` as a statement list;
 - `AstTailDotMember.chain_boundary = true` marks a `CHAIN_DOT` continuation
   after a one-line block suffix.
 

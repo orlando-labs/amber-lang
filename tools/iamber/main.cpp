@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -77,6 +78,7 @@ struct Cell {
   std::string result = "not evaluated";
   std::string error;
   std::vector<LocalView> locals;
+  std::vector<amber::runtime::RuntimeTextOutputEvent> output_events;
   std::uint64_t watch_epoch = 0;
   std::size_t watch_event_count = 0;
   std::vector<CodeErrorRange> error_ranges;
@@ -107,6 +109,7 @@ struct EvalView {
   std::string result;
   std::string error;
   std::vector<LocalView> locals;
+  std::vector<amber::runtime::RuntimeTextOutputEvent> output_events;
   std::uint64_t watch_epoch = 0;
   std::size_t watch_event_count = 0;
   std::vector<CellErrorRange> error_ranges;
@@ -716,6 +719,28 @@ std::vector<std::string> error_lines(const std::string &text) {
   return lines;
 }
 
+std::vector<amber::runtime::RuntimeTextOutputEvent> merge_output_events(
+    const std::shared_ptr<amber::runtime::RuntimeTextWriter> &stdout_sink,
+    const std::shared_ptr<amber::runtime::RuntimeTextWriter> &stderr_sink) {
+  std::vector<amber::runtime::RuntimeTextOutputEvent> events;
+  if (stdout_sink != nullptr) {
+    const std::vector<amber::runtime::RuntimeTextOutputEvent> stdout_events =
+        stdout_sink->events();
+    events.insert(events.end(), stdout_events.begin(), stdout_events.end());
+  }
+  if (stderr_sink != nullptr) {
+    const std::vector<amber::runtime::RuntimeTextOutputEvent> stderr_events =
+        stderr_sink->events();
+    events.insert(events.end(), stderr_events.begin(), stderr_events.end());
+  }
+  std::sort(events.begin(), events.end(),
+            [](const amber::runtime::RuntimeTextOutputEvent &left,
+               const amber::runtime::RuntimeTextOutputEvent &right) {
+              return left.order < right.order;
+            });
+  return events;
+}
+
 bool should_show_local(const LocalView &local) {
   if (local.name.empty() || local.role == "temp") {
     return false;
@@ -753,8 +778,16 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
     return view;
   }
 
-  const amber::runtime::RuntimeModuleLoadResult initialized =
-      loader.initialize_module(module_name);
+  std::shared_ptr<amber::runtime::RuntimeTextWriter> stdout_sink =
+      amber::runtime::RuntimeTextWriter::cell_stream("stdout");
+  std::shared_ptr<amber::runtime::RuntimeTextWriter> stderr_sink =
+      amber::runtime::RuntimeTextWriter::cell_stream("stderr");
+  amber::runtime::RuntimeModuleLoadResult initialized;
+  {
+    amber::runtime::RuntimeOutputScope output_scope(stdout_sink, stderr_sink);
+    initialized = loader.initialize_module(module_name);
+  }
+  view.output_events = merge_output_events(stdout_sink, stderr_sink);
   if (!initialized.ok) {
     view.error = loader_result_to_summary(initialized);
     view.error_ranges = map_source_error_ranges_to_cells(
@@ -862,6 +895,7 @@ void apply_eval(Session *session, std::size_t index, EvalView view) {
   cell->running = false;
   cell->ok = view.ok;
   cell->locals = std::move(view.locals);
+  cell->output_events = std::move(view.output_events);
   cell->watch_epoch = view.watch_epoch;
   cell->watch_event_count = view.watch_event_count;
   if (view.ok) {
@@ -1281,6 +1315,41 @@ std::vector<std::string> wrap_text(const std::string &text, int width) {
   return wrapped;
 }
 
+std::vector<std::string> output_detail_lines(
+    const std::vector<amber::runtime::RuntimeTextOutputEvent> &events,
+    int width) {
+  std::vector<std::string> lines;
+  std::string current_stream;
+  std::string current_text;
+  auto flush_current = [&]() {
+    if (current_text.empty()) {
+      return;
+    }
+    const std::string prefix =
+        current_stream == "stderr" ? "stderr: " : "";
+    std::vector<std::string> raw_lines = split_lines(current_text);
+    if (!raw_lines.empty() && raw_lines.back().empty()) {
+      raw_lines.pop_back();
+    }
+    for (const std::string &line : raw_lines) {
+      const std::vector<std::string> wrapped =
+          wrap_text(prefix + line, width);
+      lines.insert(lines.end(), wrapped.begin(), wrapped.end());
+    }
+    current_text.clear();
+  };
+
+  for (const amber::runtime::RuntimeTextOutputEvent &event : events) {
+    if (!current_text.empty() && event.stream != current_stream) {
+      flush_current();
+    }
+    current_stream = event.stream;
+    current_text += event.text;
+  }
+  flush_current();
+  return lines;
+}
+
 int visible_cell_count(const Session &session, int body_height) {
   if (session.cells.empty() || body_height <= 0) {
     return 0;
@@ -1652,7 +1721,10 @@ std::vector<std::string> cell_detail_lines(const Cell &cell, int width) {
   if (!cell.errors.empty()) {
     return wrap_text("! " + selected_error_message(cell), width);
   }
-  return {cell_result_line(cell)};
+  std::vector<std::string> lines =
+      output_detail_lines(cell.output_events, width);
+  lines.push_back(cell_result_line(cell));
+  return lines;
 }
 
 int cell_detail_row_count(const Cell &cell, int height, int width) {
@@ -2127,6 +2199,9 @@ int run_eval_command(const std::string &source) {
   if (!view.ok) {
     std::cerr << view.error << "\n";
     return 1;
+  }
+  for (const std::string &line : output_detail_lines(view.output_events, 120)) {
+    std::cout << line << "\n";
   }
   std::cout << "=> " << view.result << "\n";
   if (view.watch_event_count != 0U) {

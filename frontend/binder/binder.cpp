@@ -1121,6 +1121,8 @@ private:
         BlockContext{scope, has_explicit_params, {}, expr.span});
     if (const ast::Expr *body = node_field(expr, "body")) {
       visit_expr(scope, *body);
+    } else if (const ast::ListField *body_items = list_field(expr, "body")) {
+      visit_items(scope, body_items->values);
     }
     BlockContext context = block_stack_.back();
     block_stack_.pop_back();
@@ -1209,6 +1211,15 @@ bool contains_name_ref_key(const std::vector<NameRefKey> &keys,
     }
   }
   return false;
+}
+
+bool is_native_prelude_name(const std::string &name) {
+  static const std::set<std::string> names = {
+      "Amber", "Array", "Atomic", "Barrier", "Bool", "Channel",
+      "Flow",  "Float", "Int",    "Kernel",  "Map",  "Mutex",
+      "Null",  "Object", "Set",    "Str",     "Symbol",
+      "ThreadedCollection", "Tuple", "io", "p", "pp", "print", "task"};
+  return names.count(name) != 0U;
 }
 
 bool is_reflective_send_call(const ast::Expr &base, const ast::Expr &tail) {
@@ -1447,6 +1458,9 @@ std::vector<lexer::Diagnostic> unresolved_name_diagnostics(
     }
     const NameRefKey key = name_ref_key(ref.span, ref.name);
     if (contains_name_ref_key(reflective_names, key)) {
+      continue;
+    }
+    if (is_native_prelude_name(ref.name)) {
       continue;
     }
     const bool callable = contains_name_ref_key(callable_names, key);

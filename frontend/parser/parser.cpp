@@ -2995,11 +2995,26 @@ std::unique_ptr<ast::Expr> Parser::parse_block_suffix(StopMode stop_mode) {
   }
   consume(lexer::TokenKind::Colon, "expected ':' before block body");
 
-  if (check(lexer::TokenKind::Newline)) {
-    error(current(),
-          "indented block suffix parsing is not implemented in W1.2");
-    auto block = ast::make_expr("AstBlock", start_span);
+  if (match(lexer::TokenKind::Newline)) {
+    std::vector<std::unique_ptr<ast::Expr>> body;
+    consume(lexer::TokenKind::Indent, "expected indented block suffix body");
+    while (!at_end() && !check(lexer::TokenKind::Dedent)) {
+      std::unique_ptr<ast::Expr> item = parse_statement(BodyContext::Def);
+      if (item) {
+        append_item_or_merge_clause_def(&body, std::move(item));
+      }
+      while (match(lexer::TokenKind::Newline)) {
+      }
+    }
+    consume(lexer::TokenKind::Dedent, "expected block suffix dedent");
+    lexer::Span end_span = previous().span;
+    if (!body.empty()) {
+      end_span = body.back()->span;
+    }
+    auto block =
+        ast::make_expr("AstBlock", ast::join_spans(start_span, end_span));
     block->list_field("params", std::move(params));
+    block->list_field("body", std::move(body));
     return block;
   }
 

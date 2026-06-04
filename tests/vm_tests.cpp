@@ -86,6 +86,9 @@ std::uint32_t append_integer_const(amber::bytecode::BcModule *module,
 const amber::runtime::ExecutionLocal *
 execution_local_by_name(const amber::runtime::ExecutionResult &result,
                         const std::string &name);
+std::string string_value_text_or_die(
+    const amber::runtime::Value &value, const amber::bytecode::BcModule &module,
+    const amber::runtime::ExecutionResult &result);
 
 void test_execute_emitted_method() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def echo(x):\n"
@@ -887,7 +890,162 @@ void test_runtime_string_interpolation_and_conversions() {
                                       emit_result.module.init.entry_code_id);
   expect(!exec.ok() && exec.fault.has_value() &&
              exec.fault->error_name == "NoMethodError",
-         "conversion property aliases should not become ordinary methods");
+             "conversion property aliases should not become ordinary methods");
+}
+
+void test_runtime_text_output_helpers_and_io_sinks() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("print \"hello\"\n"
+              "x = p \"debug\"\n"
+              "pp([1, 2])\n"
+              "x\n");
+  std::shared_ptr<amber::runtime::RuntimeTextWriter> stdout_buffer =
+      amber::runtime::RuntimeTextWriter::buffer();
+  {
+    amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
+    const amber::runtime::ExecutionResult exec =
+        amber::runtime::execute_code(emit_result.module,
+                                     emit_result.module.init.entry_code_id);
+    expect(exec.ok(), "print/p/pp command-form execution failed");
+    expect(exec.value.is_string(), "p should return its single argument");
+  }
+  const std::string output = stdout_buffer->to_string();
+  expect(output.find("hello\n\"debug\"\n") == 0U,
+         "print and p should write display/inspect lines");
+  expect(output.find("[\n  1,\n  2,\n]") != std::string::npos,
+         "pp should write structured pretty output");
+
+  emit_result = emit_ok("print()\n");
+  stdout_buffer = amber::runtime::RuntimeTextWriter::buffer();
+  {
+    amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
+    const amber::runtime::ExecutionResult exec =
+        amber::runtime::execute_code(emit_result.module,
+                                     emit_result.module.init.entry_code_id);
+    expect(exec.ok() && exec.value.is_null(),
+           "print() should return null");
+  }
+  expect(stdout_buffer->to_string() == "\n",
+         "print() should write one newline");
+
+  emit_result = emit_ok("print(\"a\", \"b\")\n");
+  stdout_buffer = amber::runtime::RuntimeTextWriter::buffer();
+  {
+    amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
+    const amber::runtime::ExecutionResult exec =
+        amber::runtime::execute_code(emit_result.module,
+                                     emit_result.module.init.entry_code_id);
+    expect(exec.ok() && exec.value.is_null(),
+           "multi-value print should return null");
+  }
+  expect(stdout_buffer->to_string() == "a\nb\n",
+         "multi-value print should write each argument on its own line");
+
+  emit_result = emit_ok("p()\n");
+  stdout_buffer = amber::runtime::RuntimeTextWriter::buffer();
+  {
+    amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
+    const amber::runtime::ExecutionResult exec =
+        amber::runtime::execute_code(emit_result.module,
+                                     emit_result.module.init.entry_code_id);
+    expect(exec.ok() && exec.value.is_null(), "p() should return null");
+  }
+  expect(stdout_buffer->to_string().empty(), "p() should write nothing");
+
+  emit_result = emit_ok("p(1, 2)\n");
+  stdout_buffer = amber::runtime::RuntimeTextWriter::buffer();
+  {
+    amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
+    const amber::runtime::ExecutionResult exec =
+        amber::runtime::execute_code(emit_result.module,
+                                     emit_result.module.init.entry_code_id);
+    expect(exec.ok() && exec.value.is_tuple(),
+           "multi-value p should return tuple");
+    expect(exec.value.as_tuple()->items.size() == 2,
+           "multi-value p tuple shape");
+  }
+  expect(stdout_buffer->to_string() == "1\n2\n",
+         "multi-value p should write each argument on its own line");
+
+  emit_result = emit_ok("buffer = io.Buffer.new()\n"
+                        "p(\"x\", to: buffer)\n"
+                        "buffer.to_str()\n");
+  amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "explicit buffer sink execution failed");
+  expect(string_value_text_or_die(exec.value, emit_result.module, exec) ==
+             "\"x\"\n",
+         "explicit buffer sink should receive p output");
+
+  emit_result = emit_ok("buffer = io.Buffer.new()\n"
+                        "io.with_output(stdout: buffer): print \"x\"\n"
+                        "io.with_output(stdout: buffer): p \"y\"\n"
+                        "buffer.to_str()\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "dynamic output scope execution failed");
+  expect(string_value_text_or_die(exec.value, emit_result.module, exec) ==
+             "x\n\"y\"\n",
+         "io.with_output should rebind logical stdout");
+
+  emit_result = emit_ok("buffer = io.Buffer.new()\n"
+                        "handle = io.with_output(stdout: buffer): "
+                        "task.spawn: print \"async\"\n"
+                        "handle.wait()\n"
+                        "buffer.to_str()\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "task output inheritance execution failed");
+  expect(string_value_text_or_die(exec.value, emit_result.module, exec) ==
+             "async\n",
+         "task.spawn should inherit logical stdout");
+
+  emit_result = emit_ok("Kernel.p(\"warning\", to: io.stderr())\n");
+  std::shared_ptr<amber::runtime::RuntimeTextWriter> stderr_buffer =
+      amber::runtime::RuntimeTextWriter::buffer();
+  {
+    amber::runtime::RuntimeOutputScope scope({}, stderr_buffer);
+    exec = amber::runtime::execute_code(emit_result.module,
+                                        emit_result.module.init.entry_code_id);
+    expect(exec.ok() && exec.value.is_string(),
+           "explicit stderr p should return argument");
+  }
+  expect(stderr_buffer->to_string() == "\"warning\"\n",
+         "explicit stderr sink should use current logical stderr");
+
+  emit_result = emit_ok("buffer = io.Buffer.new()\n"
+                        "buffer.close()\n"
+                        "print(\"x\", to: buffer)\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "ClosedResourceError",
+         "closed text writer should raise ClosedResourceError");
+
+  emit_result = emit_ok("p(\"x\", to: 123)\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "TypeError",
+         "invalid output sink should raise TypeError");
+
+  emit_result = emit_ok("[Amber.stringify(\"hello\", mode: :inspect), "
+                        "Amber.stringify([1, 2], mode: :pretty, "
+                        "max_items: 1)]\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok() && exec.value.is_list(),
+         "Amber.stringify inspect/pretty execution failed");
+  const std::shared_ptr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 2,
+         "stringify result shape");
+  expect(string_value_text_or_die(values->items[0], emit_result.module, exec) ==
+             "\"hello\"",
+         "inspect stringify should quote strings");
+  expect(string_value_text_or_die(values->items[1], emit_result.module, exec)
+             .find("... 1 more") != std::string::npos,
+         "pretty stringify should honor max_items");
 }
 
 void test_manual_call_invokes_object_call_method() {
@@ -1437,6 +1595,17 @@ std::uint32_t append_float_const(amber::bytecode::BcModule *module,
   constant.float_value = value;
   module->const_pool.push_back(constant);
   return static_cast<std::uint32_t>(module->const_pool.size() - 1U);
+}
+
+std::string string_value_text_or_die(
+    const amber::runtime::Value &value, const amber::bytecode::BcModule &module,
+    const amber::runtime::ExecutionResult &result) {
+  expect(value.is_string(), "expected Str value");
+  const std::uint32_t string_id = value.as_string().string_id;
+  const std::vector<std::string> &strings =
+      result.runtime_strings.empty() ? module.strings : result.runtime_strings;
+  expect(string_id < strings.size(), "string id should be in runtime table");
+  return strings[string_id];
 }
 
 amber::bytecode::Instruction
@@ -2510,6 +2679,24 @@ void test_execute_emitted_block_map_suffixes() {
       execute_emitted_init("[1,2].map |x|: x * 2\n");
   expect(explicit_param.ok(), "explicit param map block should execute");
   expect_integer_list(explicit_param.value, {2, 4}, "explicit param map block");
+
+  const amber::runtime::ExecutionResult implicit_indented =
+      execute_emitted_init("[1,2].map:\n"
+                           "  doubled = _1 * 2\n"
+                           "  doubled + 1\n");
+  expect(implicit_indented.ok(),
+         "implicit placeholder indented map block should execute");
+  expect_integer_list(implicit_indented.value, {3, 5},
+                      "implicit placeholder indented map block");
+
+  const amber::runtime::ExecutionResult explicit_indented =
+      execute_emitted_init("[1,2].map |x|:\n"
+                           "  doubled = x * 2\n"
+                           "  doubled + 1\n");
+  expect(explicit_indented.ok(),
+         "explicit param indented map block should execute");
+  expect_integer_list(explicit_indented.value, {3, 5},
+                      "explicit param indented map block");
 }
 
 void test_runtime_watch_local_storage_replacement() {
@@ -7039,6 +7226,7 @@ int main() {
   test_execute_module_init_calls_top_level_def();
   test_execute_emitted_collection_literals();
   test_runtime_string_interpolation_and_conversions();
+  test_runtime_text_output_helpers_and_io_sinks();
   test_top_level_function_closure_captures_sibling_function();
   test_direct_top_level_method_entry_materializes_module_captures();
   test_top_level_function_self_recursion();

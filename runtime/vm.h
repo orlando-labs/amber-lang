@@ -34,6 +34,7 @@ class RuntimeHeap;
 class RuntimeMutex;
 class RuntimeTaskHandle;
 class RuntimeTaskModule;
+class RuntimeTextWriter;
 class RuntimeThreadedCollection;
 class RuntimeWatchCell;
 class RuntimeWatchObjectState;
@@ -111,6 +112,9 @@ enum class RuntimeNativeTypeKind {
   Barrier,
   Flow,
   ThreadedCollection,
+  Kernel,
+  Io,
+  TextBuffer,
   Amber,
   Str,
   Int,
@@ -129,18 +133,25 @@ struct NativeTypeValue {
   RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
 };
 
+enum class RuntimeNativeFunctionKind { Print, P, Pp };
+
+struct NativeFunctionValue {
+  RuntimeNativeFunctionKind kind = RuntimeNativeFunctionKind::Print;
+};
+
 struct Value {
   using Payload = std::variant<
       std::monostate, bool, std::int64_t, double, SymbolValue, StringValue,
       ClassObjectValue, std::shared_ptr<ClosureValue>,
       std::shared_ptr<InstanceValue>, std::shared_ptr<ListValue>,
       std::shared_ptr<TupleValue>, std::shared_ptr<SetValue>,
-      std::shared_ptr<MapValue>, NativeTypeValue,
+      std::shared_ptr<MapValue>, NativeTypeValue, NativeFunctionValue,
       std::shared_ptr<RuntimeTaskModule>, std::shared_ptr<RuntimeTaskHandle>,
       std::shared_ptr<RuntimeChannel>, std::shared_ptr<RuntimeMutex>,
       std::shared_ptr<RuntimeAtomic>, std::shared_ptr<RuntimeBarrier>,
       std::shared_ptr<RuntimeFlowModule>,
       std::shared_ptr<RuntimeThreadedCollection>,
+      std::shared_ptr<RuntimeTextWriter>,
       std::shared_ptr<RuntimeWatchCell>, std::shared_ptr<RuntimeWatchHandle>>;
 
   Payload payload;
@@ -155,6 +166,7 @@ struct Value {
   static Value closure(std::shared_ptr<ClosureValue> value);
   static Value instance(std::shared_ptr<InstanceValue> value);
   static Value native_type(RuntimeNativeTypeKind kind);
+  static Value native_function(RuntimeNativeFunctionKind kind);
   static Value task_module(std::shared_ptr<RuntimeTaskModule> value);
   static Value task_handle(std::shared_ptr<RuntimeTaskHandle> value);
   static Value channel(std::shared_ptr<RuntimeChannel> value);
@@ -164,6 +176,7 @@ struct Value {
   static Value flow_module(std::shared_ptr<RuntimeFlowModule> value);
   static Value
   threaded_collection(std::shared_ptr<RuntimeThreadedCollection> value);
+  static Value text_writer(std::shared_ptr<RuntimeTextWriter> value);
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
 
@@ -181,6 +194,7 @@ struct Value {
   bool is_set() const;
   bool is_map() const;
   bool is_native_type() const;
+  bool is_native_function() const;
   bool is_task_module() const;
   bool is_task_handle() const;
   bool is_channel() const;
@@ -189,6 +203,7 @@ struct Value {
   bool is_barrier() const;
   bool is_flow_module() const;
   bool is_threaded_collection() const;
+  bool is_text_writer() const;
   bool is_watch_cell() const;
   bool is_watch_handle() const;
 
@@ -205,6 +220,7 @@ struct Value {
   std::shared_ptr<SetValue> as_set() const;
   std::shared_ptr<MapValue> as_map() const;
   NativeTypeValue as_native_type() const;
+  NativeFunctionValue as_native_function() const;
   std::shared_ptr<RuntimeTaskModule> as_task_module() const;
   std::shared_ptr<RuntimeTaskHandle> as_task_handle() const;
   std::shared_ptr<RuntimeChannel> as_channel() const;
@@ -213,8 +229,75 @@ struct Value {
   std::shared_ptr<RuntimeBarrier> as_barrier() const;
   std::shared_ptr<RuntimeFlowModule> as_flow_module() const;
   std::shared_ptr<RuntimeThreadedCollection> as_threaded_collection() const;
+  std::shared_ptr<RuntimeTextWriter> as_text_writer() const;
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
+};
+
+struct RuntimeTextWriteResult {
+  bool ok = true;
+  std::string error_name;
+  std::string message;
+};
+
+struct RuntimeTextOutputEvent {
+  std::string stream;
+  std::string text;
+  std::uint64_t order = 0;
+};
+
+class RuntimeTextWriter {
+public:
+  RuntimeTextWriter();
+  RuntimeTextWriter(const RuntimeTextWriter &) = delete;
+  RuntimeTextWriter &operator=(const RuntimeTextWriter &) = delete;
+  RuntimeTextWriter(RuntimeTextWriter &&) noexcept;
+  RuntimeTextWriter &operator=(RuntimeTextWriter &&) noexcept;
+  ~RuntimeTextWriter();
+
+  static std::shared_ptr<RuntimeTextWriter> host_stdout();
+  static std::shared_ptr<RuntimeTextWriter> host_stderr();
+  static std::shared_ptr<RuntimeTextWriter> buffer();
+  static std::shared_ptr<RuntimeTextWriter>
+  cell_stream(std::string stream_name);
+
+  RuntimeTextWriteResult write_str(const std::string &text);
+  RuntimeTextWriteResult write_line(const std::string &text = {});
+  RuntimeTextWriteResult flush();
+  RuntimeTextWriteResult close();
+  bool closed() const;
+  bool buffered() const;
+  std::string to_string() const;
+  std::vector<RuntimeTextOutputEvent> events() const;
+  std::string stream_name() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
+std::shared_ptr<RuntimeTextWriter> current_runtime_stdout();
+std::shared_ptr<RuntimeTextWriter> current_runtime_stderr();
+
+class RuntimeOutputScope {
+public:
+  RuntimeOutputScope(std::shared_ptr<RuntimeTextWriter> stdout_writer = {},
+                     std::shared_ptr<RuntimeTextWriter> stderr_writer = {});
+  RuntimeOutputScope(const RuntimeOutputScope &) = delete;
+  RuntimeOutputScope &operator=(const RuntimeOutputScope &) = delete;
+  ~RuntimeOutputScope();
+
+private:
+  std::shared_ptr<RuntimeTextWriter> previous_stdout_;
+  std::shared_ptr<RuntimeTextWriter> previous_stderr_;
+};
+
+enum class RuntimeStringifyMode { Display, Inspect, Pretty };
+
+struct RuntimePrettyPrintOptions {
+  std::size_t max_width = 80;
+  std::size_t max_depth = 20;
+  std::size_t max_items = 100;
 };
 
 struct RuntimeWatchCellSnapshot {

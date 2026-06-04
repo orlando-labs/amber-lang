@@ -211,6 +211,36 @@ void test_inline_block_chain_boundary() {
   expect(tails.values[3]->kind == "AstTailCall", "uniq call tail");
 }
 
+void test_indented_block_suffix_body() {
+  std::unique_ptr<Expr> expr =
+      parse_ok("numbers.map |x|:\n"
+               "  doubled = x * 2\n"
+               "  doubled + 1\n");
+  expect(expr->kind == "AstPostfixChain", "indented block postfix chain");
+  const amber::ast::ListField &tails = list_field(*expr, "tails");
+  expect(tails.values.size() == 2, "indented block chain tail count");
+  expect(tails.values[1]->kind == "AstTailBlockSuffix",
+         "indented block suffix tail");
+
+  const Expr &block = node_field(*tails.values[1], "block");
+  expect(block.kind == "AstBlock", "indented suffix block");
+  const amber::ast::ListField &params = list_field(block, "params");
+  expect(params.values.size() == 1, "indented block param count");
+  expect(string_field(*params.values[0], "pattern") == "x",
+         "indented block param pattern");
+
+  const amber::ast::ListField &body = list_field(block, "body");
+  expect(body.values.size() == 2, "indented block body statement count");
+  expect(body.values[0]->kind == "AstExprStmt",
+         "indented block first statement");
+  expect(node_field(*body.values[0], "expr").kind == "AstAssign",
+         "indented block assignment preserved");
+  expect(body.values[1]->kind == "AstExprStmt",
+         "indented block second statement");
+  expect(node_field(*body.values[1], "expr").kind == "AstBinary",
+         "indented block result expression preserved");
+}
+
 void test_indented_postfix_continuation() {
   amber::parser::ParseModuleResult result =
       parse_module_raw("[1, 2]\n"
@@ -910,6 +940,7 @@ int main() {
   test_bare_call();
   test_safe_nav_and_index();
   test_inline_block_chain_boundary();
+  test_indented_block_suffix_body();
   test_indented_postfix_continuation();
   test_module_stray_indent_progresses();
   test_unicode_names();
