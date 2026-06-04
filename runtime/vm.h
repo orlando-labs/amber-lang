@@ -34,6 +34,7 @@ class RuntimeHeap;
 class RuntimeMutex;
 class RuntimeTaskHandle;
 class RuntimeTaskModule;
+class RuntimeLogger;
 class RuntimeTextWriter;
 class RuntimeThreadedCollection;
 class RuntimeWatchCell;
@@ -115,6 +116,7 @@ enum class RuntimeNativeTypeKind {
   Kernel,
   Io,
   TextBuffer,
+  Logger,
   Amber,
   Str,
   Int,
@@ -151,7 +153,7 @@ struct Value {
       std::shared_ptr<RuntimeAtomic>, std::shared_ptr<RuntimeBarrier>,
       std::shared_ptr<RuntimeFlowModule>,
       std::shared_ptr<RuntimeThreadedCollection>,
-      std::shared_ptr<RuntimeTextWriter>,
+      std::shared_ptr<RuntimeTextWriter>, std::shared_ptr<RuntimeLogger>,
       std::shared_ptr<RuntimeWatchCell>, std::shared_ptr<RuntimeWatchHandle>>;
 
   Payload payload;
@@ -177,6 +179,7 @@ struct Value {
   static Value
   threaded_collection(std::shared_ptr<RuntimeThreadedCollection> value);
   static Value text_writer(std::shared_ptr<RuntimeTextWriter> value);
+  static Value logger(std::shared_ptr<RuntimeLogger> value);
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
 
@@ -204,6 +207,7 @@ struct Value {
   bool is_flow_module() const;
   bool is_threaded_collection() const;
   bool is_text_writer() const;
+  bool is_logger() const;
   bool is_watch_cell() const;
   bool is_watch_handle() const;
 
@@ -230,6 +234,7 @@ struct Value {
   std::shared_ptr<RuntimeFlowModule> as_flow_module() const;
   std::shared_ptr<RuntimeThreadedCollection> as_threaded_collection() const;
   std::shared_ptr<RuntimeTextWriter> as_text_writer() const;
+  std::shared_ptr<RuntimeLogger> as_logger() const;
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
 };
@@ -267,6 +272,7 @@ public:
   RuntimeTextWriteResult close();
   bool closed() const;
   bool buffered() const;
+  bool xterm_color_available() const;
   std::string to_string() const;
   std::vector<RuntimeTextOutputEvent> events() const;
   std::string stream_name() const;
@@ -290,6 +296,60 @@ public:
 private:
   std::shared_ptr<RuntimeTextWriter> previous_stdout_;
   std::shared_ptr<RuntimeTextWriter> previous_stderr_;
+};
+
+enum class RuntimeLogLevel {
+  Fatal = 0,
+  Error = 1,
+  Warn = 2,
+  Info = 3,
+  Debug = 4
+};
+
+enum class RuntimeLogColorMode { Auto, Always, Never };
+
+std::uint64_t current_runtime_native_thread_id();
+std::string current_runtime_task_annotation();
+
+class RuntimeTaskAnnotationScope {
+public:
+  explicit RuntimeTaskAnnotationScope(std::string annotation);
+  RuntimeTaskAnnotationScope(const RuntimeTaskAnnotationScope &) = delete;
+  RuntimeTaskAnnotationScope &
+  operator=(const RuntimeTaskAnnotationScope &) = delete;
+  ~RuntimeTaskAnnotationScope();
+
+private:
+  std::string previous_annotation_;
+};
+
+class RuntimeLogger {
+public:
+  explicit RuntimeLogger(
+      std::shared_ptr<RuntimeTextWriter> writer = {},
+      RuntimeLogLevel level = RuntimeLogLevel::Info,
+      RuntimeLogColorMode color_mode = RuntimeLogColorMode::Auto);
+  RuntimeLogger(const RuntimeLogger &) = delete;
+  RuntimeLogger &operator=(const RuntimeLogger &) = delete;
+  RuntimeLogger(RuntimeLogger &&) noexcept;
+  RuntimeLogger &operator=(RuntimeLogger &&) noexcept;
+  ~RuntimeLogger();
+
+  RuntimeTextWriteResult log(RuntimeLogLevel level,
+                             const std::string &message);
+  RuntimeTextWriteResult fatal(const std::string &message);
+  RuntimeTextWriteResult error(const std::string &message);
+  RuntimeTextWriteResult warn(const std::string &message);
+  RuntimeTextWriteResult info(const std::string &message);
+  RuntimeTextWriteResult debug(const std::string &message);
+  RuntimeTextWriteResult flush();
+  RuntimeTextWriteResult close();
+  bool closed() const;
+  RuntimeLogLevel level() const;
+
+private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
 };
 
 enum class RuntimeStringifyMode { Display, Inspect, Pretty };

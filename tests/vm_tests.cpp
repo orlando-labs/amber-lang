@@ -43,6 +43,20 @@ bool wait_for_condition(Predicate predicate,
   return predicate();
 }
 
+std::size_t count_occurrences(const std::string &text,
+                              const std::string &needle) {
+  if (needle.empty()) {
+    return 0;
+  }
+  std::size_t count = 0;
+  std::size_t offset = 0;
+  while ((offset = text.find(needle, offset)) != std::string::npos) {
+    ++count;
+    offset += needle.size();
+  }
+  return count;
+}
+
 amber::bytecode::EmitResult emit_ok(const std::string &source) {
   amber::lexer::Lexer lexer(source, "<test>");
   amber::lexer::LexResult lex_result = lexer.lex();
@@ -1046,6 +1060,113 @@ void test_runtime_text_output_helpers_and_io_sinks() {
   expect(string_value_text_or_die(values->items[1], emit_result.module, exec)
              .find("... 1 more") != std::string::npos,
          "pretty stringify should honor max_items");
+}
+
+void test_runtime_logger_source_surface_and_annotations() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("import task\n"
+              "buffer = io.Buffer.new()\n"
+              "color_buffer = io.Buffer.new()\n"
+              "logger = io.Logger.new(to: buffer, level: :debug, color: false)\n"
+              "logger.info(\"ready\")\n"
+              "task.with_annotation(\"loader\"): logger.warn(\"slow\")\n"
+              "logger.warning(\"again\")\n"
+              "logger.debug(\"detail\")\n"
+              "logger.log(:fatal, \"boom\")\n"
+              "logger.flush()\n"
+              "color_logger = io.Logger.new(to: color_buffer, level: :error, "
+              "color: true)\n"
+              "color_logger.debug(\"hidden\")\n"
+              "color_logger.error(\"bad\")\n"
+              "color_logger.flush()\n"
+              "[buffer.to_str(), color_buffer.to_str()]\n");
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(emit_result.module,
+                                   emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "source-level logger execution failed");
+  expect(exec.value.is_list(), "logger source result should be list");
+  const std::shared_ptr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 2,
+         "logger source result shape");
+  const std::string plain =
+      string_value_text_or_die(values->items[0], emit_result.module, exec);
+  const std::string colored =
+      string_value_text_or_die(values->items[1], emit_result.module, exec);
+
+  expect(plain.find("[INFO] [thread=") != std::string::npos,
+         "logger info record should include native thread id");
+  expect(plain.find("[WARN] [loader] slow\n") != std::string::npos,
+         "logger warning should include scoped annotation");
+  expect(plain.find("[WARN] [thread=") != std::string::npos &&
+             plain.find("again\n") != std::string::npos,
+         "logger warning alias should write unannotated record");
+  expect(plain.find("[DEBUG] [thread=") != std::string::npos &&
+             plain.find("detail\n") != std::string::npos,
+         "logger debug should honor debug threshold");
+  expect(plain.find("[FATAL] [thread=") != std::string::npos &&
+             plain.find("boom\n") != std::string::npos,
+         "logger fatal should be available");
+
+  expect(colored.find("\033[31mERROR\033[0m") != std::string::npos,
+         "forced color logger should emit xterm color codes");
+  expect(colored.find("bad\n") != std::string::npos,
+         "forced color logger should write enabled error");
+  expect(colored.find("hidden") == std::string::npos,
+         "logger level should filter disabled debug records");
+}
+
+void test_runtime_logger_parallel_native_threads_and_tasks() {
+  const std::shared_ptr<amber::runtime::RuntimeTextWriter> buffer =
+      amber::runtime::RuntimeTextWriter::buffer();
+  amber::runtime::RuntimeLogger logger(
+      buffer, amber::runtime::RuntimeLogLevel::Debug,
+      amber::runtime::RuntimeLogColorMode::Never);
+
+  constexpr int kThreads = 6;
+  constexpr int kPerThread = 25;
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (int thread_index = 0; thread_index < kThreads; ++thread_index) {
+    threads.emplace_back([&logger, thread_index]() {
+      amber::runtime::RuntimeTaskAnnotationScope annotation(
+          "native-" + std::to_string(thread_index));
+      for (int message = 0; message < kPerThread; ++message) {
+        const amber::runtime::RuntimeTextWriteResult result = logger.debug(
+            "message-" + std::to_string(thread_index) + "-" +
+            std::to_string(message));
+        expect(result.ok, "native thread logger call should enqueue");
+      }
+    });
+  }
+  for (std::thread &thread : threads) {
+    thread.join();
+  }
+
+  amber::runtime::RuntimeTaskModule task(3);
+  amber::runtime::RuntimeTaskAnnotationScope parent_annotation("task-parent");
+  std::vector<amber::runtime::RuntimeTaskHandle> handles;
+  for (int index = 0; index < 4; ++index) {
+    handles.push_back(task.spawn([&logger, index]() {
+      logger.info("task-message-" + std::to_string(index));
+      return amber::runtime::Value::null();
+    }));
+  }
+  for (const amber::runtime::RuntimeTaskHandle &handle : handles) {
+    const amber::runtime::RuntimeTaskPublicResult result =
+        handle.wait(std::chrono::milliseconds(1000));
+    expect(result.ok, "logger task should finish");
+  }
+
+  expect(logger.flush().ok, "logger flush should succeed");
+  const std::string output = buffer->to_string();
+  expect(count_occurrences(output, "[DEBUG] [native-") ==
+             static_cast<std::size_t>(kThreads * kPerThread),
+         "logger should keep all parallel native thread records");
+  expect(output.find("message-0-0\n") != std::string::npos,
+         "logger should retain native thread messages");
+  expect(count_occurrences(output, "[INFO] [task-parent] task-message-") == 4,
+         "logger tasks should inherit task annotation");
 }
 
 void test_manual_call_invokes_object_call_method() {
@@ -7227,6 +7348,8 @@ int main() {
   test_execute_emitted_collection_literals();
   test_runtime_string_interpolation_and_conversions();
   test_runtime_text_output_helpers_and_io_sinks();
+  test_runtime_logger_source_surface_and_annotations();
+  test_runtime_logger_parallel_native_threads_and_tasks();
   test_top_level_function_closure_captures_sibling_function();
   test_direct_top_level_method_entry_materializes_module_captures();
   test_top_level_function_self_recursion();

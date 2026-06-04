@@ -23,6 +23,12 @@
 #include <unordered_set>
 #include <utility>
 
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace amber::runtime {
 
 namespace {
@@ -34,7 +40,10 @@ thread_local const std::atomic<bool> *tls_runtime_task_cancel_flag = nullptr;
 thread_local std::uint32_t tls_runtime_task_sync_depth = 0;
 thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stdout;
 thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stderr;
+thread_local std::string tls_runtime_task_annotation;
+thread_local std::uint64_t tls_runtime_native_thread_id = 0;
 std::atomic<std::uint64_t> g_runtime_output_order{1};
+std::atomic<std::uint64_t> g_runtime_native_thread_ids{1};
 
 class RuntimeTaskScope {
 public:
@@ -121,6 +130,18 @@ std::uint64_t current_runtime_strand_id() { return tls_runtime_strand_id; }
 
 std::uint64_t current_runtime_task_id() { return tls_runtime_task_id; }
 
+std::uint64_t current_runtime_native_thread_id() {
+  if (tls_runtime_native_thread_id == 0) {
+    tls_runtime_native_thread_id =
+        g_runtime_native_thread_ids.fetch_add(1, std::memory_order_relaxed);
+  }
+  return tls_runtime_native_thread_id;
+}
+
+std::string current_runtime_task_annotation() {
+  return tls_runtime_task_annotation;
+}
+
 bool current_runtime_task_cancel_requested() {
   return tls_runtime_task_cancel_flag != nullptr &&
          tls_runtime_task_cancel_flag->load();
@@ -153,6 +174,15 @@ void throw_if_runtime_task_cancelled() {
   if (current_runtime_task_cancel_requested()) {
     throw RuntimeTaskCancelled();
   }
+}
+
+RuntimeTaskAnnotationScope::RuntimeTaskAnnotationScope(std::string annotation)
+    : previous_annotation_(std::move(tls_runtime_task_annotation)) {
+  tls_runtime_task_annotation = std::move(annotation);
+}
+
+RuntimeTaskAnnotationScope::~RuntimeTaskAnnotationScope() {
+  tls_runtime_task_annotation = std::move(previous_annotation_);
 }
 
 RuntimeWorkerScope::RuntimeWorkerScope(std::uint64_t worker_id)
@@ -2339,6 +2369,12 @@ private:
     if (lhs.is_threaded_collection()) {
       return lhs.as_threaded_collection() == rhs.as_threaded_collection();
     }
+    if (lhs.is_text_writer()) {
+      return lhs.as_text_writer() == rhs.as_text_writer();
+    }
+    if (lhs.is_logger()) {
+      return lhs.as_logger() == rhs.as_logger();
+    }
     if (lhs.is_instance_object()) {
       return lhs.as_instance_object() == rhs.as_instance_object();
     }
@@ -3718,7 +3754,10 @@ const RuntimeScheduler &RuntimeTaskModule::scheduler() const {
 RuntimeTaskHandle RuntimeTaskModule::spawn_with_kind(SpawnKind kind,
                                                      TaskFunction function) {
   auto state = std::make_shared<RuntimeTaskHandle::State>();
-  auto task_body = [state, function = std::move(function)]() mutable {
+  const std::string inherited_annotation = current_runtime_task_annotation();
+  auto task_body =
+      [state, function = std::move(function), inherited_annotation]() mutable {
+    RuntimeTaskAnnotationScope annotation_scope(inherited_annotation);
     try {
       const Value value = function ? function() : Value::null();
       std::lock_guard<std::mutex> lock(state->mutex);
@@ -6099,6 +6138,33 @@ bool RuntimeTextWriter::buffered() const {
          impl_->kind == RuntimeTextWriterKind::CellStream;
 }
 
+bool RuntimeTextWriter::xterm_color_available() const {
+  if (impl_ == nullptr) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (impl_->kind != RuntimeTextWriterKind::HostStdout &&
+      impl_->kind != RuntimeTextWriterKind::HostStderr) {
+    return false;
+  }
+  if (std::getenv("NO_COLOR") != nullptr) {
+    return false;
+  }
+  const char *term = std::getenv("TERM");
+  if (term == nullptr || std::string(term) == "dumb") {
+    return false;
+  }
+#if defined(_WIN32)
+  const int fd = impl_->kind == RuntimeTextWriterKind::HostStdout ? 1 : 2;
+  return _isatty(fd) != 0;
+#else
+  const int fd =
+      impl_->kind == RuntimeTextWriterKind::HostStdout ? STDOUT_FILENO
+                                                       : STDERR_FILENO;
+  return ::isatty(fd) != 0;
+#endif
+}
+
 std::string RuntimeTextWriter::to_string() const {
   if (impl_ == nullptr) {
     return {};
@@ -6149,6 +6215,264 @@ RuntimeOutputScope::RuntimeOutputScope(
 RuntimeOutputScope::~RuntimeOutputScope() {
   tls_runtime_stdout = std::move(previous_stdout_);
   tls_runtime_stderr = std::move(previous_stderr_);
+}
+
+namespace {
+
+const char *runtime_log_level_name(RuntimeLogLevel level) {
+  switch (level) {
+  case RuntimeLogLevel::Fatal:
+    return "FATAL";
+  case RuntimeLogLevel::Error:
+    return "ERROR";
+  case RuntimeLogLevel::Warn:
+    return "WARN";
+  case RuntimeLogLevel::Info:
+    return "INFO";
+  case RuntimeLogLevel::Debug:
+    return "DEBUG";
+  }
+  return "LOG";
+}
+
+const char *runtime_log_level_color(RuntimeLogLevel level) {
+  switch (level) {
+  case RuntimeLogLevel::Fatal:
+    return "\033[1;35m";
+  case RuntimeLogLevel::Error:
+    return "\033[31m";
+  case RuntimeLogLevel::Warn:
+    return "\033[33m";
+  case RuntimeLogLevel::Info:
+    return "\033[32m";
+  case RuntimeLogLevel::Debug:
+    return "\033[36m";
+  }
+  return "";
+}
+
+bool runtime_log_level_enabled(RuntimeLogLevel threshold,
+                               RuntimeLogLevel level) {
+  return static_cast<int>(level) <= static_cast<int>(threshold);
+}
+
+std::string runtime_log_context_label() {
+  const std::string annotation = current_runtime_task_annotation();
+  if (!annotation.empty()) {
+    return annotation;
+  }
+  const std::uint64_t task_id = current_runtime_task_id();
+  if (task_id != 0) {
+    return "task=" + std::to_string(task_id);
+  }
+  return "thread=" + std::to_string(current_runtime_native_thread_id());
+}
+
+std::string format_runtime_log_line(RuntimeLogLevel level, bool color,
+                                    const std::string &message) {
+  std::string level_label = runtime_log_level_name(level);
+  if (color) {
+    level_label = std::string(runtime_log_level_color(level)) + level_label +
+                  "\033[0m";
+  }
+  return "[" + level_label + "] [" + runtime_log_context_label() + "] " +
+         message;
+}
+
+} // namespace
+
+class RuntimeLogger::Impl {
+public:
+  Impl(std::shared_ptr<RuntimeTextWriter> writer, RuntimeLogLevel level,
+       RuntimeLogColorMode color_mode)
+      : writer_(writer == nullptr ? current_runtime_stderr()
+                                  : std::move(writer)),
+        level_(level),
+        color_enabled_(color_mode == RuntimeLogColorMode::Always ||
+                       (color_mode == RuntimeLogColorMode::Auto &&
+                        writer_->xterm_color_available())),
+        worker_([this]() { drain_loop(); }) {}
+
+  ~Impl() { close(); }
+
+  RuntimeTextWriteResult log(RuntimeLogLevel level,
+                             const std::string &message) {
+    if (!runtime_log_level_enabled(level_, level)) {
+      return text_write_ok();
+    }
+    std::string line = format_runtime_log_line(level, color_enabled_, message);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closed_) {
+        return text_write_error("ClosedResourceError", "logger is closed");
+      }
+      queue_.push_back(std::move(line));
+    }
+    cv_.notify_one();
+    return text_write_ok();
+  }
+
+  RuntimeTextWriteResult flush() {
+    RuntimeTextWriteResult result;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      drained_cv_.wait(lock, [this]() {
+        return queue_.empty() && !writing_;
+      });
+      result = last_error_;
+    }
+    if (!result.ok) {
+      return result;
+    }
+    return writer_->flush();
+  }
+
+  RuntimeTextWriteResult close() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closed_) {
+        return last_error_;
+      }
+      closed_ = true;
+      stop_ = true;
+    }
+    cv_.notify_one();
+    if (worker_.joinable()) {
+      if (worker_.get_id() == std::this_thread::get_id()) {
+        worker_.detach();
+      } else {
+        worker_.join();
+      }
+    }
+    RuntimeTextWriteResult result;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      result = last_error_;
+    }
+    if (!result.ok) {
+      return result;
+    }
+    return writer_->flush();
+  }
+
+  bool closed() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return closed_;
+  }
+
+  RuntimeLogLevel level() const { return level_; }
+
+private:
+  void drain_loop() {
+    while (true) {
+      std::deque<std::string> batch;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this]() { return stop_ || !queue_.empty(); });
+        if (queue_.empty() && stop_) {
+          drained_cv_.notify_all();
+          return;
+        }
+        batch.swap(queue_);
+        writing_ = true;
+      }
+
+      for (const std::string &line : batch) {
+        RuntimeTextWriteResult result = writer_->write_str(line + "\n");
+        if (!result.ok) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (last_error_.ok) {
+            last_error_ = std::move(result);
+          }
+          break;
+        }
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        writing_ = false;
+      }
+      drained_cv_.notify_all();
+    }
+  }
+
+  std::shared_ptr<RuntimeTextWriter> writer_;
+  RuntimeLogLevel level_ = RuntimeLogLevel::Info;
+  bool color_enabled_ = false;
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::condition_variable drained_cv_;
+  std::deque<std::string> queue_;
+  bool closed_ = false;
+  bool stop_ = false;
+  bool writing_ = false;
+  RuntimeTextWriteResult last_error_;
+  std::thread worker_;
+};
+
+RuntimeLogger::RuntimeLogger(std::shared_ptr<RuntimeTextWriter> writer,
+                             RuntimeLogLevel level,
+                             RuntimeLogColorMode color_mode)
+    : impl_(std::make_shared<Impl>(std::move(writer), level, color_mode)) {}
+
+RuntimeLogger::RuntimeLogger(RuntimeLogger &&) noexcept = default;
+
+RuntimeLogger &RuntimeLogger::operator=(RuntimeLogger &&) noexcept = default;
+
+RuntimeLogger::~RuntimeLogger() {
+  if (impl_ != nullptr) {
+    impl_->close();
+  }
+}
+
+RuntimeTextWriteResult RuntimeLogger::log(RuntimeLogLevel level,
+                                          const std::string &message) {
+  if (impl_ == nullptr) {
+    return text_write_error("IOError", "logger is not initialized");
+  }
+  return impl_->log(level, message);
+}
+
+RuntimeTextWriteResult RuntimeLogger::fatal(const std::string &message) {
+  return log(RuntimeLogLevel::Fatal, message);
+}
+
+RuntimeTextWriteResult RuntimeLogger::error(const std::string &message) {
+  return log(RuntimeLogLevel::Error, message);
+}
+
+RuntimeTextWriteResult RuntimeLogger::warn(const std::string &message) {
+  return log(RuntimeLogLevel::Warn, message);
+}
+
+RuntimeTextWriteResult RuntimeLogger::info(const std::string &message) {
+  return log(RuntimeLogLevel::Info, message);
+}
+
+RuntimeTextWriteResult RuntimeLogger::debug(const std::string &message) {
+  return log(RuntimeLogLevel::Debug, message);
+}
+
+RuntimeTextWriteResult RuntimeLogger::flush() {
+  if (impl_ == nullptr) {
+    return text_write_error("IOError", "logger is not initialized");
+  }
+  return impl_->flush();
+}
+
+RuntimeTextWriteResult RuntimeLogger::close() {
+  if (impl_ == nullptr) {
+    return text_write_error("IOError", "logger is not initialized");
+  }
+  return impl_->close();
+}
+
+bool RuntimeLogger::closed() const {
+  return impl_ == nullptr || impl_->closed();
+}
+
+RuntimeLogLevel RuntimeLogger::level() const {
+  return impl_ == nullptr ? RuntimeLogLevel::Info : impl_->level();
 }
 
 Value Value::null() { return {std::monostate{}}; }
@@ -6221,6 +6545,10 @@ Value Value::threaded_collection(
 }
 
 Value Value::text_writer(std::shared_ptr<RuntimeTextWriter> value) {
+  return {std::move(value)};
+}
+
+Value Value::logger(std::shared_ptr<RuntimeLogger> value) {
   return {std::move(value)};
 }
 
@@ -6325,6 +6653,10 @@ bool Value::is_text_writer() const {
   return std::holds_alternative<std::shared_ptr<RuntimeTextWriter>>(payload);
 }
 
+bool Value::is_logger() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeLogger>>(payload);
+}
+
 bool Value::is_watch_cell() const {
   return std::holds_alternative<std::shared_ptr<RuntimeWatchCell>>(payload);
 }
@@ -6418,6 +6750,10 @@ std::shared_ptr<RuntimeTextWriter> Value::as_text_writer() const {
   return std::get<std::shared_ptr<RuntimeTextWriter>>(payload);
 }
 
+std::shared_ptr<RuntimeLogger> Value::as_logger() const {
+  return std::get<std::shared_ptr<RuntimeLogger>>(payload);
+}
+
 std::shared_ptr<RuntimeWatchCell> Value::as_watch_cell() const {
   return std::get<std::shared_ptr<RuntimeWatchCell>>(payload);
 }
@@ -6486,6 +6822,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "io";
   case RuntimeNativeTypeKind::TextBuffer:
     return "io.Buffer";
+  case RuntimeNativeTypeKind::Logger:
+    return "io.Logger";
   case RuntimeNativeTypeKind::Amber:
     return "Amber";
   case RuntimeNativeTypeKind::Str:
@@ -6781,6 +7119,9 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     }
     const std::string stream = writer->stream_name();
     return stream.empty() ? "<io.TextWriter>" : "<io.TextWriter " + stream + ">";
+  }
+  if (value.is_logger()) {
+    return value.as_logger() == nullptr ? "<io.Logger null>" : "<io.Logger>";
   }
 
   const void *identity = heap_identity_for(value);
@@ -7678,6 +8019,9 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   }
   if (lhs.is_text_writer()) {
     return lhs.as_text_writer() == rhs.as_text_writer();
+  }
+  if (lhs.is_logger()) {
+    return lhs.as_logger() == rhs.as_logger();
   }
   if (lhs.is_watch_handle()) {
     return lhs.as_watch_handle() == rhs.as_watch_handle();
@@ -10693,6 +11037,9 @@ private:
     }
     if (path == "io.Buffer") {
       return Value::native_type(RuntimeNativeTypeKind::TextBuffer);
+    }
+    if (path == "io.Logger") {
+      return Value::native_type(RuntimeNativeTypeKind::Logger);
     }
     if (path == "Amber") {
       return Value::native_type(RuntimeNativeTypeKind::Amber);
@@ -14834,6 +15181,72 @@ private:
     return writer;
   }
 
+  std::optional<std::string> text_from_symbol_or_string(const Value &value) {
+    if (value.is_symbol()) {
+      return selector_text_from_symbol(value.as_symbol().symbol_id);
+    }
+    if (value.is_string()) {
+      return string_text_from_id(value.as_string().string_id);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<RuntimeLogLevel>
+  log_level_from_value(const Frame &frame, const Value &value,
+                       const std::string &context) {
+    const std::optional<std::string> text = text_from_symbol_or_string(value);
+    if (!text.has_value()) {
+      set_fault(frame, "TypeError",
+                context + " must be :fatal, :error, :warn, :info, or :debug");
+      return std::nullopt;
+    }
+    if (*text == "fatal") {
+      return RuntimeLogLevel::Fatal;
+    }
+    if (*text == "error") {
+      return RuntimeLogLevel::Error;
+    }
+    if (*text == "warn" || *text == "warning") {
+      return RuntimeLogLevel::Warn;
+    }
+    if (*text == "info") {
+      return RuntimeLogLevel::Info;
+    }
+    if (*text == "debug") {
+      return RuntimeLogLevel::Debug;
+    }
+    set_fault(frame, "TypeError",
+              context + " must be :fatal, :error, :warn, :info, or :debug");
+    return std::nullopt;
+  }
+
+  std::optional<RuntimeLogColorMode>
+  log_color_mode_from_value(const Frame &frame, const Value &value,
+                            const std::string &context) {
+    if (value.is_bool()) {
+      return value.as_bool() ? RuntimeLogColorMode::Always
+                             : RuntimeLogColorMode::Never;
+    }
+    const std::optional<std::string> text = text_from_symbol_or_string(value);
+    if (!text.has_value()) {
+      set_fault(frame, "TypeError",
+                context + " must be Bool, :auto, :always, or :never");
+      return std::nullopt;
+    }
+    if (*text == "auto") {
+      return RuntimeLogColorMode::Auto;
+    }
+    if (*text == "always") {
+      return RuntimeLogColorMode::Always;
+    }
+    if (*text == "never") {
+      return RuntimeLogColorMode::Never;
+    }
+    set_fault(frame, "TypeError",
+              context + " must be Bool, :auto, :always, or :never");
+    return std::nullopt;
+  }
+
   bool size_keyword_value(const Frame &frame, const Value &value,
                           const std::string &name, std::size_t *out) {
     if (!value.is_integer() || value.as_integer() < 0) {
@@ -15050,6 +15463,17 @@ private:
           *out = Value::native_type(RuntimeNativeTypeKind::TextBuffer);
           return SendStatus::Matched;
         }
+        if (selector == "Logger") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "io.Logger does not accept keywords");
+            }
+            return SendStatus::Faulted;
+          }
+          *out = Value::native_type(RuntimeNativeTypeKind::Logger);
+          return SendStatus::Matched;
+        }
         if (selector == "current_stdout" || selector == "stdout") {
           if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
             if (!kw_args.empty()) {
@@ -15127,6 +15551,49 @@ private:
           return SendStatus::Faulted;
         }
         *out = Value::text_writer(RuntimeTextWriter::buffer());
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Logger) {
+        if (selector != "new") {
+          return SendStatus::NotHandled;
+        }
+        if (!require_arity(0) ||
+            !reject_unknown_keywords(frame, kw_args,
+                                     {"to", "level", "color"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::shared_ptr<RuntimeTextWriter> writer = current_runtime_stderr();
+        RuntimeLogLevel level = RuntimeLogLevel::Info;
+        RuntimeLogColorMode color_mode = RuntimeLogColorMode::Auto;
+        if (const std::optional<Value> to = keyword_arg_value(kw_args, "to")) {
+          const std::optional<std::shared_ptr<RuntimeTextWriter>>
+              explicit_writer = text_writer_from_value(frame, *to, "to:");
+          if (!explicit_writer.has_value()) {
+            return SendStatus::Faulted;
+          }
+          writer = *explicit_writer;
+        }
+        if (const std::optional<Value> level_value =
+                keyword_arg_value(kw_args, "level")) {
+          const std::optional<RuntimeLogLevel> parsed =
+              log_level_from_value(frame, *level_value, "level");
+          if (!parsed.has_value()) {
+            return SendStatus::Faulted;
+          }
+          level = *parsed;
+        }
+        if (const std::optional<Value> color_value =
+                keyword_arg_value(kw_args, "color")) {
+          const std::optional<RuntimeLogColorMode> parsed =
+              log_color_mode_from_value(frame, *color_value, "color");
+          if (!parsed.has_value()) {
+            return SendStatus::Faulted;
+          }
+          color_mode = *parsed;
+        }
+        *out = Value::logger(
+            std::make_shared<RuntimeLogger>(writer, level, color_mode));
         return SendStatus::Matched;
       }
       if (is_conversion_type(kind)) {
@@ -15374,11 +15841,207 @@ private:
       }
     }
 
+    if (receiver.is_logger()) {
+      std::shared_ptr<RuntimeLogger> logger = receiver.as_logger();
+      if (logger == nullptr) {
+        set_fault(frame, "TypeError", "logger is null");
+        return SendStatus::Faulted;
+      }
+
+      auto apply_logger_log = [&](RuntimeLogLevel level) -> SendStatus {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "logger level method does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        const std::string message = runtime_stringify_value(
+            args[0], RuntimeStringifyMode::Display, &module_, nullptr,
+            nullptr, RuntimePrettyPrintOptions{});
+        if (!set_fault_from_text_write_result(frame,
+                                              logger->log(level, message))) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      };
+
+      if (selector == "fatal") {
+        return apply_logger_log(RuntimeLogLevel::Fatal);
+      }
+      if (selector == "error") {
+        return apply_logger_log(RuntimeLogLevel::Error);
+      }
+      if (selector == "warn" || selector == "warning") {
+        return apply_logger_log(RuntimeLogLevel::Warn);
+      }
+      if (selector == "info") {
+        return apply_logger_log(RuntimeLogLevel::Info);
+      }
+      if (selector == "debug") {
+        return apply_logger_log(RuntimeLogLevel::Debug);
+      }
+      if (selector == "log") {
+        if (!require_arity(2) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "logger.log does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        const std::optional<RuntimeLogLevel> level =
+            log_level_from_value(frame, args[0], "logger.log level");
+        if (!level.has_value()) {
+          return SendStatus::Faulted;
+        }
+        const std::string message = runtime_stringify_value(
+            args[1], RuntimeStringifyMode::Display, &module_, nullptr,
+            nullptr, RuntimePrettyPrintOptions{});
+        if (!set_fault_from_text_write_result(frame,
+                                              logger->log(*level, message))) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "flush") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "logger.flush does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!set_fault_from_text_write_result(frame, logger->flush())) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "close") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "logger.close does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!set_fault_from_text_write_result(frame, logger->close())) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      if (selector == "closed?") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "logger.closed? does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(logger->closed());
+        return SendStatus::Matched;
+      }
+    }
+
     if (receiver.is_task_module()) {
       const std::shared_ptr<RuntimeTaskModule> task = receiver.as_task_module();
       if (task == nullptr) {
         set_fault(frame, "TypeError", "task module is null");
         return SendStatus::Faulted;
+      }
+      if (selector == "annotation" || selector == "current_annotation") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task.annotation does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = string_value_from_text(current_runtime_task_annotation());
+        return SendStatus::Matched;
+      }
+      if (selector == "task_id" || selector == "current_task_id") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task.task_id does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(
+            static_cast<std::int64_t>(current_runtime_task_id()));
+        return SendStatus::Matched;
+      }
+      if (selector == "strand_id") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task.strand_id does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(
+            static_cast<std::int64_t>(current_runtime_strand_id()));
+        return SendStatus::Matched;
+      }
+      if (selector == "worker_id") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task.worker_id does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(
+            static_cast<std::int64_t>(current_runtime_worker_id()));
+        return SendStatus::Matched;
+      }
+      if (selector == "thread_id") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task.thread_id does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(
+            static_cast<std::int64_t>(current_runtime_native_thread_id()));
+        return SendStatus::Matched;
+      }
+      if (selector == "with_annotation" || selector == "annotate") {
+        if (!require_arity(1) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "task.with_annotation does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!args[0].is_string()) {
+          set_fault(frame, "TypeError",
+                    "task.with_annotation expects Str annotation");
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::string> annotation =
+            string_text_from_id(args[0].as_string().string_id);
+        if (!annotation.has_value()) {
+          set_fault(frame, "VMError", "string ref is invalid");
+          return SendStatus::Faulted;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "task.with_annotation");
+        if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        try {
+          RuntimeTaskAnnotationScope annotation_scope(*annotation);
+          *out = (*invoker)(std::vector<Value>{});
+        } catch (const RuntimeTaskFailure &failure) {
+          set_fault(frame, failure.error_name(), failure.message());
+          return SendStatus::Faulted;
+        }
+        return SendStatus::Matched;
       }
       if (selector == "flow") {
         if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
@@ -22333,6 +22996,9 @@ std::string value_to_debug_string(const Value &value,
     const std::string stream = writer->stream_name();
     return stream.empty() ? "<io.TextWriter>"
                           : "<io.TextWriter " + stream + ">";
+  }
+  if (value.is_logger()) {
+    return value.as_logger() == nullptr ? "<io.Logger null>" : "<io.Logger>";
   }
   if (value.is_watch_cell()) {
     const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();
