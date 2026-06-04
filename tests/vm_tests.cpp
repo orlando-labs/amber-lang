@@ -100,9 +100,10 @@ std::uint32_t append_integer_const(amber::bytecode::BcModule *module,
 const amber::runtime::ExecutionLocal *
 execution_local_by_name(const amber::runtime::ExecutionResult &result,
                         const std::string &name);
-std::string string_value_text_or_die(
-    const amber::runtime::Value &value, const amber::bytecode::BcModule &module,
-    const amber::runtime::ExecutionResult &result);
+std::string
+string_value_text_or_die(const amber::runtime::Value &value,
+                         const amber::bytecode::BcModule &module,
+                         const amber::runtime::ExecutionResult &result);
 
 void test_execute_emitted_method() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def echo(x):\n"
@@ -212,8 +213,7 @@ void test_execute_emitted_collection_literals() {
       amber::runtime::execute_code(
           size_property_result.module,
           size_property_result.module.init.entry_code_id);
-  expect(size_property_exec.ok(),
-         "collection size property execution failed");
+  expect(size_property_exec.ok(), "collection size property execution failed");
   const std::shared_ptr<amber::runtime::ListValue> size_parts =
       size_property_exec.value.as_list();
   expect(size_parts != nullptr && size_parts->items.size() == 9,
@@ -240,9 +240,8 @@ void test_execute_emitted_collection_literals() {
               ":alpha in lookup, lookup.contains?(:alpha), "
               "lookup.include?(:alpha), lookup.member?(:alpha), "
               "lookup.includes?(:alpha), :missing in lookup]\n");
-  amber::runtime::ExecutionResult member_op_exec =
-      amber::runtime::execute_code(member_op_result.module,
-                                   member_op_result.module.init.entry_code_id);
+  amber::runtime::ExecutionResult member_op_exec = amber::runtime::execute_code(
+      member_op_result.module, member_op_result.module.init.entry_code_id);
   expect(member_op_exec.ok(), "member op execution failed");
   const std::shared_ptr<amber::runtime::ListValue> member_parts =
       member_op_exec.value.as_list();
@@ -904,22 +903,20 @@ void test_runtime_string_interpolation_and_conversions() {
                                       emit_result.module.init.entry_code_id);
   expect(!exec.ok() && exec.fault.has_value() &&
              exec.fault->error_name == "NoMethodError",
-             "conversion property aliases should not become ordinary methods");
+         "conversion property aliases should not become ordinary methods");
 }
 
 void test_runtime_text_output_helpers_and_io_sinks() {
-  amber::bytecode::EmitResult emit_result =
-      emit_ok("print \"hello\"\n"
-              "x = p \"debug\"\n"
-              "pp([1, 2])\n"
-              "x\n");
+  amber::bytecode::EmitResult emit_result = emit_ok("print \"hello\"\n"
+                                                    "x = p \"debug\"\n"
+                                                    "pp([1, 2])\n"
+                                                    "x\n");
   std::shared_ptr<amber::runtime::RuntimeTextWriter> stdout_buffer =
       amber::runtime::RuntimeTextWriter::buffer();
   {
     amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
-    const amber::runtime::ExecutionResult exec =
-        amber::runtime::execute_code(emit_result.module,
-                                     emit_result.module.init.entry_code_id);
+    const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+        emit_result.module, emit_result.module.init.entry_code_id);
     expect(exec.ok(), "print/p/pp command-form execution failed");
     expect(exec.value.is_string(), "p should return its single argument");
   }
@@ -933,11 +930,9 @@ void test_runtime_text_output_helpers_and_io_sinks() {
   stdout_buffer = amber::runtime::RuntimeTextWriter::buffer();
   {
     amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
-    const amber::runtime::ExecutionResult exec =
-        amber::runtime::execute_code(emit_result.module,
-                                     emit_result.module.init.entry_code_id);
-    expect(exec.ok() && exec.value.is_null(),
-           "print() should return null");
+    const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+        emit_result.module, emit_result.module.init.entry_code_id);
+    expect(exec.ok() && exec.value.is_null(), "print() should return null");
   }
   expect(stdout_buffer->to_string() == "\n",
          "print() should write one newline");
@@ -946,9 +941,8 @@ void test_runtime_text_output_helpers_and_io_sinks() {
   stdout_buffer = amber::runtime::RuntimeTextWriter::buffer();
   {
     amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
-    const amber::runtime::ExecutionResult exec =
-        amber::runtime::execute_code(emit_result.module,
-                                     emit_result.module.init.entry_code_id);
+    const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+        emit_result.module, emit_result.module.init.entry_code_id);
     expect(exec.ok() && exec.value.is_null(),
            "multi-value print should return null");
   }
@@ -959,9 +953,8 @@ void test_runtime_text_output_helpers_and_io_sinks() {
   stdout_buffer = amber::runtime::RuntimeTextWriter::buffer();
   {
     amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
-    const amber::runtime::ExecutionResult exec =
-        amber::runtime::execute_code(emit_result.module,
-                                     emit_result.module.init.entry_code_id);
+    const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+        emit_result.module, emit_result.module.init.entry_code_id);
     expect(exec.ok() && exec.value.is_null(), "p() should return null");
   }
   expect(stdout_buffer->to_string().empty(), "p() should write nothing");
@@ -970,9 +963,8 @@ void test_runtime_text_output_helpers_and_io_sinks() {
   stdout_buffer = amber::runtime::RuntimeTextWriter::buffer();
   {
     amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
-    const amber::runtime::ExecutionResult exec =
-        amber::runtime::execute_code(emit_result.module,
-                                     emit_result.module.init.entry_code_id);
+    const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+        emit_result.module, emit_result.module.init.entry_code_id);
     expect(exec.ok() && exec.value.is_tuple(),
            "multi-value p should return tuple");
     expect(exec.value.as_tuple()->items.size() == 2,
@@ -1058,31 +1050,30 @@ void test_runtime_text_output_helpers_and_io_sinks() {
              "\"hello\"",
          "inspect stringify should quote strings");
   expect(string_value_text_or_die(values->items[1], emit_result.module, exec)
-             .find("... 1 more") != std::string::npos,
+                 .find("... 1 more") != std::string::npos,
          "pretty stringify should honor max_items");
 }
 
 void test_runtime_logger_source_surface_and_annotations() {
-  amber::bytecode::EmitResult emit_result =
-      emit_ok("import task\n"
-              "buffer = io.Buffer.new()\n"
-              "color_buffer = io.Buffer.new()\n"
-              "logger = io.Logger.new(to: buffer, level: :debug, color: false)\n"
-              "logger.info(\"ready\")\n"
-              "task.with_annotation(\"loader\"): logger.warn(\"slow\")\n"
-              "logger.warning(\"again\")\n"
-              "logger.debug(\"detail\")\n"
-              "logger.log(:fatal, \"boom\")\n"
-              "logger.flush()\n"
-              "color_logger = io.Logger.new(to: color_buffer, level: :error, "
-              "color: true)\n"
-              "color_logger.debug(\"hidden\")\n"
-              "color_logger.error(\"bad\")\n"
-              "color_logger.flush()\n"
-              "[buffer.to_str(), color_buffer.to_str()]\n");
-  const amber::runtime::ExecutionResult exec =
-      amber::runtime::execute_code(emit_result.module,
-                                   emit_result.module.init.entry_code_id);
+  amber::bytecode::EmitResult emit_result = emit_ok(
+      "import task\n"
+      "buffer = io.Buffer.new()\n"
+      "color_buffer = io.Buffer.new()\n"
+      "logger = io.Logger.new(to: buffer, level: :debug, color: false)\n"
+      "logger.info(\"ready\")\n"
+      "task.with_annotation(\"loader\"): logger.warn(\"slow\")\n"
+      "logger.warning(\"again\")\n"
+      "logger.debug(\"detail\")\n"
+      "logger.log(:fatal, \"boom\")\n"
+      "logger.flush()\n"
+      "color_logger = io.Logger.new(to: color_buffer, level: :error, "
+      "color: true)\n"
+      "color_logger.debug(\"hidden\")\n"
+      "color_logger.error(\"bad\")\n"
+      "color_logger.flush()\n"
+      "[buffer.to_str(), color_buffer.to_str()]\n");
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
   expect(exec.ok(), "source-level logger execution failed");
   expect(exec.value.is_list(), "logger source result should be list");
   const std::shared_ptr<amber::runtime::ListValue> values =
@@ -1096,8 +1087,9 @@ void test_runtime_logger_source_surface_and_annotations() {
 
   expect(plain.find("[INFO] [thread=") != std::string::npos,
          "logger info record should include native thread id");
-  expect(plain.find("[WARN] [loader] slow\n") != std::string::npos,
-         "logger warning should include scoped annotation");
+  expect(plain.find("[WARN] [loader thread=") != std::string::npos &&
+             plain.find("slow\n") != std::string::npos,
+         "logger warning should include scoped annotation and thread id");
   expect(plain.find("[WARN] [thread=") != std::string::npos &&
              plain.find("again\n") != std::string::npos,
          "logger warning alias should write unannotated record");
@@ -1132,9 +1124,9 @@ void test_runtime_logger_parallel_native_threads_and_tasks() {
       amber::runtime::RuntimeTaskAnnotationScope annotation(
           "native-" + std::to_string(thread_index));
       for (int message = 0; message < kPerThread; ++message) {
-        const amber::runtime::RuntimeTextWriteResult result = logger.debug(
-            "message-" + std::to_string(thread_index) + "-" +
-            std::to_string(message));
+        const amber::runtime::RuntimeTextWriteResult result =
+            logger.debug("message-" + std::to_string(thread_index) + "-" +
+                         std::to_string(message));
         expect(result.ok, "native thread logger call should enqueue");
       }
     });
@@ -1165,8 +1157,10 @@ void test_runtime_logger_parallel_native_threads_and_tasks() {
          "logger should keep all parallel native thread records");
   expect(output.find("message-0-0\n") != std::string::npos,
          "logger should retain native thread messages");
-  expect(count_occurrences(output, "[INFO] [task-parent] task-message-") == 4,
-         "logger tasks should inherit task annotation");
+  expect(count_occurrences(output, "task-message-") == 4 &&
+             output.find("[INFO] [task-parent task=") != std::string::npos &&
+             output.find(" thread=") != std::string::npos,
+         "logger tasks should include annotation, task id, and thread id");
 }
 
 void test_manual_call_invokes_object_call_method() {
@@ -1253,29 +1247,21 @@ void test_execute_emitted_integer_specialized_ops() {
       exec.value.as_list();
   expect(values != nullptr && values->items.size() == 17,
          "specialized integer ops list size");
-  expect(values->items[0].is_integer() &&
-             values->items[0].as_integer() == 13,
+  expect(values->items[0].is_integer() && values->items[0].as_integer() == 13,
          "IADD should add integer registers");
-  expect(values->items[1].is_integer() &&
-             values->items[1].as_integer() == 6,
+  expect(values->items[1].is_integer() && values->items[1].as_integer() == 6,
          "ISUBK should subtract integer constant");
-  expect(values->items[2].is_integer() &&
-             values->items[2].as_integer() == 30,
+  expect(values->items[2].is_integer() && values->items[2].as_integer() == 30,
          "IMUL should multiply integer registers");
-  expect(values->items[3].is_integer() &&
-             values->items[3].as_integer() == 3,
+  expect(values->items[3].is_integer() && values->items[3].as_integer() == 3,
          "IDIV should divide integer registers");
-  expect(values->items[4].is_integer() &&
-             values->items[4].as_integer() == 1,
+  expect(values->items[4].is_integer() && values->items[4].as_integer() == 1,
          "IMOD should floor-mod positive integers");
-  expect(values->items[5].is_integer() &&
-             values->items[5].as_integer() == 2,
+  expect(values->items[5].is_integer() && values->items[5].as_integer() == 2,
          "IMOD should floor-mod negative integers");
-  expect(values->items[6].is_integer() &&
-             values->items[6].as_integer() == 3,
+  expect(values->items[6].is_integer() && values->items[6].as_integer() == 3,
          "IFLOORDIV should divide positive integers");
-  expect(values->items[7].is_integer() &&
-             values->items[7].as_integer() == -4,
+  expect(values->items[7].is_integer() && values->items[7].as_integer() == -4,
          "IFLOORDIV should floor negative quotients");
   expect(values->items[8].is_bool() && !values->items[8].as_bool(),
          "ILT should compare integer registers");
@@ -1289,14 +1275,11 @@ void test_execute_emitted_integer_specialized_ops() {
          "IEQK should compare integer constant");
   expect(values->items[13].is_bool() && values->items[13].as_bool(),
          "INE should compare integer registers");
-  expect(values->items[14].is_integer() &&
-             values->items[14].as_integer() == 1,
+  expect(values->items[14].is_integer() && values->items[14].as_integer() == 1,
          "ICMP should return 1 for greater lhs");
-  expect(values->items[15].is_integer() &&
-             values->items[15].as_integer() == -1,
+  expect(values->items[15].is_integer() && values->items[15].as_integer() == -1,
          "ICMP should return -1 for lesser lhs");
-  expect(values->items[16].is_integer() &&
-             values->items[16].as_integer() == 0,
+  expect(values->items[16].is_integer() && values->items[16].as_integer() == 0,
          "ICMPK should return 0 for equal operands");
 }
 
@@ -1320,8 +1303,7 @@ void test_execute_emitted_numeric_equality_and_new_ops() {
          "float modulo should use floor modulo");
   expect(values->items[3].is_float() && values->items[3].as_float() == 3.0,
          "float floor division should floor quotient");
-  expect(values->items[4].is_integer() &&
-             values->items[4].as_integer() == 0,
+  expect(values->items[4].is_integer() && values->items[4].as_integer() == 0,
          "mixed numeric spaceship should return zero");
   expect(values->items[5].is_bool() && values->items[5].as_bool(),
          "ascending comparison chain should pass");
@@ -1341,26 +1323,22 @@ void test_execute_emitted_integer_send_fast_path_new_ops() {
 
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       emit_result.module, emit_result.module.methods[0].entry_code_id,
-      {amber::runtime::Value::integer(10),
-       amber::runtime::Value::integer(3)});
+      {amber::runtime::Value::integer(10), amber::runtime::Value::integer(3)});
   expect(exec.ok(), "integer send fast path execution failed");
   expect(exec.value.is_list(), "integer send fast path should return list");
   const std::shared_ptr<amber::runtime::ListValue> values =
       exec.value.as_list();
   expect(values != nullptr && values->items.size() == 5,
          "integer send fast path list size");
-  expect(values->items[0].is_integer() &&
-             values->items[0].as_integer() == 1,
+  expect(values->items[0].is_integer() && values->items[0].as_integer() == 1,
          "integer SEND modulo should execute");
-  expect(values->items[1].is_integer() &&
-             values->items[1].as_integer() == 3,
+  expect(values->items[1].is_integer() && values->items[1].as_integer() == 3,
          "integer SEND floor division should execute");
   expect(values->items[2].is_bool() && !values->items[2].as_bool(),
          "integer SEND equality should execute");
   expect(values->items[3].is_bool() && values->items[3].as_bool(),
          "integer SEND inequality should execute");
-  expect(values->items[4].is_integer() &&
-             values->items[4].as_integer() == 1,
+  expect(values->items[4].is_integer() && values->items[4].as_integer() == 1,
          "integer SEND spaceship should execute");
 }
 
@@ -1538,17 +1516,16 @@ void test_execute_emitted_properties() {
   expect(exec.value.is_integer() && exec.value.as_integer() == 203,
          "class property should return getter result");
 
-  emit_result =
-      emit_ok("class Box:\n"
-              "  def init(initial): @value = initial\n"
-              "  prop value:\n"
-              "    get: @value\n"
-              "    set(v):\n"
-              "      @value = v\n"
-              "      999\n"
-              "box = Box(1)\n"
-              "assigned = (box.value = 10)\n"
-              "box.value + assigned\n");
+  emit_result = emit_ok("class Box:\n"
+                        "  def init(initial): @value = initial\n"
+                        "  prop value:\n"
+                        "    get: @value\n"
+                        "    set(v):\n"
+                        "      @value = v\n"
+                        "      999\n"
+                        "box = Box(1)\n"
+                        "assigned = (box.value = 10)\n"
+                        "box.value + assigned\n");
   exec = amber::runtime::execute_code(emit_result.module,
                                       emit_result.module.init.entry_code_id);
   expect(exec.ok(), "instance property setter execution failed");
@@ -1578,13 +1555,12 @@ void test_execute_emitted_properties() {
   expect(exec.value.is_bool() && exec.value.as_bool(),
          "getter-only attr should read default storage");
 
-  emit_result =
-      emit_ok("class Box:\n"
-              "  def init(initial): @raw_value = initial\n"
-              "  attr var value from @raw_value\n"
-              "box = Box(4)\n"
-              "assigned = (box.value = 9)\n"
-              "box.value + assigned\n");
+  emit_result = emit_ok("class Box:\n"
+                        "  def init(initial): @raw_value = initial\n"
+                        "  attr var value from @raw_value\n"
+                        "box = Box(4)\n"
+                        "assigned = (box.value = 9)\n"
+                        "box.value + assigned\n");
   exec = amber::runtime::execute_code(emit_result.module,
                                       emit_result.module.init.entry_code_id);
   expect(exec.ok(), "read-write attr execution failed");
@@ -1593,13 +1569,11 @@ void test_execute_emitted_properties() {
 }
 
 void test_bare_member_def_is_not_implicit_call() {
-  const amber::bytecode::EmitResult emit_result =
-      emit_ok("class Box:\n"
-              "  def value(): 1\n"
-              "Box().value\n");
-  const amber::runtime::ExecutionResult exec =
-      amber::runtime::execute_code(emit_result.module,
-                                   emit_result.module.init.entry_code_id);
+  const amber::bytecode::EmitResult emit_result = emit_ok("class Box:\n"
+                                                          "  def value(): 1\n"
+                                                          "Box().value\n");
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
   expect(!exec.ok() && exec.fault.has_value() &&
              exec.fault->error_name == "NoMethodError",
          "bare ordinary method access should not implicitly call def");
@@ -1718,9 +1692,10 @@ std::uint32_t append_float_const(amber::bytecode::BcModule *module,
   return static_cast<std::uint32_t>(module->const_pool.size() - 1U);
 }
 
-std::string string_value_text_or_die(
-    const amber::runtime::Value &value, const amber::bytecode::BcModule &module,
-    const amber::runtime::ExecutionResult &result) {
+std::string
+string_value_text_or_die(const amber::runtime::Value &value,
+                         const amber::bytecode::BcModule &module,
+                         const amber::runtime::ExecutionResult &result) {
   expect(value.is_string(), "expected Str value");
   const std::uint32_t string_id = value.as_string().string_id;
   const std::vector<std::string> &strings =
@@ -2907,8 +2882,7 @@ void test_runtime_integer_specialized_op_preserves_watch_local_write() {
   module.code_objects.push_back(code);
 
   amber::runtime::RuntimeWorld world(module);
-  const amber::runtime::ExecutionResult exec =
-      world.execute(code.code_id);
+  const amber::runtime::ExecutionResult exec = world.execute(code.code_id);
   expect(exec.ok(), "watched integer add should execute");
   expect(exec.value.is_integer() && exec.value.as_integer() == 2,
          "watched integer add returns updated value");
@@ -2942,8 +2916,7 @@ void test_runtime_compare_branch_preserves_debug_local() {
   code.instructions.push_back({Opcode::LoadK, {{2, false}, {two_id, false}}});
   code.instructions.push_back(
       {Opcode::ILt, {{0, false}, {1, false}, {2, false}}});
-  code.instructions.push_back(
-      {Opcode::JumpIfFalse, {{0, false}, {6, false}}});
+  code.instructions.push_back({Opcode::JumpIfFalse, {{0, false}, {6, false}}});
   code.instructions.push_back({Opcode::LoadK, {{1, false}, {two_id, false}}});
   code.instructions.push_back({Opcode::Return, {{1, false}}});
   code.instructions.push_back({Opcode::LoadK, {{1, false}, {one_id, false}}});

@@ -335,8 +335,7 @@ public:
   RuntimeLogger &operator=(RuntimeLogger &&) noexcept;
   ~RuntimeLogger();
 
-  RuntimeTextWriteResult log(RuntimeLogLevel level,
-                             const std::string &message);
+  RuntimeTextWriteResult log(RuntimeLogLevel level, const std::string &message);
   RuntimeTextWriteResult fatal(const std::string &message);
   RuntimeTextWriteResult error(const std::string &message);
   RuntimeTextWriteResult warn(const std::string &message);
@@ -1294,7 +1293,7 @@ enum class RuntimeFlowFailurePolicy { First, Collect, Ignore };
 
 enum class RuntimeFlowIsolationMode { Checked, Unchecked };
 
-enum class RuntimeFlowPartitionPolicy { Items, Chunks, Stride };
+enum class RuntimeFlowPartitionPolicy { Items, Chunks, Stride, Atomic };
 
 struct RuntimeFlowOptions {
   std::size_t workers = 0;
@@ -1405,7 +1404,9 @@ public:
 
   explicit RuntimeThreadedCollection(std::vector<Value> items,
                                      std::size_t workers = 0,
-                                     RuntimeFlowOptions options = {});
+                                     RuntimeFlowOptions options = {},
+                                     RuntimeFlowPartitionPolicy scatter_policy =
+                                         RuntimeFlowPartitionPolicy::Atomic);
   RuntimeThreadedCollection(const RuntimeThreadedCollection &) = delete;
   RuntimeThreadedCollection &
   operator=(const RuntimeThreadedCollection &) = delete;
@@ -1877,11 +1878,9 @@ ExecutionResult execute_code(const bytecode::BcModule &module,
                              Value self = Value::null(),
                              Value block = Value::null());
 
-std::string value_to_debug_string(const Value &value,
-                                  const bytecode::BcModule *module = nullptr,
-                                  const std::vector<std::string>
-                                      *runtime_strings = nullptr,
-                                  const std::vector<std::string>
-                                      *runtime_symbols = nullptr);
+std::string value_to_debug_string(
+    const Value &value, const bytecode::BcModule *module = nullptr,
+    const std::vector<std::string> *runtime_strings = nullptr,
+    const std::vector<std::string> *runtime_symbols = nullptr);
 
 } // namespace amber::runtime

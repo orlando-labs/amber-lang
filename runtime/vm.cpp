@@ -9,9 +9,9 @@
 #include <deque>
 #include <functional>
 #include <initializer_list>
+#include <iostream>
 #include <iterator>
 #include <limits>
-#include <iostream>
 #include <map>
 #include <mutex>
 #include <queue>
@@ -3755,8 +3755,8 @@ RuntimeTaskHandle RuntimeTaskModule::spawn_with_kind(SpawnKind kind,
                                                      TaskFunction function) {
   auto state = std::make_shared<RuntimeTaskHandle::State>();
   const std::string inherited_annotation = current_runtime_task_annotation();
-  auto task_body =
-      [state, function = std::move(function), inherited_annotation]() mutable {
+  auto task_body = [state, function = std::move(function),
+                    inherited_annotation]() mutable {
     RuntimeTaskAnnotationScope annotation_scope(inherited_annotation);
     try {
       const Value value = function ? function() : Value::null();
@@ -3909,6 +3909,11 @@ public:
       return validation;
     }
 
+    if (normalized.partition_policy != RuntimeFlowPartitionPolicy::Items) {
+      return scatter_map_partitioned(std::move(items), std::move(function),
+                                     normalized);
+    }
+
     std::vector<RuntimeTaskHandle> handles;
     handles.reserve(items.size());
     record_flow_started(items.size());
@@ -3997,6 +4002,15 @@ public:
   }
 
 private:
+  struct PartitionedScatterState {
+    std::mutex mutex;
+    std::atomic<std::size_t> next_index{0};
+    std::atomic<bool> stop_requested{false};
+    RuntimeFlowGatherResult result;
+    std::vector<bool> completed;
+    std::vector<Value> completion_order;
+  };
+
   static RuntimeFlowOptions normalize_options(RuntimeFlowOptions options,
                                               std::size_t item_count) {
     if (options.workers == 0) {
@@ -4014,6 +4028,159 @@ private:
     RuntimeFlowGatherResult result;
     result.error_name = "ArgumentError";
     result.message = std::move(message);
+    return result;
+  }
+
+  RuntimeFlowGatherResult
+  scatter_map_partitioned(std::vector<Value> items, MapFunction function,
+                          const RuntimeFlowOptions &options) {
+    const std::size_t worker_count = items.empty() ? 0 : options.workers;
+    auto shared_items =
+        std::make_shared<const std::vector<Value>>(std::move(items));
+    auto shared_function = std::make_shared<MapFunction>(std::move(function));
+    auto state = std::make_shared<PartitionedScatterState>();
+    state->result.values.resize(shared_items->size(), Value::null());
+    state->completed.resize(shared_items->size(), false);
+
+    auto record_failure =
+        [this, state, &options](std::size_t index, std::string error_name,
+                                std::string message, bool isolation_failure) {
+          if (options.failure_policy == RuntimeFlowFailurePolicy::First &&
+              state->stop_requested.exchange(true, std::memory_order_relaxed)) {
+            return;
+          }
+          if (isolation_failure) {
+            record_isolation_rejection();
+          }
+          std::lock_guard<std::mutex> lock(state->mutex);
+          RuntimeFlowFailure failure{index, std::move(error_name),
+                                     std::move(message)};
+          state->result.failures.push_back(failure);
+          state->result.failed = true;
+          if (state->result.error_name.empty()) {
+            state->result.error_name = failure.error_name;
+            state->result.message = failure.message;
+          }
+          state->result.failed_count =
+              static_cast<std::uint64_t>(state->result.failures.size());
+        };
+
+    auto record_success = [state, &options, &record_failure](
+                              std::size_t index, Value value) mutable {
+      if (options.isolation == RuntimeFlowIsolationMode::Checked) {
+        std::optional<RuntimeSyncBoundaryError> shareability_error =
+            runtime_value_shareability_error(value);
+        if (shareability_error.has_value()) {
+          record_failure(index, shareability_error->error_name,
+                         shareability_error->message, true);
+          return;
+        }
+      }
+
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->completed[index] = true;
+      ++state->result.completed_count;
+      if (options.ordered) {
+        state->result.values[index] = std::move(value);
+      } else {
+        state->completion_order.push_back(std::move(value));
+      }
+    };
+
+    auto process_index = [shared_items, shared_function, &record_failure,
+                          &record_success](std::size_t index) mutable {
+      try {
+        Value item = (*shared_items)[index];
+        record_success(index, (*shared_function)(item, index));
+      } catch (const RuntimeTaskFailure &failure) {
+        record_failure(index, failure.error_name(), failure.message(), false);
+      } catch (const RuntimeTaskCancelled &) {
+        throw;
+      } catch (const std::exception &error) {
+        record_failure(index, "RuntimeError", error.what(), false);
+      } catch (...) {
+        record_failure(index, "RuntimeError", "flow worker failed", false);
+      }
+    };
+
+    std::vector<RuntimeTaskHandle> handles;
+    handles.reserve(worker_count);
+    record_flow_started(worker_count);
+    for (std::size_t worker_index = 0; worker_index < worker_count;
+         ++worker_index) {
+      handles.push_back(
+          task_.spawn([state, process_index, worker_index, worker_count,
+                       item_count = shared_items->size(),
+                       policy = options.partition_policy]() mutable {
+            if (policy == RuntimeFlowPartitionPolicy::Atomic) {
+              while (!state->stop_requested.load(std::memory_order_relaxed)) {
+                throw_if_runtime_task_cancelled();
+                const std::size_t index =
+                    state->next_index.fetch_add(1, std::memory_order_relaxed);
+                if (index >= item_count) {
+                  return Value::null();
+                }
+                process_index(index);
+              }
+              return Value::null();
+            }
+
+            if (policy == RuntimeFlowPartitionPolicy::Stride) {
+              for (std::size_t index = worker_index; index < item_count;
+                   index += worker_count) {
+                if (state->stop_requested.load(std::memory_order_relaxed)) {
+                  break;
+                }
+                throw_if_runtime_task_cancelled();
+                process_index(index);
+              }
+              return Value::null();
+            }
+
+            const std::size_t chunk_size =
+                (item_count + worker_count - 1U) / worker_count;
+            const std::size_t begin = worker_index * chunk_size;
+            const std::size_t end = std::min(begin + chunk_size, item_count);
+            for (std::size_t index = begin; index < end; ++index) {
+              if (state->stop_requested.load(std::memory_order_relaxed)) {
+                break;
+              }
+              throw_if_runtime_task_cancelled();
+              process_index(index);
+            }
+            return Value::null();
+          }));
+    }
+
+    RuntimeFlowGatherResult worker_result = gather(std::move(handles), options);
+    if (!worker_result.ok || worker_result.failed || worker_result.timed_out ||
+        worker_result.cancelled) {
+      return worker_result;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    RuntimeFlowGatherResult result = std::move(state->result);
+    if (!options.ordered) {
+      result.values = std::move(state->completion_order);
+    } else if (options.failure_policy == RuntimeFlowFailurePolicy::Ignore) {
+      std::vector<Value> compacted;
+      compacted.reserve(static_cast<std::size_t>(result.completed_count));
+      for (std::size_t index = 0; index < state->completed.size(); ++index) {
+        if (state->completed[index]) {
+          compacted.push_back(std::move(result.values[index]));
+        }
+      }
+      result.values = std::move(compacted);
+    }
+
+    result.failed = !result.failures.empty();
+    result.failed_count = static_cast<std::uint64_t>(result.failures.size());
+    if (result.failed && result.error_name.empty()) {
+      result.error_name = result.failures.front().error_name;
+      result.message = result.failures.front().message;
+    }
+    result.ok = !result.failed ||
+                options.failure_policy != RuntimeFlowFailurePolicy::First;
     return result;
   }
 
@@ -4219,7 +4386,7 @@ RuntimeFlowStats RuntimeFlowModule::stats() const { return impl_->stats(); }
 class RuntimeThreadedCollection::Impl {
 public:
   Impl(std::vector<Value> items, std::size_t workers,
-       RuntimeFlowOptions options)
+       RuntimeFlowOptions options, RuntimeFlowPartitionPolicy scatter_policy)
       : items_(std::move(items)),
         flow_(RuntimeSchedulerConfig{workers == 0 ? options.workers : workers,
                                      1}),
@@ -4227,6 +4394,7 @@ public:
     if (workers != 0) {
       options_.workers = workers;
     }
+    options_.partition_policy = scatter_policy;
   }
 
   RuntimeFlowGatherResult each(EachFunction function) {
@@ -4560,10 +4728,11 @@ private:
   RuntimeThreadedCollectionStats stats_;
 };
 
-RuntimeThreadedCollection::RuntimeThreadedCollection(std::vector<Value> items,
-                                                     std::size_t workers,
-                                                     RuntimeFlowOptions options)
-    : impl_(std::make_shared<Impl>(std::move(items), workers, options)) {}
+RuntimeThreadedCollection::RuntimeThreadedCollection(
+    std::vector<Value> items, std::size_t workers, RuntimeFlowOptions options,
+    RuntimeFlowPartitionPolicy scatter_policy)
+    : impl_(std::make_shared<Impl>(std::move(items), workers, options,
+                                   scatter_policy)) {}
 
 RuntimeThreadedCollection::RuntimeThreadedCollection(
     RuntimeThreadedCollection &&) noexcept = default;
@@ -6018,8 +6187,8 @@ RuntimeTextWriter::~RuntimeTextWriter() = default;
 std::shared_ptr<RuntimeTextWriter> RuntimeTextWriter::host_stdout() {
   static std::shared_ptr<RuntimeTextWriter> writer = [] {
     auto out = std::make_shared<RuntimeTextWriter>();
-    out->impl_ = std::make_shared<Impl>(RuntimeTextWriterKind::HostStdout,
-                                        "stdout");
+    out->impl_ =
+        std::make_shared<Impl>(RuntimeTextWriterKind::HostStdout, "stdout");
     return out;
   }();
   return writer;
@@ -6028,8 +6197,8 @@ std::shared_ptr<RuntimeTextWriter> RuntimeTextWriter::host_stdout() {
 std::shared_ptr<RuntimeTextWriter> RuntimeTextWriter::host_stderr() {
   static std::shared_ptr<RuntimeTextWriter> writer = [] {
     auto out = std::make_shared<RuntimeTextWriter>();
-    out->impl_ = std::make_shared<Impl>(RuntimeTextWriterKind::HostStderr,
-                                        "stderr");
+    out->impl_ =
+        std::make_shared<Impl>(RuntimeTextWriterKind::HostStderr, "stderr");
     return out;
   }();
   return writer;
@@ -6047,8 +6216,7 @@ RuntimeTextWriter::cell_stream(std::string stream_name) {
   return out;
 }
 
-RuntimeTextWriteResult
-RuntimeTextWriter::write_str(const std::string &text) {
+RuntimeTextWriteResult RuntimeTextWriter::write_str(const std::string &text) {
   if (impl_ == nullptr) {
     return text_write_error("IOError", "text writer is not initialized");
   }
@@ -6158,9 +6326,9 @@ bool RuntimeTextWriter::xterm_color_available() const {
   const int fd = impl_->kind == RuntimeTextWriterKind::HostStdout ? 1 : 2;
   return _isatty(fd) != 0;
 #else
-  const int fd =
-      impl_->kind == RuntimeTextWriterKind::HostStdout ? STDOUT_FILENO
-                                                       : STDERR_FILENO;
+  const int fd = impl_->kind == RuntimeTextWriterKind::HostStdout
+                     ? STDOUT_FILENO
+                     : STDERR_FILENO;
   return ::isatty(fd) != 0;
 #endif
 }
@@ -6257,23 +6425,34 @@ bool runtime_log_level_enabled(RuntimeLogLevel threshold,
 }
 
 std::string runtime_log_context_label() {
+  std::vector<std::string> labels;
   const std::string annotation = current_runtime_task_annotation();
   if (!annotation.empty()) {
-    return annotation;
+    labels.push_back(annotation);
   }
   const std::uint64_t task_id = current_runtime_task_id();
   if (task_id != 0) {
-    return "task=" + std::to_string(task_id);
+    labels.push_back("task=" + std::to_string(task_id));
   }
-  return "thread=" + std::to_string(current_runtime_native_thread_id());
+  labels.push_back("thread=" +
+                   std::to_string(current_runtime_native_thread_id()));
+
+  std::string out;
+  for (const std::string &label : labels) {
+    if (!out.empty()) {
+      out += " ";
+    }
+    out += label;
+  }
+  return out;
 }
 
 std::string format_runtime_log_line(RuntimeLogLevel level, bool color,
                                     const std::string &message) {
   std::string level_label = runtime_log_level_name(level);
   if (color) {
-    level_label = std::string(runtime_log_level_color(level)) + level_label +
-                  "\033[0m";
+    level_label =
+        std::string(runtime_log_level_color(level)) + level_label + "\033[0m";
   }
   return "[" + level_label + "] [" + runtime_log_context_label() + "] " +
          message;
@@ -6316,9 +6495,7 @@ public:
     RuntimeTextWriteResult result;
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      drained_cv_.wait(lock, [this]() {
-        return queue_.empty() && !writing_;
-      });
+      drained_cv_.wait(lock, [this]() { return queue_.empty() && !writing_; });
       result = last_error_;
     }
     if (!result.ok) {
@@ -6874,16 +7051,14 @@ struct RuntimeStringifyContext {
 
 const std::vector<std::string> *
 string_table_for(const RuntimeStringifyContext &context) {
-  return context.runtime_strings != nullptr &&
-                 !context.runtime_strings->empty()
+  return context.runtime_strings != nullptr && !context.runtime_strings->empty()
              ? context.runtime_strings
              : (context.module == nullptr ? nullptr : &context.module->strings);
 }
 
 const std::vector<std::string> *
 symbol_table_for(const RuntimeStringifyContext &context) {
-  return context.runtime_symbols != nullptr &&
-                 !context.runtime_symbols->empty()
+  return context.runtime_symbols != nullptr && !context.runtime_symbols->empty()
              ? context.runtime_symbols
              : (context.module == nullptr ? nullptr : &context.module->symbols);
 }
@@ -7026,8 +7201,7 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
 
 std::string compact_join_values(RuntimeStringifyContext *context,
                                 const std::vector<Value> &items,
-                                RuntimeStringifyMode mode,
-                                std::size_t depth) {
+                                RuntimeStringifyMode mode, std::size_t depth) {
   std::ostringstream out;
   const std::size_t limit = std::min(items.size(), context->options.max_items);
   for (std::size_t i = 0; i < limit; ++i) {
@@ -7118,15 +7292,16 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
       return "<io.Buffer>";
     }
     const std::string stream = writer->stream_name();
-    return stream.empty() ? "<io.TextWriter>" : "<io.TextWriter " + stream + ">";
+    return stream.empty() ? "<io.TextWriter>"
+                          : "<io.TextWriter " + stream + ">";
   }
   if (value.is_logger()) {
     return value.as_logger() == nullptr ? "<io.Logger null>" : "<io.Logger>";
   }
 
   const void *identity = heap_identity_for(value);
-  if (identity != nullptr && context->active.find(identity) !=
-                                 context->active.end()) {
+  if (identity != nullptr &&
+      context->active.find(identity) != context->active.end()) {
     return "#<cycle " + type_label_for_cycle(value) + ">";
   }
   if (identity != nullptr && depth >= context->options.max_depth) {
@@ -7188,9 +7363,9 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
       return "<closure null>";
     }
     const std::string lifecycle = lifecycle_debug_label(closure->header);
-    return lifecycle.empty() ? "<closure c" + std::to_string(closure->code_id) +
-                                   ">"
-                             : "<" + lifecycle + " closure>";
+    return lifecycle.empty()
+               ? "<closure c" + std::to_string(closure->code_id) + ">"
+               : "<" + lifecycle + " closure>";
   }
   if (value.is_instance_object()) {
     const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
@@ -7229,7 +7404,8 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     }
     if (mode == RuntimeStringifyMode::Pretty && !list->items.empty()) {
       std::ostringstream out;
-      out << "[\n" << pretty_join_values(context, list->items, mode, depth)
+      out << "[\n"
+          << pretty_join_values(context, list->items, mode, depth)
           << indent_text(depth) << "]";
       return out.str();
     }
@@ -7246,7 +7422,8 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     }
     if (mode == RuntimeStringifyMode::Pretty && !tuple->items.empty()) {
       std::ostringstream out;
-      out << "(\n" << pretty_join_values(context, tuple->items, mode, depth)
+      out << "(\n"
+          << pretty_join_values(context, tuple->items, mode, depth)
           << indent_text(depth) << ")";
       return out.str();
     }
@@ -7266,7 +7443,8 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     }
     if (mode == RuntimeStringifyMode::Pretty) {
       std::ostringstream out;
-      out << "{\n" << pretty_join_values(context, set->items, mode, depth)
+      out << "{\n"
+          << pretty_join_values(context, set->items, mode, depth)
           << indent_text(depth) << "}";
       return out.str();
     }
@@ -7297,8 +7475,9 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
         const std::optional<std::string> key =
             symbol_text_for(*context, map->entries[i].symbol_id);
         out << indent_text(depth + 1U)
-            << (key.has_value() ? *key
-                                : "#" + std::to_string(map->entries[i].symbol_id))
+            << (key.has_value()
+                    ? *key
+                    : "#" + std::to_string(map->entries[i].symbol_id))
             << ": "
             << runtime_stringify_value_impl(context, map->entries[i].value,
                                             mode, depth + 1U)
@@ -7779,10 +7958,9 @@ struct RuntimeState {
            ++offset) {
         bytecode::BcMethod method =
             module.methods[owner.method_range_start + offset];
-        MethodTableDescriptor &table =
-            (method.flags & kMethodFlagClass) != 0U
-                ? runtime.class_method_table
-                : runtime.instance_method_table;
+        MethodTableDescriptor &table = (method.flags & kMethodFlagClass) != 0U
+                                           ? runtime.class_method_table
+                                           : runtime.instance_method_table;
         table.entries[method.selector_sym_id] = std::move(method);
       }
     }
@@ -7872,10 +8050,9 @@ struct RuntimeState {
            ++offset) {
         bytecode::BcMethod method =
             module.methods[owner.method_range_start + offset];
-        MethodTableDescriptor &table =
-            (method.flags & kMethodFlagClass) != 0U
-                ? runtime.class_method_table
-                : runtime.instance_method_table;
+        MethodTableDescriptor &table = (method.flags & kMethodFlagClass) != 0U
+                                           ? runtime.class_method_table
+                                           : runtime.instance_method_table;
         table.entries[method.selector_sym_id] = std::move(method);
       }
     }
@@ -8180,8 +8357,7 @@ public:
     const std::size_t watch_event_start = state_->watch_events.size();
     const BcCode *entry = find_code(module_, code_id);
     if (entry == nullptr) {
-      return with_runtime_names(
-          fail("VMError", "unknown code id", code_id, 0));
+      return with_runtime_names(fail("VMError", "unknown code id", code_id, 0));
     }
     std::vector<Value> entry_captures;
     if (!prepare_direct_entry_captures(*entry, code_id, &entry_captures,
@@ -8208,9 +8384,9 @@ public:
                                  std::move(watch_events),
                                  state_->watch_epoch});
     }
-    return with_runtime_names(
-        {final_value_, std::nullopt, completed_locals_for(*entry),
-         std::move(watch_events), state_->watch_epoch});
+    return with_runtime_names({final_value_, std::nullopt,
+                               completed_locals_for(*entry),
+                               std::move(watch_events), state_->watch_epoch});
   }
 
 private:
@@ -8294,8 +8470,7 @@ private:
     return std::nullopt;
   }
 
-  bool prepare_direct_entry_captures(const BcCode &entry,
-                                     std::uint32_t code_id,
+  bool prepare_direct_entry_captures(const BcCode &entry, std::uint32_t code_id,
                                      std::vector<Value> *captures,
                                      Value *self) {
     captures->clear();
@@ -8313,9 +8488,8 @@ private:
     if (!state_->module_init_completed && module_.init.has_entry_code_id &&
         module_.init.entry_code_id != code_id) {
       Vm init_vm(module_, state_, module_id_);
-      ExecutionResult init_result =
-          init_vm.execute(module_.init.entry_code_id, {}, Value::null(),
-                          Value::null());
+      ExecutionResult init_result = init_vm.execute(
+          module_.init.entry_code_id, {}, Value::null(), Value::null());
       if (!init_result.ok()) {
         fault_ = init_result.fault;
         return false;
@@ -8894,8 +9068,8 @@ private:
     return true;
   }
 
-  static bool quick_operand_reg_equals(const Instruction &insn,
-                                       std::size_t idx, std::uint32_t reg) {
+  static bool quick_operand_reg_equals(const Instruction &insn, std::size_t idx,
+                                       std::uint32_t reg) {
     std::uint32_t value = 0;
     return quick_operand_u32(insn, idx, &value) && value == reg;
   }
@@ -9044,9 +9218,8 @@ private:
         return true;
       }
       return block_reg >= 0 &&
-             block_reg !=
-                 static_cast<std::int64_t>(
-                     std::numeric_limits<std::uint32_t>::max()) &&
+             block_reg != static_cast<std::int64_t>(
+                              std::numeric_limits<std::uint32_t>::max()) &&
              static_cast<std::uint32_t>(block_reg) == reg;
     }
     case Opcode::IAdd:
@@ -9315,8 +9488,7 @@ private:
 
     switch (insn.opcode) {
     case Opcode::LoadK:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_u32(insn, 1, &b)) {
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b)) {
         out.quick_opcode = QuickOpcode::LoadK;
       }
       break;
@@ -9326,14 +9498,12 @@ private:
       }
       break;
     case Opcode::LoadBool:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_i64(insn, 1, &imm)) {
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_i64(insn, 1, &imm)) {
         out.quick_opcode = QuickOpcode::LoadBool;
       }
       break;
     case Opcode::Move:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_u32(insn, 1, &b)) {
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b)) {
         out.quick_opcode = QuickOpcode::Move;
       }
       break;
@@ -9353,14 +9523,12 @@ private:
       }
       break;
     case Opcode::LoadUpval:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_u32(insn, 1, &b)) {
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b)) {
         out.quick_opcode = QuickOpcode::LoadUpval;
       }
       break;
     case Opcode::StoreUpval:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_u32(insn, 1, &b)) {
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b)) {
         out.quick_opcode = QuickOpcode::StoreUpval;
       }
       break;
@@ -9390,8 +9558,7 @@ private:
     case Opcode::IEqK:
     case Opcode::INeK:
     case Opcode::ICmpK:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_u32(insn, 1, &b) &&
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b) &&
           quick_operand_u32(insn, 2, &c)) {
         switch (insn.opcode) {
         case Opcode::IAdd:
@@ -9483,20 +9650,17 @@ private:
       }
       break;
     case Opcode::JumpIfTrue:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_u32(insn, 1, &b)) {
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b)) {
         out.quick_opcode = QuickOpcode::JumpIfTrue;
       }
       break;
     case Opcode::JumpIfFalse:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_u32(insn, 1, &b)) {
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b)) {
         out.quick_opcode = QuickOpcode::JumpIfFalse;
       }
       break;
     case Opcode::JumpIfNull:
-      if (quick_operand_u32(insn, 0, &a) &&
-          quick_operand_u32(insn, 1, &b)) {
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b)) {
         out.quick_opcode = QuickOpcode::JumpIfNull;
       }
       break;
@@ -9510,17 +9674,16 @@ private:
         out.quick_opcode = QuickOpcode::Raise;
       }
       break;
-	    case Opcode::CloseUpvalues:
-	      out.quick_opcode = QuickOpcode::CloseUpvalues;
-	      break;
-	    case Opcode::Safepoint:
-	      out.quick_opcode = QuickOpcode::Safepoint;
-	      break;
+    case Opcode::CloseUpvalues:
+      out.quick_opcode = QuickOpcode::CloseUpvalues;
+      break;
+    case Opcode::Safepoint:
+      out.quick_opcode = QuickOpcode::Safepoint;
+      break;
     case Opcode::Send: {
       std::uint32_t selector_id = 0;
       std::uint32_t pos_count = 0;
-      if (!quick_operand_u32(insn, 0, &a) ||
-          !quick_operand_u32(insn, 1, &b) ||
+      if (!quick_operand_u32(insn, 0, &a) || !quick_operand_u32(insn, 1, &b) ||
           !quick_operand_u32(insn, 2, &selector_id) ||
           !quick_operand_u32(insn, 3, &pos_count) ||
           selector_id >= module.symbols.size() || pos_count > 1U) {
@@ -9528,8 +9691,7 @@ private:
       }
 
       std::size_t operand_index = 4;
-      if (pos_count == 1U &&
-          !quick_operand_u32(insn, operand_index++, &c)) {
+      if (pos_count == 1U && !quick_operand_u32(insn, operand_index++, &c)) {
         break;
       }
 
@@ -9616,9 +9778,9 @@ private:
       }
       break;
     }
-	    default:
-	      break;
-	    }
+    default:
+      break;
+    }
 
     out.a = a;
     out.b = b;
@@ -9627,7 +9789,8 @@ private:
     return out;
   }
 
-  static QuickCode build_quick_code(const BcModule &module, const BcCode &code) {
+  static QuickCode build_quick_code(const BcModule &module,
+                                    const BcCode &code) {
     QuickCode quick;
     quick.instructions.reserve(code.instructions.size());
     for (const Instruction &insn : code.instructions) {
@@ -9868,13 +10031,10 @@ private:
     return true;
   }
 
-  FastCallStatus try_evaluate_direct_closure(Frame &frame, const BcCode &code,
-                                             const FastCallArg *args,
-                                             std::uint32_t arg_count,
-                                             const std::vector<Value> &captures,
-                                             Value *value_out,
-                                             std::int64_t *int_out,
-                                             bool *int_result) {
+  FastCallStatus try_evaluate_direct_closure(
+      Frame &frame, const BcCode &code, const FastCallArg *args,
+      std::uint32_t arg_count, const std::vector<Value> &captures,
+      Value *value_out, std::int64_t *int_out, bool *int_result) {
     *int_result = false;
     const DirectClosureKind kind = direct_closure_kind_for(code);
     if (kind == DirectClosureKind::None) {
@@ -9889,7 +10049,8 @@ private:
       if (!fast_call_arg_integer(args[1], &index)) {
         return FastCallStatus::NotHandled;
       }
-      const std::vector<Value> *items = sequence_items_view(frame, args[0].value);
+      const std::vector<Value> *items =
+          sequence_items_view(frame, args[0].value);
       if (fault_.has_value()) {
         return FastCallStatus::Faulted;
       }
@@ -10423,10 +10584,9 @@ private:
     Value direct_value = Value::null();
     std::int64_t direct_int = 0;
     bool direct_int_result = false;
-    const FastCallStatus direct_status =
-        try_evaluate_direct_closure(frame, *code, args, pos_count,
-                                    closure->captures, &direct_value,
-                                    &direct_int, &direct_int_result);
+    const FastCallStatus direct_status = try_evaluate_direct_closure(
+        frame, *code, args, pos_count, closure->captures, &direct_value,
+        &direct_int, &direct_int_result);
     if (direct_status == FastCallStatus::Faulted) {
       return FastCallStatus::Faulted;
     }
@@ -10568,14 +10728,12 @@ private:
   }
 
   bool step_integer_binary_decoded(Frame &frame, Opcode opcode,
-                                   std::uint32_t dst,
-                                   std::uint32_t lhs_reg,
+                                   std::uint32_t dst, std::uint32_t lhs_reg,
                                    std::uint32_t rhs_operand,
                                    bool rhs_is_constant) {
     std::int64_t fast_lhs = 0;
     std::int64_t fast_rhs = 0;
-    const bool lhs_fast =
-        read_integer_reg_unboxed(frame, lhs_reg, &fast_lhs);
+    const bool lhs_fast = read_integer_reg_unboxed(frame, lhs_reg, &fast_lhs);
     if (fault_.has_value()) {
       return false;
     }
@@ -10947,8 +11105,7 @@ private:
                                   bool rhs_is_constant) {
     std::int64_t fast_lhs = 0;
     std::int64_t fast_rhs = 0;
-    const bool lhs_fast =
-        read_integer_reg_unboxed(frame, insn.a, &fast_lhs);
+    const bool lhs_fast = read_integer_reg_unboxed(frame, insn.a, &fast_lhs);
     if (fault_.has_value()) {
       return false;
     }
@@ -11751,8 +11908,8 @@ private:
            }) != items.end();
   }
 
-  static std::string canonical_collection_selector(
-      const std::string &selector) {
+  static std::string
+  canonical_collection_selector(const std::string &selector) {
     if (selector == "collect") {
       return "map";
     }
@@ -13094,18 +13251,17 @@ private:
       return conversion_ok(Value::string(intern_runtime_string(*text)));
     }
     if (value.is_float()) {
-      return conversion_ok(
-          Value::string(intern_runtime_string(display_float_text(
-              value.as_float()))));
+      return conversion_ok(Value::string(
+          intern_runtime_string(display_float_text(value.as_float()))));
     }
     if (value.is_native_type()) {
       return conversion_ok(Value::string(intern_runtime_string(
           std::string("<type ") +
           native_type_name(value.as_native_type().kind) + ">")));
     }
-    return conversion_ok(Value::string(intern_runtime_string(
-        runtime_stringify_value(value, RuntimeStringifyMode::Display,
-                                &module_))));
+    return conversion_ok(
+        Value::string(intern_runtime_string(runtime_stringify_value(
+            value, RuntimeStringifyMode::Display, &module_))));
   }
 
   ConversionResult convert_value_to_native_type(const Frame &frame,
@@ -13431,7 +13587,8 @@ private:
 
   std::uint32_t call_site_flags(const Frame &frame,
                                 std::uint32_t site_id) const {
-    if (frame.code == nullptr || site_id >= frame.code->call_site_table.size()) {
+    if (frame.code == nullptr ||
+        site_id >= frame.code->call_site_table.size()) {
       return 0;
     }
     return frame.code->call_site_table[site_id].flags;
@@ -14328,11 +14485,10 @@ private:
     return CoercedMapState{result, *result_entries};
   }
 
-  bool invoke_callable_value(Frame &frame, const Value &callee,
-                             const std::vector<Value> &pos_args,
-                             const std::vector<std::pair<std::uint32_t, Value>>
-                                 &kw_args,
-                             const Value &block, std::uint32_t dst) {
+  bool invoke_callable_value(
+      Frame &frame, const Value &callee, const std::vector<Value> &pos_args,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const Value &block, std::uint32_t dst) {
     if (callee.is_closure()) {
       if (!kw_args.empty()) {
         set_fault(frame, "TypeError",
@@ -14361,9 +14517,9 @@ private:
 
     if (callee.is_native_function()) {
       Value result = Value::null();
-      const SendStatus status = apply_kernel_output_helper(
-          frame, callee.as_native_function().kind, pos_args, block, kw_args,
-          &result);
+      const SendStatus status =
+          apply_kernel_output_helper(frame, callee.as_native_function().kind,
+                                     pos_args, block, kw_args, &result);
       if (status == SendStatus::Faulted) {
         return false;
       }
@@ -14395,8 +14551,9 @@ private:
           return false;
         }
         if (!kw_args.empty()) {
-          set_fault(frame, "TypeError",
-                    "class call without init does not accept keyword arguments");
+          set_fault(
+              frame, "TypeError",
+              "class call without init does not accept keyword arguments");
           return false;
         }
         if (!block.is_null()) {
@@ -14415,7 +14572,8 @@ private:
     }
 
     if (callee.is_instance_object()) {
-      const std::shared_ptr<InstanceValue> instance = callee.as_instance_object();
+      const std::shared_ptr<InstanceValue> instance =
+          callee.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance callee is null");
         return false;
@@ -14787,8 +14945,7 @@ private:
     std::vector<bool> active_mixins(module_.classes.size(), false);
     std::vector<bool> active_classes(module_.classes.size(), false);
     return find_method_for_dispatch_impl(
-        frame, class_index, selector,
-        (expected_flags & kMethodFlagClass) != 0U,
+        frame, class_index, selector, (expected_flags & kMethodFlagClass) != 0U,
         &seen_mixins, &active_mixins, &active_classes);
   }
 
@@ -15191,6 +15348,55 @@ private:
     return std::nullopt;
   }
 
+  std::optional<RuntimeFlowPartitionPolicy>
+  threaded_scatter_policy_from_value(const Frame &frame, const Value &value) {
+    const std::optional<std::string> text = text_from_symbol_or_string(value);
+    if (!text.has_value()) {
+      set_fault(frame, "TypeError",
+                "threaded scatter must be :atomic, :dynamic, :chunks, "
+                ":fixed, :stride, or :items");
+      return std::nullopt;
+    }
+    if (*text == "atomic" || *text == "shared" || *text == "dynamic") {
+      return RuntimeFlowPartitionPolicy::Atomic;
+    }
+    if (*text == "chunks" || *text == "chunk" || *text == "fixed" ||
+        *text == "fixed_chunks") {
+      return RuntimeFlowPartitionPolicy::Chunks;
+    }
+    if (*text == "stride" || *text == "strided") {
+      return RuntimeFlowPartitionPolicy::Stride;
+    }
+    if (*text == "items" || *text == "item" || *text == "per_item") {
+      return RuntimeFlowPartitionPolicy::Items;
+    }
+    set_fault(frame, "TypeError",
+              "threaded scatter must be :atomic, :dynamic, :chunks, "
+              ":fixed, :stride, or :items");
+    return std::nullopt;
+  }
+
+  bool threaded_scatter_policy_from_keywords(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      RuntimeFlowPartitionPolicy *out) {
+    *out = RuntimeFlowPartitionPolicy::Atomic;
+    if (!reject_unknown_keywords(frame, kw_args, {"scatter"})) {
+      return false;
+    }
+    const std::optional<Value> scatter = keyword_arg_value(kw_args, "scatter");
+    if (!scatter.has_value()) {
+      return true;
+    }
+    const std::optional<RuntimeFlowPartitionPolicy> policy =
+        threaded_scatter_policy_from_value(frame, *scatter);
+    if (!policy.has_value()) {
+      return false;
+    }
+    *out = *policy;
+    return true;
+  }
+
   std::optional<RuntimeLogLevel>
   log_level_from_value(const Frame &frame, const Value &value,
                        const std::string &context) {
@@ -15319,19 +15525,18 @@ private:
   SendStatus apply_kernel_output_helper(
       const Frame &frame, RuntimeNativeFunctionKind kind,
       const std::vector<Value> &args, const Value &block,
-      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
-      Value *out) {
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
     if (!block.is_null()) {
       set_fault(frame, "TypeError", "output helper does not accept block");
       return SendStatus::Faulted;
     }
     const bool pretty = kind == RuntimeNativeFunctionKind::Pp;
-    if (!reject_unknown_keywords(frame, kw_args,
-                                 pretty ? std::initializer_list<const char *>{
-                                              "to", "max_width", "max_depth",
-                                              "max_items"}
-                                        : std::initializer_list<const char *>{
-                                              "to"})) {
+    if (!reject_unknown_keywords(
+            frame, kw_args,
+            pretty
+                ? std::initializer_list<const char *>{"to", "max_width",
+                                                      "max_depth", "max_items"}
+                : std::initializer_list<const char *>{"to"})) {
       return SendStatus::Faulted;
     }
 
@@ -15363,11 +15568,9 @@ private:
       }
     } else {
       for (const Value &arg : args) {
-        const std::string text =
-            runtime_stringify_value(arg, mode, &module_, nullptr, nullptr,
-                                    options);
-        if (!set_fault_from_text_write_result(frame,
-                                              writer->write_str(text)) ||
+        const std::string text = runtime_stringify_value(
+            arg, mode, &module_, nullptr, nullptr, options);
+        if (!set_fault_from_text_write_result(frame, writer->write_str(text)) ||
             !set_fault_from_text_write_result(frame, writer->write_str("\n"))) {
           return SendStatus::Faulted;
         }
@@ -15411,9 +15614,9 @@ private:
           return SendStatus::NotHandled;
         }
         if (!require_arity(1) ||
-            !reject_unknown_keywords(frame, kw_args,
-                                     {"mode", "max_width", "max_depth",
-                                      "max_items"}) ||
+            !reject_unknown_keywords(
+                frame, kw_args,
+                {"mode", "max_width", "max_depth", "max_items"}) ||
             !require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -15438,7 +15641,8 @@ private:
       }
       if (kind == RuntimeNativeTypeKind::Kernel) {
         if (selector == "print") {
-          return apply_kernel_output_helper(frame, RuntimeNativeFunctionKind::Print,
+          return apply_kernel_output_helper(frame,
+                                            RuntimeNativeFunctionKind::Print,
                                             args, block, kw_args, out);
         }
         if (selector == "p") {
@@ -15446,8 +15650,8 @@ private:
                                             args, block, kw_args, out);
         }
         if (selector == "pp") {
-          return apply_kernel_output_helper(frame, RuntimeNativeFunctionKind::Pp,
-                                            args, block, kw_args, out);
+          return apply_kernel_output_helper(
+              frame, RuntimeNativeFunctionKind::Pp, args, block, kw_args, out);
         }
         return SendStatus::NotHandled;
       }
@@ -15498,8 +15702,7 @@ private:
         }
         if (selector == "with_output") {
           if (!require_arity(0) ||
-              !reject_unknown_keywords(frame, kw_args,
-                                       {"stdout", "stderr"})) {
+              !reject_unknown_keywords(frame, kw_args, {"stdout", "stderr"})) {
             return SendStatus::Faulted;
           }
           std::shared_ptr<RuntimeTextWriter> stdout_writer;
@@ -15693,15 +15896,15 @@ private:
         return SendStatus::Matched;
       }
       if (kind == RuntimeNativeTypeKind::ThreadedCollection) {
-        if ((args.size() < 1 || args.size() > 2) || !kw_args.empty() ||
-            !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "ThreadedCollection.new does not accept keywords");
-          } else {
-            set_fault(frame, "TypeError",
-                      "ThreadedCollection.new expects items and workers");
-          }
+        if ((args.size() < 1 || args.size() > 2) || !require_no_block()) {
+          set_fault(frame, "TypeError",
+                    "ThreadedCollection.new expects items and workers");
+          return SendStatus::Faulted;
+        }
+        RuntimeFlowPartitionPolicy scatter_policy =
+            RuntimeFlowPartitionPolicy::Atomic;
+        if (!threaded_scatter_policy_from_keywords(frame, kw_args,
+                                                   &scatter_policy)) {
           return SendStatus::Faulted;
         }
         bool source_was_tuple = false;
@@ -15722,7 +15925,8 @@ private:
           workers = static_cast<std::size_t>(args[1].as_integer());
         }
         *out = Value::threaded_collection(
-            std::make_shared<RuntimeThreadedCollection>(*items, workers));
+            std::make_shared<RuntimeThreadedCollection>(
+                *items, workers, RuntimeFlowOptions{}, scatter_policy));
         return SendStatus::Matched;
       }
     }
@@ -15752,8 +15956,7 @@ private:
       if (selector == "write_str") {
         if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
           if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "write_str does not accept keywords");
+            set_fault(frame, "TypeError", "write_str does not accept keywords");
           }
           return SendStatus::Faulted;
         }
@@ -15857,8 +16060,8 @@ private:
           return SendStatus::Faulted;
         }
         const std::string message = runtime_stringify_value(
-            args[0], RuntimeStringifyMode::Display, &module_, nullptr,
-            nullptr, RuntimePrettyPrintOptions{});
+            args[0], RuntimeStringifyMode::Display, &module_, nullptr, nullptr,
+            RuntimePrettyPrintOptions{});
         if (!set_fault_from_text_write_result(frame,
                                               logger->log(level, message))) {
           return SendStatus::Faulted;
@@ -15885,7 +16088,8 @@ private:
       if (selector == "log") {
         if (!require_arity(2) || !kw_args.empty() || !require_no_block()) {
           if (!kw_args.empty()) {
-            set_fault(frame, "TypeError", "logger.log does not accept keywords");
+            set_fault(frame, "TypeError",
+                      "logger.log does not accept keywords");
           }
           return SendStatus::Faulted;
         }
@@ -15895,8 +16099,8 @@ private:
           return SendStatus::Faulted;
         }
         const std::string message = runtime_stringify_value(
-            args[1], RuntimeStringifyMode::Display, &module_, nullptr,
-            nullptr, RuntimePrettyPrintOptions{});
+            args[1], RuntimeStringifyMode::Display, &module_, nullptr, nullptr,
+            RuntimePrettyPrintOptions{});
         if (!set_fault_from_text_write_result(frame,
                                               logger->log(*level, message))) {
           return SendStatus::Faulted;
@@ -16070,12 +16274,11 @@ private:
             current_runtime_stdout();
         const std::shared_ptr<RuntimeTextWriter> inherited_stderr =
             current_runtime_stderr();
-        auto task_function =
-            [invoker = *invoker, inherited_stdout, inherited_stderr]() mutable {
-              RuntimeOutputScope output_scope(inherited_stdout,
-                                              inherited_stderr);
-              return invoker(std::vector<Value>{});
-            };
+        auto task_function = [invoker = *invoker, inherited_stdout,
+                              inherited_stderr]() mutable {
+          RuntimeOutputScope output_scope(inherited_stdout, inherited_stderr);
+          return invoker(std::vector<Value>{});
+        };
         RuntimeTaskHandle handle;
         if (selector == "async") {
           handle = task->async(std::move(task_function));
@@ -16699,10 +16902,15 @@ private:
     }
 
     if ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
-        selector == "threaded") {
-      if (!kw_args.empty() || !block.is_null()) {
-        set_fault(frame, "TypeError",
-                  "threaded does not accept keywords or block arguments");
+        (selector == "threaded" || selector == "parallel")) {
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError", selector + " does not accept block");
+        return SendStatus::Faulted;
+      }
+      RuntimeFlowPartitionPolicy scatter_policy =
+          RuntimeFlowPartitionPolicy::Atomic;
+      if (!threaded_scatter_policy_from_keywords(frame, kw_args,
+                                                 &scatter_policy)) {
         return SendStatus::Faulted;
       }
       std::size_t workers = 0;
@@ -16716,7 +16924,8 @@ private:
         return SendStatus::Faulted;
       }
       *out = Value::threaded_collection(
-          std::make_shared<RuntimeThreadedCollection>(*items, workers));
+          std::make_shared<RuntimeThreadedCollection>(
+              *items, workers, RuntimeFlowOptions{}, scatter_policy));
       return SendStatus::Matched;
     }
 
@@ -16905,31 +17114,45 @@ private:
         collection_selector_in({"+", "*", "concat", "take_while", "reverse",
                                 "sort", "uniq", "each_pair", "each_cons"});
     const bool sequence_collection_selector =
-        collection_selector_in({"empty?", "[]", "deconstruct", "first",
-                                "count", "to_a", "lazy", "each", "map",
-                                "flat_map", "select", "reject", "find",
-                                "group_by", "any?", "all?", "none?",
-                                "reduce"}) ||
+        collection_selector_in({"empty?", "[]", "deconstruct", "first", "count",
+                                "to_a", "lazy", "each", "map", "flat_map",
+                                "select", "reject", "find", "group_by", "any?",
+                                "all?", "none?", "reduce"}) ||
         sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
         sequence_collection_selector || selector == "===";
     const bool lazy_seq_collection_selector = sequence_collection_selector;
     const bool numeric_selector =
-        selector_in({"+", "-", "*", "/", "%", "//", ">", "<", ">=", "<=",
-                     "==", "!=", "<=>"});
+        selector_in({"+", "-", "*", "/", "%", "//", ">", "<",
+                     ">=", "<=", "==", "!=", "<=>"});
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          sequence_collection_selector) ||
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
-        (receiver.is_map() &&
-         collection_selector_in({"empty?", "[]", "deconstruct_keys", "keys",
-                                 "values", "entries", "to_a", "count",
-                                 "each", "map", "select", "reject",
-                                 "transform", "transform_values", "merge",
-                                 "each_pair", "contains?", "include?",
-                                 "value?", "has_value?", "+", "|"})) ||
+        (receiver.is_map() && collection_selector_in({"empty?",
+                                                      "[]",
+                                                      "deconstruct_keys",
+                                                      "keys",
+                                                      "values",
+                                                      "entries",
+                                                      "to_a",
+                                                      "count",
+                                                      "each",
+                                                      "map",
+                                                      "select",
+                                                      "reject",
+                                                      "transform",
+                                                      "transform_values",
+                                                      "merge",
+                                                      "each_pair",
+                                                      "contains?",
+                                                      "include?",
+                                                      "value?",
+                                                      "has_value?",
+                                                      "+",
+                                                      "|"})) ||
         ((receiver.is_integer() || receiver.is_float()) && numeric_selector);
     const bool keyword_compatible_builtin_selector =
         collection_selector == "each" &&
@@ -17366,8 +17589,7 @@ private:
           return SendStatus::Faulted;
         }
         const std::optional<Value> value = apply_sequence_set_operation(
-            frame, receiver, collection_selector, *items, args, block,
-            kw_args);
+            frame, receiver, collection_selector, *items, args, block, kw_args);
         if (!value.has_value()) {
           return SendStatus::Faulted;
         }
@@ -17469,8 +17691,7 @@ private:
             *out = Value::integer(*bounds->start + index);
             return SendStatus::Matched;
           }
-          if ((collection_selector == "any?" ||
-               collection_selector == "all?" ||
+          if ((collection_selector == "any?" || collection_selector == "all?" ||
                collection_selector == "none?") &&
               block.is_null()) {
             if (!require_arity(0)) {
@@ -17536,8 +17757,7 @@ private:
             const std::size_t take =
                 count <= 0 ? 0U
                            : std::min<std::size_t>(
-                                 static_cast<std::size_t>(count),
-                                 items.size());
+                                 static_cast<std::size_t>(count), items.size());
             *out = make_list_value(
                 std::vector<Value>(items.begin(), items.begin() + take));
             return SendStatus::Matched;
@@ -17599,9 +17819,9 @@ private:
             sequence_extra_operation_selector ||
             (collection_selector == "each" &&
              (!args.empty() || !kw_args.empty()))) {
-          const std::optional<Value> value = apply_sequence_set_operation(
-              frame, receiver, collection_selector, items, args, block,
-              kw_args);
+          const std::optional<Value> value =
+              apply_sequence_set_operation(frame, receiver, collection_selector,
+                                           items, args, block, kw_args);
           if (!value.has_value()) {
             return SendStatus::Faulted;
           }
@@ -17919,8 +18139,7 @@ private:
             return SendStatus::Faulted;
           }
           if (block.is_null()) {
-            *out = Value::integer(
-                static_cast<std::int64_t>(extracted->size()));
+            *out = Value::integer(static_cast<std::int64_t>(extracted->size()));
             return SendStatus::Matched;
           }
           std::int64_t count = 0;
@@ -18081,8 +18300,7 @@ private:
           *out = make_list_value(std::move(values));
           return SendStatus::Matched;
         }
-        if (collection_selector == "entries" ||
-            collection_selector == "to_a") {
+        if (collection_selector == "entries" || collection_selector == "to_a") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -18333,8 +18551,8 @@ private:
             set_fault(frame, "TypeError", "division by zero");
             return SendStatus::Faulted;
           }
-          *out = Value::floating(
-              std::floor(static_cast<double>(lhs) / float_rhs));
+          *out =
+              Value::floating(std::floor(static_cast<double>(lhs) / float_rhs));
           return SendStatus::Matched;
         }
         if (!require_integer_arg(0, &rhs)) {
@@ -18390,8 +18608,8 @@ private:
         if (!require_numeric_arg(0, &numeric_rhs)) {
           return SendStatus::Faulted;
         }
-        *out =
-            Value::integer(compare_double(static_cast<double>(lhs), numeric_rhs));
+        *out = Value::integer(
+            compare_double(static_cast<double>(lhs), numeric_rhs));
         return SendStatus::Matched;
       }
     }
@@ -18701,8 +18919,8 @@ private:
                  : FastSendStatus::Faulted;
     }
     if (collection_selector == "count") {
-      return write_integer_reg_unboxed(
-                 frame, dst, static_cast<std::int64_t>(items->size()))
+      return write_integer_reg_unboxed(frame, dst,
+                                       static_cast<std::int64_t>(items->size()))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
@@ -18739,11 +18957,11 @@ private:
           single_integer_arg <= 0
               ? 0U
               : std::min<std::size_t>(
-                    static_cast<std::size_t>(single_integer_arg), items->size());
-      return write_reg_fast_plain(
-                 frame, dst,
-                 make_list_value(
-                     std::vector<Value>(items->begin(), items->begin() + take)))
+                    static_cast<std::size_t>(single_integer_arg),
+                    items->size());
+      return write_reg_fast_plain(frame, dst,
+                                  make_list_value(std::vector<Value>(
+                                      items->begin(), items->begin() + take)))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
@@ -18884,8 +19102,8 @@ private:
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     case QuickOpcode::SendSeqCount:
-      return write_integer_reg_unboxed(
-                 frame, dst, static_cast<std::int64_t>(items->size()))
+      return write_integer_reg_unboxed(frame, dst,
+                                       static_cast<std::int64_t>(items->size()))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     case QuickOpcode::SendSeqFirst:
@@ -18899,12 +19117,11 @@ private:
         const std::size_t take =
             integer_arg <= 0
                 ? 0U
-                : std::min<std::size_t>(
-                      static_cast<std::size_t>(integer_arg), items->size());
-        return write_reg_fast_plain(
-                   frame, dst,
-                   make_list_value(
-                       std::vector<Value>(items->begin(), items->begin() + take)))
+                : std::min<std::size_t>(static_cast<std::size_t>(integer_arg),
+                                        items->size());
+        return write_reg_fast_plain(frame, dst,
+                                    make_list_value(std::vector<Value>(
+                                        items->begin(), items->begin() + take)))
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
@@ -19310,8 +19527,7 @@ private:
         }
         const Constant &constant = module_.const_pool[quick->b];
         if (constant.kind == ConstantKind::Integer) {
-          if (!write_integer_reg_unboxed(frame, quick->a,
-                                         constant.int_value)) {
+          if (!write_integer_reg_unboxed(frame, quick->a, constant.int_value)) {
             return;
           }
         } else if (!write_reg(frame, quick->a,
@@ -19425,10 +19641,10 @@ private:
       case QuickOpcode::IGtJumpIfFalse:
         step_compare_jump_if_false(frame, *quick, false);
         return;
-	      case QuickOpcode::ILtKJumpIfFalse:
-	      case QuickOpcode::IGtKJumpIfFalse:
-	        step_compare_jump_if_false(frame, *quick, true);
-	        return;
+      case QuickOpcode::ILtKJumpIfFalse:
+      case QuickOpcode::IGtKJumpIfFalse:
+        step_compare_jump_if_false(frame, *quick, true);
+        return;
       case QuickOpcode::SendIAdd:
       case QuickOpcode::SendISub:
       case QuickOpcode::SendIMul:
@@ -19442,9 +19658,8 @@ private:
       case QuickOpcode::SendIEq:
       case QuickOpcode::SendINe:
       case QuickOpcode::SendICmp: {
-        const FastSendStatus status =
-            step_quick_integer_send(frame, quick->quick_opcode, quick->a,
-                                    quick->b, quick->c);
+        const FastSendStatus status = step_quick_integer_send(
+            frame, quick->quick_opcode, quick->a, quick->b, quick->c);
         if (status == FastSendStatus::Faulted) {
           return;
         }
@@ -19469,9 +19684,9 @@ private:
         }
         break;
       }
-	      case QuickOpcode::Jump:
-	        if (quick->a >= frame.code->instructions.size()) {
-	          set_fault(frame, "VMError", "jump target out of range");
+      case QuickOpcode::Jump:
+        if (quick->a >= frame.code->instructions.size()) {
+          set_fault(frame, "VMError", "jump target out of range");
           return;
         }
         frame.pc = quick->a;
@@ -19487,12 +19702,11 @@ private:
         if (fault_.has_value()) {
           return;
         }
-        const bool take =
-            quick->quick_opcode == QuickOpcode::JumpIfTrue
-                ? is_truthy(cond)
-                : (quick->quick_opcode == QuickOpcode::JumpIfFalse
-                       ? !is_truthy(cond)
-                       : cond.is_null());
+        const bool take = quick->quick_opcode == QuickOpcode::JumpIfTrue
+                              ? is_truthy(cond)
+                              : (quick->quick_opcode == QuickOpcode::JumpIfFalse
+                                     ? !is_truthy(cond)
+                                     : cond.is_null());
         frame.pc = take ? quick->b : frame.pc + 1U;
         return;
       }
@@ -19504,10 +19718,9 @@ private:
         if (frame.return_override.has_value()) {
           value = *frame.return_override;
         }
-        const bool capture_completed_frame = frames_.size() == 1U ||
-                                             (frame.code != nullptr &&
-                                              frame.code->kind ==
-                                                  CodeKind::Module);
+        const bool capture_completed_frame =
+            frames_.size() == 1U ||
+            (frame.code != nullptr && frame.code->kind == CodeKind::Module);
         std::vector<Value> completed_regs;
         std::vector<std::uint8_t> completed_initialized;
         if (capture_completed_frame) {
@@ -19516,8 +19729,7 @@ private:
           completed_initialized = frame.initialized;
         }
         const BcCode *completed_code = frame.code;
-        const std::optional<std::uint32_t> caller_reg =
-            frame.caller_result_reg;
+        const std::optional<std::uint32_t> caller_reg = frame.caller_result_reg;
         Frame completed_frame = std::move(frames_.back());
         frames_.pop_back();
         if (capture_completed_frame) {
@@ -20780,10 +20992,9 @@ private:
       if (frame.return_override.has_value()) {
         value = *frame.return_override;
       }
-      const bool capture_completed_frame = frames_.size() == 1U ||
-                                           (frame.code != nullptr &&
-                                            frame.code->kind ==
-                                                CodeKind::Module);
+      const bool capture_completed_frame =
+          frames_.size() == 1U ||
+          (frame.code != nullptr && frame.code->kind == CodeKind::Module);
       std::vector<Value> completed_regs;
       std::vector<std::uint8_t> completed_initialized;
       if (capture_completed_frame) {
@@ -21986,8 +22197,7 @@ std::string method_boundary_signature(const bytecode::BcModule &module,
       << "|property="
       << (((method.flags & kMethodFlagPropertyGetter) != 0U) ? "1" : "0")
       << "|property_setter="
-      << (((method.flags & kMethodFlagPropertySetter) != 0U) ? "1" : "0")
-      << "|"
+      << (((method.flags & kMethodFlagPropertySetter) != 0U) ? "1" : "0") << "|"
       << "defaults=" << method.default_thunk_ids.size() << "|"
       << "type_hooks=" << method.type_hook_ids.size() << "|params=";
   for (std::size_t i = 0; i < method.params.size(); ++i) {
@@ -22261,20 +22471,18 @@ RuntimeWorld::commit_transaction(const RuntimeWorldTransaction &tx) {
   bool changed = false;
   for (bytecode::BcMethod method : tx.instance_methods) {
     method.owner_dispatch_ref = tx.target_index;
-    method.flags =
-        kMethodFlagInstance |
-        (method.flags &
-         (kMethodFlagPropertyGetter | kMethodFlagPropertySetter));
+    method.flags = kMethodFlagInstance |
+                   (method.flags &
+                    (kMethodFlagPropertyGetter | kMethodFlagPropertySetter));
     runtime_owner.instance_method_table.entries[method.selector_sym_id] =
         std::move(method);
     changed = true;
   }
   for (bytecode::BcMethod method : tx.class_methods) {
     method.owner_dispatch_ref = tx.target_index;
-    method.flags =
-        kMethodFlagClass |
-        (method.flags &
-         (kMethodFlagPropertyGetter | kMethodFlagPropertySetter));
+    method.flags = kMethodFlagClass |
+                   (method.flags &
+                    (kMethodFlagPropertyGetter | kMethodFlagPropertySetter));
     runtime_owner.class_method_table.entries[method.selector_sym_id] =
         std::move(method);
     changed = true;
@@ -22917,12 +23125,10 @@ RuntimeWorld::finish_native_wait(RuntimeNativeWaitHandle *handle) {
   return impl_->state->heap.finish_native_wait(handle);
 }
 
-std::string value_to_debug_string(const Value &value,
-                                  const bytecode::BcModule *module,
-                                  const std::vector<std::string>
-                                      *runtime_strings,
-                                  const std::vector<std::string>
-                                      *runtime_symbols) {
+std::string
+value_to_debug_string(const Value &value, const bytecode::BcModule *module,
+                      const std::vector<std::string> *runtime_strings,
+                      const std::vector<std::string> *runtime_symbols) {
   const std::vector<std::string> *debug_strings =
       runtime_strings != nullptr && !runtime_strings->empty()
           ? runtime_strings

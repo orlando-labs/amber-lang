@@ -13,6 +13,8 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -1214,8 +1216,59 @@ void test_std016_threaded_collection_iteration_and_transforms() {
              stats.filter_operations == 2 && stats.flat_map_operations == 1 &&
              stats.each_operations == 1,
          "threaded collection stats should count iteration operations");
-  expect(stats.flow.gathers >= 5 && stats.flow.completed_workers >= 20,
+  expect(stats.flow.gathers >= 5 && stats.flow.completed_workers >= 10,
          "threaded collection stats should include flow stats");
+}
+
+void test_std016_threaded_collection_scatter_policies_bound_task_count() {
+  std::vector<amber::runtime::Value> items;
+  for (std::int64_t value = 1; value <= 8; ++value) {
+    items.push_back(amber::runtime::Value::integer(value));
+  }
+
+  auto run_ids =
+      [&items](amber::runtime::RuntimeFlowPartitionPolicy scatter_policy) {
+        amber::runtime::RuntimeThreadedCollection threaded(
+            items, 4, amber::runtime::RuntimeFlowOptions{}, scatter_policy);
+        std::mutex mutex;
+        std::unordered_set<std::uint64_t> task_ids;
+        const amber::runtime::RuntimeFlowGatherResult mapped =
+            threaded.map([&mutex, &task_ids](const amber::runtime::Value &value,
+                                             std::size_t) {
+              std::lock_guard<std::mutex> lock(mutex);
+              task_ids.insert(amber::runtime::current_runtime_task_id());
+              return value;
+            });
+        expect(mapped.ok && !mapped.failed && mapped.values.size() == 8,
+               "threaded scatter policy map should complete");
+        return std::pair<amber::runtime::RuntimeThreadedCollectionStats,
+                         std::unordered_set<std::uint64_t>>{
+            threaded.stats(), std::move(task_ids)};
+      };
+
+  const auto atomic_run =
+      run_ids(amber::runtime::RuntimeFlowPartitionPolicy::Atomic);
+  expect(atomic_run.first.flow.worker_tasks == 4 &&
+             atomic_run.first.flow.completed_workers == 4,
+         "atomic threaded scatter should spawn one task per worker");
+  expect(!atomic_run.second.empty() && atomic_run.second.size() <= 4,
+         "atomic threaded scatter should use at most worker-count task ids");
+
+  const auto chunks_run =
+      run_ids(amber::runtime::RuntimeFlowPartitionPolicy::Chunks);
+  expect(chunks_run.first.flow.worker_tasks == 4 &&
+             chunks_run.first.flow.completed_workers == 4,
+         "chunked threaded scatter should spawn one task per worker");
+  expect(chunks_run.second.size() == 4,
+         "chunked threaded scatter should process four non-empty chunks");
+
+  const auto items_run =
+      run_ids(amber::runtime::RuntimeFlowPartitionPolicy::Items);
+  expect(items_run.first.flow.worker_tasks == 8 &&
+             items_run.first.flow.completed_workers == 8,
+         "item threaded scatter should preserve per-item task mode");
+  expect(items_run.second.size() == 8,
+         "item threaded scatter should expose one task id per item");
 }
 
 void test_std016_threaded_collection_combination_and_permutation() {
@@ -1363,20 +1416,29 @@ void test_std017_source_level_flow_and_threaded_collection_compile_and_run() {
       "\n"
       "flowed = Flow.new().scatter_map([1, 2, 3]): _1 * 10 + _2\n"
       "threaded = [1, 2, 3].threaded(2).map: _1 + 5\n"
+      "atomic = [1, 2, 3, 4].threaded(2, scatter: :atomic).map: _1 * 2\n"
+      "chunks = [1, 2, 3, 4].threaded(2, scatter: :chunks).map: _1 * 3\n"
+      "parallel = [1, 2, 3, 4].parallel(2, scatter: :chunks).map: _1 * 4\n"
       "pairs = [1, 2, 3].threaded(2).combination(2)\n"
-      "[flowed, threaded, pairs]\n");
+      "[flowed, threaded, atomic, chunks, parallel, pairs]\n");
 
   expect(exec.ok(), "source-level flow/threaded stack should execute");
   expect(exec.value.is_list(), "source-level flow result should be list");
   const std::shared_ptr<amber::runtime::ListValue> values =
       exec.value.as_list();
-  expect(values != nullptr && values->items.size() == 3,
+  expect(values != nullptr && values->items.size() == 6,
          "source-level flow result shape");
   expect_integer_list_value(values->items[0], {10, 21, 32},
                             "source-level Flow.scatter_map");
   expect_integer_list_value(values->items[1], {6, 7, 8},
                             "source-level threaded map");
-  expect_integer_list_values(values->items[2].as_list()->items,
+  expect_integer_list_value(values->items[2], {2, 4, 6, 8},
+                            "source-level threaded atomic scatter");
+  expect_integer_list_value(values->items[3], {3, 6, 9, 12},
+                            "source-level threaded chunk scatter");
+  expect_integer_list_value(values->items[4], {4, 8, 12, 16},
+                            "source-level parallel chunk scatter");
+  expect_integer_list_values(values->items[5].as_list()->items,
                              {{1, 2}, {1, 3}, {2, 3}},
                              "source-level threaded combination");
 }
@@ -1405,6 +1467,7 @@ int main() {
   test_std015_flow_reduce_broadcast_and_failure_collection();
   test_std015_flow_isolation_checked_and_unchecked();
   test_std016_threaded_collection_iteration_and_transforms();
+  test_std016_threaded_collection_scatter_policies_bound_task_count();
   test_std016_threaded_collection_combination_and_permutation();
   test_std016_threaded_collection_failure_and_isolation();
   test_std017_source_level_task_sync_stack_compiles_and_runs();
