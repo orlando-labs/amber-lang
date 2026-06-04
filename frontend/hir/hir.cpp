@@ -179,6 +179,28 @@ bool signature_param_has_auto_assign(const binder::ParamDescriptor &param) {
   return param.auto_assign_kind == "@" || param.auto_assign_kind == "@@";
 }
 
+std::string compound_assignment_binary_op(const std::string &op) {
+  if (op == "+=") {
+    return "+";
+  }
+  if (op == "-=") {
+    return "-";
+  }
+  if (op == "*=") {
+    return "*";
+  }
+  if (op == "/=") {
+    return "/";
+  }
+  if (op == "//=") {
+    return "//";
+  }
+  if (op == "%=") {
+    return "%";
+  }
+  return "";
+}
+
 std::unique_ptr<Node> clone_node(const ast::Expr &expr) {
   auto copy = make_node(expr.kind, expr.span);
   for (const ast::StringField &field : expr.string_fields) {
@@ -1900,6 +1922,29 @@ private:
       return node;
     }
 
+    const std::string assign_op = string_value(expr, "op");
+    const bool compound = assign_op != "=";
+    const std::string binary_op =
+        compound ? compound_assignment_binary_op(assign_op) : "";
+    if (compound && binary_op.empty()) {
+      auto node = make_node("HUnsupported", expr.span);
+      node->string_field("source_kind", "assign-op:" + assign_op);
+      return node;
+    }
+    auto lower_assigned_value = [&]() {
+      if (!compound) {
+        return lower_expr(*right);
+      }
+      auto send = make_node("HSend", expr.span);
+      send->node_field("receiver", lower_expr(*left));
+      send->string_field("selector", binary_op);
+      std::vector<std::unique_ptr<Node>> pos_args;
+      pos_args.push_back(lower_expr(*right));
+      send->list_field("pos_args", std::move(pos_args));
+      send->list_field("kw_args", {});
+      return send;
+    };
+
     if (left->kind == "AstName") {
       const binder::Reference *ref =
           find_reference(left->span, string_value(*left, "name"), "write");
@@ -1913,25 +1958,30 @@ private:
       if (!capture_slot.empty()) {
         auto node = make_node("HStoreCapture", expr.span);
         node->string_field("slot", capture_slot);
-        node->node_field("expr", lower_expr(*right));
+        node->node_field("expr", lower_assigned_value());
         return node;
       }
       auto node = make_node("HStoreLocal", expr.span);
       node->string_field("slot",
                          slot.empty() ? string_value(*left, "name") : slot);
-      node->node_field("expr", lower_expr(*right));
+      node->node_field("expr", lower_assigned_value());
       return node;
     }
     if (left->kind == "AstIvar") {
       auto node = make_node("HStoreIvar", expr.span);
       node->string_field("name", string_value(*left, "name"));
-      node->node_field("expr", lower_expr(*right));
+      node->node_field("expr", lower_assigned_value());
       return node;
     }
     if (left->kind == "AstCvar") {
       auto node = make_node("HStoreCvar", expr.span);
       node->string_field("name", string_value(*left, "name"));
-      node->node_field("expr", lower_expr(*right));
+      node->node_field("expr", lower_assigned_value());
+      return node;
+    }
+    if (compound) {
+      auto node = make_node("HUnsupported", expr.span);
+      node->string_field("source_kind", "compound_assign:" + left->kind);
       return node;
     }
     if (left->kind == "AstPostfixChain") {

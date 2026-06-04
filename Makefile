@@ -32,6 +32,7 @@ AMBERC_SRCS := tools/amberc/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS
 AMBERTEST_SRCS := tools/ambertest/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
 IAMBER_SRCS := tools/iamber/main.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
 IAMBER_LDLIBS ?= -lncurses
+IAMBER_TEST_SRCS := tests/iamber_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS) $(PACKAGE_SRCS)
 LEXER_TEST_SRCS := tests/lexer_tests.cpp $(LEXER_SRCS)
 PARSER_TEST_SRCS := tests/parser_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
 BINDER_TEST_SRCS := tests/binder_tests.cpp $(PROFILE_SRCS) $(FRONTEND_SRCS)
@@ -120,6 +121,7 @@ FORMAT_FILES := \
 	tests/emitter_tests.cpp \
 	tests/module_loader_tests.cpp \
 	tests/package_tests.cpp \
+	tests/iamber_tests.cpp \
 	tests/vm_tests.cpp \
 	tests/stdlib_collections_tests.cpp \
 	tests/stdlib_task_tests.cpp
@@ -128,7 +130,7 @@ FORMAT_FILES := \
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -142,6 +144,9 @@ $(BUILD_DIR)/ambertest: $(AMBERTEST_SRCS) | $(BUILD_DIR)/.dir
 
 $(BUILD_DIR)/iamber: $(IAMBER_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(IAMBER_SRCS) $(LDFLAGS) $(IAMBER_LDLIBS) -o $@
+
+$(BUILD_DIR)/iamber_tests: $(IAMBER_TEST_SRCS) tools/iamber/main.cpp | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(IAMBER_TEST_SRCS) $(LDFLAGS) $(IAMBER_LDLIBS) -o $@
 
 $(BUILD_DIR)/lexer_tests: $(LEXER_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LEXER_TEST_SRCS) $(LDFLAGS) -o $@
@@ -216,6 +221,7 @@ test: build
 	$(BUILD_DIR)/stdlib_task_tests
 	$(BUILD_DIR)/module_loader_tests
 	$(BUILD_DIR)/package_tests
+	$(BUILD_DIR)/iamber_tests
 	$(BUILD_DIR)/amberc lex corpus/parse/lexer/basic/source.am > $(BUILD_DIR)/lexer-basic.tokens.json
 	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-first.json
 	$(BUILD_DIR)/amberc build tests/fixtures/w14_build/amber.build.json --target bytecode --out-dir $(BUILD_DIR)/w14_build/out --cache-dir $(BUILD_DIR)/w14_build/cache > $(BUILD_DIR)/w14-build-second.json

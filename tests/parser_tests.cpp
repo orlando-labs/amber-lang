@@ -119,6 +119,23 @@ void test_precedence() {
          "multiplication op");
 }
 
+void test_compound_assignment() {
+  std::unique_ptr<Expr> expr = parse_ok("x += 1\n");
+  expect(expr->kind == "AstAssign", "compound assignment parses");
+  expect(string_field(*expr, "op") == "+=", "compound assignment op");
+  expect(node_field(*expr, "left").kind == "AstName",
+         "compound assignment left");
+  expect(node_field(*expr, "right").kind == "AstLiteral",
+         "compound assignment right");
+
+  amber::parser::ParseModuleResult module = parse_module_raw("x += 1\n");
+  expect(module.ok(), "compound assignment module parse should not recurse");
+  expect(module.items.size() == 1, "compound assignment module item count");
+  const Expr &stmt = *module.items[0];
+  expect(node_field(stmt, "expr").kind == "AstAssign",
+         "compound assignment module expr");
+}
+
 void test_new_binary_operators() {
   std::unique_ptr<Expr> floor_div = parse_ok("x // 2\n");
   expect(floor_div->kind == "AstBinary", "floor division parses as binary");
@@ -935,6 +952,7 @@ void test_typed_signature_surface() {
 
 int main() {
   test_precedence();
+  test_compound_assignment();
   test_new_binary_operators();
   test_comparison_chains();
   test_bare_call();

@@ -97,6 +97,28 @@ bool is_static_string_literal(const ast::Expr &expr) {
   return expr.kind == "AstStringLiteral" && !bool_field(expr, "interpolation");
 }
 
+std::string compound_assignment_binary_op(const std::string &op) {
+  if (op == "+=") {
+    return "+";
+  }
+  if (op == "-=") {
+    return "-";
+  }
+  if (op == "*=") {
+    return "*";
+  }
+  if (op == "/=") {
+    return "/";
+  }
+  if (op == "//=") {
+    return "//";
+  }
+  if (op == "%=") {
+    return "%";
+  }
+  return "";
+}
+
 lexer::Diagnostic diagnostic(const std::string &code,
                              const std::string &message,
                              const lexer::Span &span) {
@@ -786,6 +808,26 @@ private:
         env[string_field(*left_expr, "name")] = right;
       }
       return right;
+    }
+    const std::string compound_op = compound_assignment_binary_op(op);
+    if (!compound_op.empty()) {
+      const TypeTerm right = right_expr == nullptr
+                                 ? named_type("Any")
+                                 : infer_expr(*right_expr, env);
+      TypeTerm result = named_type("Any");
+      if ((compound_op == "+" || compound_op == "-" || compound_op == "*" ||
+           compound_op == "/" || compound_op == "%" || compound_op == "//") &&
+          (is_named(left, "Float") || is_named(right, "Float"))) {
+        result = named_type("Float");
+      } else if (compound_op == "+" || compound_op == "-" ||
+                 compound_op == "*" || compound_op == "/" ||
+                 compound_op == "%" || compound_op == "//") {
+        result = named_type("Int");
+      }
+      if (left_expr != nullptr && left_expr->kind == "AstName") {
+        env[string_field(*left_expr, "name")] = result;
+      }
+      return result;
     }
     if (op == "and") {
       TypeEnv narrowed = env;

@@ -245,10 +245,20 @@ struct RuntimeTextWriteResult {
   std::string message;
 };
 
+struct RuntimeTextSourceLocation {
+  bool present = false;
+  std::uint32_t code_id = 0;
+  std::uint32_t pc = 0;
+  std::string file;
+  std::uint32_t line = 0;
+  std::uint32_t column = 0;
+};
+
 struct RuntimeTextOutputEvent {
   std::string stream;
   std::string text;
   std::uint64_t order = 0;
+  RuntimeTextSourceLocation source;
 };
 
 class RuntimeTextWriter {

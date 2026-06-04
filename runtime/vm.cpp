@@ -42,8 +42,29 @@ thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stdout;
 thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stderr;
 thread_local std::string tls_runtime_task_annotation;
 thread_local std::uint64_t tls_runtime_native_thread_id = 0;
+thread_local RuntimeTextSourceLocation tls_runtime_text_source_location;
 std::atomic<std::uint64_t> g_runtime_output_order{1};
 std::atomic<std::uint64_t> g_runtime_native_thread_ids{1};
+
+class RuntimeTextSourceLocationScope {
+public:
+  explicit RuntimeTextSourceLocationScope(RuntimeTextSourceLocation location)
+      : previous_(std::move(tls_runtime_text_source_location)) {
+    tls_runtime_text_source_location = std::move(location);
+  }
+
+  RuntimeTextSourceLocationScope(const RuntimeTextSourceLocationScope &) =
+      delete;
+  RuntimeTextSourceLocationScope &
+  operator=(const RuntimeTextSourceLocationScope &) = delete;
+
+  ~RuntimeTextSourceLocationScope() {
+    tls_runtime_text_source_location = std::move(previous_);
+  }
+
+private:
+  RuntimeTextSourceLocation previous_;
+};
 
 class RuntimeTaskScope {
 public:
@@ -6242,9 +6263,12 @@ RuntimeTextWriteResult RuntimeTextWriter::write_str(const std::string &text) {
     return text_write_ok();
   case RuntimeTextWriterKind::CellStream:
     impl_->buffer += text;
-    impl_->events.push_back(RuntimeTextOutputEvent{
-        impl_->stream.empty() ? "stdout" : impl_->stream, text,
-        g_runtime_output_order.fetch_add(1, std::memory_order_relaxed)});
+    impl_->events.push_back(
+        RuntimeTextOutputEvent{impl_->stream.empty() ? "stdout" : impl_->stream,
+                               text,
+                               g_runtime_output_order.fetch_add(
+                                   1, std::memory_order_relaxed),
+                               tls_runtime_text_source_location});
     return text_write_ok();
   }
   return text_write_error("IOError", "unknown text writer kind");
@@ -6470,7 +6494,9 @@ public:
         color_enabled_(color_mode == RuntimeLogColorMode::Always ||
                        (color_mode == RuntimeLogColorMode::Auto &&
                         writer_->xterm_color_available())),
-        worker_([this]() { drain_loop(); }) {}
+        worker_(writer_->buffered() ? std::thread{}
+                                    : std::thread([this]() { drain_loop(); })) {
+  }
 
   ~Impl() { close(); }
 
@@ -6480,12 +6506,24 @@ public:
       return text_write_ok();
     }
     std::string line = format_runtime_log_line(level, color_enabled_, message);
+    if (writer_->buffered()) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closed_) {
+        return text_write_error("ClosedResourceError", "logger is closed");
+      }
+      RuntimeTextWriteResult result = writer_->write_str(line + "\n");
+      if (!result.ok && last_error_.ok) {
+        last_error_ = result;
+      }
+      return result;
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (closed_) {
         return text_write_error("ClosedResourceError", "logger is closed");
       }
-      queue_.push_back(std::move(line));
+      queue_.push_back(
+          PendingLogLine{std::move(line), tls_runtime_text_source_location});
     }
     cv_.notify_one();
     return text_write_ok();
@@ -6540,9 +6578,14 @@ public:
   RuntimeLogLevel level() const { return level_; }
 
 private:
+  struct PendingLogLine {
+    std::string line;
+    RuntimeTextSourceLocation source;
+  };
+
   void drain_loop() {
     while (true) {
-      std::deque<std::string> batch;
+      std::deque<PendingLogLine> batch;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait(lock, [this]() { return stop_ || !queue_.empty(); });
@@ -6554,8 +6597,9 @@ private:
         writing_ = true;
       }
 
-      for (const std::string &line : batch) {
-        RuntimeTextWriteResult result = writer_->write_str(line + "\n");
+      for (const PendingLogLine &entry : batch) {
+        RuntimeTextSourceLocationScope source_scope(entry.source);
+        RuntimeTextWriteResult result = writer_->write_str(entry.line + "\n");
         if (!result.ok) {
           std::lock_guard<std::mutex> lock(mutex_);
           if (last_error_.ok) {
@@ -6579,7 +6623,7 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   std::condition_variable drained_cv_;
-  std::deque<std::string> queue_;
+  std::deque<PendingLogLine> queue_;
   bool closed_ = false;
   bool stop_ = false;
   bool writing_ = false;
@@ -8368,6 +8412,8 @@ public:
     push_frame(*entry, args, std::move(entry_captures), std::move(self),
                std::move(block), std::nullopt);
     while (fault_ == std::nullopt && !frames_.empty()) {
+      RuntimeTextSourceLocationScope source_scope(
+          current_text_source_location());
       step();
     }
     state_->heap.drain_remote_frees();
@@ -8960,6 +9006,54 @@ private:
       return;
     }
     state_->heap.collect_garbage(collect_gc_roots(), *requested, true);
+  }
+
+  RuntimeTextSourceLocation
+  text_source_location_for(const Frame &frame, std::uint32_t pc) const {
+    RuntimeTextSourceLocation out;
+    out.code_id = frame.code == nullptr ? 0U : frame.code->code_id;
+    out.pc = pc;
+    if (frame.code == nullptr) {
+      return out;
+    }
+
+    for (const bytecode::SourceSpanEntry &entry : frame.code->source_spans) {
+      if (entry.pc_from <= pc && pc < entry.pc_to) {
+        out.present = true;
+        out.file = entry.span.file;
+        out.line = static_cast<std::uint32_t>(entry.span.start.line);
+        out.column = static_cast<std::uint32_t>(entry.span.start.col);
+        return out;
+      }
+    }
+
+    std::uint32_t best_pc = 0;
+    for (const bytecode::LineEntry &entry : module_.line_table) {
+      if (entry.code_id == out.code_id && entry.pc <= pc &&
+          (out.line == 0U || entry.pc >= best_pc)) {
+        best_pc = entry.pc;
+        out.present = true;
+        out.line = entry.line;
+      }
+    }
+    return out;
+  }
+
+  RuntimeTextSourceLocation current_text_source_location() const {
+    if (frames_.empty()) {
+      return {};
+    }
+
+    for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
+      if (it->code != nullptr && it->code->kind == CodeKind::Module) {
+        return text_source_location_for(
+            *it, it->active_call_pc.value_or(
+                     static_cast<std::uint32_t>(it->pc)));
+      }
+    }
+
+    return text_source_location_for(
+        frames_.back(), static_cast<std::uint32_t>(frames_.back().pc));
   }
 
   TraceFrame trace_frame_for(const Frame &frame, std::uint32_t pc) const {

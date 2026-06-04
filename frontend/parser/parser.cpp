@@ -630,6 +630,20 @@ bool is_chain_comparison_op(const std::string &op) {
   return op == "<" || op == "<=" || op == ">" || op == ">=";
 }
 
+bool token_can_precede_assignment_delimiter(lexer::TokenKind kind) {
+  switch (kind) {
+  case lexer::TokenKind::Plus:
+  case lexer::TokenKind::Minus:
+  case lexer::TokenKind::Star:
+  case lexer::TokenKind::Slash:
+  case lexer::TokenKind::SlashSlash:
+  case lexer::TokenKind::Percent:
+    return false;
+  default:
+    return true;
+  }
+}
+
 int chain_comparison_direction(const std::string &op) {
   if (op == "<" || op == "<=") {
     return -1;
@@ -2109,7 +2123,8 @@ std::unique_ptr<ast::Expr> Parser::try_parse_pattern_assignment() {
     }
     ++index;
   }
-  if (equal_index == tokens_.size() || equal_index == current_) {
+  if (equal_index == tokens_.size() || equal_index == current_ ||
+      !token_can_precede_assignment_delimiter(tokens_[equal_index - 1U].kind)) {
     return nullptr;
   }
 
@@ -2282,6 +2297,25 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
     }
 
     InfixInfo info{};
+    const char *compound_op = nullptr;
+    if (min_precedence <= 1 &&
+        compound_assignment_op(current().kind, &compound_op) &&
+        peek().kind == lexer::TokenKind::Equal) {
+      const lexer::Token op_token = advance();
+      advance();
+      if (!is_assignable(*left)) {
+        error(op_token, "left side of assignment is not assignable");
+      }
+      std::unique_ptr<ast::Expr> right = parse_expression(1, stop_mode);
+      lexer::Span span = ast::join_spans(left->span, right->span);
+      auto assign = ast::make_expr("AstAssign", span);
+      assign->string_field("op", compound_op);
+      assign->node_field("left", std::move(left));
+      assign->node_field("right", std::move(right));
+      left = std::move(assign);
+      continue;
+    }
+
     if (!infix_info(current().kind, &info) ||
         info.precedence < min_precedence) {
       break;
@@ -3333,6 +3367,32 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
     return true;
   case lexer::TokenKind::Percent:
     *info = InfixInfo{7, Assoc::Left, "%"};
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool Parser::compound_assignment_op(lexer::TokenKind kind,
+                                    const char **op) const {
+  switch (kind) {
+  case lexer::TokenKind::Plus:
+    *op = "+=";
+    return true;
+  case lexer::TokenKind::Minus:
+    *op = "-=";
+    return true;
+  case lexer::TokenKind::Star:
+    *op = "*=";
+    return true;
+  case lexer::TokenKind::Slash:
+    *op = "/=";
+    return true;
+  case lexer::TokenKind::SlashSlash:
+    *op = "//=";
+    return true;
+  case lexer::TokenKind::Percent:
+    *op = "%=";
     return true;
   default:
     return false;

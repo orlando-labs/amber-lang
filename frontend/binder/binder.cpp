@@ -896,6 +896,11 @@ private:
       return;
     }
     if (expr.kind == "AstAssign") {
+      if (string_value(expr, "op") != "=") {
+        if (const ast::Expr *left = node_field(expr, "left")) {
+          visit_expr(scope_index, *left);
+        }
+      }
       if (const ast::Expr *right = node_field(expr, "right")) {
         visit_expr(scope_index, *right);
       }

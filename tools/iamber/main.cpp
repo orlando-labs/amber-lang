@@ -17,6 +17,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -113,6 +114,11 @@ struct EvalView {
   std::uint64_t watch_epoch = 0;
   std::size_t watch_event_count = 0;
   std::vector<CellErrorRange> error_ranges;
+};
+
+struct CellDependencyInfo {
+  std::set<std::string> reads;
+  std::set<std::string> writes;
 };
 
 constexpr short kBorderEditColor = 1;
@@ -522,6 +528,229 @@ CompileResult compile_source_text(const std::string &source,
           parse_result.module_name};
 }
 
+const amber::ast::Expr *ast_node_field(const amber::ast::Expr &expr,
+                                       const std::string &name) {
+  for (const amber::ast::NodeField &field : expr.node_fields) {
+    if (field.name == name) {
+      return field.value.get();
+    }
+  }
+  return nullptr;
+}
+
+std::string ast_string_value(const amber::ast::Expr &expr,
+                             const std::string &name) {
+  for (const amber::ast::StringField &field : expr.string_fields) {
+    if (field.name == name) {
+      return field.value;
+    }
+  }
+  return {};
+}
+
+void collect_dependency_reads(const amber::ast::Expr &expr,
+                              CellDependencyInfo *info);
+
+void collect_dependency_write_target(const amber::ast::Expr &expr,
+                                     CellDependencyInfo *info) {
+  if (info == nullptr) {
+    return;
+  }
+  if (expr.kind == "AstName") {
+    info->writes.insert(ast_string_value(expr, "name"));
+    return;
+  }
+  if (expr.kind == "AstIvar") {
+    info->writes.insert("@" + ast_string_value(expr, "name"));
+    return;
+  }
+  if (expr.kind == "AstCvar") {
+    info->writes.insert("@@" + ast_string_value(expr, "name"));
+    return;
+  }
+  collect_dependency_reads(expr, info);
+}
+
+bool dependency_scan_skips_body(const amber::ast::Expr &expr) {
+  return expr.kind == "AstDefStmt" || expr.kind == "AstClauseDef" ||
+         expr.kind == "AstClassDef" || expr.kind == "AstMixinDef" ||
+         expr.kind == "AstPropDef" || expr.kind == "AstClassPropDef" ||
+         expr.kind == "AstAttrDef";
+}
+
+void collect_dependency_reads(const amber::ast::Expr &expr,
+                              CellDependencyInfo *info) {
+  if (info == nullptr || dependency_scan_skips_body(expr)) {
+    return;
+  }
+  if (expr.kind == "AstName") {
+    info->reads.insert(ast_string_value(expr, "name"));
+    return;
+  }
+  if (expr.kind == "AstIvar") {
+    info->reads.insert("@" + ast_string_value(expr, "name"));
+    return;
+  }
+  if (expr.kind == "AstCvar") {
+    info->reads.insert("@@" + ast_string_value(expr, "name"));
+    return;
+  }
+  if (expr.kind == "AstAssign") {
+    const amber::ast::Expr *left = ast_node_field(expr, "left");
+    const amber::ast::Expr *right = ast_node_field(expr, "right");
+    if (ast_string_value(expr, "op") != "=" && left != nullptr) {
+      collect_dependency_reads(*left, info);
+    }
+    if (right != nullptr) {
+      collect_dependency_reads(*right, info);
+    }
+    if (left != nullptr) {
+      collect_dependency_write_target(*left, info);
+    }
+    return;
+  }
+  if (expr.kind == "AstPatternAssign") {
+    if (const amber::ast::Expr *right = ast_node_field(expr, "right")) {
+      collect_dependency_reads(*right, info);
+    }
+    return;
+  }
+
+  for (const amber::ast::NodeField &field : expr.node_fields) {
+    if (field.value != nullptr) {
+      collect_dependency_reads(*field.value, info);
+    }
+  }
+  for (const amber::ast::ListField &field : expr.list_fields) {
+    for (const std::unique_ptr<amber::ast::Expr> &value : field.values) {
+      if (value != nullptr) {
+        collect_dependency_reads(*value, info);
+      }
+    }
+  }
+}
+
+CellDependencyInfo dependency_info_for_cell(const Cell &cell) {
+  CellDependencyInfo info;
+  amber::lexer::LexResult lex_result = lex_source(cell.source, "<iamber-cell>");
+  if (!lex_result.ok()) {
+    return info;
+  }
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    return info;
+  }
+  for (const std::unique_ptr<amber::ast::Expr> &item : parse_result.items) {
+    if (item != nullptr) {
+      collect_dependency_reads(*item, &info);
+    }
+  }
+  return info;
+}
+
+std::vector<CellDependencyInfo>
+dependency_info_for_cells(const std::vector<Cell> &cells) {
+  std::vector<CellDependencyInfo> infos;
+  infos.reserve(cells.size());
+  for (const Cell &cell : cells) {
+    infos.push_back(dependency_info_for_cell(cell));
+  }
+  return infos;
+}
+
+std::string join_dependency_names(const std::set<std::string> &names) {
+  std::ostringstream out;
+  std::size_t index = 0;
+  for (const std::string &name : names) {
+    if (index != 0U) {
+      out << ", ";
+    }
+    out << name;
+    ++index;
+  }
+  return out.str();
+}
+
+std::set<std::string> read_write_overlap(const CellDependencyInfo &info) {
+  std::set<std::string> overlap;
+  for (const std::string &name : info.reads) {
+    if (info.writes.count(name) != 0U) {
+      overlap.insert(name);
+    }
+  }
+  return overlap;
+}
+
+bool dependency_graph_reaches(
+    const std::vector<std::vector<std::size_t>> &graph, std::size_t current,
+    std::size_t target, std::vector<unsigned char> *visited) {
+  if (current >= graph.size() || visited == nullptr) {
+    return false;
+  }
+  if ((*visited)[current] != 0U) {
+    return false;
+  }
+  (*visited)[current] = 1U;
+  for (const std::size_t next : graph[current]) {
+    if (next == target) {
+      return true;
+    }
+    if (dependency_graph_reaches(graph, next, target, visited)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<std::string>
+cyclic_watch_error_for_cell(const std::vector<Cell> &cells, std::size_t index) {
+  if (index >= cells.size() || !cells[index].watch) {
+    return std::nullopt;
+  }
+  const std::vector<CellDependencyInfo> infos = dependency_info_for_cells(cells);
+  const std::set<std::string> overlap = read_write_overlap(infos[index]);
+  if (!overlap.empty()) {
+    std::ostringstream out;
+    out << "cyclic watch dependency: cell " << (index + 1U)
+        << " reads and writes " << join_dependency_names(overlap);
+    return out.str();
+  }
+
+  std::vector<std::vector<std::size_t>> graph(cells.size());
+  for (std::size_t reader = 0; reader < cells.size(); ++reader) {
+    if (!cells[reader].watch) {
+      continue;
+    }
+    for (std::size_t writer = 0; writer < cells.size(); ++writer) {
+      if (!cells[writer].watch) {
+        continue;
+      }
+      for (const std::string &name : infos[reader].reads) {
+        if (infos[writer].writes.count(name) != 0U) {
+          graph[reader].push_back(writer);
+          break;
+        }
+      }
+    }
+  }
+
+  std::vector<unsigned char> visited(cells.size(), 0U);
+  if (dependency_graph_reaches(graph, index, index, &visited)) {
+    std::ostringstream out;
+    out << "cyclic watch dependency: cell " << (index + 1U)
+        << " participates in a watch dependency cycle";
+    return out.str();
+  }
+  return std::nullopt;
+}
+
+EvalView watch_cycle_eval_view(std::string message) {
+  EvalView view;
+  view.error = std::move(message);
+  return view;
+}
+
 std::string session_header_source() { return "package iamber.session\n\n"; }
 
 std::string session_source_until(const std::vector<Cell> &cells,
@@ -554,6 +783,27 @@ std::size_t generated_cell_source_line_count(const std::string &source) {
 
 std::size_t generated_cell_source_size(const std::string &source) {
   return source.size() + ((source.empty() || source.back() != '\n') ? 1U : 0U);
+}
+
+std::string session_source_for_cell_only(const std::vector<Cell> &cells,
+                                         std::size_t index) {
+  std::ostringstream out;
+  out << session_header_source();
+  for (std::size_t i = 0; i < index && i < cells.size(); ++i) {
+    const std::size_t blank_lines =
+        generated_cell_source_line_count(cells[i].source) + 1U;
+    for (std::size_t line = 0; line < blank_lines; ++line) {
+      out << "\n";
+    }
+  }
+  if (index < cells.size()) {
+    out << cells[index].source;
+    if (cells[index].source.empty() || cells[index].source.back() != '\n') {
+      out << "\n";
+    }
+    out << "\n";
+  }
+  return out.str();
 }
 
 std::vector<CellSourceMap>
@@ -741,6 +991,42 @@ std::vector<amber::runtime::RuntimeTextOutputEvent> merge_output_events(
   return events;
 }
 
+std::size_t cell_index_for_source_line(const std::vector<CellSourceMap> &maps,
+                                       std::size_t fallback_index,
+                                       std::uint32_t source_line) {
+  if (source_line == 0U) {
+    return fallback_index;
+  }
+  for (const CellSourceMap &map : maps) {
+    const std::size_t end_line =
+        map.start_line + std::max<std::size_t>(1U, map.source_line_count) -
+        1U;
+    if (source_line >= map.start_line && source_line <= end_line) {
+      return map.cell_index;
+    }
+  }
+  return fallback_index;
+}
+
+std::vector<amber::runtime::RuntimeTextOutputEvent>
+output_events_for_cell(
+    const std::vector<amber::runtime::RuntimeTextOutputEvent> &events,
+    const std::vector<Cell> &cells, std::size_t end_index) {
+  std::vector<amber::runtime::RuntimeTextOutputEvent> filtered;
+  const std::vector<CellSourceMap> maps =
+      cell_source_maps_until(cells, end_index);
+  for (const amber::runtime::RuntimeTextOutputEvent &event : events) {
+    const std::size_t event_cell =
+        event.source.present
+            ? cell_index_for_source_line(maps, end_index, event.source.line)
+            : end_index;
+    if (event_cell == end_index) {
+      filtered.push_back(event);
+    }
+  }
+  return filtered;
+}
+
 bool should_show_local(const LocalView &local) {
   if (local.name.empty() || local.role == "temp") {
     return false;
@@ -748,16 +1034,23 @@ bool should_show_local(const LocalView &local) {
   return true;
 }
 
-EvalView evaluate_prefix(const std::vector<Cell> &cells,
-                         std::size_t end_index) {
+EvalView evaluate_source_for_cell(const std::vector<Cell> &cells,
+                                  std::size_t end_index,
+                                  const std::string &source,
+                                  bool *compiled_ok) {
   EvalView view;
-  const std::string source = session_source_until(cells, end_index);
+  if (compiled_ok != nullptr) {
+    *compiled_ok = false;
+  }
   CompileResult compiled = compile_source_text(source, "<iamber>");
   if (!compiled.ok) {
     view.error = compiled.error;
     view.error_ranges = map_source_error_ranges_to_cells(cells, end_index,
                                                          compiled.error_ranges);
     return view;
+  }
+  if (compiled_ok != nullptr) {
+    *compiled_ok = true;
   }
   if (!compiled.module.init.has_entry_code_id) {
     view.error = "compiled module has no init entry";
@@ -787,7 +1080,9 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
     amber::runtime::RuntimeOutputScope output_scope(stdout_sink, stderr_sink);
     initialized = loader.initialize_module(module_name);
   }
-  view.output_events = merge_output_events(stdout_sink, stderr_sink);
+  view.output_events =
+      output_events_for_cell(merge_output_events(stdout_sink, stderr_sink),
+                             cells, end_index);
   if (!initialized.ok) {
     view.error = loader_result_to_summary(initialized);
     view.error_ranges = map_source_error_ranges_to_cells(
@@ -825,6 +1120,21 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
     }
   }
   return view;
+}
+
+EvalView evaluate_prefix(const std::vector<Cell> &cells,
+                         std::size_t end_index) {
+  if (end_index > 0U && end_index < cells.size()) {
+    bool compiled_ok = false;
+    EvalView isolated = evaluate_source_for_cell(
+        cells, end_index, session_source_for_cell_only(cells, end_index),
+        &compiled_ok);
+    if (compiled_ok) {
+      return isolated;
+    }
+  }
+  return evaluate_source_for_cell(
+      cells, end_index, session_source_until(cells, end_index), nullptr);
 }
 
 void clear_error_ranges_until(Session *session, std::size_t end_index) {
@@ -926,6 +1236,12 @@ void evaluate_cell(Session *session, std::size_t index, bool edit_mode,
   if (session == nullptr || index >= session->cells.size()) {
     return;
   }
+  if (std::optional<std::string> cycle =
+          cyclic_watch_error_for_cell(session->cells, index)) {
+    apply_eval(session, index, watch_cycle_eval_view(std::move(*cycle)));
+    session->status = "cyclic watch blocked";
+    return;
+  }
   if (show_running) {
     mark_cell_running(session, index, edit_mode);
   }
@@ -942,6 +1258,11 @@ void evaluate_from(Session *session, std::size_t start, bool force_all,
   for (std::size_t i = start; i < session->cells.size(); ++i) {
     if (!force_all && i != start && !session->cells[i].watch) {
       session->cells[i].dirty = true;
+      continue;
+    }
+    if (std::optional<std::string> cycle =
+            cyclic_watch_error_for_cell(session->cells, i)) {
+      apply_eval(session, i, watch_cycle_eval_view(std::move(*cycle)));
       continue;
     }
     if (show_running) {
@@ -2229,6 +2550,7 @@ void usage(std::ostream &out) {
 
 } // namespace
 
+#ifndef AMBER_IAMBER_TESTING
 int main(int argc, char **argv) {
   try {
     if (argc == 1) {
@@ -2247,3 +2569,4 @@ int main(int argc, char **argv) {
     return 1;
   }
 }
+#endif
