@@ -16,6 +16,7 @@ tokens:
   punctuation:
     - DOT
     - DOT_DOT
+    - DOT_DOT_DOT
     - CHAIN_DOT
     - SAFE_DOT
     - COLON

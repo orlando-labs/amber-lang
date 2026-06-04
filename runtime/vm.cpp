@@ -10151,11 +10151,12 @@ private:
       if (items == nullptr) {
         return FastCallStatus::NotHandled;
       }
-      if (index < 0 || static_cast<std::size_t>(index) >= items->size()) {
-        set_fault(frame, "IndexError", "collection index is out of bounds");
+      const std::optional<std::size_t> normalized =
+          normalize_sequence_index(frame, index, items->size(), "collection");
+      if (!normalized.has_value()) {
         return FastCallStatus::Faulted;
       }
-      *value_out = (*items)[static_cast<std::size_t>(index)];
+      *value_out = (*items)[*normalized];
       return FastCallStatus::Matched;
     }
 
@@ -12029,6 +12030,9 @@ private:
     if (selector == "entries") {
       return "to_a";
     }
+    if (selector == "to_array") {
+      return "to_a";
+    }
     if (selector == "length" || selector == "size") {
       return "count";
     }
@@ -12038,6 +12042,82 @@ private:
   static bool collection_size_selector(const std::string &selector) {
     const std::string canonical = canonical_collection_selector(selector);
     return canonical == "count";
+  }
+
+  std::optional<std::size_t>
+  normalize_sequence_index(const Frame &frame, std::int64_t index,
+                           std::size_t size,
+                           const std::string &context) {
+    const std::int64_t size_i64 = static_cast<std::int64_t>(size);
+    const std::int64_t normalized = index < 0 ? size_i64 + index : index;
+    if (normalized < 0 ||
+        static_cast<std::uint64_t>(normalized) >= size) {
+      set_fault(frame, "IndexError", context + " index is out of bounds");
+      return std::nullopt;
+    }
+    return static_cast<std::size_t>(normalized);
+  }
+
+  std::optional<std::vector<Value>>
+  slice_sequence_items_by_range(const Frame &frame,
+                                const std::vector<Value> &items,
+                                const Value &range) {
+    const std::optional<RangeBounds> bounds =
+        extract_range_bounds(frame, range);
+    if (fault_.has_value() || !bounds.has_value()) {
+      return std::nullopt;
+    }
+    if (bounds->float_range) {
+      set_fault(frame, "TypeError", "array slice index must be IntRange");
+      return std::nullopt;
+    }
+    if (!bounds->start.has_value()) {
+      set_fault(frame, "IndexError", "array slice index is out of bounds");
+      return std::nullopt;
+    }
+
+    const std::optional<std::size_t> start =
+        normalize_sequence_index(frame, *bounds->start, items.size(),
+                                 "array slice");
+    if (!start.has_value()) {
+      return std::nullopt;
+    }
+
+    std::int64_t normalized_finish = 0;
+    bool inclusive = bounds->inclusive_end;
+    if (bounds->finish.has_value()) {
+      const std::optional<std::size_t> finish =
+          normalize_sequence_index(frame, *bounds->finish, items.size(),
+                                   "array slice");
+      if (!finish.has_value()) {
+        return std::nullopt;
+      }
+      normalized_finish = static_cast<std::int64_t>(*finish);
+    } else {
+      normalized_finish =
+          bounds->step > 0
+              ? static_cast<std::int64_t>(items.empty() ? 0 : items.size() - 1U)
+              : 0;
+      inclusive = true;
+    }
+
+    RangeBounds slice_bounds;
+    slice_bounds.start = static_cast<std::int64_t>(*start);
+    slice_bounds.finish = normalized_finish;
+    slice_bounds.step = bounds->step;
+    slice_bounds.inclusive_end = inclusive;
+
+    std::vector<Value> sliced;
+    std::int64_t current = *slice_bounds.start;
+    while (range_int_value_in_bounds(slice_bounds, current)) {
+      sliced.push_back(items[static_cast<std::size_t>(current)]);
+      std::int64_t next = 0;
+      if (!checked_add_i64(current, slice_bounds.step, &next)) {
+        break;
+      }
+      current = next;
+    }
+    return sliced;
   }
 
   void append_unique_value(std::vector<Value> *items, const Value &value) {
@@ -12679,10 +12759,83 @@ private:
   }
 
   struct RangeBounds {
+    std::optional<Value> start_value;
+    std::optional<Value> finish_value;
+    bool float_range = false;
     std::optional<std::int64_t> start;
     std::optional<std::int64_t> finish;
+    std::optional<double> float_start;
+    std::optional<double> float_finish;
+    std::int64_t step = 1;
+    double float_step = 1.0;
     bool inclusive_end = true;
+    bool explicit_step = false;
   };
+
+  static bool value_is_numeric(const Value &value) {
+    return value.is_integer() || value.is_float();
+  }
+
+  static double numeric_value_as_double(const Value &value) {
+    return value.is_integer() ? static_cast<double>(value.as_integer())
+                              : value.as_float();
+  }
+
+  static bool range_int_value_in_bounds(const RangeBounds &bounds,
+                                        std::int64_t value) {
+    if (bounds.step > 0) {
+      if (bounds.start.has_value() && value < *bounds.start) {
+        return false;
+      }
+      if (!bounds.finish.has_value()) {
+        return true;
+      }
+      return bounds.inclusive_end ? value <= *bounds.finish
+                                  : value < *bounds.finish;
+    }
+    if (bounds.start.has_value() && value > *bounds.start) {
+      return false;
+    }
+    if (!bounds.finish.has_value()) {
+      return true;
+    }
+    return bounds.inclusive_end ? value >= *bounds.finish
+                                : value > *bounds.finish;
+  }
+
+  static bool range_float_value_in_bounds(const RangeBounds &bounds,
+                                          double value) {
+    if (bounds.float_step > 0.0) {
+      if (bounds.float_start.has_value() && value < *bounds.float_start) {
+        return false;
+      }
+      if (!bounds.float_finish.has_value()) {
+        return true;
+      }
+      return bounds.inclusive_end ? value <= *bounds.float_finish
+                                  : value < *bounds.float_finish;
+    }
+    if (bounds.float_start.has_value() && value > *bounds.float_start) {
+      return false;
+    }
+    if (!bounds.float_finish.has_value()) {
+      return true;
+    }
+    return bounds.inclusive_end ? value >= *bounds.float_finish
+                                : value > *bounds.float_finish;
+  }
+
+  static bool checked_add_i64(std::int64_t left, std::int64_t right,
+                              std::int64_t *out) {
+    if ((right > 0 &&
+         left > std::numeric_limits<std::int64_t>::max() - right) ||
+        (right < 0 &&
+         left < std::numeric_limits<std::int64_t>::min() - right)) {
+      return false;
+    }
+    *out = left + right;
+    return true;
+  }
 
   std::optional<RangeBounds> extract_range_bounds(const Frame &frame,
                                                   const Value &value) {
@@ -12704,34 +12857,83 @@ private:
         load_instance_ivar_or_null(frame, instance, "finish");
     const std::optional<Value> inclusive_end =
         load_instance_ivar_or_null(frame, instance, "inclusive_end");
+    const std::optional<Value> step =
+        load_instance_ivar_or_null(frame, instance, "step");
     if (fault_.has_value()) {
       return std::nullopt;
     }
-    if (!start->is_null() && !start->is_integer()) {
-      set_fault(frame, "TypeError", "Range start must be Integer or null");
+    if (!start->is_null() && !value_is_numeric(*start)) {
+      set_fault(frame, "TypeError", "Range start must be numeric or null");
       return std::nullopt;
     }
-    if (!finish->is_null() && !finish->is_integer()) {
-      set_fault(frame, "TypeError", "Range finish must be Integer or null");
+    if (!finish->is_null() && !value_is_numeric(*finish)) {
+      set_fault(frame, "TypeError", "Range finish must be numeric or null");
       return std::nullopt;
     }
     if (!inclusive_end->is_null() && !inclusive_end->is_bool()) {
       set_fault(frame, "TypeError", "Range inclusive_end must be Bool");
       return std::nullopt;
     }
+    if (!step->is_null() && !value_is_numeric(*step)) {
+      set_fault(frame, "TypeError", "range step must be numeric");
+      return std::nullopt;
+    }
     if (start->is_null() && finish->is_null()) {
-      set_fault(frame, "TypeError", "Range bounds must be Integer values");
+      set_fault(frame, "TypeError", "Range bounds must be numeric values");
       return std::nullopt;
     }
     RangeBounds bounds;
+    if (!start->is_null()) {
+      bounds.start_value = *start;
+    }
+    if (!finish->is_null()) {
+      bounds.finish_value = *finish;
+    }
+    bounds.explicit_step = !step->is_null();
+    const bool integer_endpoint_range =
+        (start->is_null() || start->is_integer()) &&
+        (finish->is_null() || finish->is_integer());
+    bounds.float_range =
+        !integer_endpoint_range || (!step->is_null() && step->is_float());
+    if (integer_endpoint_range && !step->is_null() && !step->is_integer()) {
+      set_fault(frame, "TypeError", "integer range step must be Int");
+      return std::nullopt;
+    }
+    if (bounds.float_range && step->is_null()) {
+      set_fault(frame, "TypeError", "float ranges require an explicit step");
+      return std::nullopt;
+    }
     if (start->is_integer()) {
       bounds.start = start->as_integer();
+    } else if (start->is_float()) {
+      bounds.float_start = start->as_float();
     }
     if (finish->is_integer()) {
       bounds.finish = finish->as_integer();
+    } else if (finish->is_float()) {
+      bounds.float_finish = finish->as_float();
     }
     bounds.inclusive_end =
         inclusive_end->is_null() ? true : inclusive_end->as_bool();
+    if (bounds.float_range) {
+      if (start->is_integer()) {
+        bounds.float_start = static_cast<double>(start->as_integer());
+      }
+      if (finish->is_integer()) {
+        bounds.float_finish = static_cast<double>(finish->as_integer());
+      }
+      bounds.float_step = numeric_value_as_double(*step);
+      if (bounds.float_step == 0.0) {
+        set_fault(frame, "ArgumentError", "range step must not be zero");
+        return std::nullopt;
+      }
+    } else {
+      bounds.step = step->is_null() ? 1 : step->as_integer();
+      if (bounds.step == 0) {
+        set_fault(frame, "ArgumentError", "range step must not be zero");
+        return std::nullopt;
+      }
+    }
     return bounds;
   }
 
@@ -12744,20 +12946,30 @@ private:
     }
 
     std::vector<Value> items;
-    if (!bounds->start.has_value() || !bounds->finish.has_value()) {
-      set_fault(frame, "ArgumentError",
-                "open-ended Range cannot be materialized eagerly");
+    if (!bounds->start_value.has_value() || !bounds->finish_value.has_value()) {
+      set_fault(frame, "InfiniteCollectionError",
+                "cannot convert an infinite collection to Array");
       return std::nullopt;
     }
-    if (*bounds->start > *bounds->finish) {
+    if (bounds->float_range) {
+      double current = *bounds->float_start;
+      std::uint64_t ordinal = 0;
+      while (range_float_value_in_bounds(*bounds, current)) {
+        items.push_back(Value::floating(current));
+        ++ordinal;
+        current = *bounds->float_start +
+                  static_cast<double>(ordinal) * bounds->float_step;
+      }
       return items;
     }
-    for (std::int64_t current = *bounds->start; current < *bounds->finish;
-         ++current) {
+    std::int64_t current = *bounds->start;
+    while (range_int_value_in_bounds(*bounds, current)) {
       items.push_back(Value::integer(current));
-    }
-    if (bounds->inclusive_end) {
-      items.push_back(Value::integer(*bounds->finish));
+      std::int64_t next = 0;
+      if (!checked_add_i64(current, bounds->step, &next)) {
+        break;
+      }
+      current = next;
     }
     return items;
   }
@@ -12769,17 +12981,43 @@ private:
     if (fault_.has_value() || !bounds.has_value()) {
       return false;
     }
+    if (bounds->float_range) {
+      if (!value_is_numeric(needle)) {
+        set_fault(frame, "TypeError", "Range#contains? expects numeric value");
+        return false;
+      }
+      const double value = numeric_value_as_double(needle);
+      if (!range_float_value_in_bounds(*bounds, value)) {
+        *out = false;
+        return true;
+      }
+      if (!bounds->float_start.has_value()) {
+        *out = true;
+        return true;
+      }
+      const double diff = value - *bounds->float_start;
+      const double remainder = std::fmod(std::fabs(diff),
+                                         std::fabs(bounds->float_step));
+      constexpr double epsilon = 1e-9;
+      *out = remainder <= epsilon ||
+             std::fabs(remainder - std::fabs(bounds->float_step)) <= epsilon;
+      return true;
+    }
     if (!needle.is_integer()) {
       set_fault(frame, "TypeError", "Range#contains? expects Integer value");
       return false;
     }
     const std::int64_t value = needle.as_integer();
-    const bool above_start =
-        !bounds->start.has_value() || value >= *bounds->start;
-    const bool below_finish = !bounds->finish.has_value() ||
-                              (bounds->inclusive_end ? value <= *bounds->finish
-                                                     : value < *bounds->finish);
-    *out = above_start && below_finish;
+    if (!range_int_value_in_bounds(*bounds, value)) {
+      *out = false;
+      return true;
+    }
+    if (!bounds->start.has_value()) {
+      *out = true;
+      return true;
+    }
+    const std::int64_t diff = value - *bounds->start;
+    *out = diff % bounds->step == 0;
     return true;
   }
 
@@ -12984,37 +13222,45 @@ private:
       if (fault_.has_value() || !bounds.has_value()) {
         return LazySeqVisitStatus::Faulted;
       }
-      if (!bounds->start.has_value()) {
+      if (!bounds->start_value.has_value()) {
         set_fault(frame, "ArgumentError",
                   "beginless Range cannot be iterated lazily");
         return LazySeqVisitStatus::Faulted;
       }
-      std::int64_t current = *bounds->start;
-      while (true) {
-        if (bounds->finish.has_value()) {
-          if (bounds->inclusive_end) {
-            if (current > *bounds->finish) {
-              return LazySeqVisitStatus::Continue;
-            }
-          } else if (current >= *bounds->finish) {
-            return LazySeqVisitStatus::Continue;
+      if (bounds->float_range) {
+        double current = *bounds->float_start;
+        std::uint64_t ordinal = 0;
+        while (range_float_value_in_bounds(*bounds, current)) {
+          const LazySeqVisitStatus status = emit_lazy_seq_value(
+              frame, state, receiver, Value::floating(current), 0U, visitor);
+          if (status != LazySeqVisitStatus::Continue) {
+            return status;
           }
+          ++ordinal;
+          current = *bounds->float_start +
+                    static_cast<double>(ordinal) * bounds->float_step;
         }
+        return LazySeqVisitStatus::Continue;
+      }
+      std::int64_t current = *bounds->start;
+      while (range_int_value_in_bounds(*bounds, current)) {
         const LazySeqVisitStatus status = emit_lazy_seq_value(
             frame, state, receiver, Value::integer(current), 0U, visitor);
         if (status != LazySeqVisitStatus::Continue) {
           return status;
         }
-        if (current == std::numeric_limits<std::int64_t>::max()) {
-          if (!bounds->finish.has_value()) {
+        std::int64_t next = 0;
+        if (!checked_add_i64(current, bounds->step, &next)) {
+          if (!bounds->finish_value.has_value()) {
             set_fault(frame, "ArgumentError",
                       "open-ended Range lazy iteration overflows Integer");
             return LazySeqVisitStatus::Faulted;
           }
           return LazySeqVisitStatus::Continue;
         }
-        ++current;
+        current = next;
       }
+      return LazySeqVisitStatus::Continue;
     }
 
     bool source_was_tuple = false;
@@ -13049,20 +13295,21 @@ private:
     if (fault_.has_value() || !bounds.has_value()) {
       return false;
     }
-    *out = !bounds->start.has_value() || !bounds->finish.has_value();
+    *out = !bounds->start_value.has_value() || !bounds->finish_value.has_value();
     return true;
   }
 
   bool require_lazy_seq_finite_source(const Frame &frame,
                                       const LazySeqState &state,
                                       const std::string &operation) {
+    (void)operation;
     bool open_ended = false;
     if (!lazy_seq_source_is_open_ended_range(frame, state, &open_ended)) {
       return false;
     }
     if (open_ended) {
-      set_fault(frame, "ArgumentError",
-                "open-ended LazySeq cannot " + operation);
+      set_fault(frame, "InfiniteCollectionError",
+                "cannot convert an infinite collection to Array");
       return false;
     }
     return true;
@@ -13361,7 +13608,6 @@ private:
   ConversionResult convert_value_to_native_type(const Frame &frame,
                                                 const Value &value,
                                                 RuntimeNativeTypeKind target) {
-    (void)frame;
     switch (target) {
     case RuntimeNativeTypeKind::Str:
       return display_string_value(value);
@@ -13456,6 +13702,17 @@ private:
     case RuntimeNativeTypeKind::Array: {
       if (value.is_list()) {
         return conversion_ok(value);
+      }
+      if (value_is_range_instance(value)) {
+        const std::optional<std::vector<Value>> items =
+            extract_range_items(frame, value);
+        if (!items.has_value()) {
+          if (fault_.has_value()) {
+            return conversion_error(fault_->error_name, fault_->message);
+          }
+          return conversion_error("TypeError", "cannot cast value to Array");
+        }
+        return conversion_ok(make_list_value(*items));
       }
       if (value.is_tuple()) {
         const std::shared_ptr<TupleValue> tuple = value.as_tuple();
@@ -17219,6 +17476,8 @@ private:
     const bool numeric_selector =
         selector_in({"+", "-", "*", "/", "%", "//", ">", "<",
                      ">=", "<=", "==", "!=", "<=>"});
+    const bool integer_times_selector =
+        receiver.is_integer() && selector == "times";
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
@@ -17247,7 +17506,8 @@ private:
                                                       "has_value?",
                                                       "+",
                                                       "|"})) ||
-        ((receiver.is_integer() || receiver.is_float()) && numeric_selector);
+        ((receiver.is_integer() || receiver.is_float()) && numeric_selector) ||
+        integer_times_selector;
     const bool keyword_compatible_builtin_selector =
         collection_selector == "each" &&
         (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
@@ -17715,7 +17975,7 @@ private:
           return SendStatus::Faulted;
         }
         const bool open_ended =
-            !bounds->start.has_value() || !bounds->finish.has_value();
+            !bounds->start_value.has_value() || !bounds->finish_value.has_value();
         if (open_ended) {
           if (collection_selector == "lazy") {
             if (!require_arity(0) || !require_no_block()) {
@@ -17735,13 +17995,13 @@ private:
             if (!require_no_block()) {
               return SendStatus::Faulted;
             }
-            if (!bounds->start.has_value()) {
+            if (!bounds->start_value.has_value()) {
               set_fault(frame, "ArgumentError",
                         "beginless Range has no first element");
               return SendStatus::Faulted;
             }
             if (args.empty()) {
-              *out = Value::integer(*bounds->start);
+              *out = *bounds->start_value;
               return SendStatus::Matched;
             }
             std::int64_t count = 0;
@@ -17752,21 +18012,31 @@ private:
             if (count > 0) {
               taken.reserve(static_cast<std::size_t>(count));
             }
-            std::int64_t current = *bounds->start;
-            for (std::int64_t index = 0; index < count; ++index) {
-              taken.push_back(Value::integer(current));
-              if (index + 1 < count &&
-                  current == std::numeric_limits<std::int64_t>::max()) {
-                set_fault(frame, "ArgumentError",
-                          "open-ended Range first(count) overflows Integer");
-                return SendStatus::Faulted;
+            if (bounds->float_range) {
+              double current = *bounds->float_start;
+              for (std::int64_t index = 0; index < count; ++index) {
+                taken.push_back(Value::floating(current));
+                current = *bounds->float_start +
+                          static_cast<double>(index + 1) * bounds->float_step;
               }
-              ++current;
+            } else {
+              std::int64_t current = *bounds->start;
+              for (std::int64_t index = 0; index < count; ++index) {
+                taken.push_back(Value::integer(current));
+                std::int64_t next = 0;
+                if (index + 1 < count &&
+                    !checked_add_i64(current, bounds->step, &next)) {
+                  set_fault(frame, "ArgumentError",
+                            "open-ended Range first(count) overflows Integer");
+                  return SendStatus::Faulted;
+                }
+                current = next;
+              }
             }
             *out = make_list_value(std::move(taken));
             return SendStatus::Matched;
           }
-          if (collection_selector == "[]" && bounds->start.has_value()) {
+          if (collection_selector == "[]" && bounds->start_value.has_value()) {
             std::int64_t index = 0;
             if (!require_arity(1) || !require_no_block() ||
                 !require_integer_arg(0, &index)) {
@@ -17776,13 +18046,23 @@ private:
               set_fault(frame, "IndexError", "Range index is out of bounds");
               return SendStatus::Faulted;
             }
-            if (*bounds->start >
-                std::numeric_limits<std::int64_t>::max() - index) {
-              set_fault(frame, "ArgumentError",
-                        "open-ended Range index overflows Integer");
-              return SendStatus::Faulted;
+            if (bounds->float_range) {
+              *out = Value::floating(
+                  *bounds->float_start +
+                  static_cast<double>(index) * bounds->float_step);
+              return SendStatus::Matched;
             }
-            *out = Value::integer(*bounds->start + index);
+            std::int64_t current = *bounds->start;
+            for (std::int64_t i = 0; i < index; ++i) {
+              std::int64_t next = 0;
+              if (!checked_add_i64(current, bounds->step, &next)) {
+                set_fault(frame, "ArgumentError",
+                          "open-ended Range index overflows Integer");
+                return SendStatus::Faulted;
+              }
+              current = next;
+            }
+            *out = Value::integer(current);
             return SendStatus::Matched;
           }
           if ((collection_selector == "any?" || collection_selector == "all?" ||
@@ -17794,8 +18074,8 @@ private:
             *out = Value::boolean(collection_selector != "none?");
             return SendStatus::Matched;
           }
-          set_fault(frame, "ArgumentError",
-                    "open-ended Range cannot run eager collection method");
+          set_fault(frame, "InfiniteCollectionError",
+                    "cannot convert an infinite collection to Array");
           return SendStatus::Faulted;
         }
       }
@@ -17816,17 +18096,29 @@ private:
             return SendStatus::Matched;
           }
           if (collection_selector == "[]") {
+            if (!require_arity(1) || !require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            if (value_is_range_instance(args[0])) {
+              const std::optional<std::vector<Value>> sliced =
+                  slice_sequence_items_by_range(frame, items, args[0]);
+              if (!sliced.has_value()) {
+                return SendStatus::Faulted;
+              }
+              *out = make_list_value(*sliced);
+              return SendStatus::Matched;
+            }
             std::int64_t index = 0;
-            if (!require_arity(1) || !require_no_block() ||
-                !require_integer_arg(0, &index)) {
+            if (!require_integer_arg(0, &index)) {
               return SendStatus::Faulted;
             }
-            if (index < 0 || static_cast<std::size_t>(index) >= items.size()) {
-              set_fault(frame, "IndexError",
-                        "collection index is out of bounds");
+            const std::optional<std::size_t> normalized =
+                normalize_sequence_index(frame, index, items.size(),
+                                         "collection");
+            if (!normalized.has_value()) {
               return SendStatus::Faulted;
             }
-            *out = items[static_cast<std::size_t>(index)];
+            *out = items[*normalized];
             return SendStatus::Matched;
           }
           if (collection_selector == "deconstruct") {
@@ -17890,16 +18182,33 @@ private:
           return SendStatus::Matched;
         }
         if (collection_selector == "[]") {
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (value_is_range_instance(args[0])) {
+            const std::optional<std::vector<Value>> sliced =
+                slice_sequence_items_by_range(frame, items, args[0]);
+            if (!sliced.has_value()) {
+              return SendStatus::Faulted;
+            }
+            *out = make_list_value(*sliced);
+            return SendStatus::Matched;
+          }
           std::int64_t index = 0;
-          if (!require_arity(1) || !require_no_block() ||
-              !require_integer_arg(0, &index)) {
+          if (!require_integer_arg(0, &index)) {
             return SendStatus::Faulted;
           }
-          if (index < 0 || static_cast<std::size_t>(index) >= items.size()) {
-            set_fault(frame, "IndexError", "collection index is out of bounds");
+          if (receiver_is_range && index < 0) {
+            set_fault(frame, "IndexError", "Range index is out of bounds");
             return SendStatus::Faulted;
           }
-          *out = items[static_cast<std::size_t>(index)];
+          const std::optional<std::size_t> normalized =
+              normalize_sequence_index(frame, index, items.size(),
+                                       "collection");
+          if (!normalized.has_value()) {
+            return SendStatus::Faulted;
+          }
+          *out = items[*normalized];
           return SendStatus::Matched;
         }
         if (collection_selector == "deconstruct") {
@@ -18546,6 +18855,33 @@ private:
       const std::int64_t lhs = receiver.as_integer();
       std::int64_t rhs = 0;
       double numeric_rhs = 0.0;
+      if (selector == "times") {
+        if (!require_arity(0) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Int#times does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> indices;
+        if (lhs > 0) {
+          indices.reserve(static_cast<std::size_t>(lhs));
+          for (std::int64_t index = 0; index < lhs; ++index) {
+            indices.push_back(Value::integer(index));
+          }
+        }
+        if (block.is_null()) {
+          *out = make_list_value(std::move(indices));
+          return SendStatus::Matched;
+        }
+        for (const Value &index : indices) {
+          if (!call_block_to_value(frame, block, {index}).has_value()) {
+            return SendStatus::Faulted;
+          }
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
       if (selector == "+") {
         if (!require_arity(1) || !require_no_block()) {
           return SendStatus::Faulted;
@@ -19029,14 +19365,14 @@ private:
                  : FastSendStatus::Faulted;
     }
     if (collection_selector == "[]") {
-      if (single_integer_arg < 0 ||
-          static_cast<std::size_t>(single_integer_arg) >= items->size()) {
-        set_fault(frame, "IndexError", "collection index is out of bounds");
+      const std::optional<std::size_t> normalized =
+          normalize_sequence_index(frame, single_integer_arg, items->size(),
+                                   "collection");
+      if (!normalized.has_value()) {
         return FastSendStatus::Faulted;
       }
       return write_reg_fast_plain(
-                 frame, dst,
-                 (*items)[static_cast<std::size_t>(single_integer_arg)])
+                 frame, dst, (*items)[*normalized])
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
@@ -19186,15 +19522,15 @@ private:
 
     switch (opcode) {
     case QuickOpcode::SendSeqIndex:
-      if (integer_arg < 0 ||
-          static_cast<std::size_t>(integer_arg) >= items->size()) {
-        set_fault(frame, "IndexError", "collection index is out of bounds");
+      if (const std::optional<std::size_t> normalized =
+              normalize_sequence_index(frame, integer_arg, items->size(),
+                                       "collection")) {
+        return write_reg_fast_plain(frame, dst, (*items)[*normalized])
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      } else {
         return FastSendStatus::Faulted;
       }
-      return write_reg_fast_plain(
-                 frame, dst, (*items)[static_cast<std::size_t>(integer_arg)])
-                 ? FastSendStatus::Matched
-                 : FastSendStatus::Faulted;
     case QuickOpcode::SendSeqCount:
       return write_integer_reg_unboxed(frame, dst,
                                        static_cast<std::int64_t>(items->size()))
@@ -19401,6 +19737,21 @@ private:
         }
       }
       if (collection_size_selector(*selector)) {
+        Value result = Value::null();
+        const SendStatus scalar_status = try_apply_scalar_send(
+            frame, receiver, *selector, args, block, kw_args, &result);
+        if (scalar_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (scalar_status == SendStatus::Matched) {
+          if (!write_reg(frame, dst, std::move(result))) {
+            return false;
+          }
+          ++frame.pc;
+          return true;
+        }
+      }
+      if (*selector == "times" && receiver.is_integer()) {
         Value result = Value::null();
         const SendStatus scalar_status = try_apply_scalar_send(
             frame, receiver, *selector, args, block, kw_args, &result);

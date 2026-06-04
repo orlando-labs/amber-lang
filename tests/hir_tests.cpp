@@ -589,7 +589,9 @@ void test_w13_operator_lowering() {
                                                "  x in xs\n"
                                                "  a and b\n"
                                                "  a or b\n"
-                                               "  1..10\n");
+                                               "  1..10\n"
+                                               "  1...10\n"
+                                               "  1..10:2\n");
   const amber::hir::Procedure *ops = procedure_by_name(program, "ops");
   expect(ops != nullptr, "ops procedure exists");
 
@@ -633,6 +635,27 @@ void test_w13_operator_lowering() {
          "range carries inclusive_end kwarg");
   expect(string_field(*inclusive, "name") == "inclusive_end",
          "range kwarg name");
+
+  const amber::ast::Expr *exclusive_stmt = list_item(*ops->body, "items", 4);
+  const amber::ast::Expr *exclusive_expr =
+      exclusive_stmt == nullptr ? nullptr : node_field(*exclusive_stmt, "expr");
+  expect(exclusive_expr != nullptr && exclusive_expr->kind == "HSend",
+         "exclusive range lowers to constructor send");
+  const amber::ast::Expr *exclusive_inclusive =
+      list_item(*exclusive_expr, "kw_args", 0);
+  expect(exclusive_inclusive != nullptr &&
+             node_field(*exclusive_inclusive, "value") != nullptr &&
+             string_field(*node_field(*exclusive_inclusive, "value"),
+                          "token") == "KEYWORD_FALSE",
+         "exclusive range lowers inclusive_end false");
+
+  const amber::ast::Expr *stepped_stmt = list_item(*ops->body, "items", 5);
+  const amber::ast::Expr *stepped_expr =
+      stepped_stmt == nullptr ? nullptr : node_field(*stepped_stmt, "expr");
+  const amber::ast::Expr *step_kwarg =
+      stepped_expr == nullptr ? nullptr : list_item(*stepped_expr, "kw_args", 1);
+  expect(step_kwarg != nullptr && string_field(*step_kwarg, "name") == "step",
+         "stepped range lowers step kwarg");
 }
 
 void test_compare_chain_lowering() {

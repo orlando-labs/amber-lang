@@ -11,6 +11,7 @@ errors:
   - ModuleInitError
   - WatchTargetError
   - EmptyCollectionError
+  - InfiniteCollectionError
   - IndexError
   - KeyError
   - ZeroDivisionError

@@ -32,7 +32,7 @@ public:
   ParseModuleResult parse_module_unit();
 
 private:
-  enum class StopMode { Normal, InlineBlock, InlineIfBranch };
+  enum class StopMode { Normal, InlineBlock, InlineIfBranch, ControlHeader };
 
   enum class BodyContext { Module, Class, Mixin, Def };
 
@@ -163,6 +163,9 @@ private:
   bool starts_same_indent_postfix_continuation() const;
   bool starts_map_literal_entry() const;
   bool is_contextual_at(std::size_t index, const char *text) const;
+  bool is_literal_float_expr(const ast::Expr &expr) const;
+  bool is_literal_zero_expr(const ast::Expr &expr) const;
+  std::unique_ptr<ast::Expr> make_null_literal(const lexer::Span &span) const;
   bool token_slice_parses_expression(std::size_t begin,
                                      std::size_t end) const;
   std::size_t find_inline_then_delimiter(std::size_t begin) const;

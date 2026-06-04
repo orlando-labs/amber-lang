@@ -843,6 +843,15 @@ private:
                                  : infer_expr(*right_expr, narrowed);
       return union_type({truthy_part(left), right});
     }
+    if (op == ".." || op == "...") {
+      if (right_expr != nullptr) {
+        (void)infer_expr(*right_expr, env);
+      }
+      if (const ast::Expr *step = node_field(expr, "step")) {
+        (void)infer_expr(*step, env);
+      }
+      return named_type("Range");
+    }
     if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" ||
         op == ">=" || op == "in") {
       return named_type("Bool");

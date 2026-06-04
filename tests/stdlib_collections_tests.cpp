@@ -168,13 +168,14 @@ amber::runtime::Value make_symbol_map(
 
 amber::runtime::Value make_range_value(
     const amber::bytecode::BcModule &module, std::int64_t start,
-    std::int64_t finish, bool inclusive_end = true) {
+    std::int64_t finish, bool inclusive_end = true, std::int64_t step = 1) {
   auto instance = amber::runtime::default_runtime_heap().make_instance_value(
       class_index_or_die(module, "Range"));
   instance->ivars["start"] = amber::runtime::Value::integer(start);
   instance->ivars["finish"] = amber::runtime::Value::integer(finish);
   instance->ivars["inclusive_end"] =
       amber::runtime::Value::boolean(inclusive_end);
+  instance->ivars["step"] = amber::runtime::Value::integer(step);
   return amber::runtime::Value::instance(std::move(instance));
 }
 
@@ -306,10 +307,11 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   BcModule module;
   for (const std::string &symbol :
        {"each", "map", "flat_map", "select", "reject", "reduce", "find", "any?",
-        "all?", "none?", "first", "count", "to_a", "lazy", "group_by", "+", ">",
+        "all?", "none?", "first", "count", "to_a", "to_array", "lazy",
+        "group_by", "+", ">",
         "contains?", "include?", "===", "empty?", "[]", "Range", "low",
         "high", "collect", "collect_concat", "filter", "find_all", "detect",
-        "inject", "member?", "length", "size", "entries"}) {
+        "inject", "member?", "length", "size", "entries", "times"}) {
     ensure_symbol_id(&module, symbol);
   }
   BcClass range_class;
@@ -389,6 +391,12 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
       make_send_code(39, symbol_id_or_die(module, "size"), false));
   module.code_objects.push_back(
       make_send_code(40, symbol_id_or_die(module, "entries"), false));
+  module.code_objects.push_back(
+      make_send_code(41, symbol_id_or_die(module, "to_array"), false));
+  module.code_objects.push_back(
+      make_send_code(42, symbol_id_or_die(module, "times"), false));
+  module.code_objects.push_back(
+      make_send_code(43, symbol_id_or_die(module, "times"), true));
 
   BcCode reduce_init;
   reduce_init.code_id = 6;
@@ -835,6 +843,22 @@ void test_std002_range_exclusive_and_open_end_edges() {
   expect_ok(result, "Range exclusive to_a");
   expect_integer_list(result.value, {1, 2}, "Range exclusive to_a");
 
+  result = amber::runtime::execute_code(module, 41, {exclusive});
+  expect_ok(result, "Range exclusive to_array");
+  expect_integer_list(result.value, {1, 2}, "Range exclusive to_array");
+
+  const amber::runtime::Value stepped =
+      make_range_value(module, 1, 5, true, 2);
+  result = amber::runtime::execute_code(module, 41, {stepped});
+  expect_ok(result, "Range stepped to_array");
+  expect_integer_list(result.value, {1, 3, 5}, "Range stepped to_array");
+
+  const amber::runtime::Value descending =
+      make_range_value(module, 5, 1, true, -2);
+  result = amber::runtime::execute_code(module, 41, {descending});
+  expect_ok(result, "Range descending to_array");
+  expect_integer_list(result.value, {5, 3, 1}, "Range descending to_array");
+
   result = amber::runtime::execute_code(
       module, 20, {open_end, amber::runtime::Value::integer(100)});
   expect_ok(result, "Range open-end contains?");
@@ -861,7 +885,8 @@ void test_std002_range_exclusive_and_open_end_edges() {
   expect_integer(result.value, 6, "Range open-end []");
 
   result = amber::runtime::execute_code(module, 14, {open_end});
-  expect_fault(result, "ArgumentError", "Range open-end eager to_a");
+  expect_fault(result, "InfiniteCollectionError",
+               "Range open-end eager to_a");
 
   const amber::runtime::Value open_begin = make_range_value(module, 0, 5);
   open_begin.as_instance_object()->ivars["start"] =
@@ -870,6 +895,42 @@ void test_std002_range_exclusive_and_open_end_edges() {
       module, 20, {open_begin, amber::runtime::Value::integer(-100)});
   expect_ok(result, "Range open-begin contains?");
   expect_bool(result.value, true, "Range open-begin contains?");
+}
+
+void test_std002_int_times() {
+  const amber::bytecode::BcModule module = make_sequence_protocol_module();
+  const amber::runtime::Value inc = make_closure_value(100);
+
+  amber::runtime::ExecutionResult result =
+      amber::runtime::execute_code(module, 42,
+                                   {amber::runtime::Value::integer(5)});
+  expect_ok(result, "Int#times enumerable");
+  expect_integer_list(result.value, {0, 1, 2, 3, 4},
+                      "Int#times enumerable");
+
+  result = amber::runtime::execute_code(module, 42,
+                                        {amber::runtime::Value::integer(0)});
+  expect_ok(result, "zero Int#times enumerable");
+  expect_integer_list(result.value, {}, "zero Int#times enumerable");
+
+  result = amber::runtime::execute_code(module, 42,
+                                        {amber::runtime::Value::integer(-3)});
+  expect_ok(result, "negative Int#times enumerable");
+  expect_integer_list(result.value, {}, "negative Int#times enumerable");
+
+  result = amber::runtime::execute_code(module, 43,
+                                        {amber::runtime::Value::integer(3),
+                                         inc});
+  expect_ok(result, "direct block Int#times");
+  expect(result.value.is_null(), "direct block Int#times returns null");
+
+  const amber::runtime::Value times =
+      amber::runtime::make_list_value({amber::runtime::Value::integer(0),
+                                       amber::runtime::Value::integer(1),
+                                       amber::runtime::Value::integer(2)});
+  result = amber::runtime::execute_code(module, 2, {times, inc});
+  expect_ok(result, "times map equivalent");
+  expect_integer_list(result.value, {1, 2, 3}, "times map equivalent");
 }
 
 void test_std003_lazy_pipeline_and_materialization() {
@@ -914,7 +975,8 @@ void test_std003_lazy_pipeline_and_materialization() {
                       "LazySeq open-ended Range first(count)");
 
   result = amber::runtime::execute_code(module, 15, {open_end, inc});
-  expect_fault(result, "ArgumentError", "LazySeq open-ended to_a");
+  expect_fault(result, "InfiniteCollectionError",
+               "LazySeq open-ended to_a");
 }
 
 amber::bytecode::BcModule make_std005_collection_ops_module() {
@@ -1690,14 +1752,41 @@ void test_std006_collection_error_edges() {
   };
 
   const amber::runtime::Value list =
-      amber::runtime::make_list_value({integer(1), integer(2), integer(3)});
+      amber::runtime::make_list_value({integer(1), integer(2), integer(3),
+                                       integer(4), integer(5)});
   amber::runtime::ExecutionResult result =
       amber::runtime::execute_code(sequence_module, 24, {list, integer(-1)});
-  expect_fault(result, "IndexError", "Array#[] negative index");
+  expect_ok(result, "Array#[] negative index");
+  expect_integer(result.value, 5, "Array#[] negative index");
 
   result =
       amber::runtime::execute_code(sequence_module, 24, {list, integer(99)});
   expect_fault(result, "IndexError", "Array#[] out of bounds");
+
+  const amber::runtime::Value tail_slice =
+      make_range_value(sequence_module, -3, -1);
+  result =
+      amber::runtime::execute_code(sequence_module, 24, {list, tail_slice});
+  expect_ok(result, "Array#[] negative endpoint slice");
+  expect_integer_list(result.value, {3, 4, 5},
+                      "Array#[] negative endpoint slice");
+
+  amber::runtime::Value open_slice =
+      make_range_value(sequence_module, 2, 0, true);
+  open_slice.as_instance_object()->ivars["finish"] =
+      amber::runtime::Value::null();
+  result =
+      amber::runtime::execute_code(sequence_module, 24, {list, open_slice});
+  expect_ok(result, "Array#[] open-ended slice");
+  expect_integer_list(result.value, {3, 4, 5}, "Array#[] open-ended slice");
+
+  const amber::runtime::Value stepped_slice =
+      make_range_value(sequence_module, 4, 0, true, -2);
+  result =
+      amber::runtime::execute_code(sequence_module, 24, {list, stepped_slice});
+  expect_ok(result, "Array#[] stepped descending slice");
+  expect_integer_list(result.value, {5, 3, 1},
+                      "Array#[] stepped descending slice");
 
   const amber::runtime::Value range = make_range_value(sequence_module, 1, 3);
   result =
@@ -1828,6 +1917,7 @@ int main() {
   test_std001_empty_sequence_edges();
   test_std002_empty_range_edges();
   test_std002_range_exclusive_and_open_end_edges();
+  test_std002_int_times();
   test_std003_lazy_pipeline_and_materialization();
   test_std005_collection_operations();
   test_std001_map_protocol_matrix();

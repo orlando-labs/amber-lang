@@ -12,6 +12,9 @@ diagnostics:
   - { code: AMB-SYN-INLINE-TERNARY-CSTYLE, severity: error, phase: parser, condition: C-style ternary operator is not supported }
   - { code: AMB-SYN-INLINE-IF-MISSING-ELSE, severity: error, phase: parser, condition: inline conditional expression is missing required else branch }
   - { code: AMB-SYN-CONDITIONAL-ELEMENT-MISSING-VALUE, severity: error, phase: parser, condition: conditional collection element has if or unless without a preceding value }
+  - { code: E_RANGE_FLOAT_STEP_REQUIRED, severity: error, phase: parser, condition: float range literal is missing an explicit step }
+  - { code: E_RANGE_ZERO_STEP, severity: error, phase: parser, condition: statically literal range step is zero }
+  - { code: E_RANGE_EXCLUSIVE_OPEN_ENDED, severity: error, phase: parser, condition: exclusive open-ended range syntax is not supported }
   - { code: AMB_PROP_BAD_DECL, severity: error, phase: parser, condition: malformed property declaration }
   - { code: AMB_PROP_INVALID_CONTEXT, severity: error, phase: parser, condition: property declaration in function or block context }
   - { code: AMB_PROP_PARAM_LIST_FORBIDDEN, severity: error, phase: parser, condition: property declaration has a forbidden parameter list }

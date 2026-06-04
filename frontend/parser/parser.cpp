@@ -294,6 +294,7 @@ bool no_space_before_pattern_token(lexer::TokenKind kind) {
   return kind == lexer::TokenKind::Comma || kind == lexer::TokenKind::Colon ||
          kind == lexer::TokenKind::Dot || kind == lexer::TokenKind::LParen ||
          kind == lexer::TokenKind::DotDot ||
+         kind == lexer::TokenKind::DotDotDot ||
          kind == lexer::TokenKind::LBracket ||
          kind == lexer::TokenKind::LBrace ||
          kind == lexer::TokenKind::Question ||
@@ -303,7 +304,9 @@ bool no_space_before_pattern_token(lexer::TokenKind kind) {
 
 bool no_space_after_pattern_token(lexer::TokenKind kind) {
   return kind == lexer::TokenKind::Colon || kind == lexer::TokenKind::Dot ||
-         kind == lexer::TokenKind::DotDot || kind == lexer::TokenKind::Caret ||
+         kind == lexer::TokenKind::DotDot ||
+         kind == lexer::TokenKind::DotDotDot ||
+         kind == lexer::TokenKind::Caret ||
          kind == lexer::TokenKind::Star || kind == lexer::TokenKind::LParen ||
          kind == lexer::TokenKind::LBracket || kind == lexer::TokenKind::LBrace;
 }
@@ -952,7 +955,7 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
     signature = make_synthetic_signature(signature_span, patterns.size());
     std::unique_ptr<ast::Expr> guard;
     if (match(lexer::TokenKind::KeywordIf)) {
-      guard = parse_expression(1, StopMode::Normal);
+      guard = parse_expression(1, StopMode::ControlHeader);
     }
     consume(lexer::TokenKind::Colon, "expected ':' after function signature");
     std::vector<std::unique_ptr<ast::Expr>> body =
@@ -1599,7 +1602,7 @@ std::unique_ptr<ast::Expr> Parser::parse_clause() {
   const std::string pattern_text = parse_clause_pattern_text();
   std::unique_ptr<ast::Expr> guard;
   if (match(lexer::TokenKind::KeywordIf)) {
-    guard = parse_expression(1, StopMode::Normal);
+    guard = parse_expression(1, StopMode::ControlHeader);
   }
   consume(lexer::TokenKind::Colon, "expected ':' after function clause");
   std::vector<std::unique_ptr<ast::Expr>> body =
@@ -1903,7 +1906,8 @@ std::unique_ptr<ast::Expr> Parser::parse_if_expr(StopMode stop_mode) {
     return node;
   }
 
-  std::unique_ptr<ast::Expr> cond = parse_expression(1, StopMode::Normal);
+  std::unique_ptr<ast::Expr> cond =
+      parse_expression(1, StopMode::ControlHeader);
   consume(lexer::TokenKind::Colon, "expected ':' after if condition");
   std::vector<std::unique_ptr<ast::Expr>> then_body =
       parse_control_body(BodyContext::Def);
@@ -1933,7 +1937,7 @@ std::vector<std::unique_ptr<ast::Expr>> Parser::parse_if_tail() {
              check(lexer::TokenKind::KeywordElsif)) {
     const lexer::Token elif_token = advance();
     std::unique_ptr<ast::Expr> nested_cond =
-        parse_expression(1, StopMode::Normal);
+        parse_expression(1, StopMode::ControlHeader);
     consume(lexer::TokenKind::Colon, "expected ':' after elif condition");
     std::vector<std::unique_ptr<ast::Expr>> nested_body =
         parse_control_body(BodyContext::Def);
@@ -1954,7 +1958,8 @@ std::vector<std::unique_ptr<ast::Expr>> Parser::parse_if_tail() {
 
 std::unique_ptr<ast::Expr> Parser::parse_unless_expr() {
   const lexer::Token start = advance();
-  std::unique_ptr<ast::Expr> cond = parse_expression(1, StopMode::Normal);
+  std::unique_ptr<ast::Expr> cond =
+      parse_expression(1, StopMode::ControlHeader);
   consume(lexer::TokenKind::Colon, "expected ':' after unless condition");
   std::vector<std::unique_ptr<ast::Expr>> then_body =
       parse_control_body(BodyContext::Def);
@@ -1980,7 +1985,7 @@ std::unique_ptr<ast::Expr> Parser::parse_loop_expr(const char *kind) {
   const lexer::Token start = advance();
   std::unique_ptr<ast::Expr> cond;
   if (std::string(kind) == "AstWhile" || std::string(kind) == "AstUntil") {
-    cond = parse_expression(1, StopMode::Normal);
+    cond = parse_expression(1, StopMode::ControlHeader);
   }
   consume(lexer::TokenKind::Colon, "expected ':' after loop header");
   std::vector<std::unique_ptr<ast::Expr>> body =
@@ -2002,7 +2007,8 @@ std::unique_ptr<ast::Expr> Parser::parse_do_while_expr() {
       parse_control_body(BodyContext::Def);
   consume(lexer::TokenKind::KeywordWhile,
           "expected trailing while after do body");
-  std::unique_ptr<ast::Expr> cond = parse_expression(1, StopMode::Normal);
+  std::unique_ptr<ast::Expr> cond =
+      parse_expression(1, StopMode::ControlHeader);
 
   auto node =
       ast::make_expr("AstDoWhile", ast::join_spans(start.span, cond->span));
@@ -2028,7 +2034,8 @@ std::unique_ptr<ast::Expr> Parser::parse_break_expr() {
 
 std::unique_ptr<ast::Expr> Parser::parse_case_expr(bool strict) {
   const lexer::Token start = advance();
-  std::unique_ptr<ast::Expr> scrutinee = parse_expression(1, StopMode::Normal);
+  std::unique_ptr<ast::Expr> scrutinee =
+      parse_expression(1, StopMode::ControlHeader);
   consume(lexer::TokenKind::Colon, "expected ':' after case scrutinee");
   consume(lexer::TokenKind::Newline, "expected newline after case header");
   consume(lexer::TokenKind::Indent, "expected indented case body");
@@ -2073,7 +2080,7 @@ std::unique_ptr<ast::Expr> Parser::parse_case_arm() {
 
   std::unique_ptr<ast::Expr> guard;
   if (match(lexer::TokenKind::KeywordIf)) {
-    guard = parse_expression(1, StopMode::Normal);
+    guard = parse_expression(1, StopMode::ControlHeader);
   }
   consume(lexer::TokenKind::Colon, "expected ':' after case arm");
   std::vector<std::unique_ptr<ast::Expr>> body =
@@ -2321,6 +2328,8 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
       break;
     }
     const lexer::Token op_token = advance();
+    const bool range_op = op_token.kind == lexer::TokenKind::DotDot ||
+                          op_token.kind == lexer::TokenKind::DotDotDot;
     if (op_token.kind == lexer::TokenKind::Equal && !is_assignable(*left)) {
       error(op_token, "left side of assignment is not assignable");
     }
@@ -2330,14 +2339,52 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
     }
     const int next_min =
         info.assoc == Assoc::Left ? info.precedence + 1 : info.precedence;
-    std::unique_ptr<ast::Expr> right = parse_expression(next_min, stop_mode);
+    bool open_ended_range = false;
+    std::unique_ptr<ast::Expr> right;
+    if (range_op &&
+        (check(lexer::TokenKind::Colon) || is_stop_token(stop_mode))) {
+      open_ended_range = true;
+      if (op_token.kind == lexer::TokenKind::DotDotDot) {
+        error_code(op_token, "E_RANGE_EXCLUSIVE_OPEN_ENDED",
+                   "exclusive open-ended ranges are not supported");
+      }
+      right = make_null_literal(current_zero_width_span());
+    } else {
+      right = parse_expression(next_min, stop_mode);
+    }
+    const bool range_left_is_float =
+        range_op && is_literal_float_expr(*left);
+    const bool range_right_is_float =
+        range_op && !open_ended_range && is_literal_float_expr(*right);
     lexer::Span span = ast::join_spans(left->span, right->span);
     auto binary = ast::make_expr(
         op_token.kind == lexer::TokenKind::Equal ? "AstAssign" : "AstBinary",
         span);
     binary->string_field("op", info.op);
+    if (range_op) {
+      binary->bool_field("inclusive_end",
+                         op_token.kind == lexer::TokenKind::DotDot);
+      if (open_ended_range) {
+        binary->bool_field("open_ended", true);
+      }
+    }
     binary->node_field("left", std::move(left));
     binary->node_field("right", std::move(right));
+    if (range_op && stop_mode != StopMode::ControlHeader &&
+        match(lexer::TokenKind::Colon)) {
+      const lexer::Token colon = previous();
+      std::unique_ptr<ast::Expr> step = parse_expression(1, stop_mode);
+      if (is_literal_zero_expr(*step)) {
+        error_code(colon, "E_RANGE_ZERO_STEP",
+                   "range step must not be zero");
+      }
+      binary->span = ast::join_spans(binary->span, step->span);
+      binary->bool_field("has_step", true);
+      binary->node_field("step", std::move(step));
+    } else if (range_left_is_float || range_right_is_float) {
+      error_code(op_token, "E_RANGE_FLOAT_STEP_REQUIRED",
+                 "float ranges require an explicit step");
+    }
     left = std::move(binary);
   }
 
@@ -3350,6 +3397,9 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
   case lexer::TokenKind::DotDot:
     *info = InfixInfo{5, Assoc::Left, ".."};
     return true;
+  case lexer::TokenKind::DotDotDot:
+    *info = InfixInfo{5, Assoc::Left, "..."};
+    return true;
   case lexer::TokenKind::Plus:
     *info = InfixInfo{6, Assoc::Left, "+"};
     return true;
@@ -3402,6 +3452,35 @@ bool Parser::compound_assignment_op(lexer::TokenKind kind,
 bool Parser::is_method_name_token(const lexer::Token &token) const {
   return token.kind == lexer::TokenKind::Identifier ||
          is_operator_method_name(token.kind);
+}
+
+bool Parser::is_literal_float_expr(const ast::Expr &expr) const {
+  return expr.kind == "AstLiteral" && string_value(expr, "token") == "FLOAT";
+}
+
+bool Parser::is_literal_zero_expr(const ast::Expr &expr) const {
+  if (expr.kind != "AstLiteral") {
+    return false;
+  }
+  const std::string token = string_value(expr, "token");
+  if (token != "INTEGER" && token != "FLOAT") {
+    return false;
+  }
+  const std::string value = string_value(expr, "value");
+  for (char c : value) {
+    if (c != '0' && c != '.' && c != '_') {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::unique_ptr<ast::Expr>
+Parser::make_null_literal(const lexer::Span &span) const {
+  auto expr = ast::make_expr("AstLiteral", span);
+  expr->string_field("token", "KEYWORD_NULL");
+  expr->string_field("value", "null");
+  return expr;
 }
 
 void Parser::error(const lexer::Token &token, const std::string &message) {

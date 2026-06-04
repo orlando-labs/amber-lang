@@ -76,7 +76,12 @@ LexResult Lexer::lex() {
       advance();
       if (!at_end() && current() == '.') {
         advance();
-        emit(TokenKind::DotDot, start, "..");
+        if (!at_end() && current() == '.') {
+          advance();
+          emit(TokenKind::DotDotDot, start, "...");
+        } else {
+          emit(TokenKind::DotDot, start, "..");
+        }
         break;
       }
       emit(one_line_block_active_ && bracket_depth_ == 0 && left_space

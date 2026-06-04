@@ -33,6 +33,7 @@ enum class TokenKind {
 
   Dot,
   DotDot,
+  DotDotDot,
   ChainDot,
   SafeDot,
   Colon,

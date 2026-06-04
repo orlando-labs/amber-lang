@@ -316,6 +316,30 @@ void test_range_precedence() {
          "range rhs addition op");
 }
 
+void test_v20_4_range_surface() {
+  std::unique_ptr<Expr> exclusive = parse_ok("1...5:2\n");
+  expect(exclusive->kind == "AstBinary", "exclusive range parses");
+  expect(string_field(*exclusive, "op") == "...", "exclusive range op");
+  expect(!bool_field(*exclusive, "inclusive_end"),
+         "exclusive range is not inclusive");
+  expect(node_field(*exclusive, "step").kind == "AstLiteral",
+         "exclusive range step parses");
+
+  std::unique_ptr<Expr> open = parse_ok("1..:2\n");
+  expect(open->kind == "AstBinary", "open-ended stepped range parses");
+  expect(bool_field(*open, "open_ended"), "open-ended range flag");
+  expect(string_field(node_field(*open, "right"), "token") == "KEYWORD_NULL",
+         "open-ended range carries null finish");
+
+  amber::parser::ParseResult float_range = parse_raw("1.0..5.0\n");
+  expect(has_diagnostic(float_range, "E_RANGE_FLOAT_STEP_REQUIRED"),
+         "float range without step diagnostic");
+
+  amber::parser::ParseResult exclusive_open = parse_raw("1...:2\n");
+  expect(has_diagnostic(exclusive_open, "E_RANGE_EXCLUSIVE_OPEN_ENDED"),
+         "exclusive open-ended range diagnostic");
+}
+
 void test_collection_literals() {
   std::unique_ptr<Expr> list = parse_ok("[1, :ok]\n");
   expect(list->kind == "AstListLiteral", "list literal parses");
@@ -963,6 +987,7 @@ int main() {
   test_module_stray_indent_progresses();
   test_unicode_names();
   test_range_precedence();
+  test_v20_4_range_surface();
   test_collection_literals();
   test_inline_conditional_expression();
   test_conditional_collection_elements();

@@ -1675,7 +1675,7 @@ private:
         node->list_field("kw_args", {});
         return node;
       }
-      if (op == "..") {
+      if (op == ".." || op == "...") {
         auto node = make_node("HSend", expr.span);
         auto receiver = make_node("HLoadConst", expr.span);
         receiver->string_field("path", "Range");
@@ -1688,8 +1688,15 @@ private:
         std::vector<std::unique_ptr<Node>> kw_args;
         auto inclusive = make_node("HKeywordArg", expr.span);
         inclusive->string_field("name", "inclusive_end");
-        inclusive->node_field("value", make_bool_const(true, expr.span));
+        inclusive->node_field("value",
+                              make_bool_const(op == "..", expr.span));
         kw_args.push_back(std::move(inclusive));
+        if (const ast::Expr *step = node_field(expr, "step")) {
+          auto step_arg = make_node("HKeywordArg", step->span);
+          step_arg->string_field("name", "step");
+          step_arg->node_field("value", lower_expr(*step));
+          kw_args.push_back(std::move(step_arg));
+        }
         node->list_field("kw_args", std::move(kw_args));
         return node;
       }
