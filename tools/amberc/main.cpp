@@ -869,8 +869,9 @@ int run_runnable_module(const std::string &module_name,
     return 1;
   }
   if (should_print_run_value(result.value)) {
-    std::cout << amber::runtime::value_to_debug_string(result.value,
-                                                       &decode_result.module)
+    std::cout << amber::runtime::value_to_debug_string(
+                     result.value, &decode_result.module,
+                     &result.runtime_strings, &result.runtime_symbols)
               << "\n";
   }
   return 0;
@@ -2036,7 +2037,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (!result.ok()) { print_fault(result); return 1; }\n";
   out << "  if (should_print_vm_value(result.value)) std::cout << "
          "amber::runtime::value_to_debug_string(result.value, "
-         "&decoded.module) << \"\\n\";\n";
+         "&decoded.module, &result.runtime_strings, "
+         "&result.runtime_symbols) << \"\\n\";\n";
   out << "  return 0;\n";
   out << "}\n\n";
   out << "static std::string native_value_to_debug_string("

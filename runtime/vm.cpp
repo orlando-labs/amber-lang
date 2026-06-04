@@ -9,7 +9,6 @@
 #include <deque>
 #include <functional>
 #include <initializer_list>
-#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -17,6 +16,7 @@
 #include <queue>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -7071,7 +7071,8 @@ public:
   explicit Vm(const BcModule &module,
               std::shared_ptr<RuntimeState> state = nullptr,
               std::string module_id = {})
-      : module_(module),
+      : module_(module), initial_string_count_(module.strings.size()),
+        initial_symbol_count_(module.symbols.size()),
         state_(state == nullptr ? std::make_shared<RuntimeState>()
                                 : std::move(state)),
         module_id_(std::move(module_id)) {
@@ -7083,13 +7084,14 @@ public:
     const std::size_t watch_event_start = state_->watch_events.size();
     const BcCode *entry = find_code(module_, code_id);
     if (entry == nullptr) {
-      return fail("VMError", "unknown code id", code_id, 0);
+      return with_runtime_names(
+          fail("VMError", "unknown code id", code_id, 0));
     }
     std::vector<Value> entry_captures;
     if (!prepare_direct_entry_captures(*entry, code_id, &entry_captures,
                                        &self)) {
       state_->heap.drain_remote_frees();
-      return {Value::null(), fault_};
+      return with_runtime_names({Value::null(), fault_});
     }
     push_frame(*entry, args, std::move(entry_captures), std::move(self),
                std::move(block), std::nullopt);
@@ -7104,17 +7106,28 @@ public:
                           state_->watch_events.end());
     }
     if (fault_.has_value()) {
-      return {Value::null(),
-              fault_,
-              {},
-              std::move(watch_events),
-              state_->watch_epoch};
+      return with_runtime_names({Value::null(),
+                                 fault_,
+                                 {},
+                                 std::move(watch_events),
+                                 state_->watch_epoch});
     }
-    return {final_value_, std::nullopt, completed_locals_for(*entry),
-            std::move(watch_events), state_->watch_epoch};
+    return with_runtime_names(
+        {final_value_, std::nullopt, completed_locals_for(*entry),
+         std::move(watch_events), state_->watch_epoch});
   }
 
 private:
+  ExecutionResult with_runtime_names(ExecutionResult result) const {
+    if (module_.strings.size() != initial_string_count_) {
+      result.runtime_strings = module_.strings;
+    }
+    if (module_.symbols.size() != initial_symbol_count_) {
+      result.runtime_symbols = module_.symbols;
+    }
+    return result;
+  }
+
   ExecutionResult fail(const std::string &error_name,
                        const std::string &message, std::uint32_t code_id,
                        std::uint32_t pc) {
@@ -11831,6 +11844,48 @@ private:
     }
   }
 
+  static std::optional<RuntimeNativeTypeKind>
+  conversion_target_for_alias(const std::string &name) {
+    if (name == "str") {
+      return RuntimeNativeTypeKind::Str;
+    }
+    if (name == "int") {
+      return RuntimeNativeTypeKind::Int;
+    }
+    if (name == "float") {
+      return RuntimeNativeTypeKind::Float;
+    }
+    if (name == "bool") {
+      return RuntimeNativeTypeKind::Bool;
+    }
+    if (name == "symbol") {
+      return RuntimeNativeTypeKind::Symbol;
+    }
+    if (name == "array") {
+      return RuntimeNativeTypeKind::Array;
+    }
+    if (name == "tuple") {
+      return RuntimeNativeTypeKind::Tuple;
+    }
+    if (name == "set") {
+      return RuntimeNativeTypeKind::Set;
+    }
+    if (name == "map") {
+      return RuntimeNativeTypeKind::Map;
+    }
+    return std::nullopt;
+  }
+
+  static std::optional<RuntimeNativeTypeKind>
+  conversion_target_for_to_method(const std::string &selector) {
+    constexpr std::string_view prefix = "to_";
+    if (selector.size() <= prefix.size() ||
+        selector.compare(0, prefix.size(), prefix) != 0) {
+      return std::nullopt;
+    }
+    return conversion_target_for_alias(selector.substr(prefix.size()));
+  }
+
   std::optional<RuntimeNativeTypeKind>
   conversion_type_from_value(const Value &target) const {
     if (target.is_native_type()) {
@@ -11892,6 +11947,18 @@ private:
     }
   }
 
+  std::string display_float_text(double value) {
+    char buffer[128];
+    const auto converted =
+        std::to_chars(buffer, buffer + sizeof(buffer), value);
+    if (converted.ec == std::errc{}) {
+      return std::string(buffer, converted.ptr);
+    }
+    std::ostringstream out;
+    out << value;
+    return out.str();
+  }
+
   ConversionResult display_string_value(const Value &value) {
     if (value.is_string()) {
       const std::optional<std::string> text =
@@ -11910,9 +11977,9 @@ private:
       return conversion_ok(Value::string(intern_runtime_string(*text)));
     }
     if (value.is_float()) {
-      std::ostringstream out;
-      out << std::setprecision(17) << value.as_float();
-      return conversion_ok(Value::string(intern_runtime_string(out.str())));
+      return conversion_ok(
+          Value::string(intern_runtime_string(display_float_text(
+              value.as_float()))));
     }
     if (value.is_native_type()) {
       return conversion_ok(Value::string(intern_runtime_string(
@@ -14938,39 +15005,8 @@ private:
           selector == "cast?");
     }
 
-    auto target_for_to_method = [&]() -> std::optional<RuntimeNativeTypeKind> {
-      if (selector == "to_str") {
-        return RuntimeNativeTypeKind::Str;
-      }
-      if (selector == "to_int") {
-        return RuntimeNativeTypeKind::Int;
-      }
-      if (selector == "to_float") {
-        return RuntimeNativeTypeKind::Float;
-      }
-      if (selector == "to_bool") {
-        return RuntimeNativeTypeKind::Bool;
-      }
-      if (selector == "to_symbol") {
-        return RuntimeNativeTypeKind::Symbol;
-      }
-      if (selector == "to_array") {
-        return RuntimeNativeTypeKind::Array;
-      }
-      if (selector == "to_tuple") {
-        return RuntimeNativeTypeKind::Tuple;
-      }
-      if (selector == "to_set") {
-        return RuntimeNativeTypeKind::Set;
-      }
-      if (selector == "to_map") {
-        return RuntimeNativeTypeKind::Map;
-      }
-      return std::nullopt;
-    };
-
     if (const std::optional<RuntimeNativeTypeKind> target =
-            target_for_to_method()) {
+            conversion_target_for_to_method(selector)) {
       if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
         if (!kw_args.empty()) {
           set_fault(frame, "TypeError",
@@ -17215,6 +17251,23 @@ private:
           return true;
         }
       }
+      if (const std::optional<RuntimeNativeTypeKind> target =
+              conversion_target_for_alias(*selector)) {
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return false;
+        }
+        ConversionResult converted =
+            convert_value_to_native_type(frame, receiver, *target);
+        if (!converted.ok) {
+          set_fault(frame, converted.error_name, converted.message);
+          return false;
+        }
+        if (!write_reg(frame, dst, std::move(converted.value))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
     }
     if (property_assignment) {
       if (args.size() != 1U || !kw_args.empty() || !block.is_null()) {
@@ -18920,6 +18973,8 @@ private:
   }
 
   BcModule module_;
+  std::size_t initial_string_count_ = 0;
+  std::size_t initial_symbol_count_ = 0;
   std::shared_ptr<RuntimeState> state_;
   std::string module_id_;
   std::unordered_map<std::uint32_t, QuickCode> quick_codes_;
@@ -20993,7 +21048,19 @@ RuntimeWorld::finish_native_wait(RuntimeNativeWaitHandle *handle) {
 }
 
 std::string value_to_debug_string(const Value &value,
-                                  const bytecode::BcModule *module) {
+                                  const bytecode::BcModule *module,
+                                  const std::vector<std::string>
+                                      *runtime_strings,
+                                  const std::vector<std::string>
+                                      *runtime_symbols) {
+  const std::vector<std::string> *debug_strings =
+      runtime_strings != nullptr && !runtime_strings->empty()
+          ? runtime_strings
+          : (module == nullptr ? nullptr : &module->strings);
+  const std::vector<std::string> *debug_symbols =
+      runtime_symbols != nullptr && !runtime_symbols->empty()
+          ? runtime_symbols
+          : (module == nullptr ? nullptr : &module->symbols);
   if (value.is_null()) {
     return "null";
   }
@@ -21010,15 +21077,15 @@ std::string value_to_debug_string(const Value &value,
   }
   if (value.is_symbol()) {
     const SymbolValue symbol = value.as_symbol();
-    if (module != nullptr && symbol.symbol_id < module->symbols.size()) {
-      return ":" + module->symbols[symbol.symbol_id];
+    if (debug_symbols != nullptr && symbol.symbol_id < debug_symbols->size()) {
+      return ":" + (*debug_symbols)[symbol.symbol_id];
     }
     return ":<invalid>";
   }
   if (value.is_string()) {
     const StringValue string = value.as_string();
-    if (module != nullptr && string.string_id < module->strings.size()) {
-      return "\"" + module->strings[string.string_id] + "\"";
+    if (debug_strings != nullptr && string.string_id < debug_strings->size()) {
+      return "\"" + (*debug_strings)[string.string_id] + "\"";
     }
     return "\"<invalid>\"";
   }
@@ -21029,8 +21096,8 @@ std::string value_to_debug_string(const Value &value,
     if (module != nullptr && klass.class_index < module->classes.size()) {
       const std::uint32_t symbol_id =
           module->classes[klass.class_index].class_name_sym_id;
-      if (symbol_id < module->symbols.size()) {
-        out << " " << module->symbols[symbol_id];
+      if (debug_symbols != nullptr && symbol_id < debug_symbols->size()) {
+        out << " " << (*debug_symbols)[symbol_id];
       } else {
         out << " #" << klass.class_index;
       }
@@ -21052,7 +21119,10 @@ std::string value_to_debug_string(const Value &value,
     const RuntimeWatchCellSnapshot snapshot = cell->snapshot();
     std::ostringstream out;
     out << "<watch-cell #" << snapshot.cell_id << " r" << snapshot.revision
-        << " " << value_to_debug_string(snapshot.value, module) << ">";
+        << " "
+        << value_to_debug_string(snapshot.value, module, runtime_strings,
+                                 runtime_symbols)
+        << ">";
     return out.str();
   }
   if (value.is_watch_handle()) {
@@ -21100,8 +21170,8 @@ std::string value_to_debug_string(const Value &value,
     if (module != nullptr && instance->class_index < module->classes.size()) {
       const std::uint32_t symbol_id =
           module->classes[instance->class_index].class_name_sym_id;
-      if (symbol_id < module->symbols.size()) {
-        out << " " << module->symbols[symbol_id];
+      if (debug_symbols != nullptr && symbol_id < debug_symbols->size()) {
+        out << " " << (*debug_symbols)[symbol_id];
       } else {
         out << " #" << instance->class_index;
       }
@@ -21126,7 +21196,8 @@ std::string value_to_debug_string(const Value &value,
       if (i != 0U) {
         out << ", ";
       }
-      out << value_to_debug_string(list->items[i], module);
+      out << value_to_debug_string(list->items[i], module, runtime_strings,
+                                   runtime_symbols);
     }
     out << "]";
     return out.str();
@@ -21146,7 +21217,8 @@ std::string value_to_debug_string(const Value &value,
       if (i != 0U) {
         out << ", ";
       }
-      out << value_to_debug_string(tuple->items[i], module);
+      out << value_to_debug_string(tuple->items[i], module, runtime_strings,
+                                   runtime_symbols);
     }
     out << ")";
     return out.str();
@@ -21169,7 +21241,8 @@ std::string value_to_debug_string(const Value &value,
       if (i != 0U) {
         out << ", ";
       }
-      out << value_to_debug_string(set->items[i], module);
+      out << value_to_debug_string(set->items[i], module, runtime_strings,
+                                   runtime_symbols);
     }
     if (set->items.size() == 1U) {
       out << ",";
@@ -21192,13 +21265,15 @@ std::string value_to_debug_string(const Value &value,
       if (i != 0U) {
         out << ", ";
       }
-      if (module != nullptr &&
-          map->entries[i].symbol_id < module->symbols.size()) {
-        out << module->symbols[map->entries[i].symbol_id];
+      if (debug_symbols != nullptr &&
+          map->entries[i].symbol_id < debug_symbols->size()) {
+        out << (*debug_symbols)[map->entries[i].symbol_id];
       } else {
         out << "#" << map->entries[i].symbol_id;
       }
-      out << ": " << value_to_debug_string(map->entries[i].value, module);
+      out << ": "
+          << value_to_debug_string(map->entries[i].value, module,
+                                   runtime_strings, runtime_symbols);
     }
     out << "}";
     return out.str();

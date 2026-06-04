@@ -767,8 +767,9 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
   }
 
   view.ok = true;
-  view.result = amber::runtime::value_to_debug_string(initialized.value,
-                                                      &compiled.module);
+  view.result = amber::runtime::value_to_debug_string(
+      initialized.value, &compiled.module, &initialized.runtime_strings,
+      &initialized.runtime_symbols);
   view.watch_epoch = initialized.watch_epoch;
   view.watch_event_count = initialized.watch_events.size();
   for (const amber::runtime::ExecutionLocal &local : initialized.locals) {
@@ -782,7 +783,9 @@ EvalView evaluate_prefix(const std::vector<Cell> &cells,
     local_view.watch_revision = local.watch_revision;
     local_view.value = local.initialized
                            ? amber::runtime::value_to_debug_string(
-                                 local.value, &compiled.module)
+                                 local.value, &compiled.module,
+                                 &initialized.runtime_strings,
+                                 &initialized.runtime_symbols)
                            : "<uninitialized>";
     if (should_show_local(local_view)) {
       view.locals.push_back(std::move(local_view));

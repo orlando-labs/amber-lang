@@ -1,19 +1,19 @@
-; amber.bc.v1 sha256=357cbe1de75b7c8fbf4ca8ea67ce051a422183601291c190fe6f012d98d19f92
+; amber.bc.v1 sha256=c3065fba1f1a527bee145db6e5d438e9953d887a549e350b7508a9c16871d5cf
 .header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
 .sections
   STRS offset=368 size=103 align=1 flags=0
   SYMS offset=471 size=39 align=1 flags=0
   KONS offset=510 size=28 align=1 flags=0
-  CODE offset=538 size=511 align=1 flags=0
-  METH offset=1049 size=108 align=1 flags=0
-  CLAS offset=1157 size=4 align=1 flags=0
-  DEPS offset=1161 size=4 align=1 flags=0
-  EXPT offset=1165 size=4 align=1 flags=0
-  INIT offset=1169 size=9 align=1 flags=0
-  PATS offset=1178 size=28 align=1 flags=0
-  SPAN offset=1206 size=2704 align=1 flags=0
-  LINE offset=3910 size=436 align=1 flags=0
-  LOCS offset=4346 size=124 align=1 flags=0
+  CODE offset=538 size=424 align=1 flags=0
+  METH offset=962 size=108 align=1 flags=0
+  CLAS offset=1070 size=4 align=1 flags=0
+  DEPS offset=1074 size=4 align=1 flags=0
+  EXPT offset=1078 size=4 align=1 flags=0
+  INIT offset=1082 size=9 align=1 flags=0
+  PATS offset=1091 size=28 align=1 flags=0
+  SPAN offset=1119 size=1729 align=1 flags=0
+  LINE offset=2848 size=280 align=1 flags=0
+  LOCS offset=3128 size=124 align=1 flags=0
 .strs
   s0 "choose"
   s1 "function"
@@ -37,74 +37,51 @@
   k3 path [1]
   k4 path [3]
 .code
-code c1 kind=module regs=7 flags=0
+code c1 kind=module regs=5 flags=0
   local l0 name=s0(choose) role=s1(function) binding=s2(local)
   local l1 name=s3(unpack) role=s1(function) binding=s2(local)
   0000 MAKE_CLOSURE 0 2 0
-  0001 SETLAST 0
-  0002 LOADNULL 3
-  0003 SETLAST 3
-  0004 MAKE_CLOSURE 1 3 0
-  0005 SETLAST 1
-  0006 LOADNULL 5
-  0007 SETLAST 5
-  0008 CLOSE_UPVALUES 0
-  0009 GETLAST 6
-  0010 RETURN 6
+  0001 MAKE_CLOSURE 1 3 0
+  0002 LOADNULL 4
+  0003 CLOSE_UPVALUES 0
+  0004 RETURN 4
   span 0..1 corpus/bc/disasm/patterns/source.am:1:1-6:8
-  span 1..2 corpus/bc/disasm/patterns/source.am:1:1-6:8
-  span 2..3 corpus/bc/disasm/patterns/source.am:1:1-6:8
-  span 3..4 corpus/bc/disasm/patterns/source.am:1:1-6:8
-  span 4..5 corpus/bc/disasm/patterns/source.am:8:1-9:25
-  span 5..6 corpus/bc/disasm/patterns/source.am:8:1-9:25
-  span 6..7 corpus/bc/disasm/patterns/source.am:8:1-9:25
-  span 7..8 corpus/bc/disasm/patterns/source.am:8:1-9:25
-  span 8..9 corpus/bc/disasm/patterns/source.am:1:1-9:25
-  span 9..10 corpus/bc/disasm/patterns/source.am:1:1-9:25
-  span 10..11 corpus/bc/disasm/patterns/source.am:1:1-9:25
-code c2 kind=method regs=5 flags=0
+  span 1..2 corpus/bc/disasm/patterns/source.am:8:1-9:25
+  span 2..3 corpus/bc/disasm/patterns/source.am:8:1-9:25
+  span 3..4 corpus/bc/disasm/patterns/source.am:1:1-9:25
+  span 4..5 corpus/bc/disasm/patterns/source.am:1:1-9:25
+code c2 kind=method regs=4 flags=0
   local l0 name=s4(x) role=s5(param) binding=s2(local)
-  0000 P_CHECK_EQ 0 0 5
+  0000 P_CHECK_EQ 0 0 4
   0001 LOADK 2 1
-  0002 SETLAST 2
-  0003 GETLAST 1
-  0004 JUMP 8
-  0005 LOADK 3 2
-  0006 SETLAST 3
-  0007 GETLAST 1
-  0008 SETLAST 1
-  0009 CLOSE_UPVALUES 0
-  0010 GETLAST 4
-  0011 RETURN 4
+  0002 MOVE 1 2
+  0003 JUMP 6
+  0004 LOADK 3 2
+  0005 MOVE 1 3
+  0006 CLOSE_UPVALUES 0
+  0007 RETURN 1
   span 0..1 corpus/bc/disasm/patterns/source.am:3:5-4:8
   span 1..2 corpus/bc/disasm/patterns/source.am:4:7-4:8
   span 2..3 corpus/bc/disasm/patterns/source.am:4:7-4:8
   span 3..4 corpus/bc/disasm/patterns/source.am:3:5-4:8
-  span 4..5 corpus/bc/disasm/patterns/source.am:3:5-4:8
+  span 4..5 corpus/bc/disasm/patterns/source.am:6:7-6:8
   span 5..6 corpus/bc/disasm/patterns/source.am:6:7-6:8
-  span 6..7 corpus/bc/disasm/patterns/source.am:6:7-6:8
-  span 7..8 corpus/bc/disasm/patterns/source.am:6:7-6:8
-  span 8..9 corpus/bc/disasm/patterns/source.am:2:3-6:8
-  span 9..10 corpus/bc/disasm/patterns/source.am:1:1-6:8
-  span 10..11 corpus/bc/disasm/patterns/source.am:1:1-6:8
-  span 11..12 corpus/bc/disasm/patterns/source.am:1:1-6:8
-code c3 kind=method regs=6 flags=0
+  span 6..7 corpus/bc/disasm/patterns/source.am:1:1-6:8
+  span 7..8 corpus/bc/disasm/patterns/source.am:1:1-6:8
+code c3 kind=method regs=5 flags=0
   local l0 name=s6(values) role=s5(param) binding=s2(local)
   local l1 name=s7(head) role=s8(pattern_assign) binding=s2(local)
   local l2 name=s9(tail) role=s8(pattern_assign) binding=s2(local)
-  0000 P_PREP_SEQ 3 0 0 8
-  0001 P_CHECK_LEN_GTE 3 1 8
+  0000 P_PREP_SEQ 3 0 0 7
+  0001 P_CHECK_LEN_GTE 3 1 7
   0002 P_GET_INDEX 4 3 0
   0003 P_BIND 1 4
   0004 P_BIND 2 3
   0005 P_COMMIT 1 2
-  0006 SETLAST 0
-  0007 JUMP 9
-  0008 P_FAIL 1
-  0009 SETLAST 0
-  0010 CLOSE_UPVALUES 0
-  0011 GETLAST 5
-  0012 RETURN 5
+  0006 JUMP 8
+  0007 P_FAIL 1
+  0008 CLOSE_UPVALUES 0
+  0009 RETURN 0
   span 0..1 corpus/bc/disasm/patterns/source.am:9:3-9:25
   span 1..2 corpus/bc/disasm/patterns/source.am:9:3-9:25
   span 2..3 corpus/bc/disasm/patterns/source.am:9:3-9:25
@@ -113,11 +90,8 @@ code c3 kind=method regs=6 flags=0
   span 5..6 corpus/bc/disasm/patterns/source.am:9:3-9:25
   span 6..7 corpus/bc/disasm/patterns/source.am:9:3-9:25
   span 7..8 corpus/bc/disasm/patterns/source.am:9:3-9:25
-  span 8..9 corpus/bc/disasm/patterns/source.am:9:3-9:25
-  span 9..10 corpus/bc/disasm/patterns/source.am:9:3-9:25
-  span 10..11 corpus/bc/disasm/patterns/source.am:8:1-9:25
-  span 11..12 corpus/bc/disasm/patterns/source.am:8:1-9:25
-  span 12..13 corpus/bc/disasm/patterns/source.am:8:1-9:25
+  span 8..9 corpus/bc/disasm/patterns/source.am:8:1-9:25
+  span 9..10 corpus/bc/disasm/patterns/source.am:8:1-9:25
 .methods
   m0 selector=y0(choose) owner=0 signature=k3 entry=c2 flags=0
     param external=y1(x) local=s4(x) flags=0
@@ -133,28 +107,18 @@ code c3 kind=method regs=6 flags=0
   pat 2 bindings=2 flags=1
 .line
   c1 pc=0 line=1
-  c1 pc=1 line=1
-  c1 pc=2 line=1
+  c1 pc=1 line=8
+  c1 pc=2 line=8
   c1 pc=3 line=1
-  c1 pc=4 line=8
-  c1 pc=5 line=8
-  c1 pc=6 line=8
-  c1 pc=7 line=8
-  c1 pc=8 line=1
-  c1 pc=9 line=1
-  c1 pc=10 line=1
+  c1 pc=4 line=1
   c2 pc=0 line=3
   c2 pc=1 line=4
   c2 pc=2 line=4
   c2 pc=3 line=3
-  c2 pc=4 line=3
+  c2 pc=4 line=6
   c2 pc=5 line=6
-  c2 pc=6 line=6
-  c2 pc=7 line=6
-  c2 pc=8 line=2
-  c2 pc=9 line=1
-  c2 pc=10 line=1
-  c2 pc=11 line=1
+  c2 pc=6 line=1
+  c2 pc=7 line=1
   c3 pc=0 line=9
   c3 pc=1 line=9
   c3 pc=2 line=9
@@ -163,15 +127,12 @@ code c3 kind=method regs=6 flags=0
   c3 pc=5 line=9
   c3 pc=6 line=9
   c3 pc=7 line=9
-  c3 pc=8 line=9
-  c3 pc=9 line=9
-  c3 pc=10 line=8
-  c3 pc=11 line=8
-  c3 pc=12 line=8
+  c3 pc=8 line=8
+  c3 pc=9 line=8
 .locs
-  c1 l0 name=s0(choose) 0..11
-  c1 l1 name=s3(unpack) 0..11
-  c2 l0 name=s4(x) 0..12
-  c3 l0 name=s6(values) 0..13
-  c3 l1 name=s7(head) 0..13
-  c3 l2 name=s9(tail) 0..13
+  c1 l0 name=s0(choose) 0..5
+  c1 l1 name=s3(unpack) 0..5
+  c2 l0 name=s4(x) 0..8
+  c3 l0 name=s6(values) 0..10
+  c3 l1 name=s7(head) 0..10
+  c3 l2 name=s9(tail) 0..10

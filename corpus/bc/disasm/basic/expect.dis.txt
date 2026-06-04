@@ -1,18 +1,18 @@
-; amber.bc.v1 sha256=b09c92b0811cb9deac78c310788905f9028c9d82ff101a2dd22f0483c82a402e
+; amber.bc.v1 sha256=1fb6d0dcfc19ee28148ac72553c576d08d5de267454e0de1c31fbc122716763b
 .header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
 .sections
   STRS offset=344 size=102 align=1 flags=0
   SYMS offset=446 size=44 align=1 flags=0
   KONS offset=490 size=21 align=1 flags=0
-  CODE offset=511 size=575 align=1 flags=0
-  METH offset=1086 size=68 align=1 flags=0
-  CLAS offset=1154 size=4 align=1 flags=0
-  DEPS offset=1158 size=4 align=1 flags=0
-  EXPT offset=1162 size=4 align=1 flags=0
-  INIT offset=1166 size=9 align=1 flags=0
-  SPAN offset=1175 size=2164 align=1 flags=0
-  LINE offset=3339 size=364 align=1 flags=0
-  LOCS offset=3703 size=84 align=1 flags=0
+  CODE offset=511 size=505 align=1 flags=0
+  METH offset=1016 size=68 align=1 flags=0
+  CLAS offset=1084 size=4 align=1 flags=0
+  DEPS offset=1088 size=4 align=1 flags=0
+  EXPT offset=1092 size=4 align=1 flags=0
+  INIT offset=1096 size=9 align=1 flags=0
+  SPAN offset=1105 size=1444 align=1 flags=0
+  LINE offset=2549 size=244 align=1 flags=0
+  LOCS offset=2793 size=84 align=1 flags=0
 .strs
   s0 "scan"
   s1 "function"
@@ -35,45 +35,34 @@
   k1 integer 1
   k2 path [4, 5]
 .code
-code c1 kind=module regs=4 flags=0
+code c1 kind=module regs=3 flags=0
   local l0 name=s0(scan) role=s1(function) binding=s2(local)
   0000 MAKE_CLOSURE 0 2 0
-  0001 SETLAST 0
-  0002 LOADNULL 2
-  0003 SETLAST 2
-  0004 CLOSE_UPVALUES 0
-  0005 GETLAST 3
-  0006 RETURN 3
+  0001 LOADNULL 2
+  0002 CLOSE_UPVALUES 0
+  0003 RETURN 2
   span 0..1 corpus/bc/disasm/basic/source.am:1:1-4:21
   span 1..2 corpus/bc/disasm/basic/source.am:1:1-4:21
   span 2..3 corpus/bc/disasm/basic/source.am:1:1-4:21
   span 3..4 corpus/bc/disasm/basic/source.am:1:1-4:21
-  span 4..5 corpus/bc/disasm/basic/source.am:1:1-4:21
-  span 5..6 corpus/bc/disasm/basic/source.am:1:1-4:21
-  span 6..7 corpus/bc/disasm/basic/source.am:1:1-4:21
-code c2 kind=method regs=10 flags=0
+code c2 kind=method regs=8 flags=0
   local l0 name=s3(xs) role=s4(param) binding=s2(local)
   local l1 name=s5(limit) role=s4(param) binding=s2(local)
   0000 SAFEPOINT
-  0001 LOADK 4 0
-  0002 SEND 3 1 0 1 4 0 4294967295 0
-  0003 JUMP_IF_FALSE 3 9
-  0004 LOADK 6 1
-  0005 SEND 5 1 1 1 6 0 4294967295 1
-  0006 MOVE 1 5
-  0007 SETLAST 1
-  0008 JUMP 0
-  0009 GETLAST 2
-  0010 SETLAST 2
-  0011 MAKE_CLOSURE 8 3 1 0 1
-  0012 SEND 7 0 2 0 0 8 2
-  0013 SETLAST 7
-  0014 CLOSE_UPVALUES 0
-  0015 GETLAST 9
-  0016 RETURN 9
+  0001 LOADK 3 0
+  0002 SEND 2 1 0 1 3 0 4294967295 0
+  0003 JUMP_IF_FALSE 2 8
+  0004 LOADK 5 1
+  0005 SEND 4 1 1 1 5 0 4294967295 1
+  0006 MOVE 1 4
+  0007 JUMP 0
+  0008 MAKE_CLOSURE 7 3 1 0 1
+  0009 SEND 6 0 2 0 0 7 2
+  0010 CLOSE_UPVALUES 0
+  0011 RETURN 6
   callsite pc=2 slot=0 sym=y0 flags=0
   callsite pc=5 slot=1 sym=y1 flags=0
-  callsite pc=12 slot=2 sym=y2 flags=0
+  callsite pc=9 slot=2 sym=y2 flags=0
   safepoint pc=0 flags=0
   span 0..1 corpus/bc/disasm/basic/source.am:2:3-3:22
   span 1..2 corpus/bc/disasm/basic/source.am:2:17-2:18
@@ -82,32 +71,23 @@ code c2 kind=method regs=10 flags=0
   span 4..5 corpus/bc/disasm/basic/source.am:3:21-3:22
   span 5..6 corpus/bc/disasm/basic/source.am:3:13-3:22
   span 6..7 corpus/bc/disasm/basic/source.am:3:5-3:22
-  span 7..8 corpus/bc/disasm/basic/source.am:3:5-3:22
-  span 8..9 corpus/bc/disasm/basic/source.am:2:3-3:22
-  span 9..10 corpus/bc/disasm/basic/source.am:2:3-3:22
-  span 10..11 corpus/bc/disasm/basic/source.am:2:3-3:22
-  span 11..12 corpus/bc/disasm/basic/source.am:4:9-4:21
-  span 12..13 corpus/bc/disasm/basic/source.am:4:3-4:9
-  span 13..14 corpus/bc/disasm/basic/source.am:4:3-4:21
-  span 14..15 corpus/bc/disasm/basic/source.am:1:1-4:21
-  span 15..16 corpus/bc/disasm/basic/source.am:1:1-4:21
-  span 16..17 corpus/bc/disasm/basic/source.am:1:1-4:21
-code c3 kind=block regs=4 flags=0
+  span 7..8 corpus/bc/disasm/basic/source.am:2:3-3:22
+  span 8..9 corpus/bc/disasm/basic/source.am:4:9-4:21
+  span 9..10 corpus/bc/disasm/basic/source.am:4:3-4:9
+  span 10..11 corpus/bc/disasm/basic/source.am:1:1-4:21
+  span 11..12 corpus/bc/disasm/basic/source.am:1:1-4:21
+code c3 kind=block regs=3 flags=0
   local l0 name=s6(_1) role=s7(implicit_block_param) binding=s8(placeholder)
   capture u0 name=s5(limit) source_kind=s2(local) source_name=s5(limit)
   0000 LOAD_UPVAL 2 0
   0001 SEND 1 0 1 1 2 0 4294967295 0
-  0002 SETLAST 1
-  0003 CLOSE_UPVALUES 0
-  0004 GETLAST 3
-  0005 RETURN 3
+  0002 CLOSE_UPVALUES 0
+  0003 RETURN 1
   callsite pc=1 slot=0 sym=y1 flags=0
   span 0..1 corpus/bc/disasm/basic/source.am:4:16-4:21
   span 1..2 corpus/bc/disasm/basic/source.am:4:11-4:21
-  span 2..3 corpus/bc/disasm/basic/source.am:4:11-4:21
+  span 2..3 corpus/bc/disasm/basic/source.am:4:9-4:21
   span 3..4 corpus/bc/disasm/basic/source.am:4:9-4:21
-  span 4..5 corpus/bc/disasm/basic/source.am:4:9-4:21
-  span 5..6 corpus/bc/disasm/basic/source.am:4:9-4:21
 .methods
   m0 selector=y3(scan) owner=0 signature=k2 entry=c2 flags=0
     param external=y4(xs) local=s3(xs) flags=0
@@ -122,9 +102,6 @@ code c3 kind=block regs=4 flags=0
   c1 pc=1 line=1
   c1 pc=2 line=1
   c1 pc=3 line=1
-  c1 pc=4 line=1
-  c1 pc=5 line=1
-  c1 pc=6 line=1
   c2 pc=0 line=2
   c2 pc=1 line=2
   c2 pc=2 line=2
@@ -132,24 +109,17 @@ code c3 kind=block regs=4 flags=0
   c2 pc=4 line=3
   c2 pc=5 line=3
   c2 pc=6 line=3
-  c2 pc=7 line=3
-  c2 pc=8 line=2
-  c2 pc=9 line=2
-  c2 pc=10 line=2
-  c2 pc=11 line=4
-  c2 pc=12 line=4
-  c2 pc=13 line=4
-  c2 pc=14 line=1
-  c2 pc=15 line=1
-  c2 pc=16 line=1
+  c2 pc=7 line=2
+  c2 pc=8 line=4
+  c2 pc=9 line=4
+  c2 pc=10 line=1
+  c2 pc=11 line=1
   c3 pc=0 line=4
   c3 pc=1 line=4
   c3 pc=2 line=4
   c3 pc=3 line=4
-  c3 pc=4 line=4
-  c3 pc=5 line=4
 .locs
-  c1 l0 name=s0(scan) 0..7
-  c2 l0 name=s3(xs) 0..17
-  c2 l1 name=s5(limit) 0..17
-  c3 l0 name=s6(_1) 0..6
+  c1 l0 name=s0(scan) 0..4
+  c2 l0 name=s3(xs) 0..12
+  c2 l1 name=s5(limit) 0..12
+  c3 l0 name=s6(_1) 0..4

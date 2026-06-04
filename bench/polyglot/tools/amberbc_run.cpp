@@ -87,8 +87,9 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    std::cout << amber::runtime::value_to_debug_string(result.value,
-                                                       &decoded.module)
+    std::cout << amber::runtime::value_to_debug_string(
+                     result.value, &decoded.module, &result.runtime_strings,
+                     &result.runtime_symbols)
               << '\n';
     return 0;
   } catch (const std::exception &error) {

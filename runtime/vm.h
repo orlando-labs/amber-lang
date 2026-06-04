@@ -1611,17 +1611,23 @@ struct ExecutionResult {
   ExecutionResult(Value result_value, std::optional<Fault> result_fault,
                   std::vector<ExecutionLocal> result_locals = {},
                   std::vector<RuntimeWatchEvent> result_watch_events = {},
-                  std::uint64_t result_watch_epoch = 0)
+                  std::uint64_t result_watch_epoch = 0,
+                  std::vector<std::string> result_runtime_strings = {},
+                  std::vector<std::string> result_runtime_symbols = {})
       : value(std::move(result_value)), fault(std::move(result_fault)),
         locals(std::move(result_locals)),
         watch_events(std::move(result_watch_events)),
-        watch_epoch(result_watch_epoch) {}
+        watch_epoch(result_watch_epoch),
+        runtime_strings(std::move(result_runtime_strings)),
+        runtime_symbols(std::move(result_runtime_symbols)) {}
 
   Value value = Value::null();
   std::optional<Fault> fault;
   std::vector<ExecutionLocal> locals;
   std::vector<RuntimeWatchEvent> watch_events;
   std::uint64_t watch_epoch = 0;
+  std::vector<std::string> runtime_strings;
+  std::vector<std::string> runtime_symbols;
 
   bool ok() const { return !fault.has_value(); }
 };
@@ -1729,6 +1735,10 @@ ExecutionResult execute_code(const bytecode::BcModule &module,
                              Value block = Value::null());
 
 std::string value_to_debug_string(const Value &value,
-                                  const bytecode::BcModule *module = nullptr);
+                                  const bytecode::BcModule *module = nullptr,
+                                  const std::vector<std::string>
+                                      *runtime_strings = nullptr,
+                                  const std::vector<std::string>
+                                      *runtime_symbols = nullptr);
 
 } // namespace amber::runtime

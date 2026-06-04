@@ -96,6 +96,8 @@ struct RuntimeModuleLoadResult {
   std::vector<ExecutionLocal> locals;
   std::vector<RuntimeWatchEvent> watch_events;
   std::uint64_t watch_epoch = 0;
+  std::vector<std::string> runtime_strings;
+  std::vector<std::string> runtime_symbols;
 };
 
 const char *runtime_module_state_name(RuntimeModuleState state);

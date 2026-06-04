@@ -352,6 +352,8 @@ struct RuntimeModuleLoader::Impl {
       out.locals = execution_result->locals;
       out.watch_events = execution_result->watch_events;
       out.watch_epoch = execution_result->watch_epoch;
+      out.runtime_strings = execution_result->runtime_strings;
+      out.runtime_symbols = execution_result->runtime_symbols;
     }
     return out;
   }
@@ -833,7 +835,7 @@ RuntimeModuleLoadResult RuntimeModuleLoader::add_serialized_module(
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
         false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
-        false, Value::null(), {}, {}, 0};
+        false, Value::null(), {}, {}, 0, {}, {}};
   }
   if (name.empty()) {
     return impl_->result(false, "ModuleLoadError", "module name is empty");
@@ -869,7 +871,7 @@ RuntimeModuleLoadResult RuntimeModuleLoader::add_import_alias(
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
         false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
-        false, Value::null(), {}, {}, 0};
+        false, Value::null(), {}, {}, 0, {}, {}};
   }
   if (module_name.empty() || local_name.empty() || dependency_name.empty() ||
       export_name.empty()) {
@@ -905,7 +907,7 @@ RuntimeModuleLoadResult RuntimeModuleLoader::link() {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
         false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
-        false, Value::null(), {}, {}, 0};
+        false, Value::null(), {}, {}, 0, {}, {}};
   }
   return impl_->link();
 }
@@ -915,7 +917,7 @@ RuntimeModuleLoader::initialize_module(const std::string &name) {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
         false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
-        false, Value::null(), {}, {}, 0};
+        false, Value::null(), {}, {}, 0, {}, {}};
   }
   RuntimeModuleLoadResult linked = impl_->link();
   if (!linked.ok) {
@@ -942,7 +944,7 @@ RuntimeModuleLoadResult RuntimeModuleLoader::initialize_all() {
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
         false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
-        false, Value::null(), {}, {}, 0};
+        false, Value::null(), {}, {}, 0, {}, {}};
   }
   RuntimeModuleLoadResult linked = impl_->link();
   if (!linked.ok) {
@@ -971,7 +973,7 @@ RuntimeModuleLoader::read_import_alias(const std::string &module_name,
   if (impl_ == nullptr) {
     return RuntimeModuleLoadResult{
         false, "ModuleLoadError", "module loader is moved-from", {}, {}, {},
-        false, Value::null(), {}, {}, 0};
+        false, Value::null(), {}, {}, 0, {}, {}};
   }
   return impl_->read_import_alias(module_name, local_name);
 }

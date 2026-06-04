@@ -33,6 +33,9 @@ struct TestCase {
   std::string entry;
 };
 
+bool g_update_goldens = false;
+int g_updated_goldens = 0;
+
 std::string read_file(const std::string &path) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
@@ -41,6 +44,17 @@ std::string read_file(const std::string &path) {
   std::ostringstream buffer;
   buffer << input.rdbuf();
   return buffer.str();
+}
+
+void write_file(const std::string &path, const std::string &contents) {
+  std::ofstream output(path, std::ios::binary);
+  if (!output) {
+    throw std::runtime_error("failed to open file for write: " + path);
+  }
+  output << contents;
+  if (!output) {
+    throw std::runtime_error("failed to write file: " + path);
+  }
 }
 
 bool is_directory(const std::string &path) {
@@ -191,6 +205,24 @@ void print_mismatch(const TestCase &test_case, const std::string &label,
   if (actual.empty() || actual[actual.size() - 1] != '\n') {
     std::cerr << "\n";
   }
+}
+
+bool compare_or_update(const TestCase &test_case, const std::string &label,
+                       const std::string &expect_path,
+                       const std::string &actual) {
+  const std::string expected = read_file(expect_path);
+  if (actual == expected) {
+    return true;
+  }
+  if (g_update_goldens) {
+    write_file(expect_path, actual);
+    ++g_updated_goldens;
+    std::cerr << test_case.directory << ": updated " << test_case.expect
+              << "\n";
+    return true;
+  }
+  print_mismatch(test_case, label, expected, actual);
+  return false;
 }
 
 std::string canonical_phase(const std::string &phase) {
@@ -354,8 +386,9 @@ std::string run_result_to_json(const std::string &entry,
   if (result.ok()) {
     out << "  \"status\": \"ok\",\n";
     out << "  \"value\": \""
-        << json_escape(
-               amber::runtime::value_to_debug_string(result.value, &module))
+        << json_escape(amber::runtime::value_to_debug_string(
+               result.value, &module, &result.runtime_strings,
+               &result.runtime_symbols))
         << "\"\n";
   } else {
     out << "  \"status\": \"fault\",\n";
@@ -447,12 +480,7 @@ bool run_lex_case(const TestCase &test_case) {
 
   const std::string actual = amber::lexer::tokens_to_json(
       result.tokens, amber::lexer::sha256_hex(source));
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "token dump", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "token dump", expect_path, actual);
 }
 
 bool run_lex_diag_case(const TestCase &test_case) {
@@ -472,12 +500,7 @@ bool run_lex_diag_case(const TestCase &test_case) {
 
   const std::string actual =
       amber::lexer::diagnostics_to_json(result.diagnostics);
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "lexer diagnostic", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "lexer diagnostic", expect_path, actual);
 }
 
 bool run_parse_expr_case(const TestCase &test_case) {
@@ -505,12 +528,7 @@ bool run_parse_expr_case(const TestCase &test_case) {
 
   const std::string actual = amber::ast::ast_module_to_json(
       *parse_result.expr, amber::lexer::sha256_hex(source));
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "AST dump", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "AST dump", expect_path, actual);
 }
 
 bool run_parse_case(const TestCase &test_case) {
@@ -539,12 +557,7 @@ bool run_parse_case(const TestCase &test_case) {
   const std::string actual = amber::ast::ast_module_to_json(
       parse_result.items, parse_result.module_name,
       amber::lexer::sha256_hex(source));
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "AST dump", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "AST dump", expect_path, actual);
 }
 
 bool run_bind_case(const TestCase &test_case) {
@@ -581,12 +594,7 @@ bool run_bind_case(const TestCase &test_case) {
   const std::string actual = amber::binder::bind_graph_to_json(
       bind_result.graph, parse_result.module_name,
       amber::lexer::sha256_hex(source));
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "bind dump", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "bind dump", expect_path, actual);
 }
 
 bool run_check_case(const TestCase &test_case) {
@@ -622,12 +630,7 @@ bool run_check_case(const TestCase &test_case) {
 
   const std::string actual = check_result_to_json(
       parse_result.module_name, bind_result.diagnostics.size());
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "check result", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "check result", expect_path, actual);
 }
 
 bool run_typed_case(const TestCase &test_case) {
@@ -671,12 +674,7 @@ bool run_typed_case(const TestCase &test_case) {
 
   const std::string actual = amber::checker::check_result_to_json(
       check_result, parse_result.module_name);
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "typed result", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "typed result", expect_path, actual);
 }
 
 bool run_typed_diag_case(const TestCase &test_case) {
@@ -691,12 +689,8 @@ bool run_typed_diag_case(const TestCase &test_case) {
   if (!lex_result.ok()) {
     const std::string actual =
         amber::lexer::diagnostics_to_json(lex_result.diagnostics);
-    const std::string expected = read_file(expect_path);
-    if (actual != expected) {
-      print_mismatch(test_case, "lexer diagnostic", expected, actual);
-      return false;
-    }
-    return true;
+    return compare_or_update(test_case, "lexer diagnostic", expect_path,
+                             actual);
   }
 
   amber::parser::Parser parser(lex_result.tokens);
@@ -704,12 +698,8 @@ bool run_typed_diag_case(const TestCase &test_case) {
   if (!parse_result.ok()) {
     const std::string actual =
         amber::lexer::diagnostics_to_json(parse_result.diagnostics);
-    const std::string expected = read_file(expect_path);
-    if (actual != expected) {
-      print_mismatch(test_case, "parser diagnostic", expected, actual);
-      return false;
-    }
-    return true;
+    return compare_or_update(test_case, "parser diagnostic", expect_path,
+                             actual);
   }
 
   amber::binder::BindResult bind_result =
@@ -717,12 +707,8 @@ bool run_typed_diag_case(const TestCase &test_case) {
   if (!bind_result.ok()) {
     const std::string actual =
         amber::lexer::diagnostics_to_json(bind_result.diagnostics);
-    const std::string expected = read_file(expect_path);
-    if (actual != expected) {
-      print_mismatch(test_case, "binder diagnostic", expected, actual);
-      return false;
-    }
-    return true;
+    return compare_or_update(test_case, "binder diagnostic", expect_path,
+                             actual);
   }
 
   amber::checker::CheckResult check_result = amber::checker::check_module(
@@ -733,12 +719,7 @@ bool run_typed_diag_case(const TestCase &test_case) {
   }
   const std::string actual =
       amber::lexer::diagnostics_to_json(check_result.diagnostics);
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "typed diagnostic", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "typed diagnostic", expect_path, actual);
 }
 
 bool run_hir_case(const TestCase &test_case) {
@@ -776,12 +757,7 @@ bool run_hir_case(const TestCase &test_case) {
       parse_result.items, parse_result.module_name, bind_result.graph);
   const std::string actual = amber::hir::program_to_json(
       program, parse_result.module_name, amber::lexer::sha256_hex(source));
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "HIR dump", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "HIR dump", expect_path, actual);
 }
 
 bool run_bc_case(const TestCase &test_case) {
@@ -838,12 +814,7 @@ bool run_bc_case(const TestCase &test_case) {
   const std::string actual = amber::bytecode::module_to_json(
       decode_result.module, decode_result.sections,
       amber::lexer::sha256_hex(std::string(bytes.begin(), bytes.end())));
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "bytecode dump", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "bytecode dump", expect_path, actual);
 }
 
 bool run_bc_disasm_case(const TestCase &test_case) {
@@ -900,12 +871,7 @@ bool run_bc_disasm_case(const TestCase &test_case) {
   const std::string actual = amber::bytecode::module_to_disasm(
       decode_result.module, decode_result.sections,
       amber::lexer::sha256_hex(std::string(bytes.begin(), bytes.end())));
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "bytecode disasm", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "bytecode disasm", expect_path, actual);
 }
 
 bool run_vm_case(const TestCase &test_case) {
@@ -926,13 +892,9 @@ bool run_vm_case(const TestCase &test_case) {
   const amber::runtime::ExecutionResult result =
       amber::runtime::execute_code(module, method->entry_code_id);
   const std::string actual = run_result_to_json(entry, module, result);
-  const std::string expected =
-      read_file(join_path(test_case.directory, test_case.expect));
-  if (actual != expected) {
-    print_mismatch(test_case, "run result", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "run result",
+                           join_path(test_case.directory, test_case.expect),
+                           actual);
 }
 
 bool run_load_case(const TestCase &test_case) {
@@ -953,13 +915,9 @@ bool run_load_case(const TestCase &test_case) {
   }
 
   const std::string actual = load_result_to_json(module_name, result);
-  const std::string expected =
-      read_file(join_path(test_case.directory, test_case.expect));
-  if (actual != expected) {
-    print_mismatch(test_case, "load result", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "load result",
+                           join_path(test_case.directory, test_case.expect),
+                           actual);
 }
 
 bool run_bind_diag_case(const TestCase &test_case) {
@@ -974,12 +932,8 @@ bool run_bind_diag_case(const TestCase &test_case) {
   if (!lex_result.ok()) {
     const std::string actual =
         amber::lexer::diagnostics_to_json(lex_result.diagnostics);
-    const std::string expected = read_file(expect_path);
-    if (actual != expected) {
-      print_mismatch(test_case, "lexer diagnostic", expected, actual);
-      return false;
-    }
-    return true;
+    return compare_or_update(test_case, "lexer diagnostic", expect_path,
+                             actual);
   }
 
   amber::parser::Parser parser(lex_result.tokens);
@@ -987,12 +941,8 @@ bool run_bind_diag_case(const TestCase &test_case) {
   if (!parse_result.ok()) {
     const std::string actual =
         amber::lexer::diagnostics_to_json(parse_result.diagnostics);
-    const std::string expected = read_file(expect_path);
-    if (actual != expected) {
-      print_mismatch(test_case, "parser diagnostic", expected, actual);
-      return false;
-    }
-    return true;
+    return compare_or_update(test_case, "parser diagnostic", expect_path,
+                             actual);
   }
 
   amber::binder::BindResult bind_result =
@@ -1004,12 +954,7 @@ bool run_bind_diag_case(const TestCase &test_case) {
 
   const std::string actual =
       amber::lexer::diagnostics_to_json(bind_result.diagnostics);
-  const std::string expected = read_file(expect_path);
-  if (actual != expected) {
-    print_mismatch(test_case, "binder diagnostic", expected, actual);
-    return false;
-  }
-  return true;
+  return compare_or_update(test_case, "binder diagnostic", expect_path, actual);
 }
 
 bool compile_all_candidate(const TestCase &test_case) {
@@ -1053,26 +998,37 @@ bool run_compile_all_bundle(const std::vector<TestCase> &cases) {
 }
 
 void usage(std::ostream &out) {
-  out << "usage: ambertest run <path> [--bundle M1|M2|M3|M4|M5|M6|M11]\n";
+  out << "usage: ambertest run <path> [--bundle M1|M2|M3|M4|M5|M6|M11] "
+         "[--update]\n";
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
   try {
-    if ((argc != 3 && argc != 5) || std::string(argv[1]) != "run") {
+    if (argc < 3 || std::string(argv[1]) != "run") {
       usage(std::cerr);
       return 2;
     }
     std::string bundle;
-    if (argc == 5) {
-      if (std::string(argv[3]) != "--bundle") {
+    g_update_goldens = false;
+    g_updated_goldens = 0;
+    for (int index = 3; index < argc; ++index) {
+      const std::string option = argv[index];
+      if (option == "--bundle") {
+        if (index + 1 >= argc) {
+          usage(std::cerr);
+          return 2;
+        }
+        bundle = argv[++index];
+        if (bundle_level(bundle) < 0) {
+          std::cerr << "ambertest: unknown bundle '" << bundle << "'\n";
+          return 2;
+        }
+      } else if (option == "--update") {
+        g_update_goldens = true;
+      } else {
         usage(std::cerr);
-        return 2;
-      }
-      bundle = argv[4];
-      if (bundle_level(bundle) < 0) {
-        std::cerr << "ambertest: unknown bundle '" << bundle << "'\n";
         return 2;
       }
     }
@@ -1201,6 +1157,9 @@ int main(int argc, char **argv) {
     std::cout << "ambertest: " << passed << " passed, " << failed << " failed";
     if (!bundle.empty()) {
       std::cout << ", " << skipped << " skipped for " << bundle;
+    }
+    if (g_update_goldens) {
+      std::cout << ", " << g_updated_goldens << " updated";
     }
     std::cout << "\n";
     return failed == 0 ? 0 : 1;

@@ -827,8 +827,18 @@ void test_runtime_string_interpolation_and_conversions() {
               "(\"#{1 + 2} #{$_}\" == \"3 3\") and "
               "(\"123\".to_int() == 123) and "
               "(123.to_str() == \"123\") and "
+              "(5.6.to_str() == \"5.6\") and "
               "(\"true\".to_bool() == true) and "
               "(\"false\".to_bool() == false) and "
+              "(42.str == \"42\") and "
+              "(\"123\".int == 123) and "
+              "(\"3.5\".float == 3.5) and "
+              "(\"true\".bool == true) and "
+              "(\"answer\".symbol == :answer) and "
+              "((1, 2).array == (1, 2).to_array()) and "
+              "([1, 2].tuple == [1, 2].to_tuple()) and "
+              "([1, 2].set == [1, 2].to_set()) and "
+              "([(:answer, 42)].map == [(:answer, 42)].to_map()) and "
               "(Int(\"123\") == 123) and "
               "(Str(42) == \"42\") and "
               "(Amber.stringify(123, mode: :display) == \"123\")\n");
@@ -839,6 +849,24 @@ void test_runtime_string_interpolation_and_conversions() {
   expect(exec.ok(), "conversion/interpolation execution failed");
   expect(exec.value.is_bool() && exec.value.as_bool(),
          "conversion/interpolation predicates should all hold");
+
+  emit_result = emit_ok("5.6.to_str()\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "float to_str execution failed");
+  expect(amber::runtime::value_to_debug_string(
+             exec.value, &emit_result.module, &exec.runtime_strings,
+             &exec.runtime_symbols) == "\"5.6\"",
+         "runtime-created to_str result should remain printable");
+
+  emit_result = emit_ok("\"fresh-runtime-symbol\".symbol\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "symbol property conversion execution failed");
+  expect(amber::runtime::value_to_debug_string(
+             exec.value, &emit_result.module, &exec.runtime_strings,
+             &exec.runtime_symbols) == ":fresh-runtime-symbol",
+         "runtime-created symbol result should remain printable");
 
   emit_result = emit_ok("\"abc\".to_int()\n");
   exec = amber::runtime::execute_code(emit_result.module,
@@ -853,6 +881,13 @@ void test_runtime_string_interpolation_and_conversions() {
   expect(!exec.ok() && exec.fault.has_value() &&
              exec.fault->error_name == "TypeError",
          "unsupported to_int source should raise TypeError");
+
+  emit_result = emit_ok("6.str()\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "NoMethodError",
+         "conversion property aliases should not become ordinary methods");
 }
 
 void test_manual_call_invokes_object_call_method() {

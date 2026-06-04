@@ -368,9 +368,9 @@ Check with `make spec-sync-check`.
 | [`docs/engineering/modern-profiles-v1.md`](../../docs/engineering/modern-profiles-v1.md) | 1 | 1 | [`ambermodern-profilesv1`](../../docs/engineering/modern-profiles-v1.md#ambermodern-profilesv1) | amber.modern-profiles.v1 |
 | [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 1 | 1 | [`ambernativev1`](../../docs/engineering/native-v1.md#ambernativev1) | amber.native.v1 |
 | [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 30 | 2 | [`code-objects`](../../docs/engineering/native-v1.md#code-objects) | Code Objects |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 60 | 2 | [`runtime-bridge`](../../docs/engineering/native-v1.md#runtime-bridge) | Runtime Bridge |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 76 | 2 | [`validation`](../../docs/engineering/native-v1.md#validation) | Validation |
-| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 96 | 2 | [`w15-closure`](../../docs/engineering/native-v1.md#w15-closure) | W15 Closure |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 68 | 2 | [`runtime-bridge`](../../docs/engineering/native-v1.md#runtime-bridge) | Runtime Bridge |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 84 | 2 | [`validation`](../../docs/engineering/native-v1.md#validation) | Validation |
+| [`docs/engineering/native-v1.md`](../../docs/engineering/native-v1.md) | 104 | 2 | [`w15-closure`](../../docs/engineering/native-v1.md#w15-closure) | W15 Closure |
 | [`docs/engineering/package-v1.md`](../../docs/engineering/package-v1.md) | 1 | 1 | [`amberpackagev1`](../../docs/engineering/package-v1.md#amberpackagev1) | amber.package.v1 |
 | [`docs/engineering/replay-v1.md`](../../docs/engineering/replay-v1.md) | 1 | 1 | [`amberreplayv1`](../../docs/engineering/replay-v1.md#amberreplayv1) | amber.replay.v1 |
 | [`docs/engineering/runtime-v1.md`](../../docs/engineering/runtime-v1.md) | 1 | 1 | [`amberruntimev1`](../../docs/engineering/runtime-v1.md#amberruntimev1) | amber.runtime.v1 |

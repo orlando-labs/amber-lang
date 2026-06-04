@@ -363,6 +363,28 @@ lazy_seq.to_array()       # ok only if finite/realizable
 infinite.to_array()       # RuntimeError or specific InfiniteCollectionError if available
 ```
 
+### 5.5. v20.3 computed-property aliases
+
+As a back-update from the v20.3 computed-property patch, v20.2 also exposes
+read-only conversion properties as semantic aliases for the corresponding
+`to_*` methods:
+
+| Property alias | Equivalent method |
+|---|---|
+| `value.str` | `value.to_str()` |
+| `value.int` | `value.to_int()` |
+| `value.float` | `value.to_float()` |
+| `value.bool` | `value.to_bool()` |
+| `value.symbol` | `value.to_symbol()` |
+| `value.array` | `value.to_array()` |
+| `value.tuple` | `value.to_tuple()` |
+| `value.set` | `value.to_set()` |
+| `value.map` | `value.to_map()` |
+
+These aliases use property-access semantics. They do not define ordinary
+methods named `str`, `int`, `float`, and so on. Explicit call syntax continues
+through ordinary method dispatch, so `value.str()` does not invoke the alias.
+
 ---
 
 ## 6. Stringification protocol

@@ -109,6 +109,39 @@ amber::bytecode::BcModule make_module(const std::vector<std::string> &deps,
   return module;
 }
 
+amber::bytecode::BcModule make_runtime_string_module() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+  module.symbols.push_back("to_str");
+
+  Constant value;
+  value.kind = ConstantKind::Integer;
+  value.int_value = 6;
+  module.const_pool.push_back(value);
+
+  BcCode init;
+  init.code_id = 1;
+  init.kind = CodeKind::Module;
+  init.reg_count = 2;
+  init.instructions.push_back({Opcode::LoadK, {{0, false}, {0, false}}});
+  init.instructions.push_back({Opcode::Send,
+                               {{1, false},
+                                {0, false},
+                                {0, false},
+                                {0, false},
+                                {0, false},
+                                {-1, true},
+                                {0, false}}});
+  init.instructions.push_back({Opcode::Return, {{1, false}}});
+  init.call_site_table.push_back({1, 0, 0, 0});
+  module.code_objects.push_back(init);
+  module.init = {true, 1, 0};
+  return module;
+}
+
 const amber::runtime::RuntimeModuleSnapshot &
 snapshot_named(const amber::runtime::RuntimeModuleLoadResult &result,
                const std::string &name) {
@@ -167,6 +200,22 @@ void test_loader_initializes_dependencies_once_in_order() {
          "util init should not rerun");
   expect(snapshot_named(second, "app.main").init_runs == 1,
          "root init should not rerun");
+}
+
+void test_loader_preserves_runtime_string_table_for_results() {
+  const amber::bytecode::BcModule module = make_runtime_string_module();
+  amber::runtime::RuntimeModuleLoader loader;
+  add_ok(loader, "runtime.string", module);
+
+  const amber::runtime::RuntimeModuleLoadResult initialized =
+      loader.initialize_module("runtime.string");
+  expect(initialized.ok, "runtime string module initialization should succeed");
+  expect(initialized.has_execution_result,
+         "runtime string module should expose execution result");
+  expect(amber::runtime::value_to_debug_string(
+             initialized.value, &module, &initialized.runtime_strings,
+             &initialized.runtime_symbols) == "\"6\"",
+         "loader should preserve runtime-created strings for display");
 }
 
 void test_loader_reports_missing_dependency() {
@@ -535,6 +584,7 @@ void test_loader_reports_source_mapped_init_failure() {
 
 int main() {
   test_loader_initializes_dependencies_once_in_order();
+  test_loader_preserves_runtime_string_table_for_results();
   test_loader_reports_missing_dependency();
   test_loader_rejects_unverified_bytecode();
   test_loader_detects_init_cycles();
