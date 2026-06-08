@@ -12,6 +12,12 @@ diagnostics:
   - { code: AMB-SYN-INLINE-TERNARY-CSTYLE, severity: error, phase: parser, condition: C-style ternary operator is not supported }
   - { code: AMB-SYN-INLINE-IF-MISSING-ELSE, severity: error, phase: parser, condition: inline conditional expression is missing required else branch }
   - { code: AMB-SYN-CONDITIONAL-ELEMENT-MISSING-VALUE, severity: error, phase: parser, condition: conditional collection element has if or unless without a preceding value }
+  - { code: E_SPREAD_POSITION, severity: error, phase: parser, condition: star spread marker outside call arguments or collection literals }
+  - { code: E_KWARG_SPREAD_POSITION, severity: error, phase: parser, condition: double-star keyword spread marker outside call arguments or map literals }
+  - { code: E_KWARG_SPREAD_KEY, severity: error, phase: runtime, condition: keyword spread key cannot be converted to a valid keyword name }
+  - { code: E_KWARG_SPREAD_DUPLICATE, severity: error, phase: runtime, condition: duplicate keyword name produced after keyword spread conversion }
+  - { code: E_KWARG_SPREAD_OPERAND, severity: error, phase: runtime, condition: operand cannot produce a keyword-spread kwargs view }
+  - { code: E_KWARG_SPREAD_RESULT, severity: error, phase: runtime, condition: kwargs property returned a non keyword-spreadable value }
   - { code: E_RANGE_FLOAT_STEP_REQUIRED, severity: error, phase: parser, condition: float range literal is missing an explicit step }
   - { code: E_RANGE_ZERO_STEP, severity: error, phase: parser, condition: statically literal range step is zero }
   - { code: E_RANGE_EXCLUSIVE_OPEN_ENDED, severity: error, phase: parser, condition: exclusive open-ended range syntax is not supported }

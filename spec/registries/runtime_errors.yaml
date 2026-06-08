@@ -3,6 +3,7 @@ spec_anchor: amber_spec_consolidated_v20_1_main.md
 errors:
   - NameError
   - ArgumentError
+  - KeywordArgumentError
   - MatchError
   - TypeError
   - ValueError

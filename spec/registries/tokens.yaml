@@ -88,6 +88,9 @@ tokens:
     - as
     - pattern
     - with
+  contextual_markers:
+    - "* spread marker in call arguments and collection literals"
+    - "** keyword spread marker in call arguments and map literals"
 identifier_profile:
   encoding: utf-8
   start:

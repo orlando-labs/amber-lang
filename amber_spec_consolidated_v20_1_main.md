@@ -1,6 +1,8 @@
 > Редакция v20.1: поверх v20.0 зафиксирован **Callable Reference & Constructor Call Revision**. В core syntax добавлены callable references `&NameSpace.some_fn`, class-side callable references `&Class.method`, unbound instance method references `&Class#method`, канонический вызов callable-значений `fn(args...)`, а также callable class objects: `Class(args...)` является preferred constructor-call form и наблюдаемо эквивалентен `Class.new(args...)`. `&` не означает raw machine address; это создание immutable callable reference object, совместимого с `HCall` / `CALL`, open-world dispatch и frozen-world invalidation rules.
 >
-> Редакция v20.6: поверх v20.1 зафиксирован core update для value-keyed `Map` / `Set`. `Map` и `Set` больше не ограничены symbol-key моделью: литералы принимают string/scalar/expression keys, list/array ключи нормализуются в immutable tuple snapshots, duplicate keys overwrite сохраняет первый stored key, а bytecode получает `MAKE_MAP_DYN` для dynamic-key map literals. Pattern matching и `deconstruct_keys` остаются symbol-key based.
+> Редакция v20.6: поверх v20.1 зафиксирован core update для value-keyed `Map` / `Set`. `Map` и `Set` больше не ограничены symbol-key моделью: литералы принимают string/scalar/expression keys, list/array ключи нормализуются в immutable tuple snapshots, duplicate keys overwrite сохраняет первый stored key, а bytecode получает `MAKE_MAP_DYN` для dynamic-key map literals. В v20.6 pattern matching и `deconstruct_keys` оставались symbol-key based; v20.8 ниже пересматривает это для ordinary maps.
+>
+> Редакция v20.7/v20.8: spread expansion и name-indifferent associative semantics фиксируются одним combined update. `*` и `**` становятся contextual spread markers в call arguments и collection literals; plain `Map` / `HashMap` становятся name-indifferent для `Symbol`/`Str` textual keys; exact `Symbol` vs `Str` separation переносится в explicit `StrictMap` / `StrictHashMap`; keyword spread валидирует keyword-convertible keys вместо требования physical symbol keys.
 
 
 # Amber
@@ -37,6 +39,8 @@ Amber в текущем виде — **консолидированная спе
 
 В v20.6 поверх этого закрывается core-level collection-key revision: ordered `Map` / `Set` используют value-key equality для supported scalar/structural keys, а legacy symbol-key maps остаются source- и bytecode-compatible через прежний `MAKE_MAP` fast path.
 
+В v20.7/v20.8 поверх этого закрывается единый core-level spread/key revision: positional и keyword spread входят в surface syntax, collection literal spread получает eager finite semantics, ordinary `Map` / `HashMap` становятся name-indifferent для `Symbol`/`Str` name keys, а exact-key поведение доступно через `StrictMap` / `StrictHashMap`. После этого keyword spread `**opts` работает через validation-based kwargs view: string-origin keys допустимы, если они конвертируются в валидные Amber keyword names.
+
 # Часть I. Полноценная спека Amber в текущем зафиксированном виде
 
 ## 1. Дизайн-якоря языка
@@ -49,6 +53,7 @@ Amber — это язык с такими базовыми обязательс�
 - pattern matching — часть ядра, а не библиотечный сахар;
 - методы не требуют явного первого параметра `self` или `cls`;
 - callable-значения являются first-class: `&target` создаёт callable reference, `fn(args...)` является каноническим вызовом callable, а class object может вызываться как constructor `Class(args...)`;
+- spread expansion является синтаксическим механизмом сборки аргументов и коллекций, а не общим prefix-оператором;
 - базовая коллекционная модель — `map/select/reduce/...` как методы, а не питоновские внешние `map/filter`.
 
 ## 2. Лексика, идентификаторы и блоки
@@ -137,9 +142,10 @@ Amber ориентирован на выражения. В частности, �
 [expr1, expr2]       # Array
 (expr1, expr2)       # Tuple, только если внутри скобок есть запятая
 {expr1, expr2}       # Set, если элементы не являются key/value парами
-{key: value}         # Map с value-key семантикой
-Map{key: value}      # explicit ordered Map
+{key: value}         # Map с value-key + name-indifferent семантикой
+Map{key: value}      # explicit ordinary ordered Map
 Set{expr1, expr2}    # explicit ordered Set
+StrictMap{key: value} # exact-key ordered Map
 ```
 
 `{}` в expression-контексте остаётся пустым `Map`. Непустая форма `{expr}`
@@ -148,7 +154,7 @@ Set{expr1, expr2}    # explicit ordered Set
 направо. Повторные ключи `Map` заменяют предыдущие значения, а повторные
 элементы `Set` схлопываются по runtime-семантике равенства.
 
-В v20.6 `Map` key может быть:
+Начиная с v20.6 `Map` key может быть:
 
 - legacy identifier key: `{name: value}` означает `{:name: value}`;
 - explicit symbol key: `{:name: value}`;
@@ -156,7 +162,46 @@ Set{expr1, expr2}    # explicit ordered Set
 - expression key в скобках: `{(name): value}`, `{(user.id): value}`;
 - structural key из tuple/list/array, где mutable list/array key нормализуется в immutable tuple snapshot.
 
-String key не приводится к `Symbol`: `{"name": 1}["name"]` и `{name: 1}[:name]` успешны, но `{name: 1}["name"]` остаётся missing key. Дубликаты сравниваются по value-key equality; при `{1: "int", 1.0: "float"}` stored key остаётся первым (`1`), а значение становится `"float"`. `NaN` запрещён как `Map` key и `Set` element. `Map` / `Set` остаются ordered-vector коллекциями в reference profile; `HashMap{...}` и `HashSet{...}` допустимы как parser-level explicit constructor spelling для совместимости с v20.6 drafts, но не требуют отдельного hash-backed runtime type в P0/P1 reference implementation.
+В v20.8 ordinary `Map` / `HashMap` нормализуют `Symbol(:name)` и `Str("name")` в один name key. Поэтому `{name: 1}["name"]`, `{"name": 1}[:name]`, `{name: 1}[:name]` и `{"name": 1}["name"]` обращаются к одной entry. Дубликаты name keys схлопываются по нормализованному name key и сохраняют первую позицию:
+
+```amber
+m = {name: 1, "name": 2}
+m[:name]    # 2
+m["name"]  # 2
+m.keys()   # ["name"]
+```
+
+Exact `Symbol` / `Str` separation требует explicit strict container:
+
+```amber
+m = StrictMap{name: 1, "name": 2}
+m[:name]    # 1
+m["name"]  # 2
+m.keys()   # [:name, "name"]
+```
+
+Non-name keys продолжают использовать value-key equality. При `{1: "int", 1.0: "float"}` stored key остаётся первым (`1`), а значение становится `"float"`. `NaN` запрещён как `Map` key и `Set` element. `Map` / `Set` остаются ordered-vector коллекциями в reference profile; `HashMap{...}` и `HashSet{...}` допустимы как parser-level explicit constructor spelling для совместимости с v20.6 drafts. `StrictHashMap{...}` является strict exact-key spelling; hash-backed storage не требуется в P0/P1 reference implementation.
+
+#### 3.1.2. Spread expansion в коллекциях
+
+`*` и `**` являются contextual spread markers. Они не являются обычными prefix operators и невалидны вне call arguments и collection literals.
+
+```amber
+[1, *items, 9]
+{1, *items, 9}          # Set spread
+{a: 1, **other, b: 2}   # Map spread
+```
+
+Spread вычисляется слева направо. Conditional collection syntax применяется и к spread entries:
+
+```amber
+[*extra if enabled?, fallback]
+{**opts unless locked?, mode: :fast}
+```
+
+Если condition falsy для `if` или truthy для `unless`, spread operand не вычисляется. Spread eager; open-ended/infinite collections не могут быть spread operands и дают `InfiniteCollectionError`.
+
+Positional collection spread принимает `Array`, `Tuple` и finite `Range`. Core spread не вызывает пользовательские `to_array()` / `to_tuple()` методы. Map spread `**` принимает keyword-spreadable maps/views по v20.8 rules: keys должны быть keyword-convertible.
 
 ### 3.2. Truthiness
 
@@ -411,6 +456,39 @@ m(user, arg1, arg2)
 ```
 
 Если нужен bound instance callable, v1 использует обычный closure/block-level adapter, а не новый surface spelling. Более явные формы вроде `obj.&method` могут быть добавлены отдельным будущим RFC, но не являются частью v20.1.
+
+### 4.7. Spread arguments `*` и `**`
+
+В v20.7/v20.8 call argument lists принимают positional и keyword spread:
+
+```amber
+fn(1, *args, mode: :fast, **opts)
+obj.run(*items, **kwargs)
+```
+
+`*expr` раскрывается в positional arguments. В core language допустимы только finite `Array`, `Tuple` и `Range`; open-ended ranges дают `InfiniteCollectionError`, остальные значения дают `TypeError`.
+
+`**expr` раскрывается в keyword arguments через validation-based kwargs view. Допустимые operands:
+
+- `Map` / `HashMap`;
+- `StrictMap` / `StrictHashMap`;
+- объект с readable property `kwargs`, результат которого сам является keyword-spreadable value.
+
+Keyword-convertible key — это `Symbol(name)`, `Str(name)` или ordinary-map `NameKey(name)`, где `name` удовлетворяет правилам Amber keyword/parameter identifier. После конверсии duplicate keyword names являются `KeywordArgumentError`, кроме случая, когда ordinary `Map` уже схлопнул duplicate name keys при построении.
+
+```amber
+fn(**{mode: :fast})       # ok
+fn(**{"mode": :fast})     # ok
+fn(**{"user-id": 1})      # KeywordArgumentError
+fn(**StrictMap{a: 1, "a": 2}) # KeywordArgumentError: duplicate `a`
+```
+
+Порядок вычисления строго слева направо: callee, positional values/spreads, explicit keyword values, keyword spreads, затем сам dispatch. Spread markers не разрешены как standalone expressions:
+
+```amber
+*xs    # invalid
+**xs   # invalid
+```
 
 ## 5. Блоки, лямбда-аргументы и placeholders
 
@@ -1215,6 +1293,20 @@ false
 {email: _}
 ```
 
+Named-key map patterns use the matched object's map semantics. Для ordinary
+`Map` / `HashMap` v20.8 это name-indifferent lookup:
+
+```amber
+case {"id": 1}:
+  when {id: id}:
+    id
+# => 1
+```
+
+Для `StrictMap` / `StrictHashMap` named-key pattern по умолчанию запрашивает
+exact symbol key, если объект не предоставляет собственный
+`deconstruct_keys`.
+
 #### Map-rest
 
 ```amber
@@ -1229,6 +1321,9 @@ false
 - `**rest` — захватить остальные ключи в map;
 - `**_` — явно проигнорировать остаток;
 - `**null` — строгий матч: лишних ключей быть не должно.
+
+Для ordinary maps rest-capture возвращает canonical exported keys
+(`Str` для name keys). Для strict maps rest-capture сохраняет exact key values.
 
 #### Pin-pattern
 
@@ -2177,7 +2272,9 @@ xs.reduce |acc, x|: ...
   `entries`;
 - `Map#contains?` и `Map#include?` проверяют наличие key.
 
-С v20.6 все перечисленные `Map` operations используют stored value keys, а не синтезированный `Symbol`. `keys`, `entries`, `each`, `map`, `select`, `reject`, `transform`, `transform_values` и `merge` обязаны передавать и возвращать фактический key value. `Map#[]`, `Map#[]?`, `contains?` и `include?` нормализуют lookup key тем же правилом, что и литерал; unsupported key values дают `TypeError`, отсутствующие valid keys дают `KeyError` только для обязательного `Map#[]`.
+С v20.8 ordinary `Map` operations используют normalized key semantics. Для name keys canonical export — `Str`: `keys`, `entries`, `each`, `map`, `select`, `reject`, `transform`, `transform_values` и `merge` обязаны передавать/возвращать string key для `Symbol(:name)` / `Str("name")` entry. `Map#[]`, `Map#[]?`, `contains?` и `include?` нормализуют lookup key тем же правилом, что и литерал; unsupported key values дают `TypeError`, отсутствующие valid keys дают `KeyError` только для обязательного `Map#[]`.
+
+`StrictMap` / `StrictHashMap` предоставляют тот же operation surface, но используют exact-key semantics и экспортируют фактический stored key value. `Map#merge` с ordinary maps схлопывает name-key duplicates, а strict merge схлопывает только exact-key duplicates.
 
 
 ## 14. Что входит в язык по намерению, но ещё не нормализовано до ядра
@@ -4054,6 +4151,28 @@ Core bytecode v20.6 добавляет `MAKE_MAP_DYN(dst, count, key_reg, value_
 для map literals с non-symbol или expression keys. Legacy symbol-only literals
 сохраняют `MAKE_MAP(dst, count, symbol_id, value_reg, ...)`, чтобы старый
 байткод и fast path оставались совместимыми.
+
+Core lowering v20.7/v20.8 добавляет HIR-level формы для spread:
+
+```text
+HSpreadArg(expr)
+HKwargSpreadArg(expr)
+HSpreadElement(expr)
+HMapSpreadEntry(expr)
+```
+
+Реализация может понижать их через новые helper opcodes/runtime calls
+(`CALL_SPREAD`, `SEND_SPREAD`, `KWARGS_VIEW`, `KWARGS_MERGE`) или через
+эквивалентную staged assembly поверх существующего call packet. Observable
+contract: left-to-right evaluation, eager finite spread, validation-based
+keyword conversion, duplicate keyword detection after normalization.
+
+Core lowering v20.8 также различает ordinary and strict map construction.
+Ordinary `MAKE_MAP` / `MAKE_MAP_DYN` use name-key normalization for
+`Symbol`/`Str` textual keys; strict map construction must preserve exact key
+identity and may use a strict flag, strict helper opcode, or constructor-side
+metadata. Existing v20.6 bytecode without strict metadata remains ordinary-map
+bytecode.
 
 Optional sections:
 

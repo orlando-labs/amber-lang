@@ -47,6 +47,21 @@ entries:
     intrinsic_id: amber.prelude.Map.v1
     dispatch: constructor
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: StrictMap
+    kind: prelude_class
+    intrinsic_id: amber.prelude.StrictMap.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: HashMap
+    kind: prelude_class
+    intrinsic_id: amber.prelude.HashMap.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: StrictHashMap
+    kind: prelude_class
+    intrinsic_id: amber.prelude.StrictHashMap.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: Set
     kind: prelude_class
     intrinsic_id: amber.prelude.Set.v1
@@ -175,6 +190,11 @@ entries:
   - name: ArgumentError
     kind: error_class
     intrinsic_id: amber.error.ArgumentError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: KeywordArgumentError
+    kind: error_class
+    intrinsic_id: amber.error.KeywordArgumentError.v1
     dispatch: exception_class
     shadowing: local_binding_disables_intrinsic_lowering
   - name: NoMethodError
