@@ -51,6 +51,13 @@ private:
     std::vector<std::unique_ptr<ast::Expr>> setter_body;
   };
 
+  struct HandlerSuffix {
+    std::vector<std::unique_ptr<ast::Expr>> rescues;
+    std::vector<std::unique_ptr<ast::Expr>> ensure_body;
+    bool has_ensure = false;
+    lexer::Span end_span;
+  };
+
   enum class Assoc { Left, Right };
 
   struct InfixInfo {
@@ -86,7 +93,15 @@ private:
   std::unique_ptr<ast::Expr> parse_mixin_def();
   std::unique_ptr<ast::Expr> parse_include_stmt(bool extend);
   std::unique_ptr<ast::Expr> parse_pass_like_stmt(const char *kind);
+  std::unique_ptr<ast::Expr> parse_invalid_handler_stmt(bool rescue);
   std::vector<std::unique_ptr<ast::Expr>> parse_body(BodyContext context);
+  HandlerSuffix parse_handler_suffix(const lexer::Span &fallback_span,
+                                     BodyContext context);
+  std::unique_ptr<ast::Expr> parse_rescue_clause(BodyContext context);
+  std::string parse_rescue_matcher_text();
+  std::string parse_exception_binding();
+  std::vector<std::unique_ptr<ast::Expr>>
+  parse_ensure_clause(BodyContext context);
   std::unique_ptr<ast::Expr> parse_signature();
   std::unique_ptr<ast::Expr> parse_param();
   std::string parse_type_term_text_until_param_boundary();
@@ -100,6 +115,8 @@ private:
   std::unique_ptr<ast::Expr> parse_loop_expr(const char *kind);
   std::unique_ptr<ast::Expr> parse_do_while_expr();
   std::unique_ptr<ast::Expr> parse_break_expr();
+  std::unique_ptr<ast::Expr> parse_raise_expr();
+  std::unique_ptr<ast::Expr> parse_try_expr();
   std::unique_ptr<ast::Expr> parse_case_expr(bool strict);
   std::unique_ptr<ast::Expr> parse_case_arm();
   std::vector<std::unique_ptr<ast::Expr>>

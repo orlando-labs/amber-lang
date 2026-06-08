@@ -538,6 +538,16 @@ private:
     if (const ast::ListField *body = list_field(item, "body")) {
       visit_items(scope, body->values);
     }
+    if (const ast::ListField *rescues = list_field(item, "rescues")) {
+      for (std::size_t index = 0; index < rescues->values.size(); ++index) {
+        visit_rescue_clause(scope, "rescue." + std::to_string(index),
+                            *rescues->values[index]);
+      }
+    }
+    if (bool_value(item, "has_ensure")) {
+      visit_branch_scope(scope, "ensure", list_field(item, "ensure_body"),
+                         item.span);
+    }
   }
 
   void bind_empty_signature(int function_scope, const lexer::Span &span) {
@@ -803,6 +813,28 @@ private:
     }
   }
 
+  void visit_rescue_clause(int parent_scope, const std::string &owner,
+                           const ast::Expr &clause) {
+    const ast::ListField *body = list_field(clause, "body");
+    const int scope = add_scope("block", owner, parent_scope,
+                                list_span_or_parent(body, clause.span));
+    declare_last_value(scope, graph_.scopes[scope].span);
+    const std::string binding = string_value(clause, "binding");
+    if (!binding.empty()) {
+      if (binding == "_") {
+        diagnostic("B0002", "error", "binder",
+                   "wildcard '_' cannot be used as an ordinary binding",
+                   clause.span);
+      } else {
+        declare_binding(scope, binding, "local", "rescue_binding",
+                        clause.span, false, "", DuplicatePolicy::Error);
+      }
+    }
+    if (body != nullptr) {
+      visit_items(scope, body->values);
+    }
+  }
+
   void visit_clause(int function_scope, const std::string &function_name,
                     std::size_t clause_index, const ast::Expr &clause) {
     const ast::ListField *body = list_field(clause, "body");
@@ -915,6 +947,28 @@ private:
         visit_expr(scope_index, *right);
       }
       visit_pattern_assignment(scope_index, expr);
+      return;
+    }
+    if (expr.kind == "AstRaise") {
+      if (const ast::Expr *value = node_field(expr, "expr")) {
+        visit_expr(scope_index, *value);
+      }
+      return;
+    }
+    if (expr.kind == "AstTry") {
+      if (const ast::ListField *body = list_field(expr, "body")) {
+        visit_items(scope_index, body->values);
+      }
+      if (const ast::ListField *rescues = list_field(expr, "rescues")) {
+        for (std::size_t index = 0; index < rescues->values.size(); ++index) {
+          visit_rescue_clause(scope_index, "try.rescue." + std::to_string(index),
+                              *rescues->values[index]);
+        }
+      }
+      if (bool_value(expr, "has_ensure")) {
+        visit_branch_scope(scope_index, "try.ensure",
+                           list_field(expr, "ensure_body"), expr.span);
+      }
       return;
     }
     if (expr.kind == "AstBlock") {

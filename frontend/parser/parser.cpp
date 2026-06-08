@@ -842,6 +842,10 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     return parse_pass_like_stmt("AstPassStmt");
   case lexer::TokenKind::KeywordNoop:
     return parse_pass_like_stmt("AstNoopStmt");
+  case lexer::TokenKind::KeywordRescue:
+    return parse_invalid_handler_stmt(true);
+  case lexer::TokenKind::KeywordEnsure:
+    return parse_invalid_handler_stmt(false);
   default:
     break;
   }
@@ -1037,14 +1041,26 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
   }
 
   std::vector<std::unique_ptr<ast::Expr>> body = parse_body(BodyContext::Def);
-  const lexer::Span end_span =
+  const lexer::Span body_end_span =
       body.empty() ? previous().span : body.back()->span;
+  HandlerSuffix handlers = parse_handler_suffix(body_end_span, BodyContext::Def);
+  const lexer::Span end_span =
+      handlers.end_span.end.offset >= body_end_span.end.offset
+          ? handlers.end_span
+          : body_end_span;
 
   auto node = ast::make_expr(class_method ? "AstClassMethodDef" : "AstDefStmt",
                              ast::join_spans(start.span, end_span));
   node->string_field("name", name_text);
   node->node_field("signature", std::move(signature));
   node->list_field("body", std::move(body));
+  if (!handlers.rescues.empty()) {
+    node->list_field("rescues", std::move(handlers.rescues));
+  }
+  if (handlers.has_ensure) {
+    node->bool_field("has_ensure", true);
+    node->list_field("ensure_body", std::move(handlers.ensure_body));
+  }
   return node;
 }
 
@@ -1391,6 +1407,18 @@ std::unique_ptr<ast::Expr> Parser::parse_pass_like_stmt(const char *kind) {
   return ast::make_expr(kind, token.span);
 }
 
+std::unique_ptr<ast::Expr> Parser::parse_invalid_handler_stmt(bool rescue) {
+  const lexer::Token token = advance();
+  error_code(token, rescue ? "E_RESCUE_WITHOUT_BODY" : "E_ENSURE_WITHOUT_BODY",
+             rescue ? "`rescue` must follow a `try` body or function/method body"
+                    : "`ensure` must follow a `try` body or function/method body");
+  while (!at_end() && !check(lexer::TokenKind::Newline) &&
+         !check(lexer::TokenKind::Dedent)) {
+    advance();
+  }
+  return ast::make_expr("AstError", token.span);
+}
+
 std::vector<std::unique_ptr<ast::Expr>>
 Parser::parse_body(BodyContext context) {
   std::vector<std::unique_ptr<ast::Expr>> body;
@@ -1411,6 +1439,166 @@ Parser::parse_body(BodyContext context) {
   std::unique_ptr<ast::Expr> item = parse_statement(context);
   if (item) {
     append_item_or_merge_clause_def(&body, std::move(item));
+  }
+  return body;
+}
+
+Parser::HandlerSuffix
+Parser::parse_handler_suffix(const lexer::Span &fallback_span,
+                             BodyContext context) {
+  HandlerSuffix suffix;
+  suffix.end_span = fallback_span;
+  while (!at_end()) {
+    while (match(lexer::TokenKind::Newline)) {
+    }
+    if (check(lexer::TokenKind::KeywordRescue)) {
+      if (suffix.has_ensure) {
+        error_code(current(), "E_RESCUE_AFTER_ENSURE",
+                   "`rescue` clauses must appear before `ensure`");
+      }
+      std::unique_ptr<ast::Expr> clause = parse_rescue_clause(context);
+      suffix.end_span = clause == nullptr ? previous().span : clause->span;
+      if (!suffix.has_ensure && clause != nullptr) {
+        suffix.rescues.push_back(std::move(clause));
+      }
+      continue;
+    }
+    if (check(lexer::TokenKind::KeywordEnsure)) {
+      if (suffix.has_ensure) {
+        error_code(current(), "E_DUPLICATE_ENSURE",
+                   "only one `ensure` clause is allowed");
+      }
+      std::vector<std::unique_ptr<ast::Expr>> body =
+          parse_ensure_clause(context);
+      suffix.end_span = body.empty() ? previous().span : body.back()->span;
+      if (!suffix.has_ensure) {
+        suffix.has_ensure = true;
+        suffix.ensure_body = std::move(body);
+      }
+      continue;
+    }
+    break;
+  }
+  return suffix;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_rescue_clause(BodyContext context) {
+  const lexer::Token start = advance();
+  std::vector<std::unique_ptr<ast::Expr>> matchers;
+  std::string binding;
+
+  if (check(lexer::TokenKind::Pipe)) {
+    binding = parse_exception_binding();
+  } else if (!check(lexer::TokenKind::Colon)) {
+    while (!at_end() && !check(lexer::TokenKind::Colon) &&
+           !check(lexer::TokenKind::Newline)) {
+      const lexer::Span matcher_start = current().span;
+      std::string matcher = parse_rescue_matcher_text();
+      if (!matcher.empty()) {
+        auto matcher_node = ast::make_expr(
+            "AstRescueMatcher", ast::join_spans(matcher_start, previous().span));
+        matcher_node->string_field("type_expr", matcher);
+        matchers.push_back(std::move(matcher_node));
+      } else if (!check(lexer::TokenKind::Pipe)) {
+        error_code(current(), "E_INVALID_RESCUE_MATCHER",
+                   "rescue matcher must be an exception class/type term");
+        break;
+      }
+      if (match(lexer::TokenKind::Comma)) {
+        if (check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe)) {
+          error_code(previous(), "E_INVALID_RESCUE_MATCHER",
+                     "rescue matcher must be an exception class/type term");
+        }
+        continue;
+      }
+      if (check(lexer::TokenKind::Pipe)) {
+        binding = parse_exception_binding();
+        if (!check(lexer::TokenKind::Colon)) {
+          error_code(previous(), "E_RESCUE_PIPE_UNION_FORBIDDEN",
+                     "use comma-separated rescue matcher list: `rescue "
+                     "TypeError, ArgumentError |e|:`");
+          while (!at_end() && !check(lexer::TokenKind::Colon) &&
+                 !check(lexer::TokenKind::Newline)) {
+            advance();
+          }
+        }
+      }
+      break;
+    }
+  }
+
+  consume(lexer::TokenKind::Colon, "expected ':' after rescue clause");
+  std::vector<std::unique_ptr<ast::Expr>> body = parse_control_body(context);
+  if (body.empty()) {
+    error_code(start, "E_RESCUE_WITHOUT_BODY",
+               "empty rescue body is not allowed; use `pass` or `noop`");
+  }
+
+  const lexer::Span end_span =
+      body.empty() ? previous().span : body.back()->span;
+  auto node =
+      ast::make_expr("AstRescueClause", ast::join_spans(start.span, end_span));
+  node->string_field("binding", binding);
+  node->list_field("matchers", std::move(matchers));
+  node->list_field("body", std::move(body));
+  return node;
+}
+
+std::string Parser::parse_rescue_matcher_text() {
+  std::string text;
+  const lexer::Token *previous_token = nullptr;
+  int bracket_depth = 0;
+  while (!at_end()) {
+    const lexer::TokenKind kind = current().kind;
+    if (bracket_depth == 0 &&
+        (kind == lexer::TokenKind::Comma || kind == lexer::TokenKind::Pipe ||
+         kind == lexer::TokenKind::Colon ||
+         kind == lexer::TokenKind::Newline ||
+         kind == lexer::TokenKind::Eof)) {
+      break;
+    }
+    const lexer::Token consumed = advance();
+    append_pattern_token(&text, consumed, previous_token);
+    if (consumed.kind == lexer::TokenKind::LParen ||
+        consumed.kind == lexer::TokenKind::LBracket ||
+        consumed.kind == lexer::TokenKind::LBrace) {
+      ++bracket_depth;
+    } else if ((consumed.kind == lexer::TokenKind::RParen ||
+                consumed.kind == lexer::TokenKind::RBracket ||
+                consumed.kind == lexer::TokenKind::RBrace) &&
+               bracket_depth > 0) {
+      --bracket_depth;
+    }
+    previous_token = &previous();
+  }
+  return text;
+}
+
+std::string Parser::parse_exception_binding() {
+  const lexer::Token open =
+      consume(lexer::TokenKind::Pipe, "expected '|' before exception binding");
+  std::string binding;
+  if (check(lexer::TokenKind::Identifier)) {
+    binding = advance().lexeme;
+  } else {
+    error_code(current(), "E_INVALID_RESCUE_BINDING",
+               "exception binding must use `|name|`");
+  }
+  if (!match(lexer::TokenKind::Pipe)) {
+    error_code(open, "E_INVALID_RESCUE_BINDING",
+               "exception binding must use `|name|`");
+  }
+  return binding;
+}
+
+std::vector<std::unique_ptr<ast::Expr>>
+Parser::parse_ensure_clause(BodyContext context) {
+  const lexer::Token start = advance();
+  consume(lexer::TokenKind::Colon, "expected ':' after ensure clause");
+  std::vector<std::unique_ptr<ast::Expr>> body = parse_control_body(context);
+  if (body.empty()) {
+    error_code(start, "E_ENSURE_WITHOUT_BODY",
+               "empty ensure body is not allowed; use `pass` or `noop`");
   }
   return body;
 }
@@ -2038,6 +2226,51 @@ std::unique_ptr<ast::Expr> Parser::parse_break_expr() {
   return node;
 }
 
+std::unique_ptr<ast::Expr> Parser::parse_raise_expr() {
+  const lexer::Token start = advance();
+  std::unique_ptr<ast::Expr> value;
+  if (is_stop_token(StopMode::Normal)) {
+    error(start, "`raise` requires an exception expression in v1");
+    value = ast::make_expr("AstError", start.span);
+  } else {
+    value = parse_expression(1, StopMode::Normal);
+  }
+  auto node = ast::make_expr("AstRaise",
+                             value != nullptr
+                                 ? ast::join_spans(start.span, value->span)
+                                 : start.span);
+  if (value) {
+    node->node_field("expr", std::move(value));
+  }
+  return node;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_try_expr() {
+  const lexer::Token start = advance();
+  consume(lexer::TokenKind::Colon, "expected ':' after try");
+  std::vector<std::unique_ptr<ast::Expr>> body =
+      parse_control_body(BodyContext::Def);
+  const lexer::Span body_end_span =
+      body.empty() ? previous().span : body.back()->span;
+  HandlerSuffix handlers = parse_handler_suffix(body_end_span, BodyContext::Def);
+  if (handlers.rescues.empty() && !handlers.has_ensure) {
+    error_code(start, "E_TRY_WITHOUT_HANDLER",
+               "`try` must have at least one `rescue` or `ensure` clause");
+  }
+  const lexer::Span end_span =
+      handlers.end_span.end.offset >= body_end_span.end.offset
+          ? handlers.end_span
+          : body_end_span;
+  auto node = ast::make_expr("AstTry", ast::join_spans(start.span, end_span));
+  node->list_field("body", std::move(body));
+  node->list_field("rescues", std::move(handlers.rescues));
+  if (handlers.has_ensure) {
+    node->bool_field("has_ensure", true);
+  }
+  node->list_field("ensure_body", std::move(handlers.ensure_body));
+  return node;
+}
+
 std::unique_ptr<ast::Expr> Parser::parse_case_expr(bool strict) {
   const lexer::Token start = advance();
   std::unique_ptr<ast::Expr> scrutinee =
@@ -2534,6 +2767,14 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   if (token.kind == lexer::TokenKind::KeywordBreak) {
     --current_;
     return parse_break_expr();
+  }
+  if (token.kind == lexer::TokenKind::KeywordRaise) {
+    --current_;
+    return parse_raise_expr();
+  }
+  if (token.kind == lexer::TokenKind::KeywordTry) {
+    --current_;
+    return parse_try_expr();
   }
   if (token.kind == lexer::TokenKind::KeywordCase) {
     --current_;
@@ -3424,6 +3665,8 @@ bool Parser::starts_primary() const {
   case lexer::TokenKind::Plus:
   case lexer::TokenKind::Minus:
   case lexer::TokenKind::KeywordNot:
+  case lexer::TokenKind::KeywordRaise:
+  case lexer::TokenKind::KeywordTry:
     return true;
   default:
     return false;
@@ -3450,6 +3693,8 @@ bool Parser::starts_bare_arg() const {
   case lexer::TokenKind::LParen:
   case lexer::TokenKind::LBracket:
   case lexer::TokenKind::LBrace:
+  case lexer::TokenKind::KeywordRaise:
+  case lexer::TokenKind::KeywordTry:
     return true;
   default:
     return false;

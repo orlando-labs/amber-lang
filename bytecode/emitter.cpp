@@ -1,6 +1,7 @@
 #include "bytecode/emitter.h"
 
 #include <cstdint>
+#include <cstddef>
 #include <iomanip>
 #include <map>
 #include <optional>
@@ -355,6 +356,11 @@ struct ProcedureMethodInfo {
   std::string target_kind;
 };
 
+struct HandlerCodeInfo {
+  std::uint32_t code_id = 0;
+  std::uint32_t exception_slot = 0;
+};
+
 class Emitter;
 
 class CodeEmitter {
@@ -418,6 +424,11 @@ private:
   void compile_param_pattern_prologues();
   void compile_if_for_effect(const ast::Expr &expr);
   std::uint32_t compile_if(const ast::Expr &expr);
+  std::uint32_t compile_try(const ast::Expr &expr);
+  void compile_ensure_for_normal_path(const ast::Expr *ensure_body,
+                                      std::uint32_t result_reg,
+                                      const lexer::Span &span);
+  void compile_raise(const ast::Expr &expr);
   std::uint32_t compile_logical(const ast::Expr &expr);
   std::uint32_t compile_compare_chain(const ast::Expr &expr);
   void compile_loop_for_effect(const ast::Expr &expr);
@@ -493,6 +504,14 @@ private:
   std::uint32_t emit_load_constant_reg(std::uint32_t constant_id,
                                        const lexer::Span &span);
   void emit_type_error(const lexer::Span &span);
+  BcCode emit_rescue_handler(const ast::Expr &try_expr,
+                             std::uint32_t *exception_slot);
+  BcCode emit_ensure_handler(const ast::Expr &ensure_body,
+                             std::uint32_t *exception_slot);
+  void emit_handler_return(std::uint32_t value_reg, const lexer::Span &span);
+  bool compile_rescue_matchers(const ast::Expr &clause,
+                               std::uint32_t exception_reg,
+                               std::vector<std::size_t> *matched_jumps);
   std::optional<std::uint32_t>
   local_slot_for_binding(const std::string &name,
                          const lexer::Span &span) const;
@@ -514,6 +533,8 @@ private:
   bool expr_is_integer_for_specialization(
       const ast::Expr &expr, const std::vector<std::uint8_t> &candidates) const;
   bool expr_is_integer_for_specialization(const ast::Expr &expr) const;
+
+  friend class Emitter;
 
   Emitter *owner_;
   const hir::Procedure *procedure_;
@@ -770,6 +791,28 @@ private:
     append_local_debug(procedure, code);
     module_.code_objects.push_back(std::move(code));
     return code_id;
+  }
+
+  HandlerCodeInfo emit_rescue_handler_code(const hir::Procedure &procedure,
+                                           const ast::Expr &try_expr) {
+    const std::uint32_t code_id = allocate_code_id();
+    CodeEmitter emitter(this, &procedure, code_id, nullptr, CodeKind::Rescue);
+    std::uint32_t exception_slot = 0;
+    BcCode code = emitter.emit_rescue_handler(try_expr, &exception_slot);
+    append_local_debug(procedure, code);
+    module_.code_objects.push_back(std::move(code));
+    return HandlerCodeInfo{code_id, exception_slot};
+  }
+
+  HandlerCodeInfo emit_ensure_handler_code(const hir::Procedure &procedure,
+                                           const ast::Expr &ensure_body) {
+    const std::uint32_t code_id = allocate_code_id();
+    CodeEmitter emitter(this, &procedure, code_id, nullptr, CodeKind::Ensure);
+    std::uint32_t exception_slot = 0;
+    BcCode code = emitter.emit_ensure_handler(ensure_body, &exception_slot);
+    append_local_debug(procedure, code);
+    module_.code_objects.push_back(std::move(code));
+    return HandlerCodeInfo{code_id, exception_slot};
   }
 
   std::uint32_t emit_type_hook_code(const lexer::Span &span,
@@ -1705,6 +1748,10 @@ void CodeEmitter::compile_expr_for_effect(const ast::Expr &expr) {
   }
   if (expr.kind == "HLoop") {
     compile_loop_for_effect(expr);
+    return;
+  }
+  if (expr.kind == "HRaise") {
+    compile_raise(expr);
     return;
   }
   compile_expr(expr);
@@ -3134,6 +3181,241 @@ std::uint32_t CodeEmitter::compile_if(const ast::Expr &expr) {
   return dst;
 }
 
+void CodeEmitter::compile_raise(const ast::Expr &expr) {
+  const ast::Expr *value = node_field(expr, "expr");
+  if (value == nullptr) {
+    diag(expr.span, "BC2001", "HRaise is missing expr");
+    emit_type_error(expr.span);
+    return;
+  }
+  const std::uint32_t value_reg = compile_expr(*value);
+  emit_instruction(Opcode::Raise, {{value_reg, false}}, expr.span);
+}
+
+void CodeEmitter::compile_ensure_for_normal_path(const ast::Expr *ensure_body,
+                                                 std::uint32_t result_reg,
+                                                 const lexer::Span &span) {
+  if (ensure_body == nullptr) {
+    return;
+  }
+  const std::optional<std::uint32_t> saved_last = last_value_reg_;
+  compile_seq(*ensure_body, false);
+  if (preserve_last_result_) {
+    emit_instruction(Opcode::SetLast, {{result_reg, false}}, span);
+  }
+  last_value_reg_ = saved_last;
+}
+
+std::uint32_t CodeEmitter::compile_try(const ast::Expr &expr) {
+  const ast::Expr *body = node_field(expr, "body");
+  const bool has_ensure = bool_field(expr, "has_ensure");
+  const ast::Expr *ensure_body =
+      has_ensure ? node_field(expr, "ensure_body") : nullptr;
+  const ast::ListField *rescues = list_field(expr, "rescues");
+  const bool has_rescues = rescues != nullptr && !rescues->values.empty();
+  const std::uint32_t dst = alloc_temp();
+
+  if (body == nullptr) {
+    diag(expr.span, "BC2001", "HTry is missing body");
+    emit_instruction(Opcode::LoadNull, {{dst, false}}, expr.span);
+    last_value_reg_ = dst;
+    return dst;
+  }
+
+  const std::optional<std::size_t> break_snapshot =
+      ensure_body != nullptr && !loops_.empty()
+          ? std::optional<std::size_t>{
+                loops_.back().break_jump_indices.size()}
+          : std::nullopt;
+  const std::uint32_t protected_from = current_pc();
+  compile_seq_to_reg(*body, dst, body->span);
+  const std::uint32_t protected_to = current_pc();
+  compile_ensure_for_normal_path(ensure_body, dst, expr.span);
+
+  const std::size_t normal_jump =
+      emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
+  if (ensure_body != nullptr && break_snapshot.has_value() &&
+      !loops_.empty() &&
+      loops_.back().break_jump_indices.size() > *break_snapshot) {
+    std::vector<std::size_t> break_jumps(
+        loops_.back().break_jump_indices.begin() +
+            static_cast<std::ptrdiff_t>(*break_snapshot),
+        loops_.back().break_jump_indices.end());
+    loops_.back().break_jump_indices.resize(*break_snapshot);
+    const std::uint32_t break_ensure_pc = current_pc();
+    for (std::size_t jump : break_jumps) {
+      patch_operand(jump, 0, break_ensure_pc, false);
+    }
+    const std::uint32_t break_result_reg =
+        loops_.back().result_reg.value_or(dst);
+    compile_ensure_for_normal_path(ensure_body, break_result_reg, expr.span);
+    loops_.back().break_jump_indices.push_back(
+        emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));
+  }
+  const std::uint32_t handler_pc = current_pc();
+  const std::size_t handler_jump =
+      emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
+  const std::uint32_t end_pc = current_pc();
+  patch_operand(normal_jump, 0, end_pc, false);
+  patch_operand(handler_jump, 0, end_pc, false);
+
+  if (protected_from < protected_to) {
+    if (has_rescues) {
+      const HandlerCodeInfo handler =
+          owner_->emit_rescue_handler_code(*procedure_, expr);
+      code_.handler_table.push_back(
+          {protected_from, protected_to, handler_pc, handler.code_id,
+           handler_flags(kHandlerKindRescue, handler.exception_slot, dst)});
+    } else if (ensure_body != nullptr) {
+      const HandlerCodeInfo handler =
+          owner_->emit_ensure_handler_code(*procedure_, *ensure_body);
+      code_.handler_table.push_back(
+          {protected_from, protected_to, handler_pc, handler.code_id,
+           handler_flags(kHandlerKindEnsure, handler.exception_slot, dst)});
+    }
+  }
+
+  last_value_reg_ = dst;
+  return dst;
+}
+
+void CodeEmitter::emit_handler_return(std::uint32_t value_reg,
+                                      const lexer::Span &span) {
+  emit_instruction(Opcode::CloseUpvalues, {{0, false}}, span);
+  emit_instruction(Opcode::Return, {{value_reg, false}}, span);
+}
+
+bool CodeEmitter::compile_rescue_matchers(
+    const ast::Expr &clause, std::uint32_t exception_reg,
+    std::vector<std::size_t> *matched_jumps) {
+  const ast::ListField *matchers = list_field(clause, "matchers");
+  if (matchers == nullptr || matchers->values.empty()) {
+    return true;
+  }
+
+  for (const std::unique_ptr<ast::Expr> &matcher : matchers->values) {
+    const std::string type_expr = string_field(*matcher, "type_expr");
+    if (type_expr.empty()) {
+      diag(matcher->span, "BC2001", "rescue matcher is missing type_expr");
+      continue;
+    }
+    const std::uint32_t matcher_reg = alloc_temp();
+    emit_instruction(Opcode::LookupConst,
+                     {{matcher_reg, false},
+                      {owner_->intern_lookup_path(type_expr), false}},
+                     matcher->span);
+    const std::uint32_t matched_reg = alloc_temp();
+    emit_instruction(Opcode::TripleEq,
+                     {{matched_reg, false},
+                      {matcher_reg, false},
+                      {exception_reg, false}},
+                     matcher->span);
+    matched_jumps->push_back(
+        emit_instruction(Opcode::JumpIfTrue,
+                         {{matched_reg, false}, {-1, true}}, matcher->span));
+  }
+  return false;
+}
+
+BcCode CodeEmitter::emit_ensure_handler(const ast::Expr &ensure_body,
+                                        std::uint32_t *exception_slot) {
+  const std::uint32_t exception_reg = alloc_temp();
+  if (exception_slot != nullptr) {
+    *exception_slot = exception_reg;
+  }
+  compile_seq(ensure_body, false);
+  const std::uint32_t null_reg = alloc_temp();
+  emit_instruction(Opcode::LoadNull, {{null_reg, false}}, ensure_body.span);
+  emit_handler_return(null_reg, ensure_body.span);
+  code_.reg_count = next_temp_;
+  return code_;
+}
+
+BcCode CodeEmitter::emit_rescue_handler(const ast::Expr &try_expr,
+                                        std::uint32_t *exception_slot) {
+  const std::uint32_t exception_reg = alloc_temp();
+  if (exception_slot != nullptr) {
+    *exception_slot = exception_reg;
+  }
+  const bool has_ensure = bool_field(try_expr, "has_ensure");
+  const ast::Expr *ensure_body =
+      has_ensure ? node_field(try_expr, "ensure_body") : nullptr;
+
+  const ast::ListField *rescues = list_field(try_expr, "rescues");
+  if (rescues != nullptr) {
+    for (const std::unique_ptr<ast::Expr> &clause : rescues->values) {
+      std::vector<std::size_t> matched_jumps;
+      const bool catch_all =
+          compile_rescue_matchers(*clause, exception_reg, &matched_jumps);
+      std::optional<std::size_t> jump_next;
+      if (!catch_all) {
+        jump_next = emit_instruction(Opcode::Jump, {{-1, true}}, clause->span);
+      }
+      for (std::size_t jump : matched_jumps) {
+        patch_operand(jump, 1, current_pc(), false);
+      }
+
+      const std::string binding = string_field(*clause, "binding");
+      if (!binding.empty()) {
+        const std::optional<std::uint32_t> slot =
+            local_slot_for_binding(binding, clause->span);
+        if (slot.has_value()) {
+          emit_instruction(Opcode::Move,
+                           {{*slot, false}, {exception_reg, false}},
+                           clause->span);
+        } else {
+          diag(clause->span, "BC2001", "rescue binding slot is missing");
+        }
+      }
+
+      const ast::Expr *body = node_field(*clause, "body");
+      const std::uint32_t result_reg = alloc_temp();
+      const std::uint32_t body_from = current_pc();
+      if (body == nullptr) {
+        diag(clause->span, "BC2001", "rescue clause is missing body");
+        emit_instruction(Opcode::LoadNull, {{result_reg, false}},
+                         clause->span);
+      } else {
+        compile_seq_to_reg(*body, result_reg, body->span);
+      }
+      const std::uint32_t body_to = current_pc();
+      if (ensure_body != nullptr) {
+        if (body_from < body_to) {
+          const HandlerCodeInfo handler =
+              owner_->emit_ensure_handler_code(*procedure_, *ensure_body);
+          code_.handler_table.push_back(
+              {body_from, body_to, body_to, handler.code_id,
+               handler_flags(kHandlerKindEnsure, handler.exception_slot,
+                             result_reg)});
+        }
+        compile_ensure_for_normal_path(ensure_body, result_reg, clause->span);
+      }
+      emit_handler_return(result_reg, clause->span);
+
+      if (jump_next.has_value()) {
+        patch_operand(*jump_next, 0, current_pc(), false);
+      }
+    }
+  }
+
+  const std::uint32_t raise_pc = current_pc();
+  emit_instruction(Opcode::Raise, {{exception_reg, false}}, try_expr.span);
+  const std::uint32_t after_raise_pc = current_pc();
+  if (ensure_body != nullptr) {
+    const HandlerCodeInfo handler =
+        owner_->emit_ensure_handler_code(*procedure_, *ensure_body);
+    code_.handler_table.push_back(
+        {raise_pc, after_raise_pc, after_raise_pc, handler.code_id,
+         handler_flags(kHandlerKindEnsure, handler.exception_slot,
+                       exception_reg)});
+  }
+  const std::uint32_t null_reg = alloc_temp();
+  emit_instruction(Opcode::LoadNull, {{null_reg, false}}, try_expr.span);
+  emit_handler_return(null_reg, try_expr.span);
+  code_.reg_count = next_temp_;
+  return code_;
+}
+
 std::uint32_t CodeEmitter::compile_logical(const ast::Expr &expr) {
   const ast::Expr *left = node_field(expr, "left");
   const ast::Expr *right = node_field(expr, "right");
@@ -3761,6 +4043,13 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   }
   if (expr.kind == "HLoop") {
     return compile_loop(expr);
+  }
+  if (expr.kind == "HTry") {
+    return compile_try(expr);
+  }
+  if (expr.kind == "HRaise") {
+    compile_raise(expr);
+    return alloc_temp();
   }
   if (expr.kind == "HMatchDispatch") {
     return compile_match_dispatch(expr);

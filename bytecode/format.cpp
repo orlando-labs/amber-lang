@@ -3241,9 +3241,24 @@ std::vector<std::uint8_t> initial_register_state(const BcModule &module,
       state[entry.slot] = 1U;
     }
   }
-  if ((code.kind == CodeKind::Rescue || code.kind == CodeKind::Ensure) &&
-      !state.empty()) {
-    state[0] = 1U;
+  if (code.kind == CodeKind::Rescue || code.kind == CodeKind::Ensure) {
+    for (const SlotLayoutEntry &entry : code.local_layout) {
+      if (entry.slot < code.reg_count) {
+        state[entry.slot] = 1U;
+      }
+    }
+    for (const BcCode &owner_code : module.code_objects) {
+      for (const HandlerEntry &entry : owner_code.handler_table) {
+        if (entry.handler_code_id != code.code_id) {
+          continue;
+        }
+        const std::uint32_t exception_slot =
+            entry.flags == 0U ? 0U : handler_exception_slot(entry.flags);
+        if (exception_slot < code.reg_count) {
+          state[exception_slot] = 1U;
+        }
+      }
+    }
   }
   return state;
 }

@@ -1043,6 +1043,59 @@ void test_control_flow_forms() {
          "do while stmt");
 }
 
+void test_try_rescue_ensure_forms() {
+  std::unique_ptr<Expr> expr =
+      parse_ok("try:\n"
+               "  1\n"
+               "rescue TypeError, ArgumentError |e|:\n"
+               "  2\n"
+               "ensure:\n"
+               "  3\n");
+  expect(expr->kind == "AstTry", "try expression parses");
+  expect(list_field(*expr, "body").values.size() == 1, "try body item count");
+  const amber::ast::ListField &rescues = list_field(*expr, "rescues");
+  expect(rescues.values.size() == 1, "try rescue count");
+  const Expr &rescue = *rescues.values[0];
+  expect(string_field(rescue, "binding") == "e", "rescue binding parses");
+  expect(list_field(rescue, "matchers").values.size() == 2,
+         "comma-separated rescue matchers parse");
+  expect(bool_field(*expr, "has_ensure"), "try ensure flag parses");
+  expect(list_field(*expr, "ensure_body").values.size() == 1,
+         "ensure body parses");
+
+  amber::parser::ParseModuleResult function_handlers = parse_module_raw(
+      "def load():\n"
+      "  1\n"
+      "rescue |e|:\n"
+      "  e\n"
+      "ensure:\n"
+      "  2\n");
+  expect(function_handlers.ok(), "function-level rescue/ensure parses");
+  const Expr &def = *function_handlers.items[0];
+  expect(def.kind == "AstDefStmt", "handler suffix def parses");
+  expect(list_field(def, "rescues").values.size() == 1,
+         "def rescue suffix parses");
+  expect(bool_field(def, "has_ensure"), "def ensure suffix parses");
+
+  amber::parser::ParseModuleResult rescue_after_ensure = parse_module_raw(
+      "try:\n"
+      "  1\n"
+      "ensure:\n"
+      "  2\n"
+      "rescue:\n"
+      "  3\n");
+  expect(has_diagnostic(rescue_after_ensure, "E_RESCUE_AFTER_ENSURE"),
+         "rescue after ensure is diagnosed");
+
+  amber::parser::ParseModuleResult pipe_union = parse_module_raw(
+      "try:\n"
+      "  1\n"
+      "rescue TypeError | ArgumentError |e|:\n"
+      "  2\n");
+  expect(has_diagnostic(pipe_union, "E_RESCUE_PIPE_UNION_FORBIDDEN"),
+         "pipe-union rescue matcher spelling is diagnosed");
+}
+
 void test_typed_signature_surface() {
   const std::string source =
       "def load(path as Str?, headers as Map[Str, Str]:) -> Result[Str, Err]:\n"
@@ -1108,6 +1161,7 @@ int main() {
   test_property_grouped_diagnostics_and_context();
   test_property_keywords_are_contextual_names();
   test_control_flow_forms();
+  test_try_rescue_ensure_forms();
   test_typed_signature_surface();
   std::cout << "parser_tests: ok\n";
   return 0;

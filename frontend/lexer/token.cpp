@@ -217,6 +217,14 @@ const char *token_kind_name(TokenKind kind) {
     return "KEYWORD_PASS";
   case TokenKind::KeywordProp:
     return "KEYWORD_PROP";
+  case TokenKind::KeywordRaise:
+    return "KEYWORD_RAISE";
+  case TokenKind::KeywordRescue:
+    return "KEYWORD_RESCUE";
+  case TokenKind::KeywordEnsure:
+    return "KEYWORD_ENSURE";
+  case TokenKind::KeywordTry:
+    return "KEYWORD_TRY";
   case TokenKind::KeywordTrue:
     return "KEYWORD_TRUE";
   case TokenKind::KeywordUnless:

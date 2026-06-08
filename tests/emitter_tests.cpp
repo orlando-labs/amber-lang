@@ -819,6 +819,41 @@ void test_property_emission() {
          "member property assignment callsite flag emitted");
 }
 
+void test_try_rescue_ensure_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("try:\n"
+              "  raise \"boom\"\n"
+              "rescue TypeError:\n"
+              "  1\n"
+              "rescue:\n"
+              "  2\n"
+              "ensure:\n"
+              "  3\n");
+
+  expect(emit_result.module.init.has_entry_code_id,
+         "try module init emitted");
+  const amber::bytecode::BcCode *code =
+      code_by_id(emit_result.module, emit_result.module.init.entry_code_id);
+  expect(code != nullptr, "try module init code exists");
+  expect(code->handler_table.size() == 1,
+         "try emits one protected handler entry");
+  expect(amber::bytecode::handler_kind(code->handler_table[0].flags) ==
+             amber::bytecode::kHandlerKindRescue,
+         "try rescue handler kind is encoded");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::Raise),
+         "try body emits RAISE");
+
+  const amber::bytecode::BcCode *rescue =
+      code_by_kind(emit_result.module, amber::bytecode::CodeKind::Rescue);
+  expect(rescue != nullptr, "rescue handler code exists");
+  expect(contains_opcode(*rescue, amber::bytecode::Opcode::TripleEq),
+         "typed rescue matcher emits TRIPLE_EQ");
+
+  const amber::bytecode::BcCode *ensure =
+      code_by_kind(emit_result.module, amber::bytecode::CodeKind::Ensure);
+  expect(ensure != nullptr, "ensure handler code exists");
+}
+
 void test_integer_specialized_send_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("def fast():\n"
@@ -911,6 +946,7 @@ int main() {
   test_simple_block_param_emission();
   test_object_model_emission();
   test_property_emission();
+  test_try_rescue_ensure_emission();
   test_integer_specialized_send_emission();
   test_unknown_integer_send_stays_dynamic();
   std::cout << "emitter_tests: ok\n";

@@ -134,6 +134,11 @@ const ast::ListField *list_field(const ast::Expr &expr,
   return nullptr;
 }
 
+bool has_non_empty_list_field(const ast::Expr &expr, const std::string &name) {
+  const ast::ListField *field = list_field(expr, name);
+  return field != nullptr && !field->values.empty();
+}
+
 ast::ListField *mutable_list_field(ast::Expr &expr, const std::string &name) {
   for (ast::ListField &field : expr.list_fields) {
     if (field.name == name) {
@@ -996,7 +1001,7 @@ private:
           lower_procedure(scope_index, string_value(item, "name"), "method",
                           procedure_name_for_owner(string_value(item, "name")),
                           signature, body_items, item.span, capture_plans,
-                          nullptr, node_field(item, "signature"));
+                          nullptr, node_field(item, "signature"), &item);
       node->string_field("procedure", procedure_id);
       for (const Procedure &procedure : procedures_) {
         if (procedure.id == procedure_id && procedure.signature != nullptr) {
@@ -1251,7 +1256,8 @@ private:
       const std::vector<const ast::Expr *> &body_items, const lexer::Span &span,
       const std::vector<CapturePlan> &capture_plans = {},
       const ast::Expr *signature_override = nullptr,
-      const ast::Expr *ast_signature = nullptr) {
+      const ast::Expr *ast_signature = nullptr,
+      const ast::Expr *handler_owner = nullptr) {
     Procedure procedure;
     procedure.id = "p" + std::to_string(procedures_.size());
     procedure.name = name;
@@ -1276,8 +1282,16 @@ private:
     lower_signature_defaults(procedures_[procedure_index].signature.get(),
                              ast_signature);
     std::vector<std::unique_ptr<Node>> statements;
-    for (const ast::Expr *item : body_items) {
-      statements.push_back(lower_stmt(*item));
+    if (handler_owner != nullptr &&
+        (has_non_empty_list_field(*handler_owner, "rescues") ||
+         bool_value(*handler_owner, "has_ensure"))) {
+      auto last_set = make_node("HLastSet", handler_owner->span);
+      last_set->node_field("expr", lower_try_like(*handler_owner));
+      statements.push_back(std::move(last_set));
+    } else {
+      for (const ast::Expr *item : body_items) {
+        statements.push_back(lower_stmt(*item));
+      }
     }
     procedures_[procedure_index].body->list_field("items",
                                                   std::move(statements));
@@ -1455,6 +1469,42 @@ private:
     node->node_field("cond", std::move(cond));
     node->node_field("then_body", make_expr_body(make_null_const(span)));
     node->node_field("else_body", make_expr_body(std::move(else_expr)));
+    return node;
+  }
+
+  std::unique_ptr<Node> lower_rescue_clause(const ast::Expr &clause) {
+    auto node = make_node("HRescue", clause.span);
+    node->string_field("binding", string_value(clause, "binding"));
+    std::vector<std::unique_ptr<Node>> matchers;
+    if (const ast::ListField *list = list_field(clause, "matchers")) {
+      for (const std::unique_ptr<ast::Expr> &matcher : list->values) {
+        auto lowered = make_node("HRescueMatcher", matcher->span);
+        lowered->string_field("type_expr",
+                              string_value(*matcher, "type_expr"));
+        matchers.push_back(std::move(lowered));
+      }
+    }
+    node->list_field("matchers", std::move(matchers));
+    node->node_field("body", lower_body(list_field(clause, "body"),
+                                        clause.span));
+    return node;
+  }
+
+  std::unique_ptr<Node> lower_try_like(const ast::Expr &expr) {
+    auto node = make_node("HTry", expr.span);
+    node->node_field("body", lower_body(list_field(expr, "body"), expr.span));
+    std::vector<std::unique_ptr<Node>> rescues;
+    if (const ast::ListField *list = list_field(expr, "rescues")) {
+      for (const std::unique_ptr<ast::Expr> &rescue : list->values) {
+        rescues.push_back(lower_rescue_clause(*rescue));
+      }
+    }
+    node->list_field("rescues", std::move(rescues));
+    if (bool_value(expr, "has_ensure")) {
+      node->bool_field("has_ensure", true);
+      node->node_field("ensure_body",
+                       lower_body(list_field(expr, "ensure_body"), expr.span));
+    }
     return node;
   }
 
@@ -1750,6 +1800,16 @@ private:
     }
     if (expr.kind == "AstPatternAssign") {
       return lower_pattern_assign(expr);
+    }
+    if (expr.kind == "AstRaise") {
+      auto node = make_node("HRaise", expr.span);
+      if (const ast::Expr *value = node_field(expr, "expr")) {
+        node->node_field("expr", lower_expr(*value));
+      }
+      return node;
+    }
+    if (expr.kind == "AstTry") {
+      return lower_try_like(expr);
     }
     if (expr.kind == "AstInlineIfExpr") {
       auto node = make_node("HIf", expr.span);

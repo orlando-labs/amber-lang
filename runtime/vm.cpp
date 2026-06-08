@@ -6583,6 +6583,12 @@ using amber::bytecode::ConstantKind;
 using amber::bytecode::Instruction;
 using amber::bytecode::Opcode;
 using amber::bytecode::SlotLayoutEntry;
+using amber::bytecode::handler_exception_slot;
+using amber::bytecode::handler_kind;
+using amber::bytecode::handler_result_slot;
+using amber::bytecode::kHandlerKindEnsure;
+using amber::bytecode::kHandlerKindLegacyRescue;
+using amber::bytecode::kHandlerKindRescue;
 
 constexpr std::uint32_t kMethodFlagInstance =
     amber::bytecode::kMethodFlagInstance;
@@ -7423,6 +7429,8 @@ struct Frame {
   std::optional<std::uint32_t> caller_result_reg;
   std::optional<std::uint32_t> active_call_pc;
   std::optional<Value> return_override;
+  bool merge_registers_to_caller = false;
+  std::optional<Value> pending_exception_on_return;
   std::unordered_map<std::uint32_t, PreparedSeqState> prepared_seq_regs;
   std::unordered_map<std::uint32_t, PreparedMapState> prepared_map_regs;
   std::unordered_map<std::uint32_t, Value> pending_pattern_bindings;
@@ -8563,6 +8571,9 @@ private:
     append_value_root(roots, frame.last_result);
     if (frame.return_override.has_value()) {
       append_value_root(roots, *frame.return_override);
+    }
+    if (frame.pending_exception_on_return.has_value()) {
+      append_value_root(roots, *frame.pending_exception_on_return);
     }
     for (const auto &[reg, value] : frame.pending_pattern_bindings) {
       (void)reg;
@@ -10133,6 +10144,8 @@ private:
     frame.caller_result_reg.reset();
     frame.active_call_pc.reset();
     frame.return_override.reset();
+    frame.merge_registers_to_caller = false;
+    frame.pending_exception_on_return.reset();
     frame.prepared_seq_regs.clear();
     frame.prepared_map_regs.clear();
     frame.pending_pattern_bindings.clear();
@@ -10155,6 +10168,8 @@ private:
     frame.caller_result_reg.reset();
     frame.active_call_pc.reset();
     frame.return_override.reset();
+    frame.merge_registers_to_caller = false;
+    frame.pending_exception_on_return.reset();
     frame.prepared_seq_regs.clear();
     frame.prepared_map_regs.clear();
     frame.pending_pattern_bindings.clear();
@@ -15298,13 +15313,196 @@ private:
     return false;
   }
 
+  void append_suppressed_exception(const Value &exception,
+                                   const Value &suppressed) {
+    if (!exception.is_instance_object()) {
+      return;
+    }
+    const std::shared_ptr<InstanceValue> instance =
+        exception.as_instance_object();
+    if (instance == nullptr) {
+      return;
+    }
+
+    std::vector<Value> suppressed_values;
+    const auto existing = instance->ivars.find("suppressed_exceptions");
+    if (existing != instance->ivars.end() && existing->second.is_list()) {
+      const std::shared_ptr<ListValue> list = existing->second.as_list();
+      if (list != nullptr) {
+        suppressed_values = list->items;
+      }
+    }
+    suppressed_values.push_back(suppressed);
+    instance->ivars["suppressed_exceptions"] =
+        make_list_value(std::move(suppressed_values));
+  }
+
+  bool merge_frame_registers(Frame &caller, Frame &completed) {
+    materialize_integer_regs(completed);
+    const std::size_t count =
+        std::min(caller.regs.size(), completed.regs.size());
+    if (caller.initialized.size() < caller.regs.size()) {
+      caller.initialized.resize(caller.regs.size(), 0U);
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+      const bool initialized =
+          index < completed.initialized.size() &&
+          completed.initialized[index] != 0U;
+      if (!initialized) {
+        caller.regs[index] = Value::null();
+        caller.initialized[index] = 0U;
+        invalidate_integer_reg(caller, static_cast<std::uint32_t>(index));
+        continue;
+      }
+      caller.regs[index] = completed.regs[index];
+      caller.initialized[index] = 1U;
+      sync_integer_reg_from_value(caller, static_cast<std::uint32_t>(index),
+                                  caller.regs[index]);
+    }
+    caller.last_result = completed.last_result;
+    return true;
+  }
+
+  bool pop_frames_above_unwind_target(std::size_t target_index,
+                                      Value *exception) {
+    while (frames_.size() > target_index + 1U) {
+      Frame completed_frame = std::move(frames_.back());
+      frames_.pop_back();
+      if (completed_frame.pending_exception_on_return.has_value()) {
+        append_suppressed_exception(*exception,
+                                    *completed_frame
+                                         .pending_exception_on_return);
+      }
+      if (completed_frame.merge_registers_to_caller && !frames_.empty()) {
+        Frame &caller = frames_.back();
+        if (!merge_frame_registers(caller, completed_frame)) {
+          recycle_frame(std::move(completed_frame));
+          return false;
+        }
+      }
+      recycle_frame(std::move(completed_frame));
+    }
+    return true;
+  }
+
+  bool push_handler_frame_from_target(
+      Frame &target, const BcCode &handler_code, const Value &exception,
+      std::uint32_t exception_slot,
+      std::optional<std::uint32_t> caller_result_reg,
+      bool merge_registers_to_caller,
+      std::optional<Value> pending_exception_on_return) {
+    materialize_integer_regs(target);
+    Frame handler = acquire_frame(handler_code);
+    const std::size_t count =
+        std::min(handler.regs.size(), target.regs.size());
+    for (std::size_t index = 0; index < count; ++index) {
+      const bool initialized =
+          index < target.initialized.size() && target.initialized[index] != 0U;
+      handler.initialized[index] = initialized ? 1U : 0U;
+      if (initialized) {
+        handler.regs[index] = target.regs[index];
+        sync_integer_reg_from_value(handler, static_cast<std::uint32_t>(index),
+                                    handler.regs[index]);
+      } else {
+        handler.regs[index] = Value::null();
+        invalidate_integer_reg(handler, static_cast<std::uint32_t>(index));
+      }
+    }
+    handler.captures = target.captures;
+    handler.self = target.self;
+    handler.block = target.block;
+    handler.last_result = target.last_result;
+    handler.caller_result_reg = caller_result_reg;
+    handler.merge_registers_to_caller = merge_registers_to_caller;
+    handler.pending_exception_on_return = pending_exception_on_return;
+    if (!write_reg(handler, exception_slot, exception)) {
+      recycle_frame(std::move(handler));
+      return false;
+    }
+    frames_.push_back(std::move(handler));
+    return true;
+  }
+
+  void finish_return(Frame &frame, Value value) {
+    if (frame.return_override.has_value()) {
+      value = *frame.return_override;
+    }
+    const bool capture_completed_frame =
+        frames_.size() == 1U ||
+        (frame.code != nullptr && frame.code->kind == CodeKind::Module);
+    const bool merge_registers = frame.merge_registers_to_caller;
+    if (capture_completed_frame || merge_registers) {
+      materialize_integer_regs(frame);
+    }
+
+    std::vector<Value> completed_regs;
+    std::vector<std::uint8_t> completed_initialized;
+    if (capture_completed_frame) {
+      completed_regs = frame.regs;
+      completed_initialized = frame.initialized;
+    }
+    const BcCode *completed_code = frame.code;
+    const std::optional<std::uint32_t> caller_reg = frame.caller_result_reg;
+    const std::optional<Value> pending_exception =
+        frame.pending_exception_on_return;
+    Frame completed_frame = std::move(frames_.back());
+    frames_.pop_back();
+    if (capture_completed_frame) {
+      last_completed_regs_ = std::move(completed_regs);
+      last_completed_initialized_ = std::move(completed_initialized);
+      if (completed_code != nullptr) {
+        persist_module_bindings(*completed_code, last_completed_regs_,
+                                last_completed_initialized_);
+      }
+    }
+    if (frames_.empty()) {
+      if (pending_exception.has_value()) {
+        const std::string error_name = exception_error_name(*pending_exception);
+        fault_ = make_fault(completed_frame, error_name,
+                            "unhandled exception " +
+                                value_to_debug_string(*pending_exception,
+                                                      &module_));
+      } else {
+        final_value_ = value;
+      }
+      recycle_frame(std::move(completed_frame));
+      return;
+    }
+
+    Frame &caller = frames_.back();
+    caller.active_call_pc.reset();
+    if (merge_registers &&
+        !merge_frame_registers(caller, completed_frame)) {
+      recycle_frame(std::move(completed_frame));
+      return;
+    }
+    if (pending_exception.has_value()) {
+      Value exception = *pending_exception;
+      recycle_frame(std::move(completed_frame));
+      raise_value(caller, exception);
+      return;
+    }
+    if (!caller_reg.has_value() || !write_reg(caller, *caller_reg, value)) {
+      recycle_frame(std::move(completed_frame));
+      return;
+    }
+    recycle_frame(std::move(completed_frame));
+  }
+
   bool raise_value(const Frame &raising_frame, const Value &exception) {
+    Value active_exception = exception;
+    if (raising_frame.pending_exception_on_return.has_value()) {
+      append_suppressed_exception(
+          active_exception, *raising_frame.pending_exception_on_return);
+    }
+
     std::size_t target_index = 0;
     const bytecode::HandlerEntry *handler = nullptr;
     if (!find_unwind_target(&target_index, &handler)) {
-      const std::string error_name = exception_error_name(exception);
+      const std::string error_name = exception_error_name(active_exception);
       const std::string message =
-          "unhandled exception " + value_to_debug_string(exception, &module_);
+          "unhandled exception " +
+          value_to_debug_string(active_exception, &module_);
       fault_ = make_fault(raising_frame, error_name, message);
       return false;
     }
@@ -15319,8 +15517,8 @@ private:
       return false;
     }
 
-    while (frames_.size() > target_index + 1U) {
-      frames_.pop_back();
+    if (!pop_frames_above_unwind_target(target_index, &active_exception)) {
+      return false;
     }
 
     Frame &target = frames_[target_index];
@@ -15334,7 +15532,22 @@ private:
     target.pending_pattern_bindings.clear();
     target.active_call_pc.reset();
     target.pc = handler->handler_pc;
-    push_frame(*handler_code, {exception}, target.captures, target.self,
+    const std::uint32_t kind =
+        handler->flags == 0U ? kHandlerKindLegacyRescue
+                             : handler_kind(handler->flags);
+    if (kind == kHandlerKindEnsure) {
+      return push_handler_frame_from_target(
+          target, *handler_code, active_exception,
+          handler_exception_slot(handler->flags), std::nullopt, true,
+          active_exception);
+    }
+    if (kind == kHandlerKindRescue) {
+      return push_handler_frame_from_target(
+          target, *handler_code, active_exception,
+          handler_exception_slot(handler->flags),
+          handler_result_slot(handler->flags), true, std::nullopt);
+    }
+    push_frame(*handler_code, {active_exception}, target.captures, target.self,
                target.block, 0U);
     return true;
   }
@@ -20261,43 +20474,7 @@ private:
         if (fault_.has_value()) {
           return;
         }
-        if (frame.return_override.has_value()) {
-          value = *frame.return_override;
-        }
-        const bool capture_completed_frame =
-            frames_.size() == 1U ||
-            (frame.code != nullptr && frame.code->kind == CodeKind::Module);
-        std::vector<Value> completed_regs;
-        std::vector<std::uint8_t> completed_initialized;
-        if (capture_completed_frame) {
-          materialize_integer_regs(frame);
-          completed_regs = frame.regs;
-          completed_initialized = frame.initialized;
-        }
-        const BcCode *completed_code = frame.code;
-        const std::optional<std::uint32_t> caller_reg = frame.caller_result_reg;
-        Frame completed_frame = std::move(frames_.back());
-        frames_.pop_back();
-        if (capture_completed_frame) {
-          last_completed_regs_ = std::move(completed_regs);
-          last_completed_initialized_ = std::move(completed_initialized);
-          if (completed_code != nullptr) {
-            persist_module_bindings(*completed_code, last_completed_regs_,
-                                    last_completed_initialized_);
-          }
-        }
-        if (frames_.empty()) {
-          final_value_ = value;
-          recycle_frame(std::move(completed_frame));
-          return;
-        }
-        Frame &caller = frames_.back();
-        caller.active_call_pc.reset();
-        if (!caller_reg.has_value() || !write_reg(caller, *caller_reg, value)) {
-          recycle_frame(std::move(completed_frame));
-          return;
-        }
-        recycle_frame(std::move(completed_frame));
+        finish_return(frame, value);
         return;
       }
       case QuickOpcode::Raise: {
@@ -21317,6 +21494,31 @@ private:
     case Opcode::SendDynSpread:
       step_send(frame, insn, true, true);
       return;
+    case Opcode::TripleEq: {
+      std::uint32_t dst = 0;
+      std::uint32_t matcher_reg = 0;
+      std::uint32_t value_reg = 0;
+      if (!operand_u32(frame, insn, 0, &dst) ||
+          !operand_u32(frame, insn, 1, &matcher_reg) ||
+          !operand_u32(frame, insn, 2, &value_reg)) {
+        return;
+      }
+      const Value matcher = read_reg(frame, matcher_reg);
+      const Value value = read_reg(frame, value_reg);
+      if (fault_.has_value()) {
+        return;
+      }
+      bool matched = false;
+      if (!pattern_triple_eq(frame, matcher, value, &matched)) {
+        return;
+      }
+      if (fault_.has_value() ||
+          !write_reg(frame, dst, Value::boolean(matched))) {
+        return;
+      }
+      ++frame.pc;
+      return;
+    }
     case Opcode::Jump: {
       std::uint32_t target = 0;
       if (!operand_u32(frame, insn, 0, &target)) {
@@ -21725,43 +21927,7 @@ private:
       if (fault_.has_value()) {
         return;
       }
-      if (frame.return_override.has_value()) {
-        value = *frame.return_override;
-      }
-      const bool capture_completed_frame =
-          frames_.size() == 1U ||
-          (frame.code != nullptr && frame.code->kind == CodeKind::Module);
-      std::vector<Value> completed_regs;
-      std::vector<std::uint8_t> completed_initialized;
-      if (capture_completed_frame) {
-        materialize_integer_regs(frame);
-        completed_regs = frame.regs;
-        completed_initialized = frame.initialized;
-      }
-      const BcCode *completed_code = frame.code;
-      const std::optional<std::uint32_t> caller_reg = frame.caller_result_reg;
-      Frame completed_frame = std::move(frames_.back());
-      frames_.pop_back();
-      if (capture_completed_frame) {
-        last_completed_regs_ = std::move(completed_regs);
-        last_completed_initialized_ = std::move(completed_initialized);
-        if (completed_code != nullptr) {
-          persist_module_bindings(*completed_code, last_completed_regs_,
-                                  last_completed_initialized_);
-        }
-      }
-      if (frames_.empty()) {
-        final_value_ = value;
-        recycle_frame(std::move(completed_frame));
-        return;
-      }
-      Frame &caller = frames_.back();
-      caller.active_call_pc.reset();
-      if (!caller_reg.has_value() || !write_reg(caller, *caller_reg, value)) {
-        recycle_frame(std::move(completed_frame));
-        return;
-      }
-      recycle_frame(std::move(completed_frame));
+      finish_return(frame, value);
       return;
     }
     case Opcode::Raise: {

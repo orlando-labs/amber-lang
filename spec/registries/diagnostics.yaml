@@ -21,6 +21,14 @@ diagnostics:
   - { code: E_RANGE_FLOAT_STEP_REQUIRED, severity: error, phase: parser, condition: float range literal is missing an explicit step }
   - { code: E_RANGE_ZERO_STEP, severity: error, phase: parser, condition: statically literal range step is zero }
   - { code: E_RANGE_EXCLUSIVE_OPEN_ENDED, severity: error, phase: parser, condition: exclusive open-ended range syntax is not supported }
+  - { code: E_RESCUE_WITHOUT_BODY, severity: error, phase: parser, condition: rescue does not follow a try body or function/method body or has an empty body }
+  - { code: E_ENSURE_WITHOUT_BODY, severity: error, phase: parser, condition: ensure does not follow a try body or function/method body or has an empty body }
+  - { code: E_RESCUE_AFTER_ENSURE, severity: error, phase: parser, condition: rescue clause appears after ensure in one protected region }
+  - { code: E_DUPLICATE_ENSURE, severity: error, phase: parser, condition: protected region declares more than one ensure clause }
+  - { code: E_INVALID_RESCUE_BINDING, severity: error, phase: parser, condition: rescue exception binding is not pipe-delimited identifier form }
+  - { code: E_INVALID_RESCUE_MATCHER, severity: error, phase: parser, condition: rescue matcher list contains an invalid or empty type term }
+  - { code: E_RESCUE_PIPE_UNION_FORBIDDEN, severity: error, phase: parser, condition: rescue matcher list uses pipe union spelling instead of comma separation }
+  - { code: E_TRY_WITHOUT_HANDLER, severity: error, phase: parser, condition: explicit try expression has no rescue or ensure clause }
   - { code: AMB_PROP_BAD_DECL, severity: error, phase: parser, condition: malformed property declaration }
   - { code: AMB_PROP_INVALID_CONTEXT, severity: error, phase: parser, condition: property declaration in function or block context }
   - { code: AMB_PROP_PARAM_LIST_FORBIDDEN, severity: error, phase: parser, condition: property declaration has a forbidden parameter list }

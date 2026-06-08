@@ -1484,6 +1484,42 @@ void test_property_lowering() {
          "attr setter property flag");
 }
 
+void test_try_rescue_ensure_lowering() {
+  const amber::hir::Program program =
+      lower_ok("try:\n"
+               "  raise \"boom\"\n"
+               "rescue |e|:\n"
+               "  e\n"
+               "ensure:\n"
+               "  1\n");
+
+  const amber::hir::Procedure *module_init =
+      procedure_by_name(program, "__module_init__");
+  expect(module_init != nullptr, "module init exists for try lowering");
+  expect(contains_kind(*module_init->body, "HTry"), "HTry is emitted");
+  expect(contains_kind(*module_init->body, "HRaise"), "HRaise is emitted");
+
+  const amber::ast::Expr *stmt = list_item(*module_init->body, "items", 0);
+  expect(stmt != nullptr && stmt->kind == "HLastSet", "try stmt lowers");
+  const amber::ast::Expr *try_expr = node_field(*stmt, "expr");
+  expect(try_expr != nullptr && try_expr->kind == "HTry",
+         "try expression is HLastSet payload");
+  expect(bool_field(*try_expr, "has_ensure"), "HTry keeps ensure flag");
+  const amber::ast::Expr *rescue = list_item(*try_expr, "rescues", 0);
+  expect(rescue != nullptr && rescue->kind == "HRescue",
+         "HRescue is emitted");
+  expect(string_field(*rescue, "binding") == "e",
+         "HRescue keeps exception binding");
+
+  bool found_rescue_local = false;
+  for (const amber::hir::ProcedureLocal &local : module_init->locals) {
+    if (local.name == "e" && local.role == "rescue_binding") {
+      found_rescue_local = true;
+    }
+  }
+  expect(found_rescue_local, "rescue binding becomes procedure local");
+}
+
 } // namespace
 
 int main() {
@@ -1517,6 +1553,7 @@ int main() {
   test_indented_block_suffix_lowering();
   test_nested_capture_propagation();
   test_property_lowering();
+  test_try_rescue_ensure_lowering();
   std::cout << "hir_tests: ok\n";
   return 0;
 }

@@ -202,6 +202,34 @@ struct HandlerEntry {
   std::uint32_t flags = 0;
 };
 
+inline constexpr std::uint32_t kHandlerKindLegacyRescue = 0x0U;
+inline constexpr std::uint32_t kHandlerKindRescue = 0x1U;
+inline constexpr std::uint32_t kHandlerKindEnsure = 0x2U;
+inline constexpr std::uint32_t kHandlerKindMask = 0xFU;
+inline constexpr std::uint32_t kHandlerExceptionSlotShift = 4U;
+inline constexpr std::uint32_t kHandlerResultSlotShift = 16U;
+inline constexpr std::uint32_t kHandlerSlotMask = 0xFFFU;
+
+inline constexpr std::uint32_t handler_flags(std::uint32_t kind,
+                                             std::uint32_t exception_slot,
+                                             std::uint32_t result_slot) {
+  return (kind & kHandlerKindMask) |
+         ((exception_slot & kHandlerSlotMask) << kHandlerExceptionSlotShift) |
+         ((result_slot & kHandlerSlotMask) << kHandlerResultSlotShift);
+}
+
+inline constexpr std::uint32_t handler_kind(std::uint32_t flags) {
+  return flags & kHandlerKindMask;
+}
+
+inline constexpr std::uint32_t handler_exception_slot(std::uint32_t flags) {
+  return (flags >> kHandlerExceptionSlotShift) & kHandlerSlotMask;
+}
+
+inline constexpr std::uint32_t handler_result_slot(std::uint32_t flags) {
+  return (flags >> kHandlerResultSlotShift) & kHandlerSlotMask;
+}
+
 struct CacheSiteEntry {
   std::uint32_t pc = 0;
   std::uint32_t slot = 0;

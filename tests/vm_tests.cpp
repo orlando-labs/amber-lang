@@ -7599,6 +7599,147 @@ void test_manual_raise_unhandled_fault_trace() {
          "unhandled RAISE should include human-readable trace text");
 }
 
+void test_source_try_rescue_ensure_execution() {
+  const std::string binding_source =
+      "try:\n"
+      "  raise \"boom\"\n"
+      "rescue |e|:\n"
+      "  e\n";
+  const amber::bytecode::EmitResult binding_emit = emit_ok(binding_source);
+  const amber::bytecode::DecodeResult binding_decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(binding_emit.module));
+  expect(binding_decoded.ok(),
+         amber::bytecode::verify_errors_to_json(binding_decoded.errors));
+  const amber::runtime::ExecutionResult binding_exec =
+      amber::runtime::execute_code(binding_decoded.module,
+                                   binding_decoded.module.init.entry_code_id);
+  expect(binding_exec.ok(), "try rescue binding execution failed");
+  expect(string_value_text_or_die(binding_exec.value, binding_decoded.module,
+                                  binding_exec) == "boom",
+         "rescue binding should receive raised value");
+  const amber::runtime::ExecutionLocal *binding_local =
+      execution_local_by_name(binding_exec, "e");
+  expect(binding_local != nullptr && binding_local->initialized,
+         "rescue binding appears initialized in execution locals");
+
+  amber::runtime::ExecutionResult typed_rescue = execute_emitted_init(
+      "class Boom:\n"
+      "  def init():\n"
+      "    pass\n"
+      "try:\n"
+      "  raise Boom()\n"
+      "rescue Boom:\n"
+      "  7\n");
+  expect(typed_rescue.ok(), "typed rescue execution failed");
+  expect(typed_rescue.value.is_integer() &&
+             typed_rescue.value.as_integer() == 7,
+         "typed rescue matcher should catch matching class instances");
+
+  amber::runtime::ExecutionResult normal_ensure = execute_emitted_init(
+      "x = 0\n"
+      "try:\n"
+      "  5\n"
+      "ensure:\n"
+      "  x = 9\n");
+  expect(normal_ensure.ok(), "normal ensure execution failed");
+  expect(normal_ensure.value.is_integer() &&
+             normal_ensure.value.as_integer() == 5,
+         "ensure must not replace normal try result");
+  const amber::runtime::ExecutionLocal *x_local =
+      execution_local_by_name(normal_ensure, "x");
+  expect(x_local != nullptr && x_local->value.is_integer() &&
+             x_local->value.as_integer() == 9,
+         "ensure normal path side effect is visible");
+
+  amber::runtime::ExecutionResult nested_ensure = execute_emitted_init(
+      "x = 0\n"
+      "try:\n"
+      "  try:\n"
+      "    raise \"boom\"\n"
+      "  ensure:\n"
+      "    x = 9\n"
+      "rescue:\n"
+      "  x\n");
+  expect(nested_ensure.ok(), "nested ensure rethrow execution failed");
+  expect(nested_ensure.value.is_integer() &&
+             nested_ensure.value.as_integer() == 9,
+         "ensure must run before exception continues to outer rescue");
+
+  amber::runtime::ExecutionResult break_ensure = execute_emitted_init(
+      "x = 0\n"
+      "loop:\n"
+      "  try:\n"
+      "    break 5\n"
+      "  ensure:\n"
+      "    x = 9\n");
+  expect(break_ensure.ok(), "break ensure execution failed");
+  expect(break_ensure.value.is_integer() &&
+             break_ensure.value.as_integer() == 5,
+         "break value should survive ensure");
+  const amber::runtime::ExecutionLocal *break_x_local =
+      execution_local_by_name(break_ensure, "x");
+  expect(break_x_local != nullptr && break_x_local->value.is_integer() &&
+             break_x_local->value.as_integer() == 9,
+         "ensure must run before break exits protected body");
+}
+
+void test_manual_ensure_suppresses_pending_exception() {
+  using namespace amber::bytecode;
+
+  BcModule module;
+  module.symbols = {"Primary", "Cleanup"};
+
+  BcClass primary_class;
+  primary_class.class_name_sym_id = 0;
+  module.classes.push_back(primary_class);
+  BcClass cleanup_class;
+  cleanup_class.class_name_sym_id = 1;
+  module.classes.push_back(cleanup_class);
+
+  BcCode code;
+  code.code_id = 1;
+  code.kind = CodeKind::Method;
+  code.reg_count = 2;
+  code.instructions.push_back({Opcode::Raise, {{0, false}}});
+  code.instructions.push_back({Opcode::LoadNull, {{0, false}}});
+  code.instructions.push_back({Opcode::Return, {{0, false}}});
+  code.handler_table.push_back(
+      {0, 1, 1, 2, handler_flags(kHandlerKindEnsure, 0, 0)});
+
+  BcCode ensure;
+  ensure.code_id = 2;
+  ensure.kind = CodeKind::Ensure;
+  ensure.reg_count = 2;
+  ensure.instructions.push_back({Opcode::Raise, {{1, false}}});
+  ensure.instructions.push_back({Opcode::LoadNull, {{0, false}}});
+  ensure.instructions.push_back({Opcode::Return, {{0, false}}});
+  module.code_objects = {code, ensure};
+
+  auto primary = std::make_shared<amber::runtime::InstanceValue>();
+  primary->class_index = 0;
+  auto cleanup = std::make_shared<amber::runtime::InstanceValue>();
+  cleanup->class_index = 1;
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      module, 1,
+      {amber::runtime::Value::instance(primary),
+       amber::runtime::Value::instance(cleanup)});
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "Cleanup",
+         "cleanup exception should replace pending exception");
+
+  const auto suppressed = cleanup->ivars.find("suppressed_exceptions");
+  expect(suppressed != cleanup->ivars.end() && suppressed->second.is_list(),
+         "cleanup exception should keep suppressed exceptions");
+  const std::shared_ptr<amber::runtime::ListValue> suppressed_list =
+      suppressed->second.as_list();
+  expect(suppressed_list != nullptr && suppressed_list->items.size() == 1,
+         "one pending exception should be suppressed");
+  expect(suppressed_list->items[0].is_instance_object() &&
+             suppressed_list->items[0].as_instance_object() == primary,
+         "suppressed exception preserves original pending exception");
+}
+
 } // namespace
 
 int main() {
@@ -7749,9 +7890,11 @@ int main() {
   test_runtime_package_reload_rolls_back_failed_decode();
   test_manual_pattern_deconstruct_protocol_sequence();
   test_manual_pattern_deconstruct_protocol_map();
+  test_source_try_rescue_ensure_execution();
   test_manual_raise_handler_table_recovers();
   test_manual_raise_unwinds_closure_to_outer_handler();
   test_manual_raise_unwinds_method_send_to_outer_handler();
+  test_manual_ensure_suppresses_pending_exception();
   test_manual_raise_unhandled_fault_trace();
   std::cout << "vm_tests: ok\n";
   return 0;
