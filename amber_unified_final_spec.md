@@ -1568,6 +1568,449 @@ def fact(n) if n > 0: n * fact(n - 1)
 
 Внутренне он компилируется в каноническую clause-style форму.
 
+
+## 10.5. Исключения: `raise`, `rescue`, `ensure`
+
+### 10.5.1. Назначение
+
+Amber вводит native exception handling syntax в Ruby-like стиле, но без обязательного `begin` для обычных function/method bodies.
+
+Каноническая function-level форма:
+
+```amber
+def f(x as Int) -> Int:
+ risky_calculation(x)
+rescue TypeError |e|:
+ recover_type_error(e)
+ensure:
+ release_critical_resource()
+```
+
+`rescue` перехватывает исключения, возникшие в защищённом body. `ensure` выполняется при любом выходе из защищённого body: normal completion, explicit `return`, implicit return через последнее выражение, `raise`, cancellation/unwind и runtime unwinding.
+
+Surface `rescue` / `ensure` являются языковой формой над уже обязательной VM handler-table/unwind моделью. Implementation не должна эмулировать их через обычные вызовы stdlib-функций.
+
+### 10.5.2. Function-level `rescue` / `ensure`
+
+`rescue` и `ensure` могут следовать после тела `def` на том же indentation level, что и тело функции или метода.
+
+```amber
+def parse_int(s as Str) -> Int:
+ s.to_int()
+rescue TypeError |e|:
+ log "bad int: #{e.message}"
+ 0
+ensure:
+ metrics.increment(:parse_attempt)
+```
+
+Грамматически такие clauses относятся к ближайшему enclosing `def` / `class_method def` body, если они стоят на уровне body этого callable.
+
+```amber
+def f():
+ risky()
+rescue Error |e|:
+ handle(e)
+```
+
+наблюдаемо эквивалентно protected callable body:
+
+```amber
+def f():
+ try:
+  risky()
+ rescue Error |e|:
+  handle(e)
+```
+
+но wrapper `try:` для whole-function case не требуется.
+
+### 10.5.3. Explicit `try` expression
+
+Для локальных protected regions вводится explicit `try:` expression.
+
+```amber
+value = try:
+ read_config(path)
+rescue FileError |e|:
+ default_config()
+ensure:
+ close_temp_handles()
+```
+
+`try` является выражением.
+
+Значение `try`:
+
+- если protected body завершился нормально — значение последнего выражения protected body;
+- если выбран `rescue` — значение последнего выражения выбранной rescue-ветки;
+- если исключение не перехвачено — исключение продолжает unwind после выполнения `ensure`;
+- `ensure` не заменяет значение выражения, если сам не бросает исключение или иной control completion.
+
+### 10.5.4. `raise`
+
+Минимальная surface-форма:
+
+```amber
+raise expr
+```
+
+`expr` должен вычисляться в `ExceptionObject` или exception-compatible значение, которое runtime умеет канонически поднять как `ExceptionObject`.
+
+Рекомендуемая stdlib-конвенция:
+
+```amber
+raise TypeError("message")
+raise TypeError.new("message")
+```
+
+Если `raise` получает значение, которое не является `ExceptionObject` и не является exception-compatible value, это `TypeError`.
+
+`raise` без аргумента в v1 не вводится. Re-raise текущего исключения должен быть оформлен отдельным будущим решением, чтобы не создавать скрытую dynamic dependency на nearest rescue context.
+
+### 10.5.5. Rescue clauses
+
+Базовая форма:
+
+```amber
+rescue ErrorType |e|:
+ body
+```
+
+Форма без binding:
+
+```amber
+rescue ErrorType:
+ body
+```
+
+Форма catch-all:
+
+```amber
+rescue |e|:
+ body
+
+rescue:
+ body
+```
+
+`rescue:` без matcher ловит все ordinary language-level exceptions, но не ловит fatal tooling/runtime classes, которые не являются частью normal language-level control flow: `InternalCompilerError`, `InternalVMError`, host fatal aborts и аналогичные runtime-fatal failures.
+
+### 10.5.6. Несколько exception types
+
+Для нескольких типов допускается только comma-separated форма:
+
+```amber
+rescue TypeError, ArgumentError |e|:
+ recover(e)
+```
+
+Вертикальная черта `|` не является union-разделителем внутри rescue matcher list. Следующая форма не входит в язык и должна диагностироваться:
+
+```amber
+rescue TypeError | ArgumentError |e|:
+ recover(e)
+```
+
+Причина: `|name|` уже является delimiter'ом binding exception object, а использование `|` как type-union внутри `rescue` создаёт нежелательную визуальную и грамматическую неоднозначность. Type unions сохраняются в `TypeTerm`, но rescue matcher list использует собственный comma-separated синтаксис.
+
+### 10.5.7. Exception matching
+
+`rescue T` матчится по правилу:
+
+```amber
+T === exception
+```
+
+Для exception classes стандартная семантика:
+
+```text
+ErrorClass === exception
+```
+
+истинна, если `exception.error_class` равен `ErrorClass` или является его subclass.
+
+Rescue clauses проверяются сверху вниз. Первая matching clause побеждает. Последующие clauses не выполняются.
+
+```amber
+def load_user(id):
+ db.users[id]
+rescue KeyError |e|:
+ null
+rescue TimeoutError |e|:
+ retry_later(id)
+```
+
+### 10.5.8. Binding exception object
+
+Форма:
+
+```amber
+rescue TypeError |e|:
+ log e.message
+```
+
+создаёт локальный binding `e`, видимый только внутри rescue-body.
+
+Без binding:
+
+```amber
+rescue TypeError:
+ 0
+```
+
+exception object не связывается с локальным именем, но остаётся доступным runtime unwind, diagnostic и backtrace machinery.
+
+Если локальная shadowing policy разрешает затенение, binding `e` может затенять внешний `e` только внутри rescue-body. Если реализация работает в профиле с запретом shadowing, нарушение диагностируется тем же механизмом, что и обычные локальные binding conflicts.
+
+### 10.5.9. `ensure`
+
+`ensure:` выполняется всегда после protected body или после выбранного rescue-body.
+
+```amber
+def f():
+ acquire()
+ risky()
+rescue Error |e|:
+ recover(e)
+ensure:
+ release()
+```
+
+Порядок выполнения:
+
+1. выполнить protected body;
+2. если body бросил exception — найти первый matching `rescue`;
+3. если matching rescue найден — выполнить rescue-body;
+4. выполнить `ensure`, если он есть;
+5. вернуть pending normal value либо продолжить pending exception/control unwind.
+
+`ensure` может существовать без `rescue`:
+
+```amber
+def with_lock(lock):
+ lock.acquire()
+ work()
+ensure:
+ lock.release()
+```
+
+### 10.5.10. Suppressed exception chain
+
+Runtime обязан поддерживать suppressed exception chain как часть `ExceptionObject` ABI.
+
+Если protected body или rescue-body уже имеет pending exception, а `ensure` бросает новое исключение, новое исключение становится наблюдаемым thrown exception, а предыдущее pending exception добавляется в `suppressed_exceptions` нового исключения.
+
+```amber
+try:
+ raise TypeError("primary")
+ensure:
+ raise CleanupError("cleanup failed")
+```
+
+Наблюдаемое исключение: `CleanupError`.
+
+`CleanupError.suppressed_exceptions` обязан содержать исходный `TypeError("primary")`.
+
+Если при выполнении `ensure` возникает цепочка дополнительных failures, suppressed exceptions добавляются в порядке их подавления. Runtime, debugger и diagnostic printer обязаны сохранять suppressed-chain; реализация не вправе терять первичное исключение как mere debug metadata.
+
+`cause` и `suppressed_exceptions` являются разными механизмами:
+
+- `cause` описывает причинную связь при явном exception chaining или runtime wrapping;
+- `suppressed_exceptions` описывает exception/control loss из-за failure в cleanup/ensure/finalization path.
+
+### 10.5.11. Completion precedence
+
+`ensure` не меняет normal result, если завершается нормально.
+
+```amber
+def f():
+ 10
+ensure:
+ log "done"
+```
+
+результат `f()` — `10`.
+
+Если `ensure` бросает исключение, выполняет non-local control transfer или иначе создаёт abrupt completion, оно заменяет прежний pending normal result или pending exception. При замене pending exception новый exception обязан сохранить прежний exception в `suppressed_exceptions`.
+
+### 10.5.12. Interaction with `$_` and implicit return
+
+Amber использует `$_` как frame-local last-result slot и implicit return через последнее выражение. Поэтому `try` / `rescue` / `ensure` lowering обязан сохранять pending completion value отдельно от временных значений, возникающих внутри `ensure`.
+
+```amber
+def f():
+ risky()
+rescue TypeError:
+ 10
+ensure:
+ log "done"
+```
+
+Если `risky()` успешно вернул `5`, результат `f()` — `5`.
+
+Если `risky()` бросил `TypeError`, результат `f()` — `10`.
+
+Последнее выражение внутри `ensure` может обновлять локальный `$_` во время исполнения ensure-body, но не заменяет итоговое значение whole `try` / function body, если ensure-body завершился normally. Lowering обязан восстановить pending completion после successful ensure.
+
+### 10.5.13. Grammar
+
+```ebnf
+TryExpr ::=
+  "try" ":" Block
+  RescueClause*
+  EnsureClause?
+
+DefWithHandlers ::=
+  DefHeader ":" Block
+  RescueClause*
+  EnsureClause?
+
+RescueClause ::=
+  "rescue" RescueMatcherList? ExceptionBinding? ":" Block
+
+RescueMatcherList ::=
+  RescueMatcher { "," RescueMatcher }
+
+RescueMatcher ::=
+  TypeTerm
+
+ExceptionBinding ::=
+  "|" Identifier "|"
+
+EnsureClause ::=
+  "ensure" ":" Block
+```
+
+Ограничения:
+
+- `ensure` может быть только один;
+- `ensure` должен идти после всех `rescue`;
+- `rescue` после `ensure` — compile-time error;
+- `rescue` без preceding `try` body или function/method body — compile-time error;
+- `ensure` без preceding `try` body или function/method body — compile-time error;
+- empty rescue/ensure body запрещён; для intentional no-op используются `pass` или `noop`;
+- union spelling через `|` внутри rescue matcher list запрещён, даже если такой spelling допустим в обычном `TypeTerm`.
+
+### 10.5.14. Diagnostics
+
+Compile-time diagnostics:
+
+```text
+E_RESCUE_WITHOUT_BODY
+`rescue` must follow a `try` body or function/method body
+```
+
+```text
+E_ENSURE_WITHOUT_BODY
+`ensure` must follow a `try` body or function/method body
+```
+
+```text
+E_RESCUE_AFTER_ENSURE
+`rescue` clauses must appear before `ensure`
+```
+
+```text
+E_DUPLICATE_ENSURE
+only one `ensure` clause is allowed
+```
+
+```text
+E_INVALID_RESCUE_BINDING
+exception binding must use `|name|`
+```
+
+```text
+E_INVALID_RESCUE_MATCHER
+rescue matcher must be an exception class/type term
+```
+
+```text
+E_RESCUE_PIPE_UNION_FORBIDDEN
+use comma-separated rescue matcher list: `rescue TypeError, ArgumentError |e|:`
+```
+
+Runtime errors:
+
+- invalid raised value: `TypeError`;
+- dynamic rescue matcher that is not an exception class/matcher: `TypeError`;
+- fatal VM/tooling errors remain outside ordinary rescue control flow.
+
+### 10.5.15. Lowering
+
+Function-level form:
+
+```amber
+def f(x):
+ body
+rescue TypeError |e|:
+ recover(e)
+ensure:
+ cleanup()
+```
+
+lowers to HIR equivalent:
+
+```text
+HDef f(x):
+ HTry(
+  body = HBlock(body),
+  rescue_clauses = [
+   HRescue(matchers = [TypeError], bind = e, body = recover(e))
+  ],
+  ensure_body = cleanup(),
+  result_slot = fresh_completion_slot
+ )
+```
+
+Multiple matchers lower as a matcher list, not as an OR-pattern:
+
+```amber
+rescue TypeError, ArgumentError |e|:
+ recover(e)
+```
+
+```text
+HRescue(
+ matchers = [TypeError, ArgumentError],
+ bind = e,
+ body = recover(e)
+)
+```
+
+Bytecode lowering must use handler table entries with protected ranges, rescue entries and ensure/finalizer entries. VM unwind walks handler tables, executes pending ensure/finalizer handlers, preserves suppressed exception chains and then either enters a matching rescue handler or continues unhandled exception propagation.
+
+### 10.5.16. Compatibility with Contracts Profile `ensure`
+
+Contracts Profile already uses `ensure` as a postcondition statement:
+
+```amber
+def withdraw(account as Account, amount as Money) -> Account !{mut}:
+ require amount > 0
+ result = account.debit(amount)
+ ensure result.balance == old(account.balance) - amount
+ result
+```
+
+Это не конфликтует с exception-finalization clause, потому что формы различаются синтаксически:
+
+```amber
+ensure expr
+```
+
+— contract/postcondition statement внутри function body.
+
+```amber
+ensure:
+ body
+```
+
+— exception-finalization clause после protected body.
+
+Двоеточие является обязательным маркером exception-finalization clause.
+
+
 ## 11. Ошибки и диагностики
 
 ### 11.1. Compile-time errors
@@ -1582,6 +2025,17 @@ def fact(n) if n > 0: n * fact(n - 1)
 - `class_method def` внутри mixin body;
 - недопустимый callable reference target: `&foo()`, `&(expr)`, `&obj.method` в v1;
 - использование `#` вне формы unbound callable reference `&Class#method`.
+
+
+Дополнительные diagnostics для exception syntax:
+
+- `E_RESCUE_WITHOUT_BODY`: `rescue` не следует за `try` body или function/method body;
+- `E_ENSURE_WITHOUT_BODY`: `ensure` не следует за `try` body или function/method body;
+- `E_RESCUE_AFTER_ENSURE`: `rescue` указан после `ensure`;
+- `E_DUPLICATE_ENSURE`: в одном protected region указано больше одного `ensure`;
+- `E_INVALID_RESCUE_BINDING`: exception binding не использует форму `|name|`;
+- `E_INVALID_RESCUE_MATCHER`: rescue matcher не является допустимым exception class/type term;
+- `E_RESCUE_PIPE_UNION_FORBIDDEN`: внутри rescue matcher list использована запрещённая union-форма через `|`; нужно писать `rescue TypeError, ArgumentError |e|:`.
 
 ### 11.2. Runtime errors
 
@@ -28381,11 +28835,14 @@ ExceptionObject(
  payload?,
  backtrace_frames[],
  cause?,
+ suppressed_exceptions[],
  source_span_id?
 )
 ```
 
 Backtrace frames contain symbolic method/module/code ids and source spans, not memory addresses.
+
+`suppressed_exceptions[]` is mandatory ABI state. It may be empty, but it must exist on every `ExceptionObject`. When an `ensure`/finalizer failure replaces an already pending exception, the replaced exception is appended to `suppressed_exceptions[]` of the newly thrown exception. Diagnostic printers, debuggers and task-failure reports must preserve and display this chain.
 
 #### 12.11.2. Unwind model
 
@@ -28397,7 +28854,7 @@ VM unwind walks frames until it finds a matching handler table entry. During unw
 4. notify structured task failure machinery if the root task frame unwinds;
 5. either enter handler or report unhandled exception.
 
-Even if source-level `rescue` syntax is not enabled in P0, the bytecode ABI must support handler tables because runtime, stdlib, scheduler and native bridges need deterministic unwind/finalization.
+Source-level `try` / `rescue` / `ensure` syntax lowers to these handler tables. The bytecode ABI must support handler tables because runtime, stdlib, scheduler and native bridges need deterministic unwind/finalization, including mandatory suppressed exception chain preservation.
 
 #### 12.11.3. Required additions to runtime error registry
 
