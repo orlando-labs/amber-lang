@@ -1,5 +1,5 @@
 schema: amber.opcodes.registry.v1
-spec_anchor: amber_spec_consolidated_v20_1_main.md
+spec_anchor: amber_unified_final_spec.md
 status: implemented_subset
 opcodes:
   - name: LOADK

@@ -1,5 +1,5 @@
 schema: amber.runtime_errors.registry.v1
-spec_anchor: amber_spec_consolidated_v20_1_main.md
+spec_anchor: amber_unified_final_spec.md
 errors:
   - NameError
   - ArgumentError

@@ -1,5 +1,5 @@
 schema: amber.diagnostics.registry.v1
-spec_anchor: amber_spec_consolidated_v20_1_main.md
+spec_anchor: amber_unified_final_spec.md
 diagnostics:
   - { code: L0001, severity: error, phase: lexer, condition: lexer cannot produce a valid token stream }
   - { code: P0001, severity: error, phase: parser, condition: parser cannot produce a valid syntax-faithful AST }

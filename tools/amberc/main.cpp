@@ -2117,7 +2117,9 @@ std::filesystem::path detect_native_runtime_root(const std::string &argv0) {
   } catch (const std::exception &) {
   }
   for (const std::filesystem::path &candidate : candidates) {
-    if (std::filesystem::exists(candidate / "runtime" / "vm.cpp") &&
+    if (std::filesystem::exists(candidate / "runtime" / "context.cpp") &&
+        std::filesystem::exists(candidate / "runtime" / "text.cpp") &&
+        std::filesystem::exists(candidate / "runtime" / "vm.cpp") &&
         std::filesystem::exists(candidate / "bytecode" / "format.cpp")) {
       return candidate;
     }
@@ -2159,7 +2161,8 @@ native_runtime_sources(const std::filesystem::path &root) {
       "profile/capabilities.cpp", "profile/effects.cpp",
       "profile/replay.cpp",       "profile/data.cpp",
       "profile/wasm_accel.cpp",   "profile/modern.cpp",
-      "package/package.cpp",      "runtime/vm.cpp",
+      "package/package.cpp",      "runtime/context.cpp",
+      "runtime/text.cpp",         "runtime/vm.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());

@@ -5,7 +5,7 @@ the `W10.5` frozen image layer, and hardened for `W15` native-readiness
 metadata closure.
 
 The native layer follows the compile-closure convention in
-[amber_compilable_project_layer_v20_1_complete.md](/Users/slowpilot/workspace/amber/amber_compilable_project_layer_v20_1_complete.md:5515):
+[amber_unified_final_spec.md](../../amber_unified_final_spec.md#8-canonical-mir-native-jit-frozen-image-profile):
 the bytecode VM remains the reference execution engine, native compilation is a
 frozen-world profile, and reflective sites are represented as runtime stubs
 rather than unsafe host-code shortcuts.

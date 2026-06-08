@@ -16,8 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ANCHOR_MAP = ROOT / "docs/engineering/spec-anchor-map-v1.md"
 ANCHOR_SOURCE_GLOBS = [
     "README.md",
-    "amber_spec_consolidated_v20_1_main.md",
-    "amber_compilable_project_layer_v20_1_complete.md",
+    "amber_unified_final_spec.md",
     "docs/engineering/*.md",
     "spec/changelog/*.md",
 ]
@@ -29,8 +28,7 @@ REGISTRY_GLOBS = [
 ]
 LINK_SCAN_GLOBS = [
     "README.md",
-    "amber_spec_consolidated_v20_1_main.md",
-    "amber_compilable_project_layer_v20_1_complete.md",
+    "amber_unified_final_spec.md",
     "docs/engineering/*.md",
     "spec/changelog/*.md",
 ]

@@ -1,6 +1,6 @@
 # Amber Reference Implementation
 
-This repository is the implementation workspace for `amber_spec_consolidated_v20_1_main.md`.
+This repository is the implementation workspace for `amber_unified_final_spec.md`.
 
 Current baseline:
 

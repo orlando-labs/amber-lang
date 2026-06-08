@@ -1,5 +1,5 @@
 schema: amber.prelude.registry.v1
-spec_anchor: amber_compilable_project_layer_v20_1_complete.md
+spec_anchor: amber_unified_final_spec.md
 abi_hash_inputs:
   - name
   - kind

@@ -23,7 +23,7 @@ FROZEN_SRCS := frozen/image.cpp
 PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp profile/data.cpp profile/wasm_accel.cpp profile/modern.cpp
 BUILD_SRCS := build/build.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
-RUNTIME_SRCS := runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
+RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(CHECKER_SRCS) $(HIR_SRCS)
@@ -97,6 +97,9 @@ FORMAT_FILES := \
 	runtime/module_loader.h \
 	runtime/native_bridge.cpp \
 	runtime/native_bridge.h \
+	runtime/context.cpp \
+	runtime/context.h \
+	runtime/text.cpp \
 	runtime/frozen_image.cpp \
 	runtime/frozen_image.h \
 	runtime/vm.cpp \
