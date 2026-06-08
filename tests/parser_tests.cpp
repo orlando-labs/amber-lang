@@ -414,8 +414,35 @@ void test_collection_literals() {
          "identifier key text");
   expect(string_field(*entries.values[1], "key_kind") == "string",
          "string key is preserved");
+  expect(node_field(*entries.values[1], "key_expr").kind == "AstStringLiteral",
+         "string key is expression key");
   expect(string_field(*entries.values[2], "key") == "kind",
          "explicit symbol key text");
+
+  std::unique_ptr<Expr> expr_key_map =
+      parse_ok("{1: :int, (name): value, [1, 2]: :pair}\n");
+  expect(expr_key_map->kind == "AstMapLiteral",
+         "expression-key map literal parses");
+  const amber::ast::ListField &expr_entries =
+      list_field(*expr_key_map, "entries");
+  expect(expr_entries.values.size() == 3,
+         "expression-key map entry count");
+  expect(string_field(*expr_entries.values[0], "key_kind") == "expression",
+         "integer key is expression key");
+  expect(node_field(*expr_entries.values[1], "key_expr").kind == "AstGroup",
+         "parenthesized map key preserves expression");
+  expect(node_field(*expr_entries.values[2], "key_expr").kind ==
+             "AstListLiteral",
+         "list map key preserves expression");
+
+  std::unique_ptr<Expr> typed_map = parse_ok("Map{\"x\": 1}\n");
+  expect(typed_map->kind == "AstMapLiteral", "Map{} parses as map literal");
+  expect(string_field(*typed_map, "collection_type") == "Map",
+         "Map{} collection type is preserved");
+  std::unique_ptr<Expr> typed_set = parse_ok("Set{1, 2}\n");
+  expect(typed_set->kind == "AstSetLiteral", "Set{} parses as set literal");
+  expect(string_field(*typed_set, "collection_type") == "Set",
+         "Set{} collection type is preserved");
 }
 
 void test_inline_conditional_expression() {

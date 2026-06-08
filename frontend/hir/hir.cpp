@@ -1591,6 +1591,9 @@ private:
           auto lowered = make_node("HMapEntry", entry->span);
           lowered->string_field("key_kind", string_value(*entry, "key_kind"));
           lowered->string_field("key", string_value(*entry, "key"));
+          if (const ast::Expr *key_expr = node_field(*entry, "key_expr")) {
+            lowered->node_field("key_expr", lower_expr(*key_expr));
+          }
           if (const ast::Expr *value = node_field(*entry, "value")) {
             lowered->node_field("value", lower_expr(*value));
           }

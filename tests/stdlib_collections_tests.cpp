@@ -1539,6 +1539,13 @@ void test_std001_map_protocol_matrix() {
   const amber::runtime::Value transform_rekey = make_closure_value(105);
   const amber::runtime::Value transform_value_with_key =
       make_closure_value(106);
+  amber::runtime::Value string_key_map =
+      amber::runtime::make_symbol_map_value(
+          std::vector<amber::runtime::MapEntry>{
+              amber::runtime::MapEntry{
+                  amber::runtime::Value::string(
+                      string_id_or_die(module, "beta")),
+                  amber::runtime::Value::integer(2)}});
 
   amber::runtime::ExecutionResult result =
       amber::runtime::execute_code(module, 1, {map});
@@ -1568,8 +1575,14 @@ void test_std001_map_protocol_matrix() {
   result = amber::runtime::execute_code(
       module, 10,
       {map, amber::runtime::Value::string(string_id_or_die(module, "beta"))});
-  expect_ok(result, "Map#[] string key");
-  expect_integer(result.value, 2, "Map#[] string key");
+  expect_fault(result, "KeyError", "Map#[] string key is distinct from Symbol");
+
+  result = amber::runtime::execute_code(
+      module, 10,
+      {string_key_map,
+       amber::runtime::Value::string(string_id_or_die(module, "beta"))});
+  expect_ok(result, "Map#[] stored string key");
+  expect_integer(result.value, 2, "Map#[] stored string key");
 
   result = amber::runtime::execute_code(
       module, 10,
@@ -1841,7 +1854,7 @@ void test_std006_collection_error_edges() {
   expect_bool(result.value, false, "Map#include? missing key");
 
   result = amber::runtime::execute_code(map_module, 10, {map, integer(1)});
-  expect_fault(result, "TypeError", "Map#[] non-key argument");
+  expect_fault(result, "KeyError", "Map#[] missing integer key");
 }
 
 amber::bytecode::BcModule make_collection_block_edge_module() {

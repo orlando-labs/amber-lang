@@ -362,7 +362,11 @@ std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
     }
     for (const MapEntry &entry : map->entries) {
       std::optional<RuntimeSyncBoundaryError> error =
-          runtime_value_shareability_error_impl(entry.value, visited);
+          runtime_value_shareability_error_impl(entry.key, visited);
+      if (error.has_value()) {
+        return error;
+      }
+      error = runtime_value_shareability_error_impl(entry.value, visited);
       if (error.has_value()) {
         return error;
       }
@@ -469,6 +473,7 @@ void runtime_append_child_values(const Value &value,
     const std::shared_ptr<MapValue> map = value.as_map();
     if (map != nullptr) {
       for (const MapEntry &entry : map->entries) {
+        children->push_back(entry.key);
         children->push_back(entry.value);
       }
     }
@@ -542,6 +547,140 @@ std::optional<RuntimeSyncBoundaryError>
 runtime_value_move_error(const Value &value) {
   std::unordered_set<std::uint64_t> visited;
   return runtime_value_move_error_impl(value, true, &visited);
+}
+
+struct CollectionKeyError {
+  std::string error_name;
+  std::string message;
+};
+
+CollectionKeyError collection_key_type_error(const std::string &message) {
+  return CollectionKeyError{"TypeError", message};
+}
+
+std::optional<Value>
+normalize_collection_key_impl(const Value &value, const char *context,
+                              std::unordered_set<std::uint64_t> *active,
+                              CollectionKeyError *error) {
+  if (value.is_float() && std::isnan(value.as_float())) {
+    *error = collection_key_type_error(std::string("NaN cannot be used as ") +
+                                       context);
+    return std::nullopt;
+  }
+
+  if (value.is_map() || value.is_set() || value.is_closure()) {
+    *error = collection_key_type_error(std::string(context) +
+                                       " does not support deep object keys");
+    return std::nullopt;
+  }
+
+  if (value.is_list() || value.is_tuple()) {
+    const ObjHeader *header = heap_header_from_value(value);
+    if (header == nullptr) {
+      *error = collection_key_type_error(std::string(context) +
+                                         " composite key is null");
+      return std::nullopt;
+    }
+    const std::optional<std::string> lifecycle_error =
+        lifecycle_access_error_name(*header);
+    if (lifecycle_error.has_value()) {
+      *error = CollectionKeyError{
+          *lifecycle_error, lifecycle_access_error_message(*lifecycle_error)};
+      return std::nullopt;
+    }
+    if (header->allocation_id != 0 &&
+        !active->insert(header->allocation_id).second) {
+      *error = collection_key_type_error(std::string("cyclic composite ") +
+                                         context + " is not supported");
+      return std::nullopt;
+    }
+
+    std::vector<Value> items;
+    if (value.is_list()) {
+      const std::shared_ptr<ListValue> list = value.as_list();
+      if (list == nullptr) {
+        *error = collection_key_type_error(std::string(context) +
+                                           " list key is null");
+        return std::nullopt;
+      }
+      items.reserve(list->items.size());
+      for (const Value &item : list->items) {
+        std::optional<Value> normalized =
+            normalize_collection_key_impl(item, context, active, error);
+        if (!normalized.has_value()) {
+          return std::nullopt;
+        }
+        items.push_back(*normalized);
+      }
+    } else {
+      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      if (tuple == nullptr) {
+        *error = collection_key_type_error(std::string(context) +
+                                           " tuple key is null");
+        return std::nullopt;
+      }
+      items.reserve(tuple->items.size());
+      for (const Value &item : tuple->items) {
+        std::optional<Value> normalized =
+            normalize_collection_key_impl(item, context, active, error);
+        if (!normalized.has_value()) {
+          return std::nullopt;
+        }
+        items.push_back(*normalized);
+      }
+    }
+    if (header->allocation_id != 0) {
+      active->erase(header->allocation_id);
+    }
+    return make_tuple_value(std::move(items));
+  }
+
+  return value;
+}
+
+std::optional<Value> normalize_map_key(const Value &key,
+                                       CollectionKeyError *error) {
+  std::unordered_set<std::uint64_t> active;
+  return normalize_collection_key_impl(key, "Map key", &active, error);
+}
+
+std::optional<Value> normalize_set_element(const Value &value,
+                                           CollectionKeyError *error) {
+  std::unordered_set<std::uint64_t> active;
+  return normalize_collection_key_impl(value, "Set element", &active, error);
+}
+
+bool collection_keys_equal(const Value &stored, const Value &lookup) {
+  return value_equals(stored, lookup);
+}
+
+void upsert_normalized_map_entry(std::vector<MapEntry> *entries,
+                                 MapEntry entry) {
+  auto existing = std::find_if(
+      entries->begin(), entries->end(), [&](const MapEntry &candidate) {
+        return collection_keys_equal(candidate.key, entry.key);
+      });
+  if (existing == entries->end()) {
+    entries->push_back(std::move(entry));
+    return;
+  }
+  existing->value = std::move(entry.value);
+}
+
+std::optional<std::vector<MapEntry>>
+normalize_map_entries(std::vector<MapEntry> entries,
+                      CollectionKeyError *error) {
+  std::vector<MapEntry> normalized;
+  normalized.reserve(entries.size());
+  for (MapEntry &entry : entries) {
+    std::optional<Value> key = normalize_map_key(entry.key, error);
+    if (!key.has_value()) {
+      return std::nullopt;
+    }
+    upsert_normalized_map_entry(&normalized,
+                                MapEntry{std::move(*key), entry.value});
+  }
+  return normalized;
 }
 
 void runtime_reown_move_graph_impl(const Value &value, OwnerTokenKind kind,
@@ -5706,6 +5845,7 @@ private:
     case HeapObjectKind::Map: {
       const auto *map = static_cast<const MapValue *>(record.ptr);
       for (const MapEntry &entry : map->entries) {
+        out->push_back(entry.key);
         out->push_back(entry.value);
       }
       return;
@@ -5775,6 +5915,7 @@ private:
     case HeapObjectKind::Map: {
       auto *map = static_cast<MapValue *>(record.ptr);
       for (MapEntry &entry : map->entries) {
+        deferred->push_back(std::move(entry.key));
         deferred->push_back(std::move(entry.value));
       }
       map->entries.clear();
@@ -5988,12 +6129,18 @@ Value RuntimeHeap::make_set_value(std::vector<Value> items, bool frozen) {
   std::vector<Value> unique_items;
   unique_items.reserve(items.size());
   for (Value &item : items) {
+    CollectionKeyError error;
+    std::optional<Value> normalized = normalize_set_element(item, &error);
+    if (!normalized.has_value()) {
+      throw RuntimeTaskFailure(error.error_name, error.message);
+    }
     const bool exists = std::find_if(unique_items.begin(), unique_items.end(),
                                      [&](const Value &seen) {
-                                       return value_equals(seen, item);
+                                       return collection_keys_equal(
+                                           seen, *normalized);
                                      }) != unique_items.end();
     if (!exists) {
-      unique_items.push_back(std::move(item));
+      unique_items.push_back(std::move(*normalized));
     }
   }
 
@@ -6013,15 +6160,21 @@ Value RuntimeHeap::make_set_value(std::vector<Value> items, bool frozen) {
 
 Value RuntimeHeap::make_symbol_map_value(std::vector<MapEntry> entries,
                                          bool frozen) {
+  CollectionKeyError error;
+  std::optional<std::vector<MapEntry>> normalized =
+      normalize_map_entries(std::move(entries), &error);
+  if (!normalized.has_value()) {
+    throw RuntimeTaskFailure(error.error_name, error.message);
+  }
   auto value = impl_->allocate<MapValue>(
-      HeapObjectKind::Map, [frozen, &entries](MapValue &value) {
+      HeapObjectKind::Map, [frozen, &normalized](MapValue &value) {
         value.header.flags =
             frozen ? kObjectFlagFrozen | kObjectFlagShareable : 0U;
         value.header.owner.kind =
             frozen ? OwnerTokenKind::Shareable : OwnerTokenKind::Confined;
         value.header.generation =
             frozen ? ObjectGeneration::Shared : ObjectGeneration::Young;
-        value.entries = std::move(entries);
+        value.entries = std::move(*normalized);
         value.frozen = frozen;
       });
   return {std::move(value)};
@@ -6707,6 +6860,14 @@ Value Value::floating(double value) { return {value}; }
 Value Value::symbol(std::uint32_t symbol_id) {
   return {SymbolValue{symbol_id}};
 }
+
+MapEntry::MapEntry(std::uint32_t key_symbol_id, Value entry_value)
+    : symbol_id(key_symbol_id), key(Value::symbol(key_symbol_id)),
+      value(std::move(entry_value)) {}
+
+MapEntry::MapEntry(Value entry_key, Value entry_value)
+    : symbol_id(entry_key.is_symbol() ? entry_key.as_symbol().symbol_id : 0),
+      key(std::move(entry_key)), value(std::move(entry_value)) {}
 
 Value Value::string(std::uint32_t string_id) {
   return {StringValue{string_id}};
@@ -7534,12 +7695,9 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
       const std::size_t limit =
           std::min(map->entries.size(), context->options.max_items);
       for (std::size_t i = 0; i < limit; ++i) {
-        const std::optional<std::string> key =
-            symbol_text_for(*context, map->entries[i].symbol_id);
         out << indent_text(depth + 1U)
-            << (key.has_value()
-                    ? *key
-                    : "#" + std::to_string(map->entries[i].symbol_id))
+            << runtime_stringify_value_impl(context, map->entries[i].key,
+                                            mode, depth + 1U)
             << ": "
             << runtime_stringify_value_impl(context, map->entries[i].value,
                                             mode, depth + 1U)
@@ -7559,10 +7717,8 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
       if (i != 0U) {
         out << ", ";
       }
-      const std::optional<std::string> key =
-          symbol_text_for(*context, map->entries[i].symbol_id);
-      out << (key.has_value() ? *key
-                              : "#" + std::to_string(map->entries[i].symbol_id))
+      out << runtime_stringify_value_impl(context, map->entries[i].key, mode,
+                                          depth + 1U)
           << ": "
           << runtime_stringify_value_impl(context, map->entries[i].value, mode,
                                           depth + 1U);
@@ -8266,7 +8422,27 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return lhs.as_watch_handle() == rhs.as_watch_handle();
   }
   if (lhs.is_instance_object()) {
-    return lhs.as_instance_object() == rhs.as_instance_object();
+    const std::shared_ptr<InstanceValue> left = lhs.as_instance_object();
+    const std::shared_ptr<InstanceValue> right = rhs.as_instance_object();
+    if (left == nullptr || right == nullptr) {
+      return left == right;
+    }
+    if (instance_is_native_range(left) && instance_is_native_range(right)) {
+      auto ivar_or_null = [](const std::shared_ptr<InstanceValue> &instance,
+                             const std::string &name) {
+        const auto found = instance->ivars.find(name);
+        return found == instance->ivars.end() ? Value::null() : found->second;
+      };
+      return value_equals(ivar_or_null(left, "start"),
+                          ivar_or_null(right, "start")) &&
+             value_equals(ivar_or_null(left, "finish"),
+                          ivar_or_null(right, "finish")) &&
+             value_equals(ivar_or_null(left, "inclusive_end"),
+                          ivar_or_null(right, "inclusive_end")) &&
+             value_equals(ivar_or_null(left, "step"),
+                          ivar_or_null(right, "step"));
+    }
+    return left == right;
   }
   if (lhs.is_list()) {
     const std::shared_ptr<ListValue> left = lhs.as_list();
@@ -8334,16 +8510,20 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     if (left->entries.size() != right->entries.size()) {
       return false;
     }
-    std::unordered_map<std::uint32_t, std::size_t> right_index;
-    for (std::size_t i = 0; i < right->entries.size(); ++i) {
-      right_index[right->entries[i].symbol_id] = i;
-    }
+    std::vector<bool> matched(right->entries.size(), false);
     for (const MapEntry &entry : left->entries) {
-      const auto right_it = right_index.find(entry.symbol_id);
-      if (right_it == right_index.end()) {
-        return false;
+      bool found = false;
+      for (std::size_t i = 0; i < right->entries.size(); ++i) {
+        if (!matched[i] && collection_keys_equal(entry.key, right->entries[i].key)) {
+          matched[i] = true;
+          found = true;
+          if (!value_equals(entry.value, right->entries[i].value)) {
+            return false;
+          }
+          break;
+        }
       }
-      if (!value_equals(entry.value, right->entries[right_it->second].value)) {
+      if (!found) {
         return false;
       }
     }
@@ -8985,6 +9165,7 @@ private:
     for (const auto &[reg, state] : frame.prepared_map_regs) {
       (void)reg;
       for (const MapEntry &entry : state.entries) {
+        append_value_root(roots, entry.key);
         append_value_root(roots, entry.value);
       }
     }
@@ -9267,6 +9448,20 @@ private:
       }
       return false;
     }
+    case Opcode::MakeMapDyn: {
+      std::uint32_t count = 0;
+      if (!quick_operand_u32(insn, 1, &count)) {
+        return true;
+      }
+      std::size_t operand_index = 2;
+      for (std::uint32_t i = 0; i < count; ++i) {
+        if (quick_operand_reg_equals(insn, operand_index++, reg) ||
+            quick_operand_reg_equals(insn, operand_index++, reg)) {
+          return true;
+        }
+      }
+      return false;
+    }
     case Opcode::MakeClosure: {
       std::uint32_t dst = 0;
       std::uint32_t capture_count = 0;
@@ -9399,6 +9594,7 @@ private:
     case Opcode::MakeList:
     case Opcode::MakeTuple:
     case Opcode::MakeMap:
+    case Opcode::MakeMapDyn:
     case Opcode::Freeze:
     case Opcode::MakeSet:
     case Opcode::LoadUpval:
@@ -11927,7 +12123,8 @@ private:
       requested[symbol_id] = true;
     }
     for (const MapEntry &entry : state.entries) {
-      if (requested.find(entry.symbol_id) == requested.end()) {
+      if (!entry.key.is_symbol() ||
+          requested.find(entry.key.as_symbol().symbol_id) == requested.end()) {
         rest.push_back(entry);
       }
     }
@@ -11997,18 +12194,19 @@ private:
                 "Map#transform block must return exactly two values");
       return std::nullopt;
     }
-    const std::optional<std::uint32_t> symbol_id =
-        map_key_symbol_id_from_value(frame, items[0], "Map#transform");
-    if (!symbol_id.has_value()) {
+    CollectionKeyError error;
+    std::optional<Value> key = normalize_map_key(items[0], &error);
+    if (!key.has_value()) {
+      set_fault(frame, error.error_name, error.message);
       return std::nullopt;
     }
-    return MapEntry{*symbol_id, items[1]};
+    return MapEntry{*key, items[1]};
   }
 
   void upsert_map_entry(std::vector<MapEntry> *entries, MapEntry entry) {
     auto existing = std::find_if(
         entries->begin(), entries->end(), [&](const MapEntry &candidate) {
-          return candidate.symbol_id == entry.symbol_id;
+          return collection_keys_equal(candidate.key, entry.key);
         });
     if (existing == entries->end()) {
       entries->push_back(std::move(entry));
@@ -12735,13 +12933,12 @@ private:
     for (const MapEntry &entry : *right) {
       auto existing = std::find_if(
           merged.begin(), merged.end(), [&](const MapEntry &candidate) {
-            return candidate.symbol_id == entry.symbol_id;
+            return collection_keys_equal(candidate.key, entry.key);
           });
       Value value = entry.value;
       if (existing != merged.end() && !block.is_null()) {
         const std::optional<Value> merged_value = call_block_to_value(
-            frame, block,
-            {Value::symbol(entry.symbol_id), existing->value, entry.value});
+            frame, block, {existing->key, existing->value, entry.value});
         if (!merged_value.has_value()) {
           return std::nullopt;
         }
@@ -12752,7 +12949,7 @@ private:
         value = *merged_value;
       }
       if (existing == merged.end()) {
-        merged.push_back({entry.symbol_id, value});
+        merged.push_back({entry.key, value});
       } else {
         existing->value = value;
       }
@@ -13395,7 +13592,8 @@ private:
       requested[symbol_id] = true;
     }
     for (const MapEntry &entry : state.entries) {
-      if (requested.find(entry.symbol_id) == requested.end()) {
+      if (!entry.key.is_symbol() ||
+          requested.find(entry.key.as_symbol().symbol_id) == requested.end()) {
         return true;
       }
     }
@@ -13859,21 +14057,12 @@ private:
           return conversion_error("TypeError",
                                   "Map cast pair must have two values");
         }
-        std::uint32_t key_symbol_id = 0;
-        if (pair[0].is_symbol()) {
-          key_symbol_id = pair[0].as_symbol().symbol_id;
-        } else if (pair[0].is_string()) {
-          const std::optional<std::string> text =
-              string_text_from_id(pair[0].as_string().string_id);
-          if (!text.has_value()) {
-            return conversion_error("VMError", "string key ref is invalid");
-          }
-          key_symbol_id = intern_runtime_symbol(*text);
-        } else {
-          return conversion_error("TypeError",
-                                  "Map cast key must be Symbol or String");
+        CollectionKeyError error;
+        std::optional<Value> key = normalize_map_key(pair[0], &error);
+        if (!key.has_value()) {
+          return conversion_error(error.error_name, error.message);
         }
-        entries.push_back({key_symbol_id, pair[1]});
+        entries.push_back({*key, pair[1]});
       }
       return conversion_ok(make_symbol_map_value(std::move(entries)));
     }
@@ -17893,7 +18082,7 @@ private:
             !require_lazy_seq_finite_source(frame, *state, "group all items")) {
           return SendStatus::Faulted;
         }
-        std::vector<std::pair<std::uint32_t, std::vector<Value>>> groups;
+        std::vector<std::pair<Value, std::vector<Value>>> groups;
         const LazySeqVisitStatus status = visit_lazy_seq(
             frame, *state, receiver,
             [&](const Value &item) -> LazySeqVisitStatus {
@@ -17906,30 +18095,20 @@ private:
                   !ensure_lifecycle_access(frame, state->source)) {
                 return LazySeqVisitStatus::Faulted;
               }
-              std::optional<std::uint32_t> key_symbol_id;
-              if (key->is_symbol()) {
-                key_symbol_id = key->as_symbol().symbol_id;
-              } else if (key->is_string()) {
-                const std::optional<std::string> text =
-                    string_text_from_id(key->as_string().string_id);
-                if (!text.has_value()) {
-                  set_fault(frame, "VMError",
-                            "group_by string key ref is invalid");
-                  return LazySeqVisitStatus::Faulted;
-                }
-                key_symbol_id = symbol_id_for_text(*text);
-              }
-              if (!key_symbol_id.has_value()) {
-                set_fault(frame, "TypeError",
-                          "group_by block must return Symbol key");
+              CollectionKeyError error;
+              const std::optional<Value> normalized_key =
+                  normalize_map_key(*key, &error);
+              if (!normalized_key.has_value()) {
+                set_fault(frame, error.error_name, error.message);
                 return LazySeqVisitStatus::Faulted;
               }
               auto group = std::find_if(groups.begin(), groups.end(),
                                         [&](const auto &entry) {
-                                          return entry.first == *key_symbol_id;
+                                          return collection_keys_equal(
+                                              entry.first, *normalized_key);
                                         });
               if (group == groups.end()) {
-                groups.push_back({*key_symbol_id, {}});
+                groups.push_back({*normalized_key, {}});
                 group = groups.end() - 1;
               }
               group->second.push_back(item);
@@ -18571,7 +18750,7 @@ private:
             return SendStatus::Matched;
           }
           if (collection_selector == "group_by") {
-            std::vector<std::pair<std::uint32_t, std::vector<Value>>> groups;
+            std::vector<std::pair<Value, std::vector<Value>>> groups;
             for (const Value &item : items) {
               const std::optional<Value> key =
                   call_block_to_value(frame, block, {item});
@@ -18581,30 +18760,20 @@ private:
               if (!require_receiver_live_after_block()) {
                 return SendStatus::Faulted;
               }
-              std::optional<std::uint32_t> key_symbol_id;
-              if (key->is_symbol()) {
-                key_symbol_id = key->as_symbol().symbol_id;
-              } else if (key->is_string()) {
-                const std::optional<std::string> text =
-                    string_text_from_id(key->as_string().string_id);
-                if (!text.has_value()) {
-                  set_fault(frame, "VMError",
-                            "group_by string key ref is invalid");
-                  return SendStatus::Faulted;
-                }
-                key_symbol_id = symbol_id_for_text(*text);
-              }
-              if (!key_symbol_id.has_value()) {
-                set_fault(frame, "TypeError",
-                          "group_by block must return Symbol key");
+              CollectionKeyError error;
+              const std::optional<Value> normalized_key =
+                  normalize_map_key(*key, &error);
+              if (!normalized_key.has_value()) {
+                set_fault(frame, error.error_name, error.message);
                 return SendStatus::Faulted;
               }
               auto group = std::find_if(groups.begin(), groups.end(),
                                         [&](const auto &entry) {
-                                          return entry.first == *key_symbol_id;
+                                          return collection_keys_equal(
+                                              entry.first, *normalized_key);
                                         });
               if (group == groups.end()) {
-                groups.push_back({*key_symbol_id, {}});
+                groups.push_back({*normalized_key, {}});
                 group = groups.end() - 1;
               }
               group->second.push_back(item);
@@ -18740,7 +18909,7 @@ private:
           std::int64_t count = 0;
           for (const MapEntry &entry : *extracted) {
             const std::optional<Value> predicate = call_block_to_value(
-                frame, block, {Value::symbol(entry.symbol_id), entry.value});
+                frame, block, {entry.key, entry.value});
             if (!predicate.has_value()) {
               return SendStatus::Faulted;
             }
@@ -18759,30 +18928,16 @@ private:
           if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
-          std::optional<std::uint32_t> key_symbol_id;
-          if (args[0].is_symbol()) {
-            key_symbol_id = args[0].as_symbol().symbol_id;
-          } else if (args[0].is_string()) {
-            const std::optional<std::string> text =
-                string_text_from_id(args[0].as_string().string_id);
-            if (!text.has_value()) {
-              set_fault(frame, "VMError", "map index string ref is invalid");
-              return SendStatus::Faulted;
-            }
-            key_symbol_id = symbol_id_for_text(*text);
-          } else {
-            set_fault(frame, "TypeError",
-                      "map index expects Symbol or String key");
+          CollectionKeyError error;
+          const std::optional<Value> key = normalize_map_key(args[0], &error);
+          if (!key.has_value()) {
+            set_fault(frame, error.error_name, error.message);
             return SendStatus::Faulted;
-          }
-          if (!key_symbol_id.has_value()) {
-            *out = Value::boolean(false);
-            return SendStatus::Matched;
           }
           const bool found =
               std::find_if(extracted->begin(), extracted->end(),
                            [&](const MapEntry &entry) {
-                             return entry.symbol_id == *key_symbol_id;
+                             return collection_keys_equal(entry.key, *key);
                            }) != extracted->end();
           *out = Value::boolean(found);
           return SendStatus::Matched;
@@ -18804,34 +18959,16 @@ private:
           if (!require_arity(1) || !require_no_block()) {
             return SendStatus::Faulted;
           }
-          std::optional<std::uint32_t> key_symbol_id;
-          if (args[0].is_symbol()) {
-            key_symbol_id = args[0].as_symbol().symbol_id;
-          } else if (args[0].is_string()) {
-            const std::optional<std::string> text =
-                string_text_from_id(args[0].as_string().string_id);
-            if (!text.has_value()) {
-              set_fault(frame, "VMError", "map index string ref is invalid");
-              return SendStatus::Faulted;
-            }
-            key_symbol_id = symbol_id_for_text(*text);
-          } else {
-            set_fault(frame, "TypeError",
-                      "map index expects Symbol or String key");
-            return SendStatus::Faulted;
-          }
-          if (!key_symbol_id.has_value()) {
-            if (collection_selector == "[]?") {
-              *out = Value::null();
-              return SendStatus::Matched;
-            }
-            set_fault(frame, "KeyError", "map key is absent");
+          CollectionKeyError error;
+          const std::optional<Value> key = normalize_map_key(args[0], &error);
+          if (!key.has_value()) {
+            set_fault(frame, error.error_name, error.message);
             return SendStatus::Faulted;
           }
           Value found = Value::null();
           bool found_key = false;
           for (const MapEntry &entry : *extracted) {
-            if (entry.symbol_id == *key_symbol_id) {
+            if (collection_keys_equal(entry.key, *key)) {
               found = entry.value;
               found_key = true;
               break;
@@ -18886,7 +19023,7 @@ private:
           std::vector<Value> keys;
           keys.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
-            keys.push_back(Value::symbol(entry.symbol_id));
+            keys.push_back(entry.key);
           }
           *out = make_list_value(std::move(keys));
           return SendStatus::Matched;
@@ -18910,8 +19047,7 @@ private:
           std::vector<Value> entries;
           entries.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
-            entries.push_back(make_tuple_value(
-                {Value::symbol(entry.symbol_id), entry.value}));
+            entries.push_back(make_tuple_value({entry.key, entry.value}));
           }
           *out = make_list_value(std::move(entries));
           return SendStatus::Matched;
@@ -18925,16 +19061,13 @@ private:
             std::vector<Value> entries;
             entries.reserve(extracted->size());
             for (const MapEntry &entry : *extracted) {
-              entries.push_back(make_tuple_value(
-                  {Value::symbol(entry.symbol_id), entry.value}));
+              entries.push_back(make_tuple_value({entry.key, entry.value}));
             }
             *out = make_list_value(std::move(entries));
             return SendStatus::Matched;
           }
           for (const MapEntry &entry : *extracted) {
-            if (!call_block_to_value(
-                     frame, block,
-                     {Value::symbol(entry.symbol_id), entry.value})
+            if (!call_block_to_value(frame, block, {entry.key, entry.value})
                      .has_value()) {
               return SendStatus::Faulted;
             }
@@ -18953,7 +19086,7 @@ private:
           mapped.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
             const std::optional<Value> value = call_block_to_value(
-                frame, block, {Value::symbol(entry.symbol_id), entry.value});
+                frame, block, {entry.key, entry.value});
             if (!value.has_value()) {
               return SendStatus::Faulted;
             }
@@ -18974,7 +19107,7 @@ private:
           filtered.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
             const std::optional<Value> predicate = call_block_to_value(
-                frame, block, {Value::symbol(entry.symbol_id), entry.value});
+                frame, block, {entry.key, entry.value});
             if (!predicate.has_value()) {
               return SendStatus::Faulted;
             }
@@ -18998,7 +19131,7 @@ private:
           transformed.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
             const std::optional<Value> value = call_block_to_value(
-                frame, block, {Value::symbol(entry.symbol_id), entry.value});
+                frame, block, {entry.key, entry.value});
             if (!value.has_value()) {
               return SendStatus::Faulted;
             }
@@ -19023,14 +19156,14 @@ private:
           transformed.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
             const std::optional<Value> value = call_block_to_value(
-                frame, block, {entry.value, Value::symbol(entry.symbol_id)});
+                frame, block, {entry.value, entry.key});
             if (!value.has_value()) {
               return SendStatus::Faulted;
             }
             if (!require_receiver_live_after_block()) {
               return SendStatus::Faulted;
             }
-            transformed.push_back({entry.symbol_id, *value});
+            transformed.push_back({entry.key, *value});
           }
           *out = make_symbol_map_value(std::move(transformed));
           return SendStatus::Matched;
@@ -20523,6 +20656,21 @@ private:
           return;
         }
       }
+      if (insn.opcode == Opcode::MakeSet) {
+        std::vector<Value> normalized_items;
+        normalized_items.reserve(items.size());
+        for (const Value &item : items) {
+          CollectionKeyError error;
+          std::optional<Value> normalized =
+              normalize_set_element(item, &error);
+          if (!normalized.has_value()) {
+            set_fault(frame, error.error_name, error.message);
+            return;
+          }
+          normalized_items.push_back(*normalized);
+        }
+        items = std::move(normalized_items);
+      }
       const Value value = insn.opcode == Opcode::MakeTuple
                               ? make_tuple_value(std::move(items))
                               : (insn.opcode == Opcode::MakeSet
@@ -20564,6 +20712,43 @@ private:
         } else {
           existing->value = std::move(value);
         }
+      }
+      if (!write_reg(frame, dst, make_symbol_map_value(std::move(entries)))) {
+        return;
+      }
+      ++frame.pc;
+      return;
+    }
+    case Opcode::MakeMapDyn: {
+      std::uint32_t dst = 0;
+      std::uint32_t count = 0;
+      if (!operand_u32(frame, insn, 0, &dst) ||
+          !operand_u32(frame, insn, 1, &count)) {
+        return;
+      }
+      std::size_t operand_index = 2;
+      std::vector<MapEntry> entries;
+      entries.reserve(count);
+      for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t key_reg = 0;
+        std::uint32_t value_reg = 0;
+        if (!operand_u32(frame, insn, operand_index++, &key_reg) ||
+            !operand_u32(frame, insn, operand_index++, &value_reg)) {
+          return;
+        }
+        Value key = read_reg(frame, key_reg);
+        Value value = read_reg(frame, value_reg);
+        if (fault_.has_value()) {
+          return;
+        }
+        CollectionKeyError error;
+        std::optional<Value> normalized_key = normalize_map_key(key, &error);
+        if (!normalized_key.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return;
+        }
+        upsert_normalized_map_entry(
+            &entries, MapEntry{std::move(*normalized_key), std::move(value)});
       }
       if (!write_reg(frame, dst, make_symbol_map_value(std::move(entries)))) {
         return;
@@ -21381,7 +21566,9 @@ private:
       state.needs_full = needs_full != 0U;
       state.fail_pc = fail_pc;
       for (std::size_t i = 0; i < state.entries.size(); ++i) {
-        state.index_by_key[state.entries[i].symbol_id] = i;
+        if (state.entries[i].key.is_symbol()) {
+          state.index_by_key[state.entries[i].key.as_symbol().symbol_id] = i;
+        }
       }
       if (!write_reg(frame, dst, map->value)) {
         return;
@@ -24040,13 +24227,9 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
       if (i != 0U) {
         out << ", ";
       }
-      if (debug_symbols != nullptr &&
-          map->entries[i].symbol_id < debug_symbols->size()) {
-        out << (*debug_symbols)[map->entries[i].symbol_id];
-      } else {
-        out << "#" << map->entries[i].symbol_id;
-      }
-      out << ": "
+      out << value_to_debug_string(map->entries[i].key, module,
+                                   runtime_strings, runtime_symbols)
+          << ": "
           << value_to_debug_string(map->entries[i].value, module,
                                    runtime_strings, runtime_symbols);
     }

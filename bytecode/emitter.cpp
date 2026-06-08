@@ -379,7 +379,9 @@ private:
 
   struct CompiledMapEntry {
     std::uint32_t symbol_id = 0;
+    std::uint32_t key_reg = 0;
     std::uint32_t value_reg = 0;
+    bool symbol_immediate = true;
   };
 
   std::uint32_t alloc_temp();
@@ -441,6 +443,9 @@ private:
   void emit_make_map_from_entries(std::uint32_t dst,
                                   const std::vector<CompiledMapEntry> &entries,
                                   const lexer::Span &span);
+  void emit_make_map_dyn_from_entries(
+      std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
+      const lexer::Span &span);
   void compile_map_literal_suffix(const ast::ListField *entries,
                                   std::size_t index,
                                   std::vector<CompiledMapEntry> prefix_entries,
@@ -1909,16 +1914,31 @@ std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
         diag(entry->span, "BC2001", "invalid map literal entry");
         continue;
       }
-      const std::string key =
-          string_field(*entry, "key_kind") == "string"
-              ? unquote_string_literal(string_field(*entry, "key"))
-              : string_field(*entry, "key");
-      compiled_entries.push_back(
-          CompiledMapEntry{owner_->intern_symbol(key), compile_expr(*value)});
+      if (string_field(*entry, "key_kind") == "symbol") {
+        compiled_entries.push_back(CompiledMapEntry{
+            owner_->intern_symbol(string_field(*entry, "key")), 0,
+            compile_expr(*value), true});
+      } else if (const ast::Expr *key_expr = node_field(*entry, "key_expr")) {
+        const std::uint32_t key_reg = compile_expr(*key_expr);
+        const std::uint32_t value_reg = compile_expr(*value);
+        compiled_entries.push_back(
+            CompiledMapEntry{0, key_reg, value_reg, false});
+      } else {
+        diag(entry->span, "BC2001", "map literal entry is missing key expr");
+      }
     }
   }
 
-  emit_make_map_from_entries(dst, compiled_entries, expr.span);
+  const bool needs_dynamic =
+      std::any_of(compiled_entries.begin(), compiled_entries.end(),
+                  [](const CompiledMapEntry &entry) {
+                    return !entry.symbol_immediate;
+                  });
+  if (needs_dynamic) {
+    emit_make_map_dyn_from_entries(dst, compiled_entries, expr.span);
+  } else {
+    emit_make_map_from_entries(dst, compiled_entries, expr.span);
+  }
   return dst;
 }
 
@@ -1936,12 +1956,42 @@ void CodeEmitter::emit_make_map_from_entries(
   emit_instruction(Opcode::MakeMap, std::move(operands), span);
 }
 
+void CodeEmitter::emit_make_map_dyn_from_entries(
+    std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
+    const lexer::Span &span) {
+  std::vector<InstructionOperand> operands;
+  operands.push_back({dst, false});
+  operands.push_back({static_cast<std::int64_t>(entries.size()), false});
+  for (const CompiledMapEntry &entry : entries) {
+    std::uint32_t key_reg = entry.key_reg;
+    if (entry.symbol_immediate) {
+      Constant constant;
+      constant.kind = ConstantKind::SymbolRef;
+      constant.ref_id = entry.symbol_id;
+      key_reg = emit_load_constant_reg(owner_->intern_constant(constant), span);
+    }
+    operands.push_back({key_reg, false});
+    operands.push_back({entry.value_reg, false});
+  }
+
+  emit_instruction(Opcode::MakeMapDyn, std::move(operands), span);
+}
+
 void CodeEmitter::compile_map_literal_suffix(
     const ast::ListField *entries, std::size_t index,
     std::vector<CompiledMapEntry> prefix_entries, std::uint32_t dst,
     const lexer::Span &span) {
   if (entries == nullptr || index >= entries->values.size()) {
-    emit_make_map_from_entries(dst, prefix_entries, span);
+    const bool needs_dynamic =
+        std::any_of(prefix_entries.begin(), prefix_entries.end(),
+                    [](const CompiledMapEntry &entry) {
+                      return !entry.symbol_immediate;
+                    });
+    if (needs_dynamic) {
+      emit_make_map_dyn_from_entries(dst, prefix_entries, span);
+    } else {
+      emit_make_map_from_entries(dst, prefix_entries, span);
+    }
     return;
   }
 
@@ -1953,14 +2003,26 @@ void CodeEmitter::compile_map_literal_suffix(
                                dst, span);
     return;
   }
-  const std::string key =
-      string_field(entry, "key_kind") == "string"
-          ? unquote_string_literal(string_field(entry, "key"))
-          : string_field(entry, "key");
-  const std::uint32_t symbol_id = owner_->intern_symbol(key);
+  auto compile_entry = [&]() -> std::optional<CompiledMapEntry> {
+    if (string_field(entry, "key_kind") == "symbol") {
+      return CompiledMapEntry{owner_->intern_symbol(string_field(entry, "key")),
+                              0, compile_expr(*value), true};
+    }
+    const ast::Expr *key_expr = node_field(entry, "key_expr");
+    if (key_expr == nullptr) {
+      diag(entry.span, "BC2001", "map literal entry is missing key expr");
+      return std::nullopt;
+    }
+    const std::uint32_t key_reg = compile_expr(*key_expr);
+    const std::uint32_t value_reg = compile_expr(*value);
+    return CompiledMapEntry{0, key_reg, value_reg, false};
+  };
   const ast::Expr *condition = node_field(entry, "condition");
   if (condition == nullptr) {
-    prefix_entries.push_back(CompiledMapEntry{symbol_id, compile_expr(*value)});
+    std::optional<CompiledMapEntry> compiled = compile_entry();
+    if (compiled.has_value()) {
+      prefix_entries.push_back(*compiled);
+    }
     compile_map_literal_suffix(entries, index + 1, std::move(prefix_entries),
                                dst, span);
     return;
@@ -1974,7 +2036,10 @@ void CodeEmitter::compile_map_literal_suffix(
       skip_opcode, {{condition_reg, false}, {-1, true}}, condition->span);
 
   std::vector<CompiledMapEntry> with_entry = prefix_entries;
-  with_entry.push_back(CompiledMapEntry{symbol_id, compile_expr(*value)});
+  std::optional<CompiledMapEntry> compiled = compile_entry();
+  if (compiled.has_value()) {
+    with_entry.push_back(*compiled);
+  }
   compile_map_literal_suffix(entries, index + 1, std::move(with_entry), dst,
                              span);
   const std::size_t jump_end =

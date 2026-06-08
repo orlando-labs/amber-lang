@@ -165,6 +165,16 @@ bool contains_symbol(const amber::bytecode::BcModule &module,
   return false;
 }
 
+bool contains_string(const amber::bytecode::BcModule &module,
+                     const std::string &text) {
+  for (const std::string &value : module.strings) {
+    if (value == text) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::string path_constant_text(const amber::bytecode::BcModule &module,
                                std::uint32_t ref_id) {
   expect(ref_id < module.const_pool.size(), "path const ref is in range");
@@ -546,7 +556,8 @@ void test_collection_literal_emission() {
       emit_ok("[1, 2]\n"
               "(3, 4)\n"
               "{5}\n"
-              "{id: :ok, \"name\": 5}\n");
+              "{id: :ok}\n"
+              "{\"name\": 5, 1: 6}\n");
   const amber::bytecode::BcCode *code =
       code_by_kind(emit_result.module, amber::bytecode::CodeKind::Module);
   expect(code != nullptr, "module init code exists");
@@ -557,13 +568,15 @@ void test_collection_literal_emission() {
   expect(contains_opcode(*code, amber::bytecode::Opcode::MakeSet),
          "set literal emits MAKE_SET");
   expect(contains_opcode(*code, amber::bytecode::Opcode::MakeMap),
-         "map literal emits MAKE_MAP");
+         "symbol-only map literal emits MAKE_MAP");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::MakeMapDyn),
+         "expression-key map literal emits MAKE_MAP_DYN");
   expect(contains_symbol(emit_result.module, "ok"),
          "symbol literal interns symbol");
   expect(contains_symbol(emit_result.module, "id"),
          "identifier map key interns symbol");
-  expect(contains_symbol(emit_result.module, "name"),
-         "string map key interns symbol-compatible key");
+  expect(contains_string(emit_result.module, "name"),
+         "string map key interns string constant");
 }
 
 void test_kernel_watch_emission() {

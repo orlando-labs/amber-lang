@@ -104,6 +104,8 @@ std::string
 string_value_text_or_die(const amber::runtime::Value &value,
                          const amber::bytecode::BcModule &module,
                          const amber::runtime::ExecutionResult &result);
+amber::runtime::ExecutionResult
+execute_emitted_init(const std::string &source);
 
 void test_execute_emitted_method() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def echo(x):\n"
@@ -234,9 +236,10 @@ void test_execute_emitted_collection_literals() {
   expect(map->entries[0].value.is_integer() &&
              map->entries[0].value.as_integer() == 2,
          "later duplicate map key wins");
-  expect(map->entries[1].symbol_id ==
-             symbol_id_or_die(map_result.module, "name"),
-         "string map key becomes symbol-compatible key");
+  expect(map->entries[1].key.is_string() &&
+             string_value_text_or_die(map->entries[1].key, map_result.module,
+                                      map_exec) == "name",
+         "string map key remains Str key");
   expect(map->entries[1].value.is_symbol() &&
              map->entries[1].value.as_symbol().symbol_id ==
                  symbol_id_or_die(map_result.module, "ok"),
@@ -372,6 +375,26 @@ void test_execute_emitted_collection_literals() {
   expect(conditional_map->entries[1].symbol_id ==
              symbol_id_or_die(conditional_map_result.module, "c"),
          "conditional map keeps later key");
+}
+
+void test_execute_emitted_v20_6_value_keyed_maps() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "k = \"dyn\"\n"
+      "m = {1: 10, 1.0: 20, \"name\": 30, (k): 40, [1, 2]: 50}\n"
+      "s = {[1, 2], (1, 2), 1, 1.0}\n"
+      "tm = Map{\"typed\": 7}\n"
+      "ts = Set{1, 1.0, [1, 2], (1, 2)}\n"
+      "r = {(1..3): 60}\n"
+      "if m[1] == 20 and m[1.0] == 20 and m[\"name\"] == 30 and "
+      "m[?:name] == null and m[k] == 40 and m[(1, 2)] == 50 and "
+      "m[[1, 2]] == 50 and m.keys().count() == 4 and s.count() == 2 and "
+      "tm[\"typed\"] == 7 and ts.count() == 2 and r[(1..3)] == 60:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect(exec.ok(), "v20.6 value-keyed map probe should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "v20.6 value-keyed map probe result");
 }
 
 void test_top_level_function_closure_captures_sibling_function() {
@@ -7447,6 +7470,7 @@ int main() {
   test_execute_module_init_calls_top_level_def();
   test_execute_native_range_literal();
   test_execute_emitted_collection_literals();
+  test_execute_emitted_v20_6_value_keyed_maps();
   test_runtime_string_interpolation_and_conversions();
   test_runtime_text_output_helpers_and_io_sinks();
   test_runtime_logger_source_surface_and_annotations();

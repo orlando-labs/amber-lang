@@ -540,7 +540,12 @@ struct SetValue {
 
 struct MapEntry {
   std::uint32_t symbol_id = 0;
+  Value key = Value::null();
   Value value = Value::null();
+
+  MapEntry() = default;
+  MapEntry(std::uint32_t key_symbol_id, Value entry_value);
+  MapEntry(Value entry_key, Value entry_value);
 };
 
 struct MapValue {

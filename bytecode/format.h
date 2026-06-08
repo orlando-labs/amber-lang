@@ -76,6 +76,7 @@ enum class Opcode : std::uint8_t {
   MakeMap = 0x0A,
   Freeze = 0x0B,
   MakeSet = 0x0C,
+  MakeMapDyn = 0x0D,
   LoadUpval = 0x10,
   StoreUpval = 0x11,
   LoadIvar = 0x12,

@@ -1,4 +1,6 @@
 > Редакция v20.1: поверх v20.0 зафиксирован **Callable Reference & Constructor Call Revision**. В core syntax добавлены callable references `&NameSpace.some_fn`, class-side callable references `&Class.method`, unbound instance method references `&Class#method`, канонический вызов callable-значений `fn(args...)`, а также callable class objects: `Class(args...)` является preferred constructor-call form и наблюдаемо эквивалентен `Class.new(args...)`. `&` не означает raw machine address; это создание immutable callable reference object, совместимого с `HCall` / `CALL`, open-world dispatch и frozen-world invalidation rules.
+>
+> Редакция v20.6: поверх v20.1 зафиксирован core update для value-keyed `Map` / `Set`. `Map` и `Set` больше не ограничены symbol-key моделью: литералы принимают string/scalar/expression keys, list/array ключи нормализуются в immutable tuple snapshots, duplicate keys overwrite сохраняет первый stored key, а bytecode получает `MAKE_MAP_DYN` для dynamic-key map literals. Pattern matching и `deconstruct_keys` остаются symbol-key based.
 
 
 # Amber
@@ -32,6 +34,8 @@
 ## Статус
 
 Amber в текущем виде — **консолидированная спецификация с закрытым implementation gate, зафиксированным reference blueprint для runtime P0/P1 и закрытыми profile-level решениями второй волны**. Ядро синтаксиса и семантики уже достаточно устойчиво, чтобы писать не только прототип парсера и интерпретатора, но и первый байткодный runtime; инженерная граница старта поддержана каноническими AST/HIR/diagnostic dump-контрактами, обязательным каталогом diagnostic codes v1, layout-моделью corpus/golden-файлов и bootstrap order для reference toolchain. Ранее зафиксированные minimal type envelope для parser/HIR/runtime hooks, обязательный stdlib contract для chainable collections, формальная матрица диагностик, policy по underscore-спецформам, окончательная граница bare matcher expressions и v1-решение по field lifetime annotations, а также reference execution profile, reference lifetime profile, collector/pinning/FFI profile, compiled-module/loader profile, strict `case!`, source-level modules, minimal MOP, mixin/`include` profile и frozen-world boundary сохраняются без регрессий: register/slot bytecode VM, frame/closure/object ABI, pattern-matching opcode family, ownership model без GIL, explicit destruction/deallocation (`destroy!` + `memory.dealloc`), non-moving generational collector, pinning boundary для native interop, `.amberbc`-формат и verifier/loader state machine, static `package/import/export`, reopenable named classes, named mixins, declarative `include`, linearized ancestor composition, reflective `define_method`, builtin `send(...)`, `method_missing` fallback и двухфазная модель dispatch-world (`open` -> `frozen`). В v16 дополнительно закрываются optional Amber/Typed checker profile, package/distribution/signing/hot-reload policy, read-only reflection mirrors, class-side `extend`, advanced concurrency (`move`, `select`, supervisor policies, async I/O awaitables), weak/ephemeron/buffer/borrow story без field modifiers и canonical MIR/SSA + native/JIT/AOT + frozen-image profile. В v19.2 дополнительно закрыт optional Amber/Notebook Watch Profile: `Kernel.watch(target)` является compiler/kernel intrinsic для notebook-инвалидации, но не считается world mutation и не меняет production semantics. В v20 дополнительно закрывается слой Modern Pressure Profiles: capabilities/sandbox, effects, observability/replay, columnar BI, schemas/API contracts, Wasm components, accelerators, AI-agent tooling, contracts/property testing, privacy/lineage и durable workflows. В v20.1 поверх этого закрывается core-level callable reference / constructor-call revision: `&target`, `&Class#method`, canonical `fn(args...)` и callable class objects `Class(args...)`. Эти возможности не расширяют Modern Pressure Profiles и не являются host-only фичами: они входят в минимальный синтаксис и lowering core. После этой редакции незакрытых spec-level вопросов больше не остаётся: дальше остаются только реализация, тестовые корпуса, toolchain и выбор порядка включения профилей в конкретных hosts.
+
+В v20.6 поверх этого закрывается core-level collection-key revision: ordered `Map` / `Set` используют value-key equality для supported scalar/structural keys, а legacy symbol-key maps остаются source- и bytecode-compatible через прежний `MAKE_MAP` fast path.
 
 # Часть I. Полноценная спека Amber в текущем зафиксированном виде
 
@@ -133,7 +137,9 @@ Amber ориентирован на выражения. В частности, �
 [expr1, expr2]       # Array
 (expr1, expr2)       # Tuple, только если внутри скобок есть запятая
 {expr1, expr2}       # Set, если элементы не являются key/value парами
-{key: value}         # Map с symbol/string ключом по форме записи ключа
+{key: value}         # Map с value-key семантикой
+Map{key: value}      # explicit ordered Map
+Set{expr1, expr2}    # explicit ordered Set
 ```
 
 `{}` в expression-контексте остаётся пустым `Map`. Непустая форма `{expr}`
@@ -141,6 +147,16 @@ Amber ориентирован на выражения. В частности, �
 как map-entry. Элементы `Array`/`Set` и значения `Map` вычисляются слева
 направо. Повторные ключи `Map` заменяют предыдущие значения, а повторные
 элементы `Set` схлопываются по runtime-семантике равенства.
+
+В v20.6 `Map` key может быть:
+
+- legacy identifier key: `{name: value}` означает `{:name: value}`;
+- explicit symbol key: `{:name: value}`;
+- string/scalar literal key: `{"name": value, 1: value, true: value}`;
+- expression key в скобках: `{(name): value}`, `{(user.id): value}`;
+- structural key из tuple/list/array, где mutable list/array key нормализуется в immutable tuple snapshot.
+
+String key не приводится к `Symbol`: `{"name": 1}["name"]` и `{name: 1}[:name]` успешны, но `{name: 1}["name"]` остаётся missing key. Дубликаты сравниваются по value-key equality; при `{1: "int", 1.0: "float"}` stored key остаётся первым (`1`), а значение становится `"float"`. `NaN` запрещён как `Map` key и `Set` element. `Map` / `Set` остаются ordered-vector коллекциями в reference profile; `HashMap{...}` и `HashSet{...}` допустимы как parser-level explicit constructor spelling для совместимости с v20.6 drafts, но не требуют отдельного hash-backed runtime type в P0/P1 reference implementation.
 
 ### 3.2. Truthiness
 
@@ -2161,6 +2177,8 @@ xs.reduce |acc, x|: ...
   `entries`;
 - `Map#contains?` и `Map#include?` проверяют наличие key.
 
+С v20.6 все перечисленные `Map` operations используют stored value keys, а не синтезированный `Symbol`. `keys`, `entries`, `each`, `map`, `select`, `reject`, `transform`, `transform_values` и `merge` обязаны передавать и возвращать фактический key value. `Map#[]`, `Map#[]?`, `contains?` и `include?` нормализуют lookup key тем же правилом, что и литерал; unsupported key values дают `TypeError`, отсутствующие valid keys дают `KeyError` только для обязательного `Map#[]`.
+
 
 ## 14. Что входит в язык по намерению, но ещё не нормализовано до ядра
 
@@ -4031,6 +4049,11 @@ HAgentPatchMetadata(metadata)
 ```
 
 ### 15.2. Bytecode / `.amberbc` optional sections
+
+Core bytecode v20.6 добавляет `MAKE_MAP_DYN(dst, count, key_reg, value_reg, ...)`
+для map literals с non-symbol или expression keys. Legacy symbol-only literals
+сохраняют `MAKE_MAP(dst, count, symbol_id, value_reg, ...)`, чтобы старый
+байткод и fast path оставались совместимыми.
 
 Optional sections:
 

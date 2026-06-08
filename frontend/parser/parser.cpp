@@ -2476,6 +2476,27 @@ Parser::parse_comparison_chain(std::unique_ptr<ast::Expr> left,
 std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   const lexer::Token token = advance();
   if (is_identifier_like_token(token.kind)) {
+    const bool typed_map = token.lexeme == "Map" || token.lexeme == "HashMap";
+    const bool typed_set = token.lexeme == "Set" || token.lexeme == "HashSet";
+    if ((typed_map || typed_set) && check(lexer::TokenKind::LBrace)) {
+      const lexer::Token open = advance();
+      if (typed_map && !check(lexer::TokenKind::RBrace) &&
+          !starts_map_literal_entry()) {
+        error_code(open, "E_COLLECTION_LITERAL_KIND",
+                   "Map literal constructor requires key-value entries");
+      }
+      if (typed_set && starts_map_literal_entry()) {
+        error_code(open, "E_COLLECTION_LITERAL_KIND",
+                   "Set literal constructor requires elements, not key-value "
+                   "entries");
+      }
+      std::unique_ptr<ast::Expr> expr =
+          typed_map ? parse_map_literal(open, stop_mode)
+                    : parse_set_literal(open, stop_mode);
+      expr->string_field("collection_type", token.lexeme);
+      expr->span = ast::join_spans(token.span, expr->span);
+      return expr;
+    }
     auto expr = ast::make_expr("AstName", token.span);
     expr->string_field("name", token.lexeme);
     return expr;
@@ -2744,21 +2765,28 @@ std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
     std::string key_kind = "symbol";
     std::string key_value;
     lexer::Span key_span = key.span;
+    std::unique_ptr<ast::Expr> key_expr;
 
     if (match(lexer::TokenKind::Identifier)) {
       key_value = key.lexeme;
     } else if (match(lexer::TokenKind::String)) {
       key_kind = "string";
       key_value = key.lexeme;
+      key_expr = parse_string_literal_expr(key);
     } else if (match(lexer::TokenKind::Colon)) {
       const lexer::Token name = consume(lexer::TokenKind::Identifier,
                                         "expected symbol key name after ':'");
       key_value = name.lexeme;
       key_span = ast::join_spans(key.span, name.span);
     } else {
-      error(key, "expected map literal key");
-      advance();
-      continue;
+      key_kind = "expression";
+      key_expr = parse_expression(1, stop_mode);
+      if (key_expr == nullptr) {
+        error(key, "expected map literal key");
+        advance();
+        continue;
+      }
+      key_span = key_expr->span;
     }
 
     consume(lexer::TokenKind::Colon, "expected ':' after map literal key");
@@ -2772,6 +2800,9 @@ std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
                                 : ast::join_spans(key_span, value->span)));
     entry->string_field("key_kind", key_kind);
     entry->string_field("key", key_value);
+    if (key_expr != nullptr) {
+      entry->node_field("key_expr", std::move(key_expr));
+    }
     entry->node_field("value", std::move(value));
     if (condition != nullptr) {
       entry->node_field("condition", std::move(condition));
@@ -3283,12 +3314,48 @@ bool Parser::starts_same_indent_postfix_continuation() const {
 
 bool Parser::starts_map_literal_entry() const {
   if (current().kind == lexer::TokenKind::Identifier ||
-      current().kind == lexer::TokenKind::String) {
+      current().kind == lexer::TokenKind::String ||
+      current().kind == lexer::TokenKind::Integer ||
+      current().kind == lexer::TokenKind::Float ||
+      current().kind == lexer::TokenKind::KeywordTrue ||
+      current().kind == lexer::TokenKind::KeywordFalse ||
+      current().kind == lexer::TokenKind::KeywordNull) {
     return peek().kind == lexer::TokenKind::Colon;
   }
   if (current().kind == lexer::TokenKind::Colon &&
       peek().kind == lexer::TokenKind::Identifier) {
     return peek(2).kind == lexer::TokenKind::Colon;
+  }
+  if (current().kind == lexer::TokenKind::LParen ||
+      current().kind == lexer::TokenKind::LBracket) {
+    int depth = 0;
+    for (std::size_t index = current_; index < tokens_.size(); ++index) {
+      const lexer::TokenKind kind = tokens_[index].kind;
+      if (kind == lexer::TokenKind::LParen ||
+          kind == lexer::TokenKind::LBracket ||
+          kind == lexer::TokenKind::LBrace) {
+        ++depth;
+        continue;
+      }
+      if (kind == lexer::TokenKind::RParen ||
+          kind == lexer::TokenKind::RBracket ||
+          kind == lexer::TokenKind::RBrace) {
+        if (depth == 0) {
+          return false;
+        }
+        --depth;
+        continue;
+      }
+      if (depth == 0 && kind == lexer::TokenKind::Colon) {
+        return true;
+      }
+      if (depth == 0 &&
+          (kind == lexer::TokenKind::Comma ||
+           kind == lexer::TokenKind::Newline ||
+           kind == lexer::TokenKind::Eof)) {
+        return false;
+      }
+    }
   }
   return false;
 }

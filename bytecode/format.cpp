@@ -1503,6 +1503,9 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x0C:
     opcode = Opcode::MakeSet;
     return true;
+  case 0x0D:
+    opcode = Opcode::MakeMapDyn;
+    return true;
   case 0x10:
     opcode = Opcode::LoadUpval;
     return true;
@@ -3407,6 +3410,25 @@ InstructionFlow verify_instruction_flow(
     }
     break;
   }
+  case Opcode::MakeMapDyn: {
+    std::uint32_t count = 0;
+    if (instruction.operands.size() >= 2U &&
+        read_u32_operand(instruction, 1, "map count must be unsigned", errors,
+                         &count) &&
+        operand_count_is(instruction, 2U + static_cast<std::size_t>(count) * 2U,
+                         errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::size_t operand_index = 2;
+      for (std::uint32_t index = 0; index < count; ++index) {
+        add_register_read(code, instruction, operand_index++, flow, errors);
+        add_register_read(code, instruction, operand_index++, flow, errors);
+      }
+    } else if (instruction.operands.size() < 2U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+    }
+    break;
+  }
   case Opcode::LoadUpval: {
     if (operand_count_is(instruction, 2, errors)) {
       add_register_write(code, instruction, 0, flow, errors);
@@ -4921,6 +4943,8 @@ std::string opcode_name(Opcode opcode) {
     return "MAKE_MAP";
   case Opcode::MakeSet:
     return "MAKE_SET";
+  case Opcode::MakeMapDyn:
+    return "MAKE_MAP_DYN";
   case Opcode::Freeze:
     return "FREEZE";
   case Opcode::LoadUpval:

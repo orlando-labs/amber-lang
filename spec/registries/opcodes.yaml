@@ -26,6 +26,8 @@ opcodes:
     byte: 0x0B
   - name: MAKESET
     byte: 0x0C
+  - name: MAKE_MAP_DYN
+    byte: 0x0D
   - name: LOADUPVAL
     byte: 0x10
   - name: STOREUPVAL
