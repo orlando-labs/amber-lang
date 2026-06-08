@@ -1506,6 +1506,12 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x0D:
     opcode = Opcode::MakeMapDyn;
     return true;
+  case 0x0E:
+    opcode = Opcode::MakeListSpread;
+    return true;
+  case 0x0F:
+    opcode = Opcode::MakeSetSpread;
+    return true;
   case 0x10:
     opcode = Opcode::LoadUpval;
     return true;
@@ -1556,6 +1562,18 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
     return true;
   case 0x22:
     opcode = Opcode::Call;
+    return true;
+  case 0x62:
+    opcode = Opcode::SendSpread;
+    return true;
+  case 0x63:
+    opcode = Opcode::SendDynSpread;
+    return true;
+  case 0x64:
+    opcode = Opcode::CallSpread;
+    return true;
+  case 0x65:
+    opcode = Opcode::MakeMapSpread;
     return true;
   case 0x23:
     opcode = Opcode::InOp;
@@ -3385,6 +3403,33 @@ InstructionFlow verify_instruction_flow(
     }
     break;
   }
+  case Opcode::MakeListSpread:
+  case Opcode::MakeSetSpread: {
+    std::uint32_t count = 0;
+    if (instruction.operands.size() >= 2U &&
+        read_u32_operand(instruction, 1, "spread item count must be unsigned",
+                         errors, &count) &&
+        operand_count_is(instruction, 2U + static_cast<std::size_t>(count) * 2U,
+                         errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::size_t operand_index = 2;
+      for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t kind = 0;
+        if (read_u32_operand(instruction, operand_index++,
+                             "spread item kind must be unsigned", errors,
+                             &kind) &&
+            kind != kSpreadOperandValue && kind != kSpreadOperandExpand) {
+          add_verify_error(errors, "BC1310", "invalid spread item kind",
+                           SectionKind::Code, 0);
+        }
+        add_register_read(code, instruction, operand_index++, flow, errors);
+      }
+    } else if (instruction.operands.size() < 2U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+    }
+    break;
+  }
   case Opcode::MakeMap: {
     std::uint32_t count = 0;
     if (instruction.operands.size() >= 2U &&
@@ -3403,6 +3448,50 @@ InstructionFlow verify_instruction_flow(
                             errors);
         }
         add_register_read(code, instruction, operand_index++, flow, errors);
+      }
+    } else if (instruction.operands.size() < 2U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+    }
+    break;
+  }
+  case Opcode::MakeMapSpread: {
+    std::uint32_t count = 0;
+    if (instruction.operands.size() >= 2U &&
+        read_u32_operand(instruction, 1, "map count must be unsigned", errors,
+                         &count) &&
+        operand_count_is(instruction, 2U + static_cast<std::size_t>(count) * 3U,
+                         errors)) {
+      add_register_write(code, instruction, 0, flow, errors);
+      std::size_t operand_index = 2;
+      for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t kind = 0;
+        if (!read_u32_operand(instruction, operand_index++,
+                              "map spread entry kind must be unsigned", errors,
+                              &kind)) {
+          operand_index += 2;
+          continue;
+        }
+        if (kind == kMapSpreadEntrySymbol) {
+          std::uint32_t symbol_id = 0;
+          if (read_u32_operand(instruction, operand_index++,
+                               "symbol ref must be unsigned", errors,
+                               &symbol_id)) {
+            verify_symbol_ref(module, symbol_id,
+                              "map key symbol ref is invalid", errors);
+          }
+          add_register_read(code, instruction, operand_index++, flow, errors);
+        } else if (kind == kMapSpreadEntryDynamic) {
+          add_register_read(code, instruction, operand_index++, flow, errors);
+          add_register_read(code, instruction, operand_index++, flow, errors);
+        } else if (kind == kMapSpreadEntrySpread) {
+          ++operand_index;
+          add_register_read(code, instruction, operand_index++, flow, errors);
+        } else {
+          add_verify_error(errors, "BC1310", "invalid map spread entry kind",
+                           SectionKind::Code, 0);
+          operand_index += 2;
+        }
       }
     } else if (instruction.operands.size() < 2U) {
       add_verify_error(errors, "BC1310", "invalid instruction operand count",
@@ -3697,6 +3786,114 @@ InstructionFlow verify_instruction_flow(
                            &symbol_id)) {
         verify_symbol_ref(module, symbol_id, "keyword symbol ref is invalid",
                           errors);
+      }
+      add_register_read(code, instruction, operand_index++, flow, errors);
+    }
+    const std::int64_t block_reg = instruction.operands[operand_index++].value;
+    if (block_reg >= 0 &&
+        block_reg != static_cast<std::int64_t>(
+                         std::numeric_limits<std::uint32_t>::max())) {
+      if (static_cast<std::uint64_t>(block_reg) >= code.reg_count) {
+        add_verify_error(errors, "BC1311", "block register is out of range",
+                         SectionKind::Code, 0);
+      } else {
+        flow.reads.push_back(static_cast<std::uint32_t>(block_reg));
+      }
+    }
+    if (!operand_count_between(instruction, operand_index, operand_index + 1U,
+                               errors)) {
+      break;
+    }
+    if (instruction.operands.size() == operand_index + 1U) {
+      std::uint32_t site_id = 0;
+      if (read_u32_operand(instruction, operand_index,
+                           "call-site id must be unsigned", errors, &site_id) &&
+          site_id >= code.call_site_table.size()) {
+        add_verify_error(errors, "BC1312", "call-site id is out of range",
+                         SectionKind::Code, 0);
+      }
+    }
+    break;
+  }
+  case Opcode::SendSpread:
+  case Opcode::SendDynSpread:
+  case Opcode::CallSpread: {
+    const bool is_call = instruction.opcode == Opcode::CallSpread;
+    const bool is_dynamic = instruction.opcode == Opcode::SendDynSpread;
+    std::size_t operand_index = 0;
+    const std::size_t fixed_prefix = is_call ? 2U : 3U;
+    if (instruction.operands.size() < fixed_prefix + 3U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+      break;
+    }
+    add_register_write(code, instruction, operand_index++, flow, errors);
+    add_register_read(code, instruction, operand_index++, flow, errors);
+    if (!is_call) {
+      if (is_dynamic) {
+        add_register_read(code, instruction, operand_index++, flow, errors);
+      } else {
+        std::uint32_t selector_id = 0;
+        if (read_u32_operand(instruction, operand_index++,
+                             "selector ref must be unsigned", errors,
+                             &selector_id)) {
+          verify_symbol_ref(module, selector_id,
+                            "selector symbol ref is invalid", errors);
+        }
+      }
+    }
+    std::uint32_t pos_count = 0;
+    if (!read_u32_operand(instruction, operand_index++,
+                          "positional count must be unsigned", errors,
+                          &pos_count)) {
+      break;
+    }
+    if (instruction.operands.size() < operand_index + pos_count * 2U + 2U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+      break;
+    }
+    for (std::uint32_t index = 0; index < pos_count; ++index) {
+      std::uint32_t kind = 0;
+      if (read_u32_operand(instruction, operand_index++,
+                           "spread positional kind must be unsigned", errors,
+                           &kind) &&
+          kind != kSpreadOperandValue && kind != kSpreadOperandExpand) {
+        add_verify_error(errors, "BC1310", "invalid spread positional kind",
+                         SectionKind::Code, 0);
+      }
+      add_register_read(code, instruction, operand_index++, flow, errors);
+    }
+    std::uint32_t kw_count = 0;
+    if (!read_u32_operand(instruction, operand_index++,
+                          "keyword count must be unsigned", errors,
+                          &kw_count)) {
+      break;
+    }
+    if (instruction.operands.size() < operand_index + kw_count * 3U + 1U) {
+      add_verify_error(errors, "BC1310", "invalid instruction operand count",
+                       SectionKind::Code, 0);
+      break;
+    }
+    for (std::uint32_t index = 0; index < kw_count; ++index) {
+      std::uint32_t kind = 0;
+      if (!read_u32_operand(instruction, operand_index++,
+                            "spread keyword kind must be unsigned", errors,
+                            &kind)) {
+        operand_index += 2;
+        continue;
+      }
+      std::uint32_t symbol_id = 0;
+      if (read_u32_operand(instruction, operand_index++,
+                           "keyword symbol ref must be unsigned", errors,
+                           &symbol_id) &&
+          kind == kSpreadOperandValue) {
+        verify_symbol_ref(module, symbol_id, "keyword symbol ref is invalid",
+                          errors);
+      }
+      if (kind != kSpreadOperandValue && kind != kSpreadOperandExpand) {
+        add_verify_error(errors, "BC1310", "invalid spread keyword kind",
+                         SectionKind::Code, 0);
       }
       add_register_read(code, instruction, operand_index++, flow, errors);
     }
@@ -4945,6 +5142,10 @@ std::string opcode_name(Opcode opcode) {
     return "MAKE_SET";
   case Opcode::MakeMapDyn:
     return "MAKE_MAP_DYN";
+  case Opcode::MakeListSpread:
+    return "MAKE_LIST_SPREAD";
+  case Opcode::MakeSetSpread:
+    return "MAKE_SET_SPREAD";
   case Opcode::Freeze:
     return "FREEZE";
   case Opcode::LoadUpval:
@@ -4981,6 +5182,14 @@ std::string opcode_name(Opcode opcode) {
     return "SEND_DYN";
   case Opcode::Call:
     return "CALL";
+  case Opcode::SendSpread:
+    return "SEND_SPREAD";
+  case Opcode::SendDynSpread:
+    return "SEND_DYN_SPREAD";
+  case Opcode::CallSpread:
+    return "CALL_SPREAD";
+  case Opcode::MakeMapSpread:
+    return "MAKE_MAP_SPREAD";
   case Opcode::InOp:
     return "IN_OP";
   case Opcode::TripleEq:

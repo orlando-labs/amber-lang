@@ -45,6 +45,107 @@ void increment_kind_allocation(RuntimeHeapStats &stats, HeapObjectKind kind) {
   }
 }
 
+bool decode_keyword_utf8_codepoint(const std::string &source,
+                                   std::size_t offset,
+                                   std::uint32_t *codepoint,
+                                   std::size_t *byte_count) {
+  if (offset >= source.size()) {
+    return false;
+  }
+  const unsigned char byte0 = static_cast<unsigned char>(source[offset]);
+  if (byte0 < 0x80U) {
+    *codepoint = byte0;
+    *byte_count = 1;
+    return true;
+  }
+
+  std::uint32_t value = 0;
+  std::size_t count = 0;
+  if ((byte0 & 0xE0U) == 0xC0U) {
+    value = byte0 & 0x1FU;
+    count = 2;
+  } else if ((byte0 & 0xF0U) == 0xE0U) {
+    value = byte0 & 0x0FU;
+    count = 3;
+  } else if ((byte0 & 0xF8U) == 0xF0U) {
+    value = byte0 & 0x07U;
+    count = 4;
+  } else {
+    return false;
+  }
+
+  if (offset + count > source.size()) {
+    return false;
+  }
+  for (std::size_t i = 1; i < count; ++i) {
+    const unsigned char byte = static_cast<unsigned char>(source[offset + i]);
+    if ((byte & 0xC0U) != 0x80U) {
+      return false;
+    }
+    value = (value << 6U) | (byte & 0x3FU);
+  }
+  *codepoint = value;
+  *byte_count = count;
+  return true;
+}
+
+bool keyword_identifier_start(std::uint32_t codepoint) {
+  const bool ascii_alpha = (codepoint >= 'A' && codepoint <= 'Z') ||
+                           (codepoint >= 'a' && codepoint <= 'z');
+  const bool cyrillic = (codepoint >= 0x0400U && codepoint <= 0x052FU) ||
+                        (codepoint >= 0x1C80U && codepoint <= 0x1C8FU) ||
+                        (codepoint >= 0x2DE0U && codepoint <= 0x2DFFU) ||
+                        (codepoint >= 0xA640U && codepoint <= 0xA69FU);
+  const bool greek = (codepoint >= 0x0370U && codepoint <= 0x03FFU) ||
+                     (codepoint >= 0x1F00U && codepoint <= 0x1FFFU);
+  return ascii_alpha || cyrillic || greek || codepoint == '_';
+}
+
+bool keyword_identifier_part(std::uint32_t codepoint) {
+  return keyword_identifier_start(codepoint) ||
+         (codepoint >= '0' && codepoint <= '9');
+}
+
+bool reserved_keyword_identifier(const std::string &text) {
+  static const std::unordered_set<std::string_view> keywords = {
+      "and",    "attr",   "break",  "case",    "class",  "class_method",
+      "class_prop",       "def",    "do",      "elif",   "else",
+      "elsif",  "export", "extend", "false",   "from",   "if",
+      "import", "in",     "include", "loop",    "mixin",  "noop",
+      "not",    "null",   "or",     "package", "pass",   "prop",
+      "true",   "unless", "until",  "when",
+      "while"};
+  return keywords.find(text) != keywords.end();
+}
+
+bool keyword_identifier_text(const std::string &text) {
+  if (text.empty() || reserved_keyword_identifier(text)) {
+    return false;
+  }
+
+  std::size_t offset = 0;
+  std::uint32_t codepoint = 0;
+  std::size_t byte_count = 0;
+  if (!decode_keyword_utf8_codepoint(text, offset, &codepoint, &byte_count) ||
+      !keyword_identifier_start(codepoint)) {
+    return false;
+  }
+  offset += byte_count;
+
+  while (offset < text.size()) {
+    const unsigned char byte = static_cast<unsigned char>(text[offset]);
+    if ((byte == '?' || byte == '!') && offset + 1U == text.size()) {
+      return true;
+    }
+    if (!decode_keyword_utf8_codepoint(text, offset, &codepoint, &byte_count) ||
+        !keyword_identifier_part(codepoint)) {
+      return false;
+    }
+    offset += byte_count;
+  }
+  return true;
+}
+
 bool value_has_heap_payload_tag(const Value &value);
 const ObjHeader *heap_header_from_value(const Value &value);
 ObjHeader *mutable_heap_header_from_value(const Value &value);
@@ -8745,6 +8846,21 @@ private:
              quick_operand_u32(insn, 2, &count) &&
              quick_register_range_contains(first_reg, count, reg);
     }
+    case Opcode::MakeListSpread:
+    case Opcode::MakeSetSpread: {
+      std::uint32_t count = 0;
+      if (!quick_operand_u32(insn, 1, &count)) {
+        return true;
+      }
+      std::size_t operand_index = 2;
+      for (std::uint32_t i = 0; i < count; ++i) {
+        ++operand_index;
+        if (quick_operand_reg_equals(insn, operand_index++, reg)) {
+          return true;
+        }
+      }
+      return false;
+    }
     case Opcode::MakeMap: {
       std::uint32_t count = 0;
       if (!quick_operand_u32(insn, 1, &count)) {
@@ -8768,6 +8884,28 @@ private:
       for (std::uint32_t i = 0; i < count; ++i) {
         if (quick_operand_reg_equals(insn, operand_index++, reg) ||
             quick_operand_reg_equals(insn, operand_index++, reg)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    case Opcode::MakeMapSpread: {
+      std::uint32_t count = 0;
+      if (!quick_operand_u32(insn, 1, &count)) {
+        return true;
+      }
+      std::size_t operand_index = 2;
+      for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t kind = 0;
+        if (!quick_operand_u32(insn, operand_index++, &kind)) {
+          return true;
+        }
+        if (kind == bytecode::kMapSpreadEntryDynamic &&
+            quick_operand_reg_equals(insn, operand_index, reg)) {
+          return true;
+        }
+        ++operand_index;
+        if (quick_operand_reg_equals(insn, operand_index++, reg)) {
           return true;
         }
       }
@@ -8798,9 +8936,17 @@ private:
       return quick_operand_reg_equals(insn, 1, reg);
     case Opcode::Send:
     case Opcode::SendDyn:
-    case Opcode::Call: {
-      const bool is_call = insn.opcode == Opcode::Call;
-      const bool is_dynamic = insn.opcode == Opcode::SendDyn;
+    case Opcode::Call:
+    case Opcode::SendSpread:
+    case Opcode::SendDynSpread:
+    case Opcode::CallSpread: {
+      const bool is_call = insn.opcode == Opcode::Call ||
+                           insn.opcode == Opcode::CallSpread;
+      const bool is_dynamic = insn.opcode == Opcode::SendDyn ||
+                              insn.opcode == Opcode::SendDynSpread;
+      const bool expanded = insn.opcode == Opcode::SendSpread ||
+                            insn.opcode == Opcode::SendDynSpread ||
+                            insn.opcode == Opcode::CallSpread;
       std::size_t operand_index = 0;
       ++operand_index;
       if (quick_operand_reg_equals(insn, operand_index++, reg)) {
@@ -8817,6 +8963,9 @@ private:
         return true;
       }
       for (std::uint32_t i = 0; i < pos_count; ++i) {
+        if (expanded) {
+          ++operand_index;
+        }
         if (quick_operand_reg_equals(insn, operand_index++, reg)) {
           return true;
         }
@@ -8826,6 +8975,9 @@ private:
         return true;
       }
       for (std::uint32_t i = 0; i < kw_count; ++i) {
+        if (expanded) {
+          ++operand_index;
+        }
         ++operand_index;
         if (quick_operand_reg_equals(insn, operand_index++, reg)) {
           return true;
@@ -8903,11 +9055,14 @@ private:
     case Opcode::LoadSelf:
     case Opcode::GetLast:
     case Opcode::MakeList:
+    case Opcode::MakeListSpread:
     case Opcode::MakeTuple:
     case Opcode::MakeMap:
     case Opcode::MakeMapDyn:
+    case Opcode::MakeMapSpread:
     case Opcode::Freeze:
     case Opcode::MakeSet:
+    case Opcode::MakeSetSpread:
     case Opcode::LoadUpval:
     case Opcode::LoadIvar:
     case Opcode::LoadCvar:
@@ -8921,6 +9076,9 @@ private:
     case Opcode::Send:
     case Opcode::SendDyn:
     case Opcode::Call:
+    case Opcode::SendSpread:
+    case Opcode::SendDynSpread:
+    case Opcode::CallSpread:
     case Opcode::InOp:
     case Opcode::TripleEq:
     case Opcode::IAdd:
@@ -10045,8 +10203,8 @@ private:
     return value;
   }
 
-  bool read_call_packet(Frame &frame, const Instruction &insn,
-                        CallPacket *out) {
+  bool read_call_packet(Frame &frame, const Instruction &insn, CallPacket *out,
+                        bool expanded = false) {
     std::uint32_t callee_reg = 0;
     std::uint32_t pos_count = 0;
     if (!operand_u32(frame, insn, 0, &out->dst) ||
@@ -10059,12 +10217,29 @@ private:
     out->pos_args.clear();
     out->pos_args.reserve(pos_count);
     for (std::uint32_t i = 0; i < pos_count; ++i) {
+      std::uint32_t kind = bytecode::kSpreadOperandValue;
+      if (expanded &&
+          !operand_u32(frame, insn, operand_index++, &kind)) {
+        return false;
+      }
       std::uint32_t reg = 0;
       if (!operand_u32(frame, insn, operand_index++, &reg)) {
         return false;
       }
-      out->pos_args.push_back(read_reg(frame, reg));
+      Value value = read_reg(frame, reg);
       if (fault_.has_value()) {
+        return false;
+      }
+      if (kind == bytecode::kSpreadOperandValue) {
+        out->pos_args.push_back(std::move(value));
+      } else if (kind == bytecode::kSpreadOperandExpand) {
+        if (!append_spread_sequence_items(
+                frame, value, SpreadSequenceTarget::PositionalCall,
+                &out->pos_args)) {
+          return false;
+        }
+      } else {
+        set_fault(frame, "VMError", "invalid call spread positional kind");
         return false;
       }
     }
@@ -10076,14 +10251,29 @@ private:
     out->kw_args.clear();
     out->kw_args.reserve(kw_count);
     for (std::uint32_t i = 0; i < kw_count; ++i) {
+      std::uint32_t kind = bytecode::kSpreadOperandValue;
+      if (expanded &&
+          !operand_u32(frame, insn, operand_index++, &kind)) {
+        return false;
+      }
       std::uint32_t name_symbol_id = 0;
       std::uint32_t reg = 0;
       if (!operand_u32(frame, insn, operand_index++, &name_symbol_id) ||
           !operand_u32(frame, insn, operand_index++, &reg)) {
         return false;
       }
-      out->kw_args.push_back({name_symbol_id, read_reg(frame, reg)});
+      Value value = read_reg(frame, reg);
       if (fault_.has_value()) {
+        return false;
+      }
+      if (kind == bytecode::kSpreadOperandValue) {
+        out->kw_args.push_back({name_symbol_id, std::move(value)});
+      } else if (kind == bytecode::kSpreadOperandExpand) {
+        if (!append_keyword_spread_entries(frame, value, &out->kw_args)) {
+          return false;
+        }
+      } else {
+        set_fault(frame, "VMError", "invalid call spread keyword kind");
         return false;
       }
     }
@@ -11360,6 +11550,114 @@ private:
     return std::nullopt;
   }
 
+  enum class SpreadSequenceTarget { PositionalCall, ArrayLiteral, SetLiteral };
+
+  const char *spread_sequence_type_error(SpreadSequenceTarget target) const {
+    switch (target) {
+    case SpreadSequenceTarget::PositionalCall:
+      return "positional spread requires Array, Tuple, or finite Range";
+    case SpreadSequenceTarget::ArrayLiteral:
+      return "array spread requires Array, Tuple, or finite Range";
+    case SpreadSequenceTarget::SetLiteral:
+      return "set spread requires Array, Tuple, Set, HashSet, or finite Range";
+    }
+    return "invalid spread value";
+  }
+
+  bool append_map_spread_entries(const Frame &frame, const Value &value,
+                                 std::vector<MapEntry> *out) {
+    const std::optional<std::vector<MapEntry>> entries =
+        extract_map_entries(frame, value);
+    if (fault_.has_value()) {
+      return false;
+    }
+    if (!entries.has_value()) {
+      set_fault(frame, "TypeError", "map spread requires Map or HashMap");
+      return false;
+    }
+    for (const MapEntry &entry : *entries) {
+      upsert_map_entry(out, entry);
+    }
+    return true;
+  }
+
+  std::optional<std::uint32_t>
+  keyword_spread_symbol_id_from_key(const Frame &frame, const Value &key) {
+    if (key.is_symbol()) {
+      const std::uint32_t symbol_id = key.as_symbol().symbol_id;
+      if (symbol_id >= module_.symbols.size()) {
+        set_fault(frame, "VMError",
+                  "keyword argument spread symbol key ref is invalid");
+        return std::nullopt;
+      }
+      if (!keyword_identifier_text(module_.symbols[symbol_id])) {
+        set_fault(frame, "KeywordArgumentError",
+                  "keyword argument spread key is not keyword-convertible");
+        return std::nullopt;
+      }
+      return symbol_id;
+    }
+    if (key.is_string()) {
+      const std::optional<std::string> text =
+          string_text_from_id(key.as_string().string_id);
+      if (!text.has_value()) {
+        set_fault(frame, "VMError",
+                  "keyword argument spread string key ref is invalid");
+        return std::nullopt;
+      }
+      if (!keyword_identifier_text(*text)) {
+        set_fault(frame, "KeywordArgumentError",
+                  "keyword argument spread key is not keyword-convertible");
+        return std::nullopt;
+      }
+      return intern_runtime_symbol(*text);
+    }
+    set_fault(frame, "KeywordArgumentError",
+              "keyword argument spread key is not keyword-convertible");
+    return std::nullopt;
+  }
+
+  bool append_keyword_spread_entry(
+      const Frame &frame, std::uint32_t symbol_id, Value value,
+      std::vector<std::pair<std::uint32_t, Value>> *out) {
+    const auto duplicate =
+        std::find_if(out->begin(), out->end(), [symbol_id](const auto &entry) {
+          return entry.first == symbol_id;
+        });
+    if (duplicate != out->end()) {
+      set_fault(frame, "KeywordArgumentError", "duplicate keyword argument");
+      return false;
+    }
+    out->push_back({symbol_id, std::move(value)});
+    return true;
+  }
+
+  bool append_keyword_spread_entries(
+      const Frame &frame, const Value &value,
+      std::vector<std::pair<std::uint32_t, Value>> *out) {
+    const std::optional<std::vector<MapEntry>> entries =
+        extract_map_entries(frame, value);
+    if (fault_.has_value()) {
+      return false;
+    }
+    if (!entries.has_value()) {
+      set_fault(frame, "TypeError",
+                "keyword argument spread requires Map or HashMap");
+      return false;
+    }
+    for (const MapEntry &entry : *entries) {
+      const std::optional<std::uint32_t> symbol_id =
+          keyword_spread_symbol_id_from_key(frame, entry.key);
+      if (!symbol_id.has_value()) {
+        return false;
+      }
+      if (!append_keyword_spread_entry(frame, *symbol_id, entry.value, out)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   const std::vector<Value> *sequence_items_view(const Frame &frame,
                                                 const Value &value) {
     if (value.is_list()) {
@@ -12525,6 +12823,99 @@ private:
       current = next;
     }
     return items;
+  }
+
+  std::optional<std::vector<Value>>
+  extract_range_items_for_spread(const Frame &frame, const Value &value) {
+    const std::optional<RangeBounds> bounds =
+        extract_range_bounds(frame, value);
+    if (fault_.has_value() || !bounds.has_value()) {
+      return std::nullopt;
+    }
+    if (!bounds->start_value.has_value() || !bounds->finish_value.has_value()) {
+      set_fault(frame, "InfiniteCollectionError",
+                "cannot spread an infinite/open-ended collection");
+      return std::nullopt;
+    }
+
+    std::vector<Value> items;
+    if (bounds->float_range) {
+      double current = *bounds->float_start;
+      std::uint64_t ordinal = 0;
+      while (range_float_value_in_bounds(*bounds, current)) {
+        items.push_back(Value::floating(current));
+        ++ordinal;
+        current = *bounds->float_start +
+                  static_cast<double>(ordinal) * bounds->float_step;
+      }
+      return items;
+    }
+
+    std::int64_t current = *bounds->start;
+    while (range_int_value_in_bounds(*bounds, current)) {
+      items.push_back(Value::integer(current));
+      std::int64_t next = 0;
+      if (!checked_add_i64(current, bounds->step, &next)) {
+        break;
+      }
+      current = next;
+    }
+    return items;
+  }
+
+  std::optional<std::vector<Value>>
+  extract_spread_sequence_items(const Frame &frame, const Value &value,
+                                SpreadSequenceTarget target) {
+    if (value.is_list()) {
+      const std::shared_ptr<ListValue> list = value.as_list();
+      if (list == nullptr) {
+        set_fault(frame, "TypeError", "list value is null");
+        return std::nullopt;
+      }
+      if (!ensure_lifecycle_access(frame, value)) {
+        return std::nullopt;
+      }
+      return list->items;
+    }
+    if (value.is_tuple()) {
+      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      if (tuple == nullptr) {
+        set_fault(frame, "TypeError", "tuple value is null");
+        return std::nullopt;
+      }
+      if (!ensure_lifecycle_access(frame, value)) {
+        return std::nullopt;
+      }
+      return tuple->items;
+    }
+    if (target == SpreadSequenceTarget::SetLiteral && value.is_set()) {
+      const std::shared_ptr<SetValue> set = value.as_set();
+      if (set == nullptr) {
+        set_fault(frame, "TypeError", "set value is null");
+        return std::nullopt;
+      }
+      if (!ensure_lifecycle_access(frame, value)) {
+        return std::nullopt;
+      }
+      return set->items;
+    }
+    if (value_is_range_instance(value)) {
+      return extract_range_items_for_spread(frame, value);
+    }
+    set_fault(frame, "TypeError", spread_sequence_type_error(target));
+    return std::nullopt;
+  }
+
+  bool append_spread_sequence_items(const Frame &frame, const Value &value,
+                                    SpreadSequenceTarget target,
+                                    std::vector<Value> *out) {
+    const std::optional<std::vector<Value>> items =
+        extract_spread_sequence_items(frame, value, target);
+    if (!items.has_value()) {
+      return false;
+    }
+    out->insert(out->end(), items->begin(), items->end());
+    return true;
   }
 
   bool range_contains_value(const Frame &frame, const Value &range,
@@ -19237,7 +19628,8 @@ private:
     }
   }
 
-  bool step_send(Frame &frame, const Instruction &insn, bool dynamic_selector) {
+  bool step_send(Frame &frame, const Instruction &insn, bool dynamic_selector,
+                 bool expanded = false) {
     std::uint32_t dst = 0;
     std::uint32_t recv_reg = 0;
     if (!operand_u32(frame, insn, 0, &dst) ||
@@ -19279,14 +19671,16 @@ private:
         return false;
       }
       const std::string &static_selector = module_.symbols[selector_id];
-      const FastSendStatus fast_status =
-          step_fast_static_send(frame, insn, dst, recv_reg, static_selector);
-      if (fast_status == FastSendStatus::Faulted) {
-        return false;
-      }
-      if (fast_status == FastSendStatus::Matched) {
-        ++frame.pc;
-        return true;
+      if (!expanded) {
+        const FastSendStatus fast_status =
+            step_fast_static_send(frame, insn, dst, recv_reg, static_selector);
+        if (fast_status == FastSendStatus::Faulted) {
+          return false;
+        }
+        if (fast_status == FastSendStatus::Matched) {
+          ++frame.pc;
+          return true;
+        }
       }
       selector_value = Value::symbol(selector_id);
       selector_symbol_id_for_cache = selector_id;
@@ -19300,12 +19694,28 @@ private:
     std::vector<Value> args;
     args.reserve(pos_count);
     for (std::uint32_t i = 0; i < pos_count; ++i) {
+      std::uint32_t kind = bytecode::kSpreadOperandValue;
+      if (expanded &&
+          !operand_u32(frame, insn, operand_index++, &kind)) {
+        return false;
+      }
       std::uint32_t reg = 0;
       if (!operand_u32(frame, insn, operand_index++, &reg)) {
         return false;
       }
-      args.push_back(read_reg(frame, reg));
+      Value value = read_reg(frame, reg);
       if (fault_.has_value()) {
+        return false;
+      }
+      if (kind == bytecode::kSpreadOperandValue) {
+        args.push_back(std::move(value));
+      } else if (kind == bytecode::kSpreadOperandExpand) {
+        if (!append_spread_sequence_items(
+                frame, value, SpreadSequenceTarget::PositionalCall, &args)) {
+          return false;
+        }
+      } else {
+        set_fault(frame, "VMError", "invalid send spread positional kind");
         return false;
       }
     }
@@ -19317,14 +19727,29 @@ private:
     std::vector<std::pair<std::uint32_t, Value>> kw_args;
     kw_args.reserve(kw_count);
     for (std::uint32_t i = 0; i < kw_count; ++i) {
+      std::uint32_t kind = bytecode::kSpreadOperandValue;
+      if (expanded &&
+          !operand_u32(frame, insn, operand_index++, &kind)) {
+        return false;
+      }
       std::uint32_t name_symbol_id = 0;
       std::uint32_t reg = 0;
       if (!operand_u32(frame, insn, operand_index++, &name_symbol_id) ||
           !operand_u32(frame, insn, operand_index++, &reg)) {
         return false;
       }
-      kw_args.push_back({name_symbol_id, read_reg(frame, reg)});
+      Value value = read_reg(frame, reg);
       if (fault_.has_value()) {
+        return false;
+      }
+      if (kind == bytecode::kSpreadOperandValue) {
+        kw_args.push_back({name_symbol_id, std::move(value)});
+      } else if (kind == bytecode::kSpreadOperandExpand) {
+        if (!append_keyword_spread_entries(frame, value, &kw_args)) {
+          return false;
+        }
+      } else {
+        set_fault(frame, "VMError", "invalid send spread keyword kind");
         return false;
       }
     }
@@ -19993,6 +20418,66 @@ private:
       ++frame.pc;
       return;
     }
+    case Opcode::MakeListSpread:
+    case Opcode::MakeSetSpread: {
+      std::uint32_t dst = 0;
+      std::uint32_t count = 0;
+      if (!operand_u32(frame, insn, 0, &dst) ||
+          !operand_u32(frame, insn, 1, &count)) {
+        return;
+      }
+      const bool make_set = insn.opcode == Opcode::MakeSetSpread;
+      const SpreadSequenceTarget target =
+          make_set ? SpreadSequenceTarget::SetLiteral
+                   : SpreadSequenceTarget::ArrayLiteral;
+      std::size_t operand_index = 2;
+      std::vector<Value> items;
+      for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t kind = 0;
+        std::uint32_t reg = 0;
+        if (!operand_u32(frame, insn, operand_index++, &kind) ||
+            !operand_u32(frame, insn, operand_index++, &reg)) {
+          return;
+        }
+        Value value = read_reg(frame, reg);
+        if (fault_.has_value()) {
+          return;
+        }
+        if (kind == bytecode::kSpreadOperandValue) {
+          items.push_back(std::move(value));
+        } else if (kind == bytecode::kSpreadOperandExpand) {
+          if (!append_spread_sequence_items(frame, value, target, &items)) {
+            return;
+          }
+        } else {
+          set_fault(frame, "VMError", "invalid spread item kind");
+          return;
+        }
+      }
+      if (make_set) {
+        std::vector<Value> normalized_items;
+        normalized_items.reserve(items.size());
+        for (const Value &item : items) {
+          CollectionKeyError error;
+          std::optional<Value> normalized =
+              normalize_set_element(item, &error);
+          if (!normalized.has_value()) {
+            set_fault(frame, error.error_name, error.message);
+            return;
+          }
+          normalized_items.push_back(*normalized);
+        }
+        items = std::move(normalized_items);
+      }
+      const Value value =
+          make_set ? make_set_value(std::move(items))
+                   : make_list_value(std::move(items));
+      if (!write_reg(frame, dst, value)) {
+        return;
+      }
+      ++frame.pc;
+      return;
+    }
     case Opcode::MakeMap: {
       std::uint32_t dst = 0;
       std::uint32_t count = 0;
@@ -20060,6 +20545,72 @@ private:
         }
         upsert_normalized_map_entry(
             &entries, MapEntry{std::move(*normalized_key), std::move(value)});
+      }
+      if (!write_reg(frame, dst, make_symbol_map_value(std::move(entries)))) {
+        return;
+      }
+      ++frame.pc;
+      return;
+    }
+    case Opcode::MakeMapSpread: {
+      std::uint32_t dst = 0;
+      std::uint32_t count = 0;
+      if (!operand_u32(frame, insn, 0, &dst) ||
+          !operand_u32(frame, insn, 1, &count)) {
+        return;
+      }
+      std::size_t operand_index = 2;
+      std::vector<MapEntry> entries;
+      for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t kind = 0;
+        std::uint32_t key_or_symbol = 0;
+        std::uint32_t value_reg = 0;
+        if (!operand_u32(frame, insn, operand_index++, &kind) ||
+            !operand_u32(frame, insn, operand_index++, &key_or_symbol) ||
+            !operand_u32(frame, insn, operand_index++, &value_reg)) {
+          return;
+        }
+        if (kind == bytecode::kMapSpreadEntrySymbol) {
+          Value value = read_reg(frame, value_reg);
+          if (fault_.has_value()) {
+            return;
+          }
+          auto existing = std::find_if(
+              entries.begin(), entries.end(),
+              [key_or_symbol](const MapEntry &entry) {
+                return entry.symbol_id == key_or_symbol;
+              });
+          if (existing == entries.end()) {
+            entries.push_back({key_or_symbol, std::move(value)});
+          } else {
+            existing->value = std::move(value);
+          }
+        } else if (kind == bytecode::kMapSpreadEntryDynamic) {
+          Value key = read_reg(frame, key_or_symbol);
+          Value value = read_reg(frame, value_reg);
+          if (fault_.has_value()) {
+            return;
+          }
+          CollectionKeyError error;
+          std::optional<Value> normalized_key = normalize_map_key(key, &error);
+          if (!normalized_key.has_value()) {
+            set_fault(frame, error.error_name, error.message);
+            return;
+          }
+          upsert_normalized_map_entry(
+              &entries, MapEntry{std::move(*normalized_key), std::move(value)});
+        } else if (kind == bytecode::kMapSpreadEntrySpread) {
+          Value value = read_reg(frame, value_reg);
+          if (fault_.has_value()) {
+            return;
+          }
+          if (!append_map_spread_entries(frame, value, &entries)) {
+            return;
+          }
+        } else {
+          set_fault(frame, "VMError", "invalid map spread entry kind");
+          return;
+        }
       }
       if (!write_reg(frame, dst, make_symbol_map_value(std::move(entries)))) {
         return;
@@ -20536,17 +21087,21 @@ private:
       ++frame.pc;
       return;
     }
-    case Opcode::Call: {
-      const FastCallStatus fast_status = step_fast_closure_call(frame, insn);
-      if (fast_status == FastCallStatus::Faulted) {
-        return;
-      }
-      if (fast_status == FastCallStatus::Matched) {
-        return;
+    case Opcode::Call:
+    case Opcode::CallSpread: {
+      const bool expanded = insn.opcode == Opcode::CallSpread;
+      if (!expanded) {
+        const FastCallStatus fast_status = step_fast_closure_call(frame, insn);
+        if (fast_status == FastCallStatus::Faulted) {
+          return;
+        }
+        if (fast_status == FastCallStatus::Matched) {
+          return;
+        }
       }
 
       CallPacket packet;
-      if (!read_call_packet(frame, insn, &packet)) {
+      if (!read_call_packet(frame, insn, &packet, expanded)) {
         return;
       }
 
@@ -20755,6 +21310,12 @@ private:
       return;
     case Opcode::SendDyn:
       step_send(frame, insn, true);
+      return;
+    case Opcode::SendSpread:
+      step_send(frame, insn, false, true);
+      return;
+    case Opcode::SendDynSpread:
+      step_send(frame, insn, true, true);
       return;
     case Opcode::Jump: {
       std::uint32_t target = 0;

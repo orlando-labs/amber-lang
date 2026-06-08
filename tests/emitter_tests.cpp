@@ -579,6 +579,35 @@ void test_collection_literal_emission() {
          "string map key interns string constant");
 }
 
+void test_v20_7_spread_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("def take(a, b:, c:):\n"
+              "  a\n"
+              "args = [2, 3]\n"
+              "opts = {b: 2, c: 3}\n"
+              "take(1, *args)\n"
+              "take(1, **opts)\n"
+              "[0, *args]\n"
+              "{0, *args}\n"
+              "{a: 1, **opts}\n");
+  const amber::bytecode::BcCode *code =
+      code_by_kind(emit_result.module, amber::bytecode::CodeKind::Module);
+  expect(code != nullptr, "module init code exists");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::CallSpread),
+         "spread call emits CALL_SPREAD");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::MakeListSpread),
+         "array spread emits MAKE_LIST_SPREAD");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::MakeSetSpread),
+         "set spread emits MAKE_SET_SPREAD");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::MakeMapSpread),
+         "map spread emits MAKE_MAP_SPREAD");
+
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+}
+
 void test_kernel_watch_emission() {
   const amber::bytecode::EmitResult local_result =
       emit_ok("x = 1\n"
@@ -876,6 +905,7 @@ int main() {
   test_clause_method_emission();
   test_w13_operator_emission();
   test_collection_literal_emission();
+  test_v20_7_spread_emission();
   test_kernel_watch_emission();
   test_block_param_pattern_emission();
   test_simple_block_param_emission();

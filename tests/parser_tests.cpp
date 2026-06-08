@@ -445,6 +445,46 @@ void test_collection_literals() {
          "Set{} collection type is preserved");
 }
 
+void test_v20_7_spread_surface() {
+  std::unique_ptr<Expr> call =
+      parse_ok("fn(1, *args, mode: :fast, **opts)\n");
+  expect(call->kind == "AstPostfixChain", "spread call parses");
+  const amber::ast::ListField &call_tails = list_field(*call, "tails");
+  const amber::ast::ListField &args = list_field(*call_tails.values[0], "args");
+  expect(args.values.size() == 4, "spread call arg count");
+  expect(args.values[1]->kind == "AstSpreadArg", "positional spread arg");
+  expect(args.values[2]->kind == "AstKeywordArg", "ordinary keyword arg");
+  expect(args.values[3]->kind == "AstKeywordSpreadArg",
+         "keyword spread arg");
+
+  std::unique_ptr<Expr> list =
+      parse_ok("[1, *items if include_items?, 9]\n");
+  const amber::ast::ListField &list_elements = list_field(*list, "elements");
+  expect(list_elements.values[1]->kind == "AstArraySpread",
+         "array spread element");
+  expect(node_field(*list_elements.values[1], "condition").kind ==
+             "AstCollectionCondition",
+         "array spread condition");
+
+  std::unique_ptr<Expr> set = parse_ok("{1, *items}\n");
+  const amber::ast::ListField &set_elements = list_field(*set, "elements");
+  expect(set_elements.values[1]->kind == "AstSetSpread",
+         "set spread element");
+
+  std::unique_ptr<Expr> map = parse_ok("{a: 1, **other, b: 2}\n");
+  const amber::ast::ListField &entries = list_field(*map, "entries");
+  expect(entries.values.size() == 3, "map spread entry count");
+  expect(entries.values[1]->kind == "AstMapSpread", "map spread entry");
+
+  amber::parser::ParseResult stray_spread = parse_raw("*items\n");
+  expect(has_diagnostic(stray_spread, "E_SPREAD_POSITION"),
+         "stray positional spread diagnostic");
+  amber::parser::ParseResult kw_after_spread =
+      parse_raw("fn(**opts, mode: :fast)\n");
+  expect(has_diagnostic(kw_after_spread, "E_ARGUMENT_ORDER"),
+         "keyword after keyword spread order diagnostic");
+}
+
 void test_inline_conditional_expression() {
   std::unique_ptr<Expr> expr = parse_ok("if ready? then :ready else :idle\n");
   expect(expr->kind == "AstInlineIfExpr", "inline if expression parses");
@@ -1052,6 +1092,7 @@ int main() {
   test_range_precedence();
   test_v20_4_range_surface();
   test_collection_literals();
+  test_v20_7_spread_surface();
   test_inline_conditional_expression();
   test_conditional_collection_elements();
   test_string_literal_surface();

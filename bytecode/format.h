@@ -77,6 +77,8 @@ enum class Opcode : std::uint8_t {
   Freeze = 0x0B,
   MakeSet = 0x0C,
   MakeMapDyn = 0x0D,
+  MakeListSpread = 0x0E,
+  MakeSetSpread = 0x0F,
   LoadUpval = 0x10,
   StoreUpval = 0x11,
   LoadIvar = 0x12,
@@ -94,6 +96,10 @@ enum class Opcode : std::uint8_t {
   Send = 0x20,
   SendDyn = 0x21,
   Call = 0x22,
+  SendSpread = 0x62,
+  SendDynSpread = 0x63,
+  CallSpread = 0x64,
+  MakeMapSpread = 0x65,
   InOp = 0x23,
   TripleEq = 0x24,
   TypeCheck = 0x25,
@@ -205,6 +211,11 @@ struct CacheSiteEntry {
 
 inline constexpr std::uint32_t kCallSiteFlagPropertyAccess = 0x1U;
 inline constexpr std::uint32_t kCallSiteFlagPropertyAssignment = 0x2U;
+inline constexpr std::uint32_t kSpreadOperandValue = 0x0U;
+inline constexpr std::uint32_t kSpreadOperandExpand = 0x1U;
+inline constexpr std::uint32_t kMapSpreadEntrySymbol = 0x0U;
+inline constexpr std::uint32_t kMapSpreadEntryDynamic = 0x1U;
+inline constexpr std::uint32_t kMapSpreadEntrySpread = 0x2U;
 
 struct SourceSpanEntry {
   std::uint32_t pc_from = 0;

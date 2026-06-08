@@ -74,6 +74,8 @@ struct Signature {
 
 struct CallArgShape {
   std::string keyword_name;
+  bool positional_spread = false;
+  bool keyword_spread = false;
   lexer::Span span;
 };
 

@@ -2,6 +2,7 @@
 #include "frontend/lexer/lexer.h"
 #include "frontend/pattern/pattern.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <map>
 #include <set>
@@ -1236,7 +1237,11 @@ bool is_reflective_send_call(const ast::Expr &base, const ast::Expr &tail) {
     return false;
   }
   return args->values[0]->kind != "AstKeywordArg" &&
-         args->values[1]->kind != "AstKeywordArg";
+         args->values[0]->kind != "AstKeywordSpreadArg" &&
+         args->values[0]->kind != "AstSpreadArg" &&
+         args->values[1]->kind != "AstKeywordArg" &&
+         args->values[1]->kind != "AstKeywordSpreadArg" &&
+         args->values[1]->kind != "AstSpreadArg";
 }
 
 bool is_kernel_watch_chain(const ast::Expr &base, const ast::ListField &tails) {
@@ -1330,6 +1335,10 @@ CallSiteShape extract_call_shape(const ast::Expr &expr) {
     arg.span = arg_expr->span;
     if (arg_expr->kind == "AstKeywordArg") {
       arg.keyword_name = string_value(*arg_expr, "name");
+    } else if (arg_expr->kind == "AstSpreadArg") {
+      arg.positional_spread = true;
+    } else if (arg_expr->kind == "AstKeywordSpreadArg") {
+      arg.keyword_spread = true;
     }
     result.args.push_back(std::move(arg));
   }
@@ -1347,6 +1356,13 @@ CallBindResult bind_call_shape(const Signature &signature,
   std::vector<int> positional_indices;
   std::map<std::string, int> first_keyword_indices;
   std::set<std::string> consumed_keywords;
+  const bool has_spread = std::any_of(
+      args.begin(), args.end(), [](const CallArgShape &arg) {
+        return arg.positional_spread || arg.keyword_spread;
+      });
+  if (has_spread) {
+    return result;
+  }
 
   for (std::size_t i = 0; i < args.size(); ++i) {
     const CallArgShape &arg = args[i];

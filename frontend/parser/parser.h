@@ -152,6 +152,9 @@ private:
                                            StopMode stop_mode);
   std::unique_ptr<ast::Expr> parse_block_suffix(StopMode stop_mode);
   std::vector<std::unique_ptr<ast::Expr>> parse_paren_args(StopMode stop_mode);
+  std::vector<std::unique_ptr<ast::Expr>>
+  parse_call_arg_list(lexer::TokenKind closing_kind, StopMode stop_mode);
+  std::unique_ptr<ast::Expr> parse_call_arg(StopMode stop_mode);
   std::vector<std::unique_ptr<ast::Expr>> parse_bare_args(StopMode stop_mode);
   std::vector<std::unique_ptr<ast::Expr>>
   parse_expr_list(lexer::TokenKind closing_kind, StopMode stop_mode);

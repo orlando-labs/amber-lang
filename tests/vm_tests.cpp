@@ -377,6 +377,142 @@ void test_execute_emitted_collection_literals() {
          "conditional map keeps later key");
 }
 
+void test_execute_emitted_v20_7_spread() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("def collect(a, b, c):\n"
+              "  [a, b, c]\n"
+              "\n"
+              "def probe():\n"
+              "  args = [2, 3]\n"
+              "  collect(1, *args)\n");
+  const amber::bytecode::BcMethod *method =
+      method_by_name(emit_result.module, "probe");
+  expect(method != nullptr, "positional spread probe method exists");
+  amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(emit_result.module, method->entry_code_id);
+  expect(exec.ok(), "positional call spread execution failed");
+  expect(exec.value.is_list(), "positional call spread returns list");
+  const std::shared_ptr<amber::runtime::ListValue> call_items =
+      exec.value.as_list();
+  expect(call_items != nullptr && call_items->items.size() == 3,
+         "positional call spread result count");
+  expect(call_items->items[0].as_integer() == 1 &&
+             call_items->items[1].as_integer() == 2 &&
+             call_items->items[2].as_integer() == 3,
+         "positional call spread result values");
+
+  emit_result = emit_ok("class Config:\n"
+                        "  class_method def build(x, alpha:, beta: 2):\n"
+                        "    x + alpha + beta\n"
+                        "\n"
+                        "def probe():\n"
+                        "  opts = {alpha: 5, beta: 6}\n"
+                        "  Config.build(4, **opts)\n");
+  method = method_by_name(emit_result.module, "probe");
+  expect(method != nullptr, "keyword spread probe method exists");
+  exec =
+      amber::runtime::execute_code(emit_result.module, method->entry_code_id);
+  expect(exec.ok(), "keyword call spread execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 15,
+         "keyword call spread binds keyword entries");
+
+  emit_result = emit_ok("class Config:\n"
+                        "  class_method def build(x, alpha:, beta: 2):\n"
+                        "    x + alpha + beta\n"
+                        "\n"
+                        "def probe():\n"
+                        "  opts = {\"alpha\": 5, \"beta\": 6}\n"
+                        "  Config.build(4, **opts)\n");
+  method = method_by_name(emit_result.module, "probe");
+  expect(method != nullptr, "keyword string spread probe method exists");
+  exec =
+      amber::runtime::execute_code(emit_result.module, method->entry_code_id);
+  expect(exec.ok(), "keyword string-key spread execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 15,
+         "keyword spread converts string keys to keyword names");
+
+  emit_result = emit_ok("[1, *[2, 3], *(4..5)]\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "array spread execution failed");
+  expect(exec.value.is_list(), "array spread returns list");
+  const std::shared_ptr<amber::runtime::ListValue> array_items =
+      exec.value.as_list();
+  expect(array_items != nullptr && array_items->items.size() == 5,
+         "array spread item count");
+  for (std::size_t i = 0; i < array_items->items.size(); ++i) {
+    expect(array_items->items[i].is_integer() &&
+               array_items->items[i].as_integer() ==
+                   static_cast<std::int64_t>(i + 1U),
+           "array spread item value");
+  }
+
+  emit_result = emit_ok("{1, *[1, 2, 3]}\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "set spread execution failed");
+  expect(exec.value.is_set(), "set spread returns set");
+  const std::shared_ptr<amber::runtime::SetValue> set_items =
+      exec.value.as_set();
+  expect(set_items != nullptr && set_items->items.size() == 3,
+         "set spread collapses duplicates");
+
+  emit_result = emit_ok("{a: 1, **{a: 2, b: 3}}\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "map spread execution failed");
+  expect(exec.value.is_map(), "map spread returns map");
+  const std::shared_ptr<amber::runtime::MapValue> map_items =
+      exec.value.as_map();
+  expect(map_items != nullptr && map_items->entries.size() == 2,
+         "map spread entry count");
+  expect(map_items->entries[0].symbol_id ==
+             symbol_id_or_die(emit_result.module, "a"),
+         "map spread keeps first key order");
+  expect(map_items->entries[0].value.as_integer() == 2,
+         "map spread overwrites duplicate key");
+  expect(map_items->entries[1].symbol_id ==
+             symbol_id_or_die(emit_result.module, "b"),
+         "map spread appends new key");
+
+  emit_result = emit_ok("[*(1..)]\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "InfiniteCollectionError",
+         "open-ended range spread is rejected");
+
+  emit_result = emit_ok("class Config:\n"
+                        "  class_method def build(alpha:):\n"
+                        "    alpha\n"
+                        "\n"
+                        "def probe():\n"
+                        "  opts = {\"bad name\": 5}\n"
+                        "  Config.build(**opts)\n");
+  method = method_by_name(emit_result.module, "probe");
+  expect(method != nullptr, "keyword spread invalid key probe exists");
+  exec =
+      amber::runtime::execute_code(emit_result.module, method->entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "KeywordArgumentError",
+         "keyword spread rejects non-convertible string keys");
+
+  emit_result = emit_ok("class Config:\n"
+                        "  class_method def build(alpha:):\n"
+                        "    alpha\n"
+                        "\n"
+                        "def probe():\n"
+                        "  opts = {\"alpha\": 5}\n"
+                        "  Config.build(alpha: 1, **opts)\n");
+  method = method_by_name(emit_result.module, "probe");
+  expect(method != nullptr, "keyword spread duplicate probe exists");
+  exec =
+      amber::runtime::execute_code(emit_result.module, method->entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "KeywordArgumentError",
+         "keyword spread rejects duplicate converted keys");
+}
+
 void test_execute_emitted_v20_6_value_keyed_maps() {
   const amber::runtime::ExecutionResult exec = execute_emitted_init(
       "k = \"dyn\"\n"
@@ -7470,6 +7606,7 @@ int main() {
   test_execute_module_init_calls_top_level_def();
   test_execute_native_range_literal();
   test_execute_emitted_collection_literals();
+  test_execute_emitted_v20_7_spread();
   test_execute_emitted_v20_6_value_keyed_maps();
   test_runtime_string_interpolation_and_conversions();
   test_runtime_text_output_helpers_and_io_sinks();

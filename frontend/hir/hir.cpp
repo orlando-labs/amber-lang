@@ -1575,6 +1575,22 @@ private:
               lowered->node_field("value", lower_expr(*value));
             }
             elements.push_back(std::move(lowered));
+          } else if (element->kind == "AstArraySpread" ||
+                     element->kind == "AstSetSpread") {
+            auto lowered = make_node("HSpreadElement", element->span);
+            if (const ast::Expr *value = node_field(*element, "expr")) {
+              lowered->node_field("expr", lower_expr(*value));
+            }
+            if (const ast::Expr *condition =
+                    node_field(*element, "condition")) {
+              lowered->string_field("condition_kind",
+                                    string_value(*condition, "kind"));
+              if (const ast::Expr *condition_expr =
+                      node_field(*condition, "expr")) {
+                lowered->node_field("condition", lower_expr(*condition_expr));
+              }
+            }
+            elements.push_back(std::move(lowered));
           } else {
             elements.push_back(lower_expr(*element));
           }
@@ -1588,6 +1604,22 @@ private:
       std::vector<std::unique_ptr<Node>> entries;
       if (const ast::ListField *list = list_field(expr, "entries")) {
         for (const std::unique_ptr<ast::Expr> &entry : list->values) {
+          if (entry->kind == "AstMapSpread") {
+            auto lowered = make_node("HMapSpread", entry->span);
+            if (const ast::Expr *value = node_field(*entry, "expr")) {
+              lowered->node_field("expr", lower_expr(*value));
+            }
+            if (const ast::Expr *condition = node_field(*entry, "condition")) {
+              lowered->string_field("condition_kind",
+                                    string_value(*condition, "kind"));
+              if (const ast::Expr *condition_expr =
+                      node_field(*condition, "expr")) {
+                lowered->node_field("condition", lower_expr(*condition_expr));
+              }
+            }
+            entries.push_back(std::move(lowered));
+            continue;
+          }
           auto lowered = make_node("HMapEntry", entry->span);
           lowered->string_field("key_kind", string_value(*entry, "key_kind"));
           lowered->string_field("key", string_value(*entry, "key"));
@@ -1828,6 +1860,20 @@ private:
       node->string_field("name", string_value(expr, "name"));
       if (const ast::Expr *value = node_field(expr, "value")) {
         node->node_field("value", lower_expr(*value));
+      }
+      return node;
+    }
+    if (expr.kind == "AstSpreadArg") {
+      auto node = make_node("HCallArgSpread", expr.span);
+      if (const ast::Expr *value = node_field(expr, "expr")) {
+        node->node_field("expr", lower_expr(*value));
+      }
+      return node;
+    }
+    if (expr.kind == "AstKeywordSpreadArg") {
+      auto node = make_node("HCallKwargSpread", expr.span);
+      if (const ast::Expr *value = node_field(expr, "expr")) {
+        node->node_field("expr", lower_expr(*value));
       }
       return node;
     }
@@ -2212,7 +2258,11 @@ private:
       return nullptr;
     }
     if (args->values[0]->kind == "AstKeywordArg" ||
-        args->values[1]->kind == "AstKeywordArg") {
+        args->values[0]->kind == "AstKeywordSpreadArg" ||
+        args->values[0]->kind == "AstSpreadArg" ||
+        args->values[1]->kind == "AstKeywordArg" ||
+        args->values[1]->kind == "AstKeywordSpreadArg" ||
+        args->values[1]->kind == "AstSpreadArg") {
       return nullptr;
     }
 
@@ -2224,7 +2274,7 @@ private:
     std::vector<std::unique_ptr<Node>> kw_args;
     for (std::size_t arg_i = 2; arg_i < args->values.size(); ++arg_i) {
       const ast::Expr &arg = *args->values[arg_i];
-      if (arg.kind == "AstKeywordArg") {
+      if (arg.kind == "AstKeywordArg" || arg.kind == "AstKeywordSpreadArg") {
         kw_args.push_back(lower_expr(arg));
       } else {
         pos_args.push_back(lower_expr(arg));
@@ -2310,7 +2360,8 @@ private:
       return;
     }
     for (const std::unique_ptr<ast::Expr> &arg : args->values) {
-      if (arg->kind == "AstKeywordArg") {
+      if (arg->kind == "AstKeywordArg" ||
+          arg->kind == "AstKeywordSpreadArg") {
         kw_args->push_back(lower_expr(*arg));
       } else {
         pos_args->push_back(lower_expr(*arg));
