@@ -980,12 +980,18 @@ bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
   }
   *selector = module.symbols[symbol_id];
   return *selector == "+" || *selector == "-" || *selector == "*" ||
-         *selector == "/" || *selector == "<" || *selector == ">";
+         *selector == "/" || *selector == "%" || *selector == "//" ||
+         *selector == "<" || *selector == ">" || *selector == "<=" ||
+         *selector == ">=" || *selector == "==" || *selector == "!=" ||
+         *selector == "<=>" || *selector == "&" || *selector == "|" ||
+         *selector == "^" || *selector == "<<" ||
+         *selector == ">>";
 }
 
 bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
   return (selector == "[]" && pos_count == 1U) ||
+         (selector == "[]=" && pos_count == 2U) ||
          ((selector == "count" || selector == "first") && pos_count == 0U);
 }
 
@@ -1011,7 +1017,12 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                                   instruction.opcode == Opcode::IGeK ||
                                   instruction.opcode == Opcode::IEqK ||
                                   instruction.opcode == Opcode::INeK ||
-                                  instruction.opcode == Opcode::ICmpK;
+                                  instruction.opcode == Opcode::ICmpK ||
+                                  instruction.opcode == Opcode::IBitAndK ||
+                                  instruction.opcode == Opcode::IBitOrK ||
+                                  instruction.opcode == Opcode::IBitXorK ||
+                                  instruction.opcode == Opcode::IShlK ||
+                                  instruction.opcode == Opcode::IShrK;
     if (integer_k_opcode) {
       std::uint32_t const_id = 0;
       if (!operand_u32_value(instruction, 2, &const_id) ||
@@ -1063,6 +1074,11 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
     case Opcode::IEq:
     case Opcode::INe:
     case Opcode::ICmp:
+    case Opcode::IBitAnd:
+    case Opcode::IBitOr:
+    case Opcode::IBitXor:
+    case Opcode::IShl:
+    case Opcode::IShr:
     case Opcode::IAddK:
     case Opcode::ISubK:
     case Opcode::ILtK:
@@ -1076,6 +1092,11 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
     case Opcode::IEqK:
     case Opcode::INeK:
     case Opcode::ICmpK:
+    case Opcode::IBitAndK:
+    case Opcode::IBitOrK:
+    case Opcode::IBitXorK:
+    case Opcode::IShlK:
+    case Opcode::IShrK:
     case Opcode::Jump:
     case Opcode::JumpIfTrue:
     case Opcode::JumpIfFalse:
@@ -1434,12 +1455,16 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t symbol_id = 0;
       std::uint32_t pos_count = 0;
       std::uint32_t arg = 0;
+      std::uint32_t arg2 = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &recv);
       operand_u32_value(instruction, 2, &symbol_id);
       operand_u32_value(instruction, 3, &pos_count);
       if (pos_count != 0U) {
         operand_u32_value(instruction, 4, &arg);
+      }
+      if (pos_count > 1U) {
+        operand_u32_value(instruction, 5, &arg2);
       }
       const std::string selector = module.symbols[symbol_id];
       if (selector == "+") {
@@ -1460,6 +1485,16 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "NativeValue::integer(as_int(" +
                                 read_reg_expr(recv) + ") / as_int(" +
                                 read_reg_expr(arg) + "))");
+      } else if (selector == "%") {
+        out << "  if (as_int(" << read_reg_expr(arg)
+            << ") == 0) throw NativeBailout();\n";
+        write_reg_stmt(dst, "NativeValue::integer(floor_mod_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
+      } else if (selector == "//") {
+        write_reg_stmt(dst, "NativeValue::integer(floor_div_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
       } else if (selector == "<") {
         write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
                                 read_reg_expr(recv) + ") < as_int(" +
@@ -1468,9 +1503,59 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
                                 read_reg_expr(recv) + ") > as_int(" +
                                 read_reg_expr(arg) + "))");
+      } else if (selector == "<=") {
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(recv) + ") <= as_int(" +
+                                read_reg_expr(arg) + "))");
+      } else if (selector == ">=") {
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(recv) + ") >= as_int(" +
+                                read_reg_expr(arg) + "))");
+      } else if (selector == "==") {
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(recv) + ") == as_int(" +
+                                read_reg_expr(arg) + "))");
+      } else if (selector == "!=") {
+        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
+                                read_reg_expr(recv) + ") != as_int(" +
+                                read_reg_expr(arg) + "))");
+      } else if (selector == "<=>") {
+        write_reg_stmt(dst, "NativeValue::integer(compare_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
+      } else if (selector == "&") {
+        write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
+      } else if (selector == "|") {
+        write_reg_stmt(dst, "NativeValue::integer(bit_or_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
+      } else if (selector == "^") {
+        write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
+      } else if (selector == "<<") {
+        out << "  if (as_int(" << read_reg_expr(arg)
+            << ") < 0 || as_int(" << read_reg_expr(arg)
+            << ") >= 64) throw NativeBailout();\n";
+        write_reg_stmt(dst, "NativeValue::integer(shl_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
+      } else if (selector == ">>") {
+        out << "  if (as_int(" << read_reg_expr(arg)
+            << ") < 0 || as_int(" << read_reg_expr(arg)
+            << ") >= 64) throw NativeBailout();\n";
+        write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
       } else if (selector == "[]") {
         write_reg_stmt(dst, "native_list_at(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
+      } else if (selector == "[]=") {
+        write_reg_stmt(dst, "native_list_set(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", " +
+                                read_reg_expr(arg2) + ")");
       } else if (selector == "count") {
         write_reg_stmt(dst, "native_list_count(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
@@ -1491,7 +1576,12 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     case Opcode::IGe:
     case Opcode::IEq:
     case Opcode::INe:
-    case Opcode::ICmp: {
+    case Opcode::ICmp:
+    case Opcode::IBitAnd:
+    case Opcode::IBitOr:
+    case Opcode::IBitXor:
+    case Opcode::IShl:
+    case Opcode::IShr: {
       std::uint32_t dst = 0;
       std::uint32_t lhs = 0;
       std::uint32_t rhs = 0;
@@ -1546,6 +1636,32 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "NativeValue::integer(compare_int64(as_int(" +
                                 read_reg_expr(lhs) + "), as_int(" +
                                 read_reg_expr(rhs) + ")))");
+      } else if (instruction.opcode == Opcode::IBitAnd) {
+        write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
+      } else if (instruction.opcode == Opcode::IBitOr) {
+        write_reg_stmt(dst, "NativeValue::integer(bit_or_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
+      } else if (instruction.opcode == Opcode::IBitXor) {
+        write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
+      } else if (instruction.opcode == Opcode::IShl) {
+        out << "  if (as_int(" << read_reg_expr(rhs)
+            << ") < 0 || as_int(" << read_reg_expr(rhs)
+            << ") >= 64) throw NativeBailout();\n";
+        write_reg_stmt(dst, "NativeValue::integer(shl_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
+      } else if (instruction.opcode == Opcode::IShr) {
+        out << "  if (as_int(" << read_reg_expr(rhs)
+            << ") < 0 || as_int(" << read_reg_expr(rhs)
+            << ") >= 64) throw NativeBailout();\n";
+        write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::ILt) {
         write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
                                 read_reg_expr(lhs) + ") < as_int(" +
@@ -1570,7 +1686,12 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     case Opcode::IGeK:
     case Opcode::IEqK:
     case Opcode::INeK:
-    case Opcode::ICmpK: {
+    case Opcode::ICmpK:
+    case Opcode::IBitAndK:
+    case Opcode::IBitOrK:
+    case Opcode::IBitXorK:
+    case Opcode::IShlK:
+    case Opcode::IShrK: {
       std::uint32_t dst = 0;
       std::uint32_t lhs = 0;
       std::uint32_t const_id = 0;
@@ -1631,6 +1752,34 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "NativeValue::integer(compare_int64(as_int(" +
                                 read_reg_expr(lhs) + "), " +
                                 cpp_decimal_i64(rhs) + "))");
+      } else if (instruction.opcode == Opcode::IBitAndK) {
+        write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
+                                read_reg_expr(lhs) + "), " +
+                                cpp_decimal_i64(rhs) + "))");
+      } else if (instruction.opcode == Opcode::IBitOrK) {
+        write_reg_stmt(dst, "NativeValue::integer(bit_or_int64(as_int(" +
+                                read_reg_expr(lhs) + "), " +
+                                cpp_decimal_i64(rhs) + "))");
+      } else if (instruction.opcode == Opcode::IBitXorK) {
+        write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
+                                read_reg_expr(lhs) + "), " +
+                                cpp_decimal_i64(rhs) + "))");
+      } else if (instruction.opcode == Opcode::IShlK) {
+        if (rhs < 0 || rhs >= 64) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          write_reg_stmt(dst, "NativeValue::integer(shl_int64(as_int(" +
+                                  read_reg_expr(lhs) + "), " +
+                                  cpp_decimal_i64(rhs) + "))");
+        }
+      } else if (instruction.opcode == Opcode::IShrK) {
+        if (rhs < 0 || rhs >= 64) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
+                                  read_reg_expr(lhs) + "), " +
+                                  cpp_decimal_i64(rhs) + "))");
+        }
       } else if (instruction.opcode == Opcode::ILtK) {
         write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
                                 read_reg_expr(lhs) + ") < " +
@@ -1897,6 +2046,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeList *>(value.heap_value);\n";
   out << "}\n";
+  out << "static NativeList &as_mutable_list(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::List || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeList *>(value.heap_value);\n";
+  out << "}\n";
   out << "static NativeClosure *as_closure(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Closure || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
@@ -1909,6 +2063,15 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (index < 0 || static_cast<std::size_t>(index) >= items.size()) "
          "throw NativeBailout();\n";
   out << "  return items[static_cast<std::size_t>(index)];\n";
+  out << "}\n";
+  out << "static NativeValue native_list_set(const NativeValue &value, "
+         "const NativeValue &index_value, const NativeValue &next_value) {\n";
+  out << "  auto &items = as_mutable_list(value).items;\n";
+  out << "  const std::int64_t index = as_int(index_value);\n";
+  out << "  if (index < 0 || static_cast<std::size_t>(index) >= items.size()) "
+         "throw NativeBailout();\n";
+  out << "  items[static_cast<std::size_t>(index)] = next_value;\n";
+  out << "  return next_value;\n";
   out << "}\n";
   out << "static NativeValue native_list_count(const NativeValue &value) {\n";
   out << "  return NativeValue::integer("
@@ -1940,6 +2103,34 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "static std::int64_t floor_mod_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  return lhs - floor_div_int64(lhs, rhs) * rhs;\n";
+  out << "}\n\n";
+  out << "static std::int64_t bit_xor_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  return static_cast<std::int64_t>("
+         "static_cast<std::uint64_t>(lhs) ^ "
+         "static_cast<std::uint64_t>(rhs));\n";
+  out << "}\n\n";
+  out << "static std::int64_t bit_and_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  return static_cast<std::int64_t>("
+         "static_cast<std::uint64_t>(lhs) & "
+         "static_cast<std::uint64_t>(rhs));\n";
+  out << "}\n\n";
+  out << "static std::int64_t bit_or_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  return static_cast<std::int64_t>("
+         "static_cast<std::uint64_t>(lhs) | "
+         "static_cast<std::uint64_t>(rhs));\n";
+  out << "}\n\n";
+  out << "static std::int64_t shl_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  return static_cast<std::int64_t>("
+         "static_cast<std::uint64_t>(lhs) << rhs);\n";
+  out << "}\n\n";
+  out << "static std::int64_t shr_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  return static_cast<std::int64_t>("
+         "static_cast<std::uint64_t>(lhs) >> rhs);\n";
   out << "}\n\n";
   for (std::uint32_t code_id : plan.native_code_ids) {
     out << "static NativeValue " << native_cpp_function_name(code_id)

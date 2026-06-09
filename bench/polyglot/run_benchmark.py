@@ -52,6 +52,19 @@ WORKLOADS = {
         go_source="calls_collections.go",
         go_binary="calls_collections",
     ),
+    "sha-digest": Workload(
+        name="sha-digest",
+        expected_checksum="2242493101",
+        amber_module="bench.polyglot.sha_digest",
+        amber_entry="__init__",
+        amber_source="sha_digest.am",
+        python_source="sha_digest.py",
+        ruby_source="sha_digest.rb",
+        cpp_source="sha_digest.cpp",
+        cpp_binary="sha_digest",
+        go_source="sha_digest.go",
+        go_binary="sha_digest",
+    ),
 }
 
 

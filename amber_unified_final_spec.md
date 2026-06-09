@@ -220,7 +220,88 @@ not a
 - `A or B` возвращает `A`, если `A` truthy, иначе возвращает `B`;
 - `not A` возвращает булев результат.
 
-### 3.4. Оператор принадлежности `in`
+
+### 3.4. Возведение в степень и bitwise XOR
+
+Amber фиксирует отдельные surface-операторы для возведения в степень и bitwise XOR:
+
+```amber
+2 ** 10      # exponentiation => 1024
+a ^ b        # bitwise xor
+```
+
+Нормативно:
+
+- `a ** b` означает exponentiation / power operation;
+- `a ^ b` означает bitwise XOR;
+- `^` не используется как оператор возведения в степень;
+- `**` как infix-оператор требует левый операнд и не является prefix-оператором;
+- `^` как infix-оператор требует левый и правый операнды в expression-контексте.
+
+Ассоциативность `**` — справа налево:
+
+```amber
+2 ** 3 ** 2
+# читается как:
+2 ** (3 ** 2)
+# => 512
+```
+
+Unary `+`, `-` и `not` имеют более низкий приоритет, чем `**`. Поэтому:
+
+```amber
+-2 ** 2
+# читается как:
+-(2 ** 2)
+# => -4
+
+(-2) ** 2
+# => 4
+```
+
+Приоритет `^` — ниже `&` и выше `|`, если bitwise AND/OR включены в используемый профиль реализации. В минимальном v1-profile, где `&` занят callable-reference prefix-form и bitwise AND/OR могут отсутствовать как surface-операторы, `^` всё равно резервируется как bitwise XOR level между shifts/additive arithmetic и comparisons. Если битовые операторы реализуются как ordinary method selectors, `^` обязан понижаться в тот же binary-operator dispatch pipeline, что и остальные арифметические операторы.
+
+#### Контекстное разделение `**` и spread
+
+`**` сохраняет уже зафиксированную роль contextual spread marker в call argument lists и map literals:
+
+```amber
+fn(**opts)
+{**defaults, mode: :fast}
+```
+
+Это не конфликтует с exponentiation, потому что формы различаются синтаксической позицией:
+
+```amber
+fn(x ** y)       # infix exponent expression
+fn(**opts)       # keyword spread argument
+
+{power: x ** y}  # map value expression
+{**opts}         # map spread entry
+```
+
+Parser обязан различать:
+
+- `**expr` в позиции начала argument-entry или map-entry как spread marker;
+- `lhs ** rhs` в обычном expression-контексте как exponentiation operator.
+
+Вне call arguments и collection literals prefix-form `**expr` остаётся невалидной, потому что spread не является обычным prefix-оператором.
+
+#### Контекстное разделение `^` и pin-pattern
+
+`^name` уже используется как pin-pattern в pattern-контексте. Это не конфликтует с `a ^ b`, потому что pin является prefix-form внутри grammar паттернов, а XOR является infix-form внутри grammar выражений:
+
+```amber
+case value:
+ when ^expected:
+  :same
+
+mask = flags ^ FLAG_A
+```
+
+В expression-контексте prefix-form `^expr` не вводится. В pattern-контексте infix-XOR не участвует в разборе паттерна; если нужен вычисленный matcher, используется уже существующий механизм matcher expression / guard, а не `^` как арифметический символ.
+
+### 3.5. Оператор принадлежности `in`
 
 `in` — это infix-оператор в выражениях.
 
@@ -248,7 +329,7 @@ x + 1 in xs and ok
 - `Str` — проверка подстроки;
 - `Range` — попадание в диапазон.
 
-### 3.5. Presence-операции поверх Ruby-like truthiness
+### 3.6. Presence-операции поверх Ruby-like truthiness
 
 Так как `0`, `""` и пустые коллекции truthy, в языке отдельно фиксируются value-presence операции:
 
@@ -2076,7 +2157,10 @@ ensure:
 - `include` вне class/mixin body;
 - `class_method def` внутри mixin body;
 - недопустимый callable reference target: `&foo()`, `&(expr)`, `&obj.method` в v1;
-- использование `#` вне формы unbound callable reference `&Class#method`.
+- использование `#` вне формы unbound callable reference `&Class#method`;
+- prefix-form `**expr` вне call arguments и collection literals;
+- prefix-form `^expr` вне pattern-контекста pin-pattern;
+- использование `^` как попытки обозначить exponentiation не имеет специальной семантики: в expression grammar это всегда bitwise XOR.
 
 
 Дополнительные diagnostics для exception syntax:
@@ -21576,19 +21660,22 @@ numbers.map: _1.email.downcase().uniq()
 Нормативный порядок приоритетов для parser core:
 
 1. postfix: member access, member send, call, safe-nav, indexing, safe-indexing, block suffix;
-2. callable reference `&target` и префиксные unary `+`, `-`, `not`;
-3. мультипликативные `* / %`;
-4. аддитивные `+ -`;
-5. сравнения и membership: `== != < <= > >= in`;
-6. `and`;
-7. `or`;
-8. присваивание `=`.
+2. exponentiation `**`;
+3. callable reference `&target` и префиксные unary `+`, `-`, `not`;
+4. мультипликативные `* / %`;
+5. аддитивные `+ -`;
+6. bitwise XOR `^`;
+7. сравнения и membership: `== != < <= > >= in`;
+8. `and`;
+9. `or`;
+10. присваивание `=`.
 
 Ассоциативность:
 
 - postfix — слева направо;
-- арифметика и сравнения — слева направо;
-- `not` — префиксный;
+- `**` — справа налево;
+- мультипликативные, аддитивные, `^`, сравнения и membership — слева направо;
+- `not`, unary `+` и unary `-` — префиксные и имеют более низкий приоритет, чем `**`;
 - `and` / `or` — слева направо, short-circuit;
 - `=` — справа налево.
 
@@ -21609,17 +21696,21 @@ AndExpr::= NotExpr { "and" NotExpr }
 NotExpr::= "not" NotExpr
  | CompareExpr
 
-CompareExpr::= AddExpr { CompareOp AddExpr }
+CompareExpr::= XorExpr { CompareOp XorExpr }
 
 CompareOp::= "==" | "!=" | "<" | "<=" | ">" | ">=" | "in"
+
+XorExpr::= AddExpr { "^" AddExpr }
 
 AddExpr::= MulExpr { ("+" | "-") MulExpr }
 
 MulExpr::= PrefixExpr { ("*" | "/" | "%") PrefixExpr }
 
-PrefixExpr::= ("+" | "-") PrefixExpr
+PrefixExpr::= ("+" | "-" | "not") PrefixExpr
  | CallableRefExpr
- | PostfixExpr
+ | PowerExpr
+
+PowerExpr::= PostfixExpr [ "**" PrefixExpr ]
 
 CallableRefExpr::= "&" CallableRefTarget
 
@@ -21704,6 +21795,8 @@ PatternList::= Pattern { "," Pattern } [ "," ]
 ```
 
 `MethodName` в этой грамматике означает обычный идентификатор метода, включая суффиксы `?` и `!`. `CallableRefTarget` является restricted syntactic target: он не допускает call-tail, index-tail, parenthesized expression или ordinary receiver expression. `PrimaryExpr` перечислен укрупнённо: точная grammar литералов и statement-like expressions задаётся соответствующими разделами Части I. Для v1 parser core `UnlessExpr` обязателен как отдельная surface-form, а `DefExpr` / `ClassExpr` / `MixinExpr` обозначают expression-position тех же декларативных syntactic families; AST не имеет права терять этот факт и понижать их в ordinary call/control-flow узлы уже на parser-уровне.
+
+`PowerExpr` делает `**` right-associative через правый операнд `PrefixExpr`: `2 ** 3 ** 2` парсится как `2 ** (3 ** 2)`, а `-2 ** 2` — как `-(2 ** 2)`. Prefix-spread `**expr` не входит в `PrefixExpr`; он распознаётся только внутри grammar argument/map entries. Prefix `^expr` не входит в expression grammar и остаётся доступным только как pin-pattern внутри pattern grammar.
 
 ### 15.4. Parser note: where bare args are legal
 
@@ -28706,6 +28799,8 @@ Operators lower to semantic operations with fallback selectors:
 | `a * b` | `BINARY_OP mul` | `:*` |
 | `a / b` | `BINARY_OP div` | `:/` |
 | `a % b` | `BINARY_OP mod` | `:%` |
+| `a ** b` | `BINARY_OP pow` | `:**` |
+| `a ^ b` | `BINARY_OP bit_xor` | `:^` |
 | `a == b` | `COMPARE_OP eq` | `:==` |
 | `a != b` | `COMPARE_OP ne` | `:==` then boolean invert |
 | `< <= > >=` | `COMPARE_OP` | corresponding symbolic selector |
@@ -28714,7 +28809,7 @@ Operators lower to semantic operations with fallback selectors:
 | `a and b` | control-flow | no selector |
 | `a or b` | control-flow | no selector |
 
-`BINARY_OP` may specialize for `Int`, `Float` and `Str`, but fallback must preserve normal method dispatch and errors.
+`BINARY_OP` may specialize for `Int`, `Float` and `Str`, and for integer bitwise operations where applicable, but fallback must preserve normal method dispatch and errors. `pow` is the semantic operation for exponentiation; `bit_xor` is the semantic operation for XOR.
 
 #### 12.8.2. Truthiness lowering
 

@@ -10,6 +10,7 @@
   ],
   "modules": [
     {"name": "bench.polyglot.calls_collections", "path": "src/calls_collections.am"},
+    {"name": "bench.polyglot.sha_digest", "path": "src/sha_digest.am"},
     {"name": "bench.polyglot", "path": "src/main.am"}
   ]
 }

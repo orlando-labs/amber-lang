@@ -1575,6 +1575,36 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x65:
     opcode = Opcode::MakeMapSpread;
     return true;
+  case 0x66:
+    opcode = Opcode::IBitXor;
+    return true;
+  case 0x67:
+    opcode = Opcode::IShl;
+    return true;
+  case 0x68:
+    opcode = Opcode::IShr;
+    return true;
+  case 0x69:
+    opcode = Opcode::IBitXorK;
+    return true;
+  case 0x6A:
+    opcode = Opcode::IShlK;
+    return true;
+  case 0x6B:
+    opcode = Opcode::IShrK;
+    return true;
+  case 0x6C:
+    opcode = Opcode::IBitAnd;
+    return true;
+  case 0x6D:
+    opcode = Opcode::IBitOr;
+    return true;
+  case 0x6E:
+    opcode = Opcode::IBitAndK;
+    return true;
+  case 0x6F:
+    opcode = Opcode::IBitOrK;
+    return true;
   case 0x23:
     opcode = Opcode::InOp;
     return true;
@@ -3958,7 +3988,12 @@ InstructionFlow verify_instruction_flow(
   case Opcode::IGe:
   case Opcode::IEq:
   case Opcode::INe:
-  case Opcode::ICmp: {
+  case Opcode::ICmp:
+  case Opcode::IBitXor:
+  case Opcode::IShl:
+  case Opcode::IBitAnd:
+  case Opcode::IBitOr:
+  case Opcode::IShr: {
     if (operand_count_is(instruction, 3, errors)) {
       add_register_write(code, instruction, 0, flow, errors);
       add_register_read(code, instruction, 1, flow, errors);
@@ -3978,7 +4013,12 @@ InstructionFlow verify_instruction_flow(
   case Opcode::IGeK:
   case Opcode::IEqK:
   case Opcode::INeK:
-  case Opcode::ICmpK: {
+  case Opcode::ICmpK:
+  case Opcode::IBitXorK:
+  case Opcode::IShlK:
+  case Opcode::IBitAndK:
+  case Opcode::IBitOrK:
+  case Opcode::IShrK: {
     if (operand_count_is(instruction, 3, errors)) {
       add_register_write(code, instruction, 0, flow, errors);
       add_register_read(code, instruction, 1, flow, errors);
@@ -5275,6 +5315,26 @@ std::string opcode_name(Opcode opcode) {
     return "INEK";
   case Opcode::ICmpK:
     return "ICMPK";
+  case Opcode::IBitXor:
+    return "IBITXOR";
+  case Opcode::IBitAnd:
+    return "IBITAND";
+  case Opcode::IBitOr:
+    return "IBITOR";
+  case Opcode::IShl:
+    return "ISHL";
+  case Opcode::IShr:
+    return "ISHR";
+  case Opcode::IBitXorK:
+    return "IBITXORK";
+  case Opcode::IBitAndK:
+    return "IBITANDK";
+  case Opcode::IBitOrK:
+    return "IBITORK";
+  case Opcode::IShlK:
+    return "ISHLK";
+  case Opcode::IShrK:
+    return "ISHRK";
   case Opcode::Jump:
     return "JUMP";
   case Opcode::JumpIfTrue:

@@ -1219,6 +1219,28 @@ void test_pattern_assignment_lowering() {
          "pattern assignment rhs lowered");
 }
 
+void test_index_assignment_lowering() {
+  const amber::hir::Program program = lower_ok("def replace(xs):\n"
+                                               "  xs[1] = 9\n");
+  const amber::hir::Procedure *replace =
+      procedure_by_name(program, "replace");
+  expect(replace != nullptr, "replace procedure exists");
+  const amber::ast::Expr *stmt = list_item(*replace->body, "items", 0);
+  expect(stmt != nullptr, "index assignment stmt exists");
+  const amber::ast::Expr *expr = node_field(*stmt, "expr");
+  expect(expr != nullptr && expr->kind == "HSend",
+         "index assignment lowers to HSend");
+  expect(string_field(*expr, "selector") == "[]=",
+         "index assignment selector");
+  expect(node_field(*expr, "receiver") != nullptr &&
+             node_field(*expr, "receiver")->kind == "HLoadLocal",
+         "index assignment receiver lowered");
+  expect(list_item(*expr, "pos_args", 0) != nullptr &&
+             list_item(*expr, "pos_args", 1) != nullptr &&
+             list_item(*expr, "pos_args", 2) == nullptr,
+         "index assignment has index and value args");
+}
+
 void test_default_param_lowering() {
   const amber::hir::Program program = lower_ok("def configure(x, y = x + 1):\n"
                                                "  y\n");
@@ -1569,6 +1591,7 @@ int main() {
   test_block_param_pattern_lowering();
   test_simple_block_param_pattern_slot();
   test_pattern_assignment_lowering();
+  test_index_assignment_lowering();
   test_default_param_lowering();
   test_dynamic_pattern_without_with_lowering();
   test_direct_capture_lowering();

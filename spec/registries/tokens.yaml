@@ -28,23 +28,31 @@ tokens:
     - LBRACE
     - RBRACE
     - PIPE
+    - AMPERSAND
     - CARET
     - BANG
+    - QUESTION
   operators:
     - PLUS
     - MINUS
     - STAR
+    - STAR_STAR
     - SLASH
     - SLASH_SLASH
     - PERCENT
+    - AMPERSAND
+    - PIPE
+    - CARET
     - EQUAL
     - EQUAL_EQUAL
     - EQUAL_EQUAL_EQUAL
     - BANG_EQUAL
     - LESS
+    - LESS_LESS
     - LESS_EQUAL
     - LESS_EQUAL_GREATER
     - GREATER
+    - GREATER_GREATER
     - GREATER_EQUAL
     - AT
     - AT_AT

@@ -889,6 +889,11 @@ void test_integer_specialized_send_emission() {
               "  quotient = product / y\n"
               "  remainder = product % y\n"
               "  floored = product // y\n"
+              "  anded = x & y\n"
+              "  ored = x | 4\n"
+              "  xored = x ^ y\n"
+              "  shifted = x << 2\n"
+              "  unshifted = shifted >> 1\n"
               "  cmp = x <=> y\n"
               "  le = q <= x\n"
               "  ge = q >= 0\n"
@@ -896,7 +901,8 @@ void test_integer_specialized_send_emission() {
               "  ne = x != y\n"
               "  (q < x) and (q > 0) and le and ge and eq and ne and "
               "(cmp > 0) and (floored > 0) and (remainder >= 0) and "
-              "(quotient > 0)\n");
+              "(quotient > 0) and (anded > 0) and (ored > 0) and "
+              "(xored > 0) and (shifted > unshifted)\n");
 
   const amber::bytecode::BcCode *code = code_by_id(
       emit_result.module, emit_result.module.methods[0].entry_code_id);
@@ -913,6 +919,16 @@ void test_integer_specialized_send_emission() {
          "integer local modulo emits IMOD");
   expect(contains_opcode(*code, amber::bytecode::Opcode::IFloorDiv),
          "integer local floor division emits IFLOORDIV");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IBitAnd),
+         "integer local bit and emits IBITAND");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IBitOrK),
+         "integer literal bit or emits IBITORK");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IBitXor),
+         "integer local xor emits IBITXOR");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IShlK),
+         "integer literal left shift emits ISHLK");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::IShrK),
+         "integer literal right shift emits ISHRK");
   expect(contains_opcode(*code, amber::bytecode::Opcode::ILt),
          "integer local comparison emits ILT");
   expect(contains_opcode(*code, amber::bytecode::Opcode::IGtK),

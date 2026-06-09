@@ -158,6 +158,64 @@ void test_new_binary_operators() {
   std::unique_ptr<Expr> spaceship = parse_ok("x <=> y\n");
   expect(spaceship->kind == "AstBinary", "spaceship parses as binary");
   expect(string_field(*spaceship, "op") == "<=>", "spaceship op");
+
+  std::unique_ptr<Expr> power = parse_ok("2 ** 3 ** 2\n");
+  expect(power->kind == "AstBinary", "power parses as binary");
+  expect(string_field(*power, "op") == "**", "power op");
+  expect(node_field(*power, "right").kind == "AstBinary",
+         "power is right-associative");
+  expect(string_field(node_field(*power, "right"), "op") == "**",
+         "nested power stays on right");
+
+  std::unique_ptr<Expr> unary_power = parse_ok("-2 ** 2\n");
+  expect(unary_power->kind == "AstUnary", "unary minus stays outer");
+  expect(node_field(*unary_power, "operand").kind == "AstBinary",
+         "power binds tighter than unary");
+  expect(string_field(node_field(*unary_power, "operand"), "op") == "**",
+         "unary operand is power");
+
+  std::unique_ptr<Expr> unary_multiply = parse_ok("-2 * 3\n");
+  expect(unary_multiply->kind == "AstBinary",
+         "multiplication stays outside unary minus");
+  expect(string_field(*unary_multiply, "op") == "*",
+         "unary binds tighter than multiplication");
+  expect(node_field(*unary_multiply, "left").kind == "AstUnary",
+         "multiplication lhs is unary");
+
+  std::unique_ptr<Expr> xor_expr = parse_ok("x ^ y\n");
+  expect(xor_expr->kind == "AstBinary", "xor parses as binary");
+  expect(string_field(*xor_expr, "op") == "^", "xor op");
+
+  std::unique_ptr<Expr> and_expr = parse_ok("x & y\n");
+  expect(and_expr->kind == "AstBinary", "bit and parses as binary");
+  expect(string_field(*and_expr, "op") == "&", "bit and op");
+
+  std::unique_ptr<Expr> or_expr = parse_ok("x | y\n");
+  expect(or_expr->kind == "AstBinary", "bit or parses as binary");
+  expect(string_field(*or_expr, "op") == "|", "bit or op");
+
+  std::unique_ptr<Expr> bit_precedence = parse_ok("x | y ^ z & w\n");
+  expect(bit_precedence->kind == "AstBinary", "bit precedence root");
+  expect(string_field(*bit_precedence, "op") == "|",
+         "bit or has lowest bitwise precedence");
+  expect(node_field(*bit_precedence, "right").kind == "AstBinary",
+         "bit or rhs is xor");
+  expect(string_field(node_field(*bit_precedence, "right"), "op") == "^",
+         "xor binds above or");
+  expect(node_field(node_field(*bit_precedence, "right"), "right").kind ==
+             "AstBinary",
+         "xor rhs is bit and");
+  expect(string_field(node_field(node_field(*bit_precedence, "right"), "right"),
+                      "op") == "&",
+         "bit and binds above xor");
+
+  std::unique_ptr<Expr> shl = parse_ok("x << 5\n");
+  expect(shl->kind == "AstBinary", "left shift parses as binary");
+  expect(string_field(*shl, "op") == "<<", "left shift op");
+
+  std::unique_ptr<Expr> shr = parse_ok("x >> 5\n");
+  expect(shr->kind == "AstBinary", "right shift parses as binary");
+  expect(string_field(*shr, "op") == ">>", "right shift op");
 }
 
 void test_comparison_chains() {

@@ -8,6 +8,7 @@ This benchmark compares identical workloads across:
 - Python
 - Ruby
 - C++ compiled with `-O2`
+- Go when `go` is available in `PATH`
 
 The Amber built path intentionally runs an already generated executable, so
 compile time is not included in the measured run. The runner still builds fresh
@@ -28,6 +29,7 @@ workload:
 
 - `arithmetic`: `715609516598740`
 - `calls-collections`: `2047795430`
+- `sha-digest`: `2242493101`
 
 Baseline before bytecode arithmetic fast paths:
 
@@ -247,6 +249,19 @@ cpp                   10     0.0020     0.0019          1.3         2047795430
 go                    10     0.0025     0.0024          4.0         2047795430
 ```
 
+SHA digest:
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.1341     0.1314          6.2         2242493101
+amber-built           10     0.0043     0.0042          2.1         2242493101
+python                10     0.0778     0.0768         15.3         2242493101
+ruby                  10     0.0521     0.0515         16.5         2242493101
+cpp                   10     0.0024     0.0023          1.3         2242493101
+go                    10     0.0032     0.0029          4.0         2242493101
+```
+
 The arithmetic executable reports full native coverage for 2/2 code objects.
 The `calls-collections` executable reports full native coverage for 10/10 code
 objects: module-init closures use shared native capture cells, closure calls
@@ -255,6 +270,13 @@ the direct list path. Its `amber-built` mean improved from the previous
 `0.0101s` fallback result to `0.0032s`, about 3.2x faster and close to the Go
 result. Stack-backed native register frames also improved arithmetic from the
 previous `0.0051s` mean to `0.0042s`.
+
+The `sha-digest` executable reports full native coverage for 9/9 code objects.
+The workload exercises the SHA-256 compression schedule, list index assignment,
+integer `&`, `|`, `^`, `<<`, and `>>`. The Amber source keeps the hot 32-bit
+rotate/mix formulas inline so the native path does not pay closure-call ABI
+cost for tiny bitwise helpers; 32-bit wrap uses `& 0xffffffff` instead of
+division-based modulo.
 
 Commands used:
 
@@ -277,4 +299,13 @@ python3 bench/polyglot/run_benchmark.py \
   --repeats 10 \
   --no-build \
   --build-dir /private/tmp/amber_polyglot_native_closure_lists_calls_final
+python3 bench/polyglot/run_benchmark.py \
+  --workload sha-digest \
+  --repeats 10 \
+  --build-dir /private/tmp/amber_polyglot_sha_digest_final
+python3 bench/polyglot/run_benchmark.py \
+  --workload sha-digest \
+  --repeats 10 \
+  --no-build \
+  --build-dir /private/tmp/amber_polyglot_sha_digest_final
 ```

@@ -247,7 +247,9 @@ bool is_integer_literal_expr(const ast::Expr &expr) {
 bool is_integer_result_selector(const std::string &selector) {
   return selector == "+" || selector == "-" || selector == "*" ||
          selector == "/" || selector == "%" || selector == "//" ||
-         selector == "<=>";
+         selector == "<=>" || selector == "&" || selector == "|" ||
+         selector == "^" || selector == "<<" ||
+         selector == ">>";
 }
 
 bool is_integer_comparison_selector(const std::string &selector) {
@@ -278,6 +280,21 @@ Opcode integer_register_opcode(const std::string &selector) {
   }
   if (selector == "//") {
     return Opcode::IFloorDiv;
+  }
+  if (selector == "&") {
+    return Opcode::IBitAnd;
+  }
+  if (selector == "|") {
+    return Opcode::IBitOr;
+  }
+  if (selector == "^") {
+    return Opcode::IBitXor;
+  }
+  if (selector == "<<") {
+    return Opcode::IShl;
+  }
+  if (selector == ">>") {
+    return Opcode::IShr;
   }
   if (selector == "<") {
     return Opcode::ILt;
@@ -318,6 +335,21 @@ Opcode integer_constant_opcode(const std::string &selector) {
   }
   if (selector == "//") {
     return Opcode::IFloorDivK;
+  }
+  if (selector == "&") {
+    return Opcode::IBitAndK;
+  }
+  if (selector == "|") {
+    return Opcode::IBitOrK;
+  }
+  if (selector == "^") {
+    return Opcode::IBitXorK;
+  }
+  if (selector == "<<") {
+    return Opcode::IShlK;
+  }
+  if (selector == ">>") {
+    return Opcode::IShrK;
   }
   if (selector == "<") {
     return Opcode::ILtK;

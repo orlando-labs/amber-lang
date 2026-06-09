@@ -120,6 +120,34 @@ opcodes:
     byte: 0x60
   - name: ICMPK
     byte: 0x61
+  - name: SEND_SPREAD
+    byte: 0x62
+  - name: SEND_DYN_SPREAD
+    byte: 0x63
+  - name: CALL_SPREAD
+    byte: 0x64
+  - name: MAKE_MAP_SPREAD
+    byte: 0x65
+  - name: IBITXOR
+    byte: 0x66
+  - name: ISHL
+    byte: 0x67
+  - name: ISHR
+    byte: 0x68
+  - name: IBITXORK
+    byte: 0x69
+  - name: ISHLK
+    byte: 0x6A
+  - name: ISHRK
+    byte: 0x6B
+  - name: IBITAND
+    byte: 0x6C
+  - name: IBITOR
+    byte: 0x6D
+  - name: IBITANDK
+    byte: 0x6E
+  - name: IBITORK
+    byte: 0x6F
   - name: JUMP
     byte: 0x30
   - name: JUMP_IF_TRUE

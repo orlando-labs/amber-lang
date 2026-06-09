@@ -643,10 +643,10 @@ private:
 
     if (!match(lexer::TokenKind::RBrace)) {
       while (true) {
-        if (peek() != nullptr && peek()->kind == lexer::TokenKind::Star &&
-            peek(1) != nullptr && peek(1)->kind == lexer::TokenKind::Star &&
-            peek(2) != nullptr) {
-          index_ += 2;
+        if (peek() != nullptr &&
+            peek()->kind == lexer::TokenKind::StarStar &&
+            peek(1) != nullptr) {
+          ++index_;
           if (rest_seen) {
             rest_tail_valid = false;
           }

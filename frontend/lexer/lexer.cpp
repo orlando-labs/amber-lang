@@ -141,6 +141,10 @@ LexResult Lexer::lex() {
       advance();
       emit(TokenKind::Pipe, start, "|");
       break;
+    case '&':
+      advance();
+      emit(TokenKind::Ampersand, start, "&");
+      break;
     case '^':
       advance();
       emit(TokenKind::Caret, start, "^");
@@ -164,7 +168,12 @@ LexResult Lexer::lex() {
       break;
     case '*':
       advance();
-      emit(TokenKind::Star, start, "*");
+      if (!at_end() && current() == '*') {
+        advance();
+        emit(TokenKind::StarStar, start, "**");
+      } else {
+        emit(TokenKind::Star, start, "*");
+      }
       break;
     case '/':
       advance();
@@ -203,7 +212,10 @@ LexResult Lexer::lex() {
       break;
     case '<':
       advance();
-      if (!at_end() && current() == '=' && peek() == '>') {
+      if (!at_end() && current() == '<') {
+        advance();
+        emit(TokenKind::LessLess, start, "<<");
+      } else if (!at_end() && current() == '=' && peek() == '>') {
         advance();
         advance();
         emit(TokenKind::LessEqualGreater, start, "<=>");
@@ -216,7 +228,10 @@ LexResult Lexer::lex() {
       break;
     case '>':
       advance();
-      if (!at_end() && current() == '=') {
+      if (!at_end() && current() == '>') {
+        advance();
+        emit(TokenKind::GreaterGreater, start, ">>");
+      } else if (!at_end() && current() == '=') {
         advance();
         emit(TokenKind::GreaterEqual, start, ">=");
       } else {

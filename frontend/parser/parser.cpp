@@ -19,8 +19,8 @@ ast::Expr &keyword_arg_field(ast::Expr &expr, const lexer::Token &name) {
 
 bool is_keyword_spread_start(const lexer::Token &first,
                              const lexer::Token &second) {
-  return first.kind == lexer::TokenKind::Star &&
-         second.kind == lexer::TokenKind::Star;
+  (void)second;
+  return first.kind == lexer::TokenKind::StarStar;
 }
 
 const ast::NodeField *find_node_field(const ast::Expr &expr,
@@ -622,9 +622,15 @@ bool is_operator_method_name(lexer::TokenKind kind) {
   return kind == lexer::TokenKind::Plus ||
          kind == lexer::TokenKind::Minus ||
          kind == lexer::TokenKind::Star ||
+         kind == lexer::TokenKind::StarStar ||
          kind == lexer::TokenKind::Slash ||
          kind == lexer::TokenKind::SlashSlash ||
          kind == lexer::TokenKind::Percent ||
+         kind == lexer::TokenKind::Ampersand ||
+         kind == lexer::TokenKind::Pipe ||
+         kind == lexer::TokenKind::Caret ||
+         kind == lexer::TokenKind::LessLess ||
+         kind == lexer::TokenKind::GreaterGreater ||
          kind == lexer::TokenKind::EqualEqual ||
          kind == lexer::TokenKind::EqualEqualEqual ||
          kind == lexer::TokenKind::BangEqual ||
@@ -644,9 +650,15 @@ bool token_can_precede_assignment_delimiter(lexer::TokenKind kind) {
   case lexer::TokenKind::Plus:
   case lexer::TokenKind::Minus:
   case lexer::TokenKind::Star:
+  case lexer::TokenKind::StarStar:
   case lexer::TokenKind::Slash:
   case lexer::TokenKind::SlashSlash:
   case lexer::TokenKind::Percent:
+  case lexer::TokenKind::Ampersand:
+  case lexer::TokenKind::Pipe:
+  case lexer::TokenKind::Caret:
+  case lexer::TokenKind::LessLess:
+  case lexer::TokenKind::GreaterGreater:
     return false;
   default:
     return true;
@@ -2899,7 +2911,7 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   if (token.kind == lexer::TokenKind::Plus ||
       token.kind == lexer::TokenKind::Minus ||
       token.kind == lexer::TokenKind::KeywordNot) {
-    std::unique_ptr<ast::Expr> operand = parse_expression(8, stop_mode);
+    std::unique_ptr<ast::Expr> operand = parse_expression(10, stop_mode);
     auto expr =
         ast::make_expr("AstUnary", ast::join_spans(token.span, operand->span));
     expr->string_field("op", token.lexeme);
@@ -2907,19 +2919,16 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
     return expr;
   }
   if (token.kind == lexer::TokenKind::Star) {
-    if (check(lexer::TokenKind::Star)) {
-      const lexer::Token second = advance();
-      error_code(token, "E_KWARG_SPREAD_POSITION",
-                 "`**` spread is only valid in call arguments and map "
-                 "literals");
-      auto expr =
-          ast::make_expr("AstError", ast::join_spans(token.span, second.span));
-      expr->string_field("token", "**");
-      return expr;
-    }
     error_code(token, "E_SPREAD_POSITION",
                "`*` spread is only valid in call arguments and collection "
                "literals");
+    auto expr = ast::make_expr("AstError", token.span);
+    expr->string_field("token", token.lexeme);
+    return expr;
+  }
+  if (token.kind == lexer::TokenKind::StarStar) {
+    error_code(token, "E_KWARG_SPREAD_POSITION",
+               "`**` spread is only valid in call arguments and map literals");
     auto expr = ast::make_expr("AstError", token.span);
     expr->string_field("token", token.lexeme);
     return expr;
@@ -3006,14 +3015,13 @@ Parser::parse_collection_element(lexer::TokenKind closing_kind,
                                  StopMode stop_mode) {
   (void)closing_kind;
   if (is_keyword_spread_start(current(), peek())) {
-    const lexer::Token first = advance();
-    const lexer::Token second = advance();
-    error_code(first, "E_KWARG_SPREAD_POSITION",
+    const lexer::Token spread = advance();
+    error_code(spread, "E_KWARG_SPREAD_POSITION",
                "`**` spread is only valid in call arguments and map literals");
     std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
     auto error_node = ast::make_expr(
-        "AstError", value == nullptr ? ast::join_spans(first.span, second.span)
-                                     : ast::join_spans(first.span, value->span));
+        "AstError", value == nullptr ? spread.span
+                                     : ast::join_spans(spread.span, value->span));
     error_node->string_field("token", "**");
     return error_node;
   }
@@ -3114,16 +3122,15 @@ std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
 
   while (!check(lexer::TokenKind::RBrace) && !at_end()) {
     if (is_keyword_spread_start(current(), peek())) {
-      const lexer::Token first = advance();
-      const lexer::Token second = advance();
+      const lexer::Token spread_token = advance();
       std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
       std::unique_ptr<ast::Expr> condition = parse_collection_condition();
       auto spread = ast::make_expr(
           "AstMapSpread",
           condition != nullptr
-              ? ast::join_spans(first.span, condition->span)
-              : (value == nullptr ? ast::join_spans(first.span, second.span)
-                                  : ast::join_spans(first.span, value->span)));
+              ? ast::join_spans(spread_token.span, condition->span)
+              : (value == nullptr ? spread_token.span
+                                  : ast::join_spans(spread_token.span, value->span)));
       spread->node_field("expr", std::move(value));
       if (condition != nullptr) {
         spread->node_field("condition", std::move(condition));
@@ -3542,13 +3549,12 @@ Parser::parse_paren_args(StopMode stop_mode) {
 
 std::unique_ptr<ast::Expr> Parser::parse_call_arg(StopMode stop_mode) {
   if (is_keyword_spread_start(current(), peek())) {
-    const lexer::Token first = advance();
-    const lexer::Token second = advance();
+    const lexer::Token spread = advance();
     std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
     auto arg = ast::make_expr(
         "AstKeywordSpreadArg",
-        value == nullptr ? ast::join_spans(first.span, second.span)
-                         : ast::join_spans(first.span, value->span));
+        value == nullptr ? spread.span
+                         : ast::join_spans(spread.span, value->span));
     arg->node_field("expr", std::move(value));
     return arg;
   }
@@ -3964,23 +3970,41 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
   case lexer::TokenKind::DotDotDot:
     *info = InfixInfo{5, Assoc::Left, "..."};
     return true;
+  case lexer::TokenKind::Pipe:
+    *info = InfixInfo{5, Assoc::Left, "|"};
+    return true;
+  case lexer::TokenKind::Caret:
+    *info = InfixInfo{6, Assoc::Left, "^"};
+    return true;
+  case lexer::TokenKind::Ampersand:
+    *info = InfixInfo{7, Assoc::Left, "&"};
+    return true;
   case lexer::TokenKind::Plus:
-    *info = InfixInfo{6, Assoc::Left, "+"};
+    *info = InfixInfo{8, Assoc::Left, "+"};
     return true;
   case lexer::TokenKind::Minus:
-    *info = InfixInfo{6, Assoc::Left, "-"};
+    *info = InfixInfo{8, Assoc::Left, "-"};
+    return true;
+  case lexer::TokenKind::LessLess:
+    *info = InfixInfo{8, Assoc::Left, "<<"};
+    return true;
+  case lexer::TokenKind::GreaterGreater:
+    *info = InfixInfo{8, Assoc::Left, ">>"};
     return true;
   case lexer::TokenKind::Star:
-    *info = InfixInfo{7, Assoc::Left, "*"};
+    *info = InfixInfo{9, Assoc::Left, "*"};
     return true;
   case lexer::TokenKind::Slash:
-    *info = InfixInfo{7, Assoc::Left, "/"};
+    *info = InfixInfo{9, Assoc::Left, "/"};
     return true;
   case lexer::TokenKind::SlashSlash:
-    *info = InfixInfo{7, Assoc::Left, "//"};
+    *info = InfixInfo{9, Assoc::Left, "//"};
     return true;
   case lexer::TokenKind::Percent:
-    *info = InfixInfo{7, Assoc::Left, "%"};
+    *info = InfixInfo{9, Assoc::Left, "%"};
+    return true;
+  case lexer::TokenKind::StarStar:
+    *info = InfixInfo{10, Assoc::Right, "**"};
     return true;
   default:
     return false;

@@ -7359,6 +7359,11 @@ enum class QuickOpcode : std::uint8_t {
   IEq,
   INe,
   ICmp,
+  IBitAnd,
+  IBitOr,
+  IBitXor,
+  IShl,
+  IShr,
   IAddK,
   ISubK,
   ILtK,
@@ -7372,6 +7377,11 @@ enum class QuickOpcode : std::uint8_t {
   IEqK,
   INeK,
   ICmpK,
+  IBitAndK,
+  IBitOrK,
+  IBitXorK,
+  IShlK,
+  IShrK,
   Jump,
   JumpIfTrue,
   JumpIfFalse,
@@ -7397,6 +7407,11 @@ enum class QuickOpcode : std::uint8_t {
   SendIEq,
   SendINe,
   SendICmp,
+  SendIBitAnd,
+  SendIBitOr,
+  SendIBitXor,
+  SendIShl,
+  SendIShr,
   SendSeqIndex,
   SendSeqCount,
   SendSeqFirst,
@@ -7775,6 +7790,49 @@ std::int64_t floor_mod_int64(std::int64_t lhs, std::int64_t rhs) {
 
 double floor_mod_double(double lhs, double rhs) {
   return lhs - std::floor(lhs / rhs) * rhs;
+}
+
+std::int64_t bit_xor_int64(std::int64_t lhs, std::int64_t rhs) {
+  return static_cast<std::int64_t>(
+      static_cast<std::uint64_t>(lhs) ^ static_cast<std::uint64_t>(rhs));
+}
+
+std::int64_t bit_and_int64(std::int64_t lhs, std::int64_t rhs) {
+  return static_cast<std::int64_t>(
+      static_cast<std::uint64_t>(lhs) & static_cast<std::uint64_t>(rhs));
+}
+
+std::int64_t bit_or_int64(std::int64_t lhs, std::int64_t rhs) {
+  return static_cast<std::int64_t>(
+      static_cast<std::uint64_t>(lhs) | static_cast<std::uint64_t>(rhs));
+}
+
+std::int64_t shl_int64(std::int64_t lhs, std::int64_t rhs) {
+  return static_cast<std::int64_t>(static_cast<std::uint64_t>(lhs) << rhs);
+}
+
+std::int64_t shr_int64(std::int64_t lhs, std::int64_t rhs) {
+  return static_cast<std::int64_t>(static_cast<std::uint64_t>(lhs) >> rhs);
+}
+
+std::optional<std::int64_t> pow_int64_nonnegative(std::int64_t lhs,
+                                                  std::int64_t rhs) {
+  if (rhs < 0) {
+    return std::nullopt;
+  }
+  std::uint64_t result = 1;
+  std::uint64_t base = static_cast<std::uint64_t>(lhs);
+  std::uint64_t exponent = static_cast<std::uint64_t>(rhs);
+  while (exponent > 0) {
+    if ((exponent & 1U) != 0U) {
+      result *= base;
+    }
+    exponent >>= 1U;
+    if (exponent > 0) {
+      base *= base;
+    }
+  }
+  return static_cast<std::int64_t>(result);
 }
 
 bool value_equals(const Value &lhs, const Value &rhs) {
@@ -9040,6 +9098,11 @@ private:
     case Opcode::IEq:
     case Opcode::INe:
     case Opcode::ICmp:
+    case Opcode::IBitAnd:
+    case Opcode::IBitOr:
+    case Opcode::IBitXor:
+    case Opcode::IShl:
+    case Opcode::IShr:
       return quick_operand_reg_equals(insn, 1, reg) ||
              quick_operand_reg_equals(insn, 2, reg);
     case Opcode::IAddK:
@@ -9055,6 +9118,11 @@ private:
     case Opcode::IEqK:
     case Opcode::INeK:
     case Opcode::ICmpK:
+    case Opcode::IBitAndK:
+    case Opcode::IBitOrK:
+    case Opcode::IBitXorK:
+    case Opcode::IShlK:
+    case Opcode::IShrK:
       return quick_operand_reg_equals(insn, 1, reg);
     case Opcode::JumpIfTrue:
     case Opcode::JumpIfFalse:
@@ -9129,6 +9197,11 @@ private:
     case Opcode::IEq:
     case Opcode::INe:
     case Opcode::ICmp:
+    case Opcode::IBitAnd:
+    case Opcode::IBitOr:
+    case Opcode::IBitXor:
+    case Opcode::IShl:
+    case Opcode::IShr:
     case Opcode::IAddK:
     case Opcode::ISubK:
     case Opcode::ILtK:
@@ -9142,6 +9215,11 @@ private:
     case Opcode::IEqK:
     case Opcode::INeK:
     case Opcode::ICmpK:
+    case Opcode::IBitAndK:
+    case Opcode::IBitOrK:
+    case Opcode::IBitXorK:
+    case Opcode::IShlK:
+    case Opcode::IShrK:
     case Opcode::PPrepSeq:
     case Opcode::PPrepMap:
     case Opcode::PGetIndex:
@@ -9359,6 +9437,11 @@ private:
     case Opcode::IEq:
     case Opcode::INe:
     case Opcode::ICmp:
+    case Opcode::IBitAnd:
+    case Opcode::IBitOr:
+    case Opcode::IBitXor:
+    case Opcode::IShl:
+    case Opcode::IShr:
     case Opcode::IAddK:
     case Opcode::ISubK:
     case Opcode::ILtK:
@@ -9372,6 +9455,11 @@ private:
     case Opcode::IEqK:
     case Opcode::INeK:
     case Opcode::ICmpK:
+    case Opcode::IBitAndK:
+    case Opcode::IBitOrK:
+    case Opcode::IBitXorK:
+    case Opcode::IShlK:
+    case Opcode::IShrK:
       if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b) &&
           quick_operand_u32(insn, 2, &c)) {
         switch (insn.opcode) {
@@ -9414,6 +9502,21 @@ private:
         case Opcode::ICmp:
           out.quick_opcode = QuickOpcode::ICmp;
           break;
+        case Opcode::IBitAnd:
+          out.quick_opcode = QuickOpcode::IBitAnd;
+          break;
+        case Opcode::IBitOr:
+          out.quick_opcode = QuickOpcode::IBitOr;
+          break;
+        case Opcode::IBitXor:
+          out.quick_opcode = QuickOpcode::IBitXor;
+          break;
+        case Opcode::IShl:
+          out.quick_opcode = QuickOpcode::IShl;
+          break;
+        case Opcode::IShr:
+          out.quick_opcode = QuickOpcode::IShr;
+          break;
         case Opcode::IAddK:
           out.quick_opcode = QuickOpcode::IAddK;
           break;
@@ -9452,6 +9555,21 @@ private:
           break;
         case Opcode::ICmpK:
           out.quick_opcode = QuickOpcode::ICmpK;
+          break;
+        case Opcode::IBitAndK:
+          out.quick_opcode = QuickOpcode::IBitAndK;
+          break;
+        case Opcode::IBitOrK:
+          out.quick_opcode = QuickOpcode::IBitOrK;
+          break;
+        case Opcode::IBitXorK:
+          out.quick_opcode = QuickOpcode::IBitXorK;
+          break;
+        case Opcode::IShlK:
+          out.quick_opcode = QuickOpcode::IShlK;
+          break;
+        case Opcode::IShrK:
+          out.quick_opcode = QuickOpcode::IShrK;
           break;
         default:
           break;
@@ -9578,6 +9696,21 @@ private:
         } else if (selector == "<=>") {
           out.quick_opcode = QuickOpcode::SendICmp;
           out.opcode = Opcode::ICmp;
+        } else if (selector == "&") {
+          out.quick_opcode = QuickOpcode::SendIBitAnd;
+          out.opcode = Opcode::IBitAnd;
+        } else if (selector == "|") {
+          out.quick_opcode = QuickOpcode::SendIBitOr;
+          out.opcode = Opcode::IBitOr;
+        } else if (selector == "^") {
+          out.quick_opcode = QuickOpcode::SendIBitXor;
+          out.opcode = Opcode::IBitXor;
+        } else if (selector == "<<") {
+          out.quick_opcode = QuickOpcode::SendIShl;
+          out.opcode = Opcode::IShl;
+        } else if (selector == ">>") {
+          out.quick_opcode = QuickOpcode::SendIShr;
+          out.opcode = Opcode::IShr;
         } else if (collection_selector == "[]") {
           out.quick_opcode = QuickOpcode::SendSeqIndex;
         } else if (collection_selector == "first") {
@@ -10718,6 +10851,48 @@ private:
         }
         ++frame.pc;
         return true;
+      case Opcode::IBitAnd:
+      case Opcode::IBitAndK:
+        if (!write_integer_reg_unboxed(frame, dst,
+                                       bit_and_int64(fast_lhs, fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IBitOr:
+      case Opcode::IBitOrK:
+        if (!write_integer_reg_unboxed(frame, dst,
+                                       bit_or_int64(fast_lhs, fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IBitXor:
+      case Opcode::IBitXorK:
+        if (!write_integer_reg_unboxed(frame, dst,
+                                       bit_xor_int64(fast_lhs, fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      case Opcode::IShl:
+      case Opcode::IShlK:
+      case Opcode::IShr:
+      case Opcode::IShrK:
+        if (fast_rhs < 0 || fast_rhs >= 64) {
+          set_fault(frame, "ArgumentError",
+                    "shift amount must be between 0 and 63");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(
+                frame, dst,
+                (opcode == Opcode::IShl || opcode == Opcode::IShlK)
+                    ? shl_int64(fast_lhs, fast_rhs)
+                    : shr_int64(fast_lhs, fast_rhs))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
       default:
         set_fault(frame, "VMError", "unsupported integer opcode");
         return false;
@@ -10783,6 +10958,21 @@ private:
       case Opcode::ICmp:
       case Opcode::ICmpK:
         return "<=>";
+      case Opcode::IBitAnd:
+      case Opcode::IBitAndK:
+        return "&";
+      case Opcode::IBitOr:
+      case Opcode::IBitOrK:
+        return "|";
+      case Opcode::IBitXor:
+      case Opcode::IBitXorK:
+        return "^";
+      case Opcode::IShl:
+      case Opcode::IShlK:
+        return "<<";
+      case Opcode::IShr:
+      case Opcode::IShrK:
+        return ">>";
       default:
         return "";
       }
@@ -10926,6 +11116,45 @@ private:
     case Opcode::ICmp:
     case Opcode::ICmpK:
       if (!write_integer_reg_unboxed(frame, dst, compare_int64(lhs, rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IBitAnd:
+    case Opcode::IBitAndK:
+      if (!write_integer_reg_unboxed(frame, dst, bit_and_int64(lhs, rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IBitOr:
+    case Opcode::IBitOrK:
+      if (!write_integer_reg_unboxed(frame, dst, bit_or_int64(lhs, rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IBitXor:
+    case Opcode::IBitXorK:
+      if (!write_integer_reg_unboxed(frame, dst, bit_xor_int64(lhs, rhs))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    case Opcode::IShl:
+    case Opcode::IShlK:
+    case Opcode::IShr:
+    case Opcode::IShrK:
+      if (rhs < 0 || rhs >= 64) {
+        set_fault(frame, "ArgumentError",
+                  "shift amount must be between 0 and 63");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(
+              frame, dst,
+              (opcode == Opcode::IShl || opcode == Opcode::IShlK)
+                  ? shl_int64(lhs, rhs)
+                  : shr_int64(lhs, rhs))) {
         return false;
       }
       ++frame.pc;
@@ -17918,18 +18147,21 @@ private:
     const bool lazy_seq_collection_selector = sequence_collection_selector;
     const bool numeric_selector =
         selector_in({"+", "-", "*", "/", "%", "//", ">", "<",
-                     ">=", "<=", "==", "!=", "<=>", "u+", "u-"});
+                     ">=", "<=", "==", "!=", "<=>", "&", "|", "^", "<<",
+                     ">>", "**", "u+", "u-"});
     const bool integer_times_selector =
         receiver.is_integer() && selector == "times";
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          sequence_collection_selector) ||
+        (receiver.is_list() && collection_selector == "[]=") ||
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() && collection_selector_in({"empty?",
                                                       "[]",
                                                       "[]?",
+                                                      "[]=",
                                                       "deconstruct_keys",
                                                       "keys",
                                                       "values",
@@ -17973,6 +18205,56 @@ private:
       }
       const bool equal = value_equals(receiver, args[0]);
       *out = Value::boolean(selector == "!=" ? !equal : equal);
+      return SendStatus::Matched;
+    }
+
+    if (receiver.is_list() && collection_selector == "[]=") {
+      std::int64_t index = 0;
+      if (!require_arity(2) || !require_no_block() ||
+          !require_integer_arg(0, &index)) {
+        return SendStatus::Faulted;
+      }
+      const std::shared_ptr<ListValue> list = receiver.as_list();
+      if (list == nullptr) {
+        set_fault(frame, "TypeError", "list value is null");
+        return SendStatus::Faulted;
+      }
+      if (list->frozen) {
+        set_fault(frame, "FrozenError", "cannot modify frozen list");
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::size_t> normalized =
+          normalize_sequence_index(frame, index, list->items.size(), "list");
+      if (!normalized.has_value()) {
+        return SendStatus::Faulted;
+      }
+      list->items[*normalized] = args[1];
+      *out = args[1];
+      return SendStatus::Matched;
+    }
+
+    if (receiver.is_map() && collection_selector == "[]=") {
+      if (!require_arity(2) || !require_no_block()) {
+        return SendStatus::Faulted;
+      }
+      const std::shared_ptr<MapValue> map = receiver.as_map();
+      if (map == nullptr) {
+        set_fault(frame, "TypeError", "map value is null");
+        return SendStatus::Faulted;
+      }
+      if (map->frozen) {
+        set_fault(frame, "FrozenError", "cannot modify frozen map");
+        return SendStatus::Faulted;
+      }
+      CollectionKeyError error;
+      std::optional<Value> key = normalize_map_key(args[0], &error);
+      if (!key.has_value()) {
+        set_fault(frame, error.error_name, error.message);
+        return SendStatus::Faulted;
+      }
+      upsert_normalized_map_entry(&map->entries,
+                                  MapEntry{std::move(*key), args[1]});
+      *out = args[1];
       return SendStatus::Matched;
     }
 
@@ -19468,6 +19750,53 @@ private:
         *out = Value::integer(floor_div_int64(lhs, rhs));
         return SendStatus::Matched;
       }
+      if (selector == "**") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_float()) {
+          *out =
+              Value::floating(std::pow(static_cast<double>(lhs),
+                                       args[0].as_float()));
+          return SendStatus::Matched;
+        }
+        if (!require_integer_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if (const std::optional<std::int64_t> integer_power =
+                pow_int64_nonnegative(lhs, rhs)) {
+          *out = Value::integer(*integer_power);
+        } else {
+          *out = Value::floating(
+              std::pow(static_cast<double>(lhs), static_cast<double>(rhs)));
+        }
+        return SendStatus::Matched;
+      }
+      if (selector == "&" || selector == "|" || selector == "^" ||
+          selector == "<<" || selector == ">>") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if ((selector == "<<" || selector == ">>") &&
+            (rhs < 0 || rhs >= 64)) {
+          set_fault(frame, "ArgumentError",
+                    "shift amount must be between 0 and 63");
+          return SendStatus::Faulted;
+        }
+        if (selector == "&") {
+          *out = Value::integer(bit_and_int64(lhs, rhs));
+        } else if (selector == "|") {
+          *out = Value::integer(bit_or_int64(lhs, rhs));
+        } else if (selector == "^") {
+          *out = Value::integer(bit_xor_int64(lhs, rhs));
+        } else if (selector == "<<") {
+          *out = Value::integer(shl_int64(lhs, rhs));
+        } else {
+          *out = Value::integer(shr_int64(lhs, rhs));
+        }
+        return SendStatus::Matched;
+      }
       if (selector == ">") {
         if (!require_arity(1) || !require_no_block() ||
             !require_numeric_arg(0, &numeric_rhs)) {
@@ -19594,6 +19923,14 @@ private:
         *out = Value::floating(std::floor(lhs / rhs));
         return SendStatus::Matched;
       }
+      if (selector == "**") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(std::pow(lhs, rhs));
+        return SendStatus::Matched;
+      }
       if (selector == ">") {
         if (!require_arity(1) || !require_no_block() ||
             !require_numeric_arg(0, &rhs)) {
@@ -19654,7 +19991,8 @@ private:
         selector == "/" || selector == "%" || selector == "//" ||
         selector == ">" || selector == "<" || selector == ">=" ||
         selector == "<=" || selector == "==" || selector == "!=" ||
-        selector == "<=>";
+        selector == "<=>" || selector == "&" || selector == "|" ||
+        selector == "^" || selector == "<<" || selector == ">>";
     if (!collection_fast_selector && !integer_selector) {
       return FastSendStatus::NotHandled;
     }
@@ -19766,6 +20104,34 @@ private:
       }
       if (selector == "<=>") {
         return write_integer_reg_unboxed(frame, dst, compare_int64(lhs, rhs))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "&") {
+        return write_integer_reg_unboxed(frame, dst, bit_and_int64(lhs, rhs))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "|") {
+        return write_integer_reg_unboxed(frame, dst, bit_or_int64(lhs, rhs))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "^") {
+        return write_integer_reg_unboxed(frame, dst, bit_xor_int64(lhs, rhs))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (selector == "<<" || selector == ">>") {
+        if (rhs < 0 || rhs >= 64) {
+          set_fault(frame, "ArgumentError",
+                    "shift amount must be between 0 and 63");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(
+                   frame, dst,
+                   selector == "<<" ? shl_int64(lhs, rhs)
+                                    : shr_int64(lhs, rhs))
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
@@ -19970,6 +20336,31 @@ private:
                  : FastSendStatus::Faulted;
     case QuickOpcode::SendICmp:
       return write_integer_reg_unboxed(frame, dst, compare_int64(lhs, rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIBitAnd:
+      return write_integer_reg_unboxed(frame, dst, bit_and_int64(lhs, rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIBitOr:
+      return write_integer_reg_unboxed(frame, dst, bit_or_int64(lhs, rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIBitXor:
+      return write_integer_reg_unboxed(frame, dst, bit_xor_int64(lhs, rhs))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    case QuickOpcode::SendIShl:
+    case QuickOpcode::SendIShr:
+      if (rhs < 0 || rhs >= 64) {
+        set_fault(frame, "ArgumentError",
+                  "shift amount must be between 0 and 63");
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(
+                 frame, dst,
+                 opcode == QuickOpcode::SendIShl ? shl_int64(lhs, rhs)
+                                                 : shr_int64(lhs, rhs))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     default:
@@ -20586,6 +20977,11 @@ private:
       case QuickOpcode::IEq:
       case QuickOpcode::INe:
       case QuickOpcode::ICmp:
+      case QuickOpcode::IBitAnd:
+      case QuickOpcode::IBitOr:
+      case QuickOpcode::IBitXor:
+      case QuickOpcode::IShl:
+      case QuickOpcode::IShr:
         step_integer_binary(frame, *quick, false);
         return;
       case QuickOpcode::IAddK:
@@ -20601,6 +20997,11 @@ private:
       case QuickOpcode::IEqK:
       case QuickOpcode::INeK:
       case QuickOpcode::ICmpK:
+      case QuickOpcode::IBitAndK:
+      case QuickOpcode::IBitOrK:
+      case QuickOpcode::IBitXorK:
+      case QuickOpcode::IShlK:
+      case QuickOpcode::IShrK:
         step_integer_binary(frame, *quick, true);
         return;
       case QuickOpcode::ILtJumpIfFalse:
@@ -20623,7 +21024,12 @@ private:
       case QuickOpcode::SendIGe:
       case QuickOpcode::SendIEq:
       case QuickOpcode::SendINe:
-      case QuickOpcode::SendICmp: {
+      case QuickOpcode::SendICmp:
+      case QuickOpcode::SendIBitAnd:
+      case QuickOpcode::SendIBitOr:
+      case QuickOpcode::SendIBitXor:
+      case QuickOpcode::SendIShl:
+      case QuickOpcode::SendIShr: {
         const FastSendStatus status = step_quick_integer_send(
             frame, quick->quick_opcode, quick->a, quick->b, quick->c);
         if (status == FastSendStatus::Faulted) {
@@ -21672,6 +22078,11 @@ private:
     case Opcode::IEq:
     case Opcode::INe:
     case Opcode::ICmp:
+    case Opcode::IBitAnd:
+    case Opcode::IBitOr:
+    case Opcode::IBitXor:
+    case Opcode::IShl:
+    case Opcode::IShr:
       step_integer_binary(frame, insn, false);
       return;
     case Opcode::IAddK:
@@ -21687,6 +22098,11 @@ private:
     case Opcode::IEqK:
     case Opcode::INeK:
     case Opcode::ICmpK:
+    case Opcode::IBitAndK:
+    case Opcode::IBitOrK:
+    case Opcode::IBitXorK:
+    case Opcode::IShlK:
+    case Opcode::IShrK:
       step_integer_binary(frame, insn, true);
       return;
     case Opcode::Send:

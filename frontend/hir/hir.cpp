@@ -2134,6 +2134,26 @@ private:
           node->list_field("kw_args", {});
           return node;
         }
+        if (last_tail.kind == "AstTailIndex" &&
+            !bool_value(last_tail, "optional")) {
+          const ast::Expr *index_expr = node_field(last_tail, "index_expr");
+          if (index_expr == nullptr) {
+            auto node = make_node("HUnsupported", expr.span);
+            node->string_field("source_kind", "assign:index-missing");
+            return node;
+          }
+          auto node = make_node("HSend", expr.span);
+          node->node_field(
+              "receiver",
+              lower_postfix_chain_with_limit(*left, tails->values.size() - 1U));
+          node->string_field("selector", "[]=");
+          std::vector<std::unique_ptr<Node>> pos_args;
+          pos_args.push_back(lower_expr(*index_expr));
+          pos_args.push_back(lower_expr(*right));
+          node->list_field("pos_args", std::move(pos_args));
+          node->list_field("kw_args", {});
+          return node;
+        }
       }
     }
 

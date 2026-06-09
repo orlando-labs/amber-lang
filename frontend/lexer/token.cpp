@@ -115,6 +115,8 @@ const char *token_kind_name(TokenKind kind) {
     return "RBRACE";
   case TokenKind::Pipe:
     return "PIPE";
+  case TokenKind::Ampersand:
+    return "AMPERSAND";
   case TokenKind::Caret:
     return "CARET";
   case TokenKind::Bang:
@@ -129,6 +131,8 @@ const char *token_kind_name(TokenKind kind) {
     return "ARROW";
   case TokenKind::Star:
     return "STAR";
+  case TokenKind::StarStar:
+    return "STAR_STAR";
   case TokenKind::Slash:
     return "SLASH";
   case TokenKind::SlashSlash:
@@ -145,12 +149,16 @@ const char *token_kind_name(TokenKind kind) {
     return "BANG_EQUAL";
   case TokenKind::Less:
     return "LESS";
+  case TokenKind::LessLess:
+    return "LESS_LESS";
   case TokenKind::LessEqualGreater:
     return "LESS_EQUAL_GREATER";
   case TokenKind::LessEqual:
     return "LESS_EQUAL";
   case TokenKind::Greater:
     return "GREATER";
+  case TokenKind::GreaterGreater:
+    return "GREATER_GREATER";
   case TokenKind::GreaterEqual:
     return "GREATER_EQUAL";
   case TokenKind::At:

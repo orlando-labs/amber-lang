@@ -816,12 +816,16 @@ private:
                                  : infer_expr(*right_expr, env);
       TypeTerm result = named_type("Any");
       if ((compound_op == "+" || compound_op == "-" || compound_op == "*" ||
-           compound_op == "/" || compound_op == "%" || compound_op == "//") &&
+           compound_op == "/" || compound_op == "%" || compound_op == "//" ||
+           compound_op == "**") &&
           (is_named(left, "Float") || is_named(right, "Float"))) {
         result = named_type("Float");
       } else if (compound_op == "+" || compound_op == "-" ||
                  compound_op == "*" || compound_op == "/" ||
-                 compound_op == "%" || compound_op == "//") {
+                 compound_op == "%" || compound_op == "//" ||
+                 compound_op == "&" || compound_op == "|" ||
+                 compound_op == "^" || compound_op == "<<" ||
+                 compound_op == ">>" || compound_op == "**") {
         result = named_type("Int");
       }
       if (left_expr != nullptr && left_expr->kind == "AstName") {
@@ -862,12 +866,13 @@ private:
       return named_type("Int");
     }
     if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%" ||
-         op == "//") &&
+         op == "//" || op == "**") &&
         (is_named(left, "Float") || is_named(right, "Float"))) {
       return named_type("Float");
     }
     if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" ||
-        op == "//") {
+        op == "//" || op == "&" || op == "|" || op == "^" || op == "<<" ||
+        op == ">>" || op == "**") {
       return named_type("Int");
     }
     return named_type("Any");

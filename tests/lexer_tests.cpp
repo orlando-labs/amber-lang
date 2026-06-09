@@ -211,11 +211,17 @@ void test_w13_comments_ranges_and_numbers() {
 }
 
 void test_new_operator_tokens() {
-  expect_kinds("floor division, modulo, spaceship",
-               "a // b % c <=> d\n",
+  expect_kinds("floor division, modulo, spaceship, power, bitwise, shifts",
+               "a // b % c <=> d ** e & f ^ g | h << i >> j\n",
                {TokenKind::Identifier, TokenKind::SlashSlash,
                 TokenKind::Identifier, TokenKind::Percent,
                 TokenKind::Identifier, TokenKind::LessEqualGreater,
+                TokenKind::Identifier, TokenKind::StarStar,
+                TokenKind::Identifier, TokenKind::Ampersand,
+                TokenKind::Identifier, TokenKind::Caret,
+                TokenKind::Identifier, TokenKind::Pipe,
+                TokenKind::Identifier, TokenKind::LessLess,
+                TokenKind::Identifier, TokenKind::GreaterGreater,
                 TokenKind::Identifier, TokenKind::Newline, TokenKind::Eof});
 }
 

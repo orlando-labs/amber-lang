@@ -245,6 +245,25 @@ void test_execute_emitted_collection_literals() {
                  symbol_id_or_die(map_result.module, "ok"),
          "symbol literal map value");
 
+  amber::bytecode::EmitResult index_store_result =
+      emit_ok("items = [1, 2, 3]\n"
+              "items[1] = 9\n"
+              "lookup = {answer: 1}\n"
+              "lookup[:answer] = items[1] + 1\n"
+              "[items[0], items[1], lookup[:answer]]\n");
+  amber::runtime::ExecutionResult index_store_exec =
+      amber::runtime::execute_code(index_store_result.module,
+                                   index_store_result.module.init.entry_code_id);
+  expect(index_store_exec.ok(), "index assignment execution failed");
+  const std::shared_ptr<amber::runtime::ListValue> index_store_items =
+      index_store_exec.value.as_list();
+  expect(index_store_items != nullptr && index_store_items->items.size() == 3,
+         "index assignment result shape");
+  expect(index_store_items->items[0].as_integer() == 1 &&
+             index_store_items->items[1].as_integer() == 9 &&
+             index_store_items->items[2].as_integer() == 10,
+         "index assignment mutates list and map");
+
   amber::bytecode::EmitResult size_property_result =
       emit_ok("items = [1, 2, 3]\n"
               "lookup = {a: 1, b: 2}\n"
@@ -1436,14 +1455,15 @@ void test_execute_emitted_integer_specialized_ops() {
               "neg = zero - x\n"
               "[x + y, x - 4, x * y, x / y, x % y, neg % y, x // y, "
               "neg // y, x < y, x > 4, x <= 10, x >= y, x == 10, "
-              "x != y, x <=> y, y <=> x, y <=> 3]\n");
+              "x != y, x <=> y, y <=> x, y <=> 3, x & y, x | y, "
+              "x ^ y, x << 2, x >> 1, 2 ** 10, 2 ** -1, 2.0 ** 3]\n");
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       emit_result.module, emit_result.module.init.entry_code_id);
   expect(exec.ok(), "specialized integer ops execution failed");
   expect(exec.value.is_list(), "specialized integer ops should return list");
   const std::shared_ptr<amber::runtime::ListValue> values =
       exec.value.as_list();
-  expect(values != nullptr && values->items.size() == 17,
+  expect(values != nullptr && values->items.size() == 25,
          "specialized integer ops list size");
   expect(values->items[0].is_integer() && values->items[0].as_integer() == 13,
          "IADD should add integer registers");
@@ -1479,6 +1499,23 @@ void test_execute_emitted_integer_specialized_ops() {
          "ICMP should return -1 for lesser lhs");
   expect(values->items[16].is_integer() && values->items[16].as_integer() == 0,
          "ICMPK should return 0 for equal operands");
+  expect(values->items[17].is_integer() && values->items[17].as_integer() == 2,
+         "IBITAND should and integer registers");
+  expect(values->items[18].is_integer() && values->items[18].as_integer() == 11,
+         "IBITOR should or integer registers");
+  expect(values->items[19].is_integer() && values->items[19].as_integer() == 9,
+         "IBITXOR should xor integer registers");
+  expect(values->items[20].is_integer() && values->items[20].as_integer() == 40,
+         "ISHLK should shift left");
+  expect(values->items[21].is_integer() && values->items[21].as_integer() == 5,
+         "ISHRK should shift right");
+  expect(values->items[22].is_integer() &&
+             values->items[22].as_integer() == 1024,
+         "Int#** should return integer for non-negative exponent");
+  expect(values->items[23].is_float() && values->items[23].as_float() == 0.5,
+         "Int#** should return float for negative exponent");
+  expect(values->items[24].is_float() && values->items[24].as_float() == 8.0,
+         "Float#** should return float");
 }
 
 void test_execute_emitted_numeric_equality_and_new_ops() {
@@ -1516,7 +1553,8 @@ void test_execute_emitted_numeric_equality_and_new_ops() {
 void test_execute_emitted_integer_send_fast_path_new_ops() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("def ops(x, y):\n"
-              "  [x % y, x // y, x == y, x != y, x <=> y]\n");
+              "  [x % y, x // y, x == y, x != y, x <=> y, x & y, "
+              "x | y, x ^ y, x << y, x >> 1, x ** y]\n");
   expect(emit_result.module.methods.size() == 1, "expected ops method");
 
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
@@ -1526,7 +1564,7 @@ void test_execute_emitted_integer_send_fast_path_new_ops() {
   expect(exec.value.is_list(), "integer send fast path should return list");
   const std::shared_ptr<amber::runtime::ListValue> values =
       exec.value.as_list();
-  expect(values != nullptr && values->items.size() == 5,
+  expect(values != nullptr && values->items.size() == 11,
          "integer send fast path list size");
   expect(values->items[0].is_integer() && values->items[0].as_integer() == 1,
          "integer SEND modulo should execute");
@@ -1538,6 +1576,19 @@ void test_execute_emitted_integer_send_fast_path_new_ops() {
          "integer SEND inequality should execute");
   expect(values->items[4].is_integer() && values->items[4].as_integer() == 1,
          "integer SEND spaceship should execute");
+  expect(values->items[5].is_integer() && values->items[5].as_integer() == 2,
+         "integer SEND bit and should execute");
+  expect(values->items[6].is_integer() && values->items[6].as_integer() == 11,
+         "integer SEND bit or should execute");
+  expect(values->items[7].is_integer() && values->items[7].as_integer() == 9,
+         "integer SEND xor should execute");
+  expect(values->items[8].is_integer() && values->items[8].as_integer() == 80,
+         "integer SEND left shift should execute");
+  expect(values->items[9].is_integer() && values->items[9].as_integer() == 5,
+         "integer SEND right shift should execute");
+  expect(values->items[10].is_integer() &&
+             values->items[10].as_integer() == 1000,
+         "integer SEND power should execute");
 }
 
 void test_runtime_integer_sidecar_result_returns_materialized_value() {
