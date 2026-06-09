@@ -1520,6 +1520,28 @@ void test_try_rescue_ensure_lowering() {
   expect(found_rescue_local, "rescue binding becomes procedure local");
 }
 
+void test_throw_catch_lowering() {
+  const amber::hir::Program program =
+      lower_ok("catch :enough:\n"
+               "  throw :enough, 42\n");
+
+  const amber::hir::Procedure *module_init =
+      procedure_by_name(program, "__module_init__");
+  expect(module_init != nullptr, "module init exists for catch lowering");
+  expect(contains_kind(*module_init->body, "HCatch"), "HCatch is emitted");
+  expect(contains_kind(*module_init->body, "HThrow"), "HThrow is emitted");
+
+  const amber::ast::Expr *stmt = list_item(*module_init->body, "items", 0);
+  expect(stmt != nullptr && stmt->kind == "HLastSet", "catch stmt lowers");
+  const amber::ast::Expr *catch_expr = node_field(*stmt, "expr");
+  expect(catch_expr != nullptr && catch_expr->kind == "HCatch",
+         "catch expression is HLastSet payload");
+  expect(node_field(*catch_expr, "tag") != nullptr,
+         "HCatch keeps tag expression");
+  expect(node_field(*catch_expr, "body") != nullptr,
+         "HCatch keeps body expression");
+}
+
 } // namespace
 
 int main() {
@@ -1554,6 +1576,7 @@ int main() {
   test_nested_capture_propagation();
   test_property_lowering();
   test_try_rescue_ensure_lowering();
+  test_throw_catch_lowering();
   std::cout << "hir_tests: ok\n";
   return 0;
 }

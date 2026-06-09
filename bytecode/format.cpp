@@ -1683,6 +1683,9 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x36:
     opcode = Opcode::Safepoint;
     return true;
+  case 0x37:
+    opcode = Opcode::Throw;
+    return true;
   case 0x40:
     opcode = Opcode::PPrepSeq;
     return true;
@@ -3386,11 +3389,16 @@ InstructionFlow verify_instruction_flow(
     break;
   }
   case Opcode::SetLast:
-  case Opcode::Raise: {
-    if (operand_count_is(instruction, 1, errors)) {
-      add_register_read(code, instruction, 0, flow, errors);
+  case Opcode::Raise:
+  case Opcode::Throw: {
+    const std::size_t expected = instruction.opcode == Opcode::Throw ? 2U : 1U;
+    if (operand_count_is(instruction, expected, errors)) {
+      for (std::size_t index = 0; index < expected; ++index) {
+        add_register_read(code, instruction, index, flow, errors);
+      }
     }
-    if (instruction.opcode == Opcode::Raise) {
+    if (instruction.opcode == Opcode::Raise ||
+        instruction.opcode == Opcode::Throw) {
       falls_through = false;
     }
     break;
@@ -4299,7 +4307,11 @@ void verify_module(BcModule &module, std::vector<VerifyError> &errors) {
         add_verify_error(errors, "BC1304", "handler range is invalid",
                          SectionKind::Code, 0);
       }
-      if (!code_id_exists(code_ids, entry.handler_code_id)) {
+      const std::uint32_t kind =
+          entry.flags == 0U ? kHandlerKindLegacyRescue
+                            : handler_kind(entry.flags);
+      if (kind != kHandlerKindCatch &&
+          !code_id_exists(code_ids, entry.handler_code_id)) {
         add_verify_error(errors, "BC1204", "handler references unknown code id",
                          SectionKind::Code, 0);
       }
@@ -5277,6 +5289,8 @@ std::string opcode_name(Opcode opcode) {
     return "RAISE";
   case Opcode::Safepoint:
     return "SAFEPOINT";
+  case Opcode::Throw:
+    return "THROW";
   case Opcode::PPrepSeq:
     return "P_PREP_SEQ";
   case Opcode::PPrepMap:

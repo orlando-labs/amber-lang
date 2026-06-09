@@ -1808,6 +1808,22 @@ private:
       }
       return node;
     }
+    if (expr.kind == "AstThrow") {
+      auto node = make_node("HThrow", expr.span);
+      if (const ast::Expr *tag = node_field(expr, "tag")) {
+        node->node_field("tag", lower_expr(*tag));
+      }
+      if (const ast::Expr *value = node_field(expr, "value")) {
+        node->node_field("value", lower_expr(*value));
+      }
+      return node;
+    }
+    if (expr.kind == "AstCatch") {
+      auto node = make_node("HCatch", expr.span);
+      node->node_field("tag", lower_expr(*node_field_required(expr, "tag")));
+      node->node_field("body", lower_body(list_field(expr, "body"), expr.span));
+      return node;
+    }
     if (expr.kind == "AstTry") {
       return lower_try_like(expr);
     }

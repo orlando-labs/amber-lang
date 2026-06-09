@@ -955,6 +955,23 @@ private:
       }
       return;
     }
+    if (expr.kind == "AstThrow") {
+      if (const ast::Expr *tag = node_field(expr, "tag")) {
+        visit_expr(scope_index, *tag);
+      }
+      if (const ast::Expr *value = node_field(expr, "value")) {
+        visit_expr(scope_index, *value);
+      }
+      return;
+    }
+    if (expr.kind == "AstCatch") {
+      if (const ast::Expr *tag = node_field(expr, "tag")) {
+        visit_expr(scope_index, *tag);
+      }
+      visit_branch_scope(scope_index, "catch", list_field(expr, "body"),
+                         expr.span);
+      return;
+    }
     if (expr.kind == "AstTry") {
       if (const ast::ListField *body = list_field(expr, "body")) {
         visit_items(scope_index, body->values);

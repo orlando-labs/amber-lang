@@ -57,6 +57,8 @@ const char *opcode_stub_kind(bytecode::Opcode opcode) {
     return "pattern_protocol";
   case bytecode::Opcode::Raise:
     return "raise";
+  case bytecode::Opcode::Throw:
+    return "throw";
   default:
     return "";
   }
@@ -98,6 +100,9 @@ std::string helper_for_stub_kind(const std::string &kind) {
   }
   if (kind == "raise") {
     return "amber_runtime_raise";
+  }
+  if (kind == "throw") {
+    return "amber_runtime_throw";
   }
   return "amber_runtime_slow_stub";
 }
@@ -313,6 +318,9 @@ std::string slowpath_reason_for_stub_kind(const std::string &kind) {
   }
   if (kind == "raise") {
     return "language raise path preserves runtime exception object";
+  }
+  if (kind == "throw") {
+    return "language throw path preserves tagged non-exception unwind";
   }
   return "runtime helper slow path";
 }

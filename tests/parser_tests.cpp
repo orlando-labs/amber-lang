@@ -1096,6 +1096,37 @@ void test_try_rescue_ensure_forms() {
          "pipe-union rescue matcher spelling is diagnosed");
 }
 
+void test_throw_catch_forms() {
+  std::unique_ptr<Expr> thrown = parse_ok("throw :enough, 42\n");
+  expect(thrown->kind == "AstThrow", "throw expression parses");
+  expect(node_field(*thrown, "tag").kind == "AstLiteral",
+         "throw tag parses as literal");
+  expect(string_field(node_field(*thrown, "tag"), "token") == "SYMBOL",
+         "throw symbol tag token");
+  expect(string_field(node_field(*thrown, "tag"), "value") == "enough",
+         "throw symbol tag value");
+  expect(node_field(*thrown, "value").kind == "AstLiteral",
+         "throw payload parses");
+
+  std::unique_ptr<Expr> paren_catch =
+      parse_ok("catch(:enough):\n"
+               "  1\n");
+  expect(paren_catch->kind == "AstCatch", "paren catch expression parses");
+  expect(string_field(node_field(*paren_catch, "tag"), "value") == "enough",
+         "paren catch tag parses");
+  expect(list_field(*paren_catch, "body").values.size() == 1,
+         "paren catch body parses");
+
+  std::unique_ptr<Expr> bare_catch =
+      parse_ok("catch :enough:\n"
+               "  1\n");
+  expect(bare_catch->kind == "AstCatch", "bare catch expression parses");
+  expect(string_field(node_field(*bare_catch, "tag"), "value") == "enough",
+         "bare catch tag parses");
+  expect(list_field(*bare_catch, "body").values.size() == 1,
+         "bare catch body parses");
+}
+
 void test_typed_signature_surface() {
   const std::string source =
       "def load(path as Str?, headers as Map[Str, Str]:) -> Result[Str, Err]:\n"
@@ -1162,6 +1193,7 @@ int main() {
   test_property_keywords_are_contextual_names();
   test_control_flow_forms();
   test_try_rescue_ensure_forms();
+  test_throw_catch_forms();
   test_typed_signature_surface();
   std::cout << "parser_tests: ok\n";
   return 0;

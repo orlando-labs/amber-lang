@@ -6589,6 +6589,7 @@ using amber::bytecode::handler_result_slot;
 using amber::bytecode::kHandlerKindEnsure;
 using amber::bytecode::kHandlerKindLegacyRescue;
 using amber::bytecode::kHandlerKindRescue;
+using amber::bytecode::kHandlerKindCatch;
 
 constexpr std::uint32_t kMethodFlagInstance =
     amber::bytecode::kMethodFlagInstance;
@@ -7414,6 +7415,16 @@ struct QuickCode {
   std::vector<QuickInsn> instructions;
 };
 
+struct PendingThrow {
+  Value tag = Value::null();
+  Value value = Value::null();
+};
+
+struct PreservedRegister {
+  std::uint32_t reg = 0;
+  Value value = Value::null();
+};
+
 struct Frame {
   const BcCode *code = nullptr;
   const QuickCode *quick_code = nullptr;
@@ -7431,6 +7442,8 @@ struct Frame {
   std::optional<Value> return_override;
   bool merge_registers_to_caller = false;
   std::optional<Value> pending_exception_on_return;
+  std::optional<PendingThrow> pending_throw_on_return;
+  std::vector<PreservedRegister> preserved_registers_on_return;
   std::unordered_map<std::uint32_t, PreparedSeqState> prepared_seq_regs;
   std::unordered_map<std::uint32_t, PreparedMapState> prepared_map_regs;
   std::unordered_map<std::uint32_t, Value> pending_pattern_bindings;
@@ -8575,6 +8588,14 @@ private:
     if (frame.pending_exception_on_return.has_value()) {
       append_value_root(roots, *frame.pending_exception_on_return);
     }
+    if (frame.pending_throw_on_return.has_value()) {
+      append_value_root(roots, frame.pending_throw_on_return->tag);
+      append_value_root(roots, frame.pending_throw_on_return->value);
+    }
+    for (const PreservedRegister &preserved :
+         frame.preserved_registers_on_return) {
+      append_value_root(roots, preserved.value);
+    }
     for (const auto &[reg, value] : frame.pending_pattern_bindings) {
       (void)reg;
       append_value_root(roots, value);
@@ -8834,6 +8855,9 @@ private:
     case Opcode::Return:
     case Opcode::TypeCheck:
       return quick_operand_reg_equals(insn, 0, reg);
+    case Opcode::Throw:
+      return quick_operand_reg_equals(insn, 0, reg) ||
+             quick_operand_reg_equals(insn, 1, reg);
     case Opcode::StoreUpval:
       return quick_operand_reg_equals(insn, 1, reg);
     case Opcode::LoadIvar:
@@ -9141,6 +9165,7 @@ private:
     case Opcode::JumpIfNull:
     case Opcode::Return:
     case Opcode::Raise:
+    case Opcode::Throw:
     case Opcode::Safepoint:
     case Opcode::PCheckEq:
     case Opcode::PCheckPin:
@@ -9211,6 +9236,7 @@ private:
       return quick_add_target_successor(code, insn, 2, out);
     case Opcode::Return:
     case Opcode::Raise:
+    case Opcode::Throw:
       return true;
     case Opcode::PFail: {
       std::int64_t mode = kPatternFailModeMatchError;
@@ -10146,6 +10172,8 @@ private:
     frame.return_override.reset();
     frame.merge_registers_to_caller = false;
     frame.pending_exception_on_return.reset();
+    frame.pending_throw_on_return.reset();
+    frame.preserved_registers_on_return.clear();
     frame.prepared_seq_regs.clear();
     frame.prepared_map_regs.clear();
     frame.pending_pattern_bindings.clear();
@@ -10170,6 +10198,8 @@ private:
     frame.return_override.reset();
     frame.merge_registers_to_caller = false;
     frame.pending_exception_on_return.reset();
+    frame.pending_throw_on_return.reset();
+    frame.preserved_registers_on_return.clear();
     frame.prepared_seq_regs.clear();
     frame.prepared_map_regs.clear();
     frame.pending_pattern_bindings.clear();
@@ -15277,14 +15307,35 @@ private:
                          block, dst);
   }
 
+  enum class UnwindReason { Exception, Throw };
+
+  static std::uint32_t handler_entry_kind(const bytecode::HandlerEntry &entry) {
+    return entry.flags == 0U ? kHandlerKindLegacyRescue
+                             : handler_kind(entry.flags);
+  }
+
+  static bool handler_accepts_reason(const bytecode::HandlerEntry &entry,
+                                     UnwindReason reason) {
+    const std::uint32_t kind = handler_entry_kind(entry);
+    if (reason == UnwindReason::Exception) {
+      return kind == kHandlerKindLegacyRescue || kind == kHandlerKindRescue ||
+             kind == kHandlerKindEnsure;
+    }
+    return kind == kHandlerKindCatch || kind == kHandlerKindEnsure;
+  }
+
   const bytecode::HandlerEntry *find_handler_for_pc(const Frame &frame,
-                                                    std::uint32_t pc) const {
+                                                    std::uint32_t pc,
+                                                    UnwindReason reason) const {
     if (frame.code == nullptr) {
       return nullptr;
     }
     const bytecode::HandlerEntry *best = nullptr;
     std::uint32_t best_width = std::numeric_limits<std::uint32_t>::max();
     for (const bytecode::HandlerEntry &entry : frame.code->handler_table) {
+      if (!handler_accepts_reason(entry, reason)) {
+        continue;
+      }
       if (entry.protected_from <= pc && pc < entry.protected_to) {
         const std::uint32_t width = entry.protected_to - entry.protected_from;
         if (best == nullptr || width < best_width) {
@@ -15296,14 +15347,15 @@ private:
     return best;
   }
 
-  bool find_unwind_target(std::size_t *frame_index,
+  bool find_unwind_target(UnwindReason reason, std::size_t *frame_index,
                           const bytecode::HandlerEntry **handler) const {
     for (std::size_t index = frames_.size(); index > 0; --index) {
       const std::size_t candidate = index - 1U;
       const Frame &frame = frames_[candidate];
       const std::uint32_t pc =
           frame.active_call_pc.value_or(static_cast<std::uint32_t>(frame.pc));
-      const bytecode::HandlerEntry *entry = find_handler_for_pc(frame, pc);
+      const bytecode::HandlerEntry *entry =
+          find_handler_for_pc(frame, pc, reason);
       if (entry != nullptr) {
         *frame_index = candidate;
         *handler = entry;
@@ -15337,6 +15389,57 @@ private:
         make_list_value(std::move(suppressed_values));
   }
 
+  std::vector<PreservedRegister>
+  snapshot_active_catch_tags(Frame &frame, std::uint32_t pc) {
+    std::vector<PreservedRegister> preserved;
+    if (frame.code == nullptr) {
+      return preserved;
+    }
+    for (const bytecode::HandlerEntry &entry : frame.code->handler_table) {
+      if (handler_entry_kind(entry) != kHandlerKindCatch) {
+        continue;
+      }
+      if (!(entry.protected_from <= pc && pc < entry.protected_to)) {
+        continue;
+      }
+      const std::uint32_t slot = handler_exception_slot(entry.flags);
+      const bool already_preserved =
+          std::any_of(preserved.begin(), preserved.end(),
+                      [slot](const PreservedRegister &item) {
+                        return item.reg == slot;
+                      });
+      if (already_preserved) {
+        continue;
+      }
+      preserved.push_back({slot, read_reg(frame, slot)});
+      if (fault_.has_value()) {
+        return preserved;
+      }
+    }
+    return preserved;
+  }
+
+  bool restore_preserved_registers(
+      Frame &caller, const std::vector<PreservedRegister> &preserved) {
+    for (const PreservedRegister &item : preserved) {
+      if (item.reg >= caller.regs.size()) {
+        set_fault(caller, "VMError", "preserved register is out of range");
+        return false;
+      }
+      if (caller.initialized.size() < caller.regs.size()) {
+        caller.initialized.resize(caller.regs.size(), 0U);
+      }
+      invalidate_integer_reg(caller, item.reg);
+      caller.regs[item.reg] = item.value;
+      caller.initialized[item.reg] = 1U;
+      sync_integer_reg_from_value(caller, item.reg, caller.regs[item.reg]);
+      caller.prepared_seq_regs.erase(item.reg);
+      caller.prepared_map_regs.erase(item.reg);
+      caller.pending_pattern_bindings.erase(item.reg);
+    }
+    return true;
+  }
+
   bool merge_frame_registers(Frame &caller, Frame &completed) {
     materialize_integer_regs(completed);
     const std::size_t count =
@@ -15360,6 +15463,10 @@ private:
                                   caller.regs[index]);
     }
     caller.last_result = completed.last_result;
+    if (!restore_preserved_registers(
+            caller, completed.preserved_registers_on_return)) {
+      return false;
+    }
     return true;
   }
 
@@ -15368,7 +15475,8 @@ private:
     while (frames_.size() > target_index + 1U) {
       Frame completed_frame = std::move(frames_.back());
       frames_.pop_back();
-      if (completed_frame.pending_exception_on_return.has_value()) {
+      if (exception != nullptr &&
+          completed_frame.pending_exception_on_return.has_value()) {
         append_suppressed_exception(*exception,
                                     *completed_frame
                                          .pending_exception_on_return);
@@ -15390,7 +15498,9 @@ private:
       std::uint32_t exception_slot,
       std::optional<std::uint32_t> caller_result_reg,
       bool merge_registers_to_caller,
-      std::optional<Value> pending_exception_on_return) {
+      std::optional<Value> pending_exception_on_return,
+      std::optional<PendingThrow> pending_throw_on_return = std::nullopt,
+      std::vector<PreservedRegister> preserved_registers_on_return = {}) {
     materialize_integer_regs(target);
     Frame handler = acquire_frame(handler_code);
     const std::size_t count =
@@ -15415,6 +15525,9 @@ private:
     handler.caller_result_reg = caller_result_reg;
     handler.merge_registers_to_caller = merge_registers_to_caller;
     handler.pending_exception_on_return = pending_exception_on_return;
+    handler.pending_throw_on_return = pending_throw_on_return;
+    handler.preserved_registers_on_return =
+        std::move(preserved_registers_on_return);
     if (!write_reg(handler, exception_slot, exception)) {
       recycle_frame(std::move(handler));
       return false;
@@ -15445,6 +15558,8 @@ private:
     const std::optional<std::uint32_t> caller_reg = frame.caller_result_reg;
     const std::optional<Value> pending_exception =
         frame.pending_exception_on_return;
+    const std::optional<PendingThrow> pending_throw =
+        frame.pending_throw_on_return;
     Frame completed_frame = std::move(frames_.back());
     frames_.pop_back();
     if (capture_completed_frame) {
@@ -15462,6 +15577,11 @@ private:
                             "unhandled exception " +
                                 value_to_debug_string(*pending_exception,
                                                       &module_));
+      } else if (pending_throw.has_value()) {
+        fault_ = make_fault(
+            completed_frame, "UncaughtThrowError",
+            "uncaught throw " +
+                value_to_debug_string(pending_throw->tag, &module_));
       } else {
         final_value_ = value;
       }
@@ -15482,6 +15602,12 @@ private:
       raise_value(caller, exception);
       return;
     }
+    if (pending_throw.has_value()) {
+      PendingThrow pending = *pending_throw;
+      recycle_frame(std::move(completed_frame));
+      throw_value(caller, pending.tag, pending.value);
+      return;
+    }
     if (!caller_reg.has_value() || !write_reg(caller, *caller_reg, value)) {
       recycle_frame(std::move(completed_frame));
       return;
@@ -15498,7 +15624,8 @@ private:
 
     std::size_t target_index = 0;
     const bytecode::HandlerEntry *handler = nullptr;
-    if (!find_unwind_target(&target_index, &handler)) {
+    if (!find_unwind_target(UnwindReason::Exception, &target_index,
+                            &handler)) {
       const std::string error_name = exception_error_name(active_exception);
       const std::string message =
           "unhandled exception " +
@@ -15532,9 +15659,7 @@ private:
     target.pending_pattern_bindings.clear();
     target.active_call_pc.reset();
     target.pc = handler->handler_pc;
-    const std::uint32_t kind =
-        handler->flags == 0U ? kHandlerKindLegacyRescue
-                             : handler_kind(handler->flags);
+    const std::uint32_t kind = handler_entry_kind(*handler);
     if (kind == kHandlerKindEnsure) {
       return push_handler_frame_from_target(
           target, *handler_code, active_exception,
@@ -15550,6 +15675,88 @@ private:
     push_frame(*handler_code, {active_exception}, target.captures, target.self,
                target.block, 0U);
     return true;
+  }
+
+  bool throw_value(const Frame &throwing_frame, const Value &tag,
+                   const Value &value) {
+    PendingThrow active_throw{tag, value};
+
+    while (true) {
+      std::size_t target_index = 0;
+      const bytecode::HandlerEntry *handler = nullptr;
+      if (!find_unwind_target(UnwindReason::Throw, &target_index, &handler)) {
+        const Frame &fault_frame =
+            frames_.empty() ? throwing_frame : frames_.back();
+        fault_ = make_fault(
+            fault_frame, "UncaughtThrowError",
+            "uncaught throw " +
+                value_to_debug_string(active_throw.tag, &module_));
+        return false;
+      }
+      if (target_index >= frames_.size()) {
+        set_fault(throwing_frame, "VMError", "handler frame is out of range");
+        return false;
+      }
+
+      if (!pop_frames_above_unwind_target(target_index, nullptr)) {
+        return false;
+      }
+
+      Frame &target = frames_[target_index];
+      if (target.code == nullptr ||
+          handler->handler_pc >= target.code->instructions.size()) {
+        set_fault(target, "VMError", "handler pc is out of range");
+        return false;
+      }
+
+      const std::uint32_t unwind_pc =
+          target.active_call_pc.value_or(static_cast<std::uint32_t>(target.pc));
+      const std::uint32_t kind = handler_entry_kind(*handler);
+      std::vector<PreservedRegister> preserved_catch_tags;
+      if (kind == kHandlerKindEnsure) {
+        preserved_catch_tags = snapshot_active_catch_tags(target, unwind_pc);
+        if (fault_.has_value()) {
+          return false;
+        }
+      }
+
+      clear_pattern_state(target);
+      target.pending_pattern_bindings.clear();
+      target.active_call_pc.reset();
+      target.pc = handler->handler_pc;
+
+      if (kind == kHandlerKindEnsure) {
+        const BcCode *handler_code =
+            find_code(module_, handler->handler_code_id);
+        if (handler_code == nullptr) {
+          set_fault(target, "VMError", "handler code id is unknown");
+          return false;
+        }
+        return push_handler_frame_from_target(
+            target, *handler_code, Value::null(),
+            handler_exception_slot(handler->flags), std::nullopt, true,
+            std::nullopt, active_throw, std::move(preserved_catch_tags));
+      }
+
+      if (kind == kHandlerKindCatch) {
+        const std::uint32_t tag_slot = handler_exception_slot(handler->flags);
+        const Value catch_tag = read_reg(target, tag_slot);
+        if (fault_.has_value()) {
+          return false;
+        }
+        if (!value_equals(catch_tag, active_throw.tag)) {
+          continue;
+        }
+        const std::uint32_t result_slot = handler_result_slot(handler->flags);
+        if (!write_reg(target, result_slot, active_throw.value)) {
+          return false;
+        }
+        return true;
+      }
+
+      set_fault(target, "VMError", "invalid throw handler kind");
+      return false;
+    }
   }
 
   bool is_pattern_opcode(Opcode opcode) const {
@@ -21940,6 +22147,21 @@ private:
         return;
       }
       raise_value(frame, exception);
+      return;
+    }
+    case Opcode::Throw: {
+      std::uint32_t tag_reg = 0;
+      std::uint32_t value_reg = 0;
+      if (!operand_u32(frame, insn, 0, &tag_reg) ||
+          !operand_u32(frame, insn, 1, &value_reg)) {
+        return;
+      }
+      const Value tag = read_reg(frame, tag_reg);
+      const Value value = read_reg(frame, value_reg);
+      if (fault_.has_value()) {
+        return;
+      }
+      throw_value(frame, tag, value);
       return;
     }
     case Opcode::CloseUpvalues:

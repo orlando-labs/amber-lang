@@ -1586,7 +1586,7 @@ ensure:
  release_critical_resource()
 ```
 
-`rescue` перехватывает исключения, возникшие в защищённом body. `ensure` выполняется при любом выходе из защищённого body: normal completion, explicit `return`, implicit return через последнее выражение, `raise`, cancellation/unwind и runtime unwinding.
+`rescue` перехватывает исключения, возникшие в защищённом body. `ensure` выполняется при любом выходе из защищённого body: normal completion, explicit `return`, implicit return через последнее выражение, `raise`, `throw`/`catch` unwind, cancellation/unwind и runtime unwinding.
 
 Surface `rescue` / `ensure` являются языковой формой над уже обязательной VM handler-table/unwind моделью. Implementation не должна эмулировать их через обычные вызовы stdlib-функций.
 
@@ -1694,7 +1694,7 @@ rescue:
  body
 ```
 
-`rescue:` без matcher ловит все ordinary language-level exceptions, но не ловит fatal tooling/runtime classes, которые не являются частью normal language-level control flow: `InternalCompilerError`, `InternalVMError`, host fatal aborts и аналогичные runtime-fatal failures.
+`rescue:` без matcher ловит все ordinary language-level exceptions, но не ловит `throw`/`catch` control flow и fatal tooling/runtime classes, которые не являются частью normal language-level exception flow: `InternalCompilerError`, `InternalVMError`, host fatal aborts и аналогичные runtime-fatal failures.
 
 ### 10.5.6. Несколько exception types
 
@@ -1861,6 +1861,16 @@ TryExpr ::=
   RescueClause*
   EnsureClause?
 
+ThrowExpr ::=
+  "throw" Expr ("," Expr)?
+
+CatchExpr ::=
+  "catch" CatchTag ":" Block
+
+CatchTag ::=
+  Expr
+| "(" Expr ")"
+
 DefWithHandlers ::=
   DefHeader ":" Block
   RescueClause*
@@ -1891,6 +1901,7 @@ EnsureClause ::=
 - `ensure` без preceding `try` body или function/method body — compile-time error;
 - empty rescue/ensure body запрещён; для intentional no-op используются `pass` или `noop`;
 - union spelling через `|` внутри rescue matcher list запрещён, даже если такой spelling допустим в обычном `TypeTerm`.
+- `catch` tag может записываться как `catch(:tag):` или без скобок как `catch :tag:`.
 
 ### 10.5.14. Diagnostics
 
@@ -1934,6 +1945,7 @@ use comma-separated rescue matcher list: `rescue TypeError, ArgumentError |e|:`
 Runtime errors:
 
 - invalid raised value: `TypeError`;
+- unmatched `throw`: `UncaughtThrowError`;
 - dynamic rescue matcher that is not an exception class/matcher: `TypeError`;
 - fatal VM/tooling errors remain outside ordinary rescue control flow.
 
@@ -1979,9 +1991,49 @@ HRescue(
 )
 ```
 
-Bytecode lowering must use handler table entries with protected ranges, rescue entries and ensure/finalizer entries. VM unwind walks handler tables, executes pending ensure/finalizer handlers, preserves suppressed exception chains and then either enters a matching rescue handler or continues unhandled exception propagation.
+Bytecode lowering must use handler table entries with protected ranges, rescue entries, catch entries and ensure/finalizer entries. VM unwind walks handler tables, executes pending ensure/finalizer handlers, preserves suppressed exception chains for exception unwinds and then either enters a matching rescue/catch handler or continues unhandled propagation.
 
-### 10.5.16. Compatibility with Contracts Profile `ensure`
+### 10.5.16. Non-exception `throw` / `catch`
+
+`throw` / `catch` provides tagged non-local control transfer. It is not exception handling and does not allocate or raise an `ExceptionObject`.
+
+```amber
+def deep_nested_code:
+  throw :enough, 42
+
+res = catch(:enough):
+  deep_nested_code()
+
+res # => 42
+```
+
+The catch tag may be parenthesized or written directly:
+
+```amber
+catch(:enough):
+  work()
+
+catch :enough:
+  work()
+```
+
+Semantics:
+
+- `catch tag: body` evaluates `tag` once before entering `body`;
+- if `body` completes normally, the `catch` expression returns the normal body result;
+- `throw tag, value` evaluates `tag`, then `value`, then starts tagged unwind;
+- if the `value` operand is omitted, the thrown value is `null`;
+- the nearest active `catch` whose evaluated tag is equal by Amber value equality receives the thrown value and becomes the result of that `catch` expression;
+- catches with non-matching tags are skipped and unwind continues outward;
+- `rescue`, including `rescue:`, never catches `throw`;
+- `ensure` runs during `throw` unwind exactly as for exception unwind;
+- if no matching `catch` exists, runtime raises `UncaughtThrowError`.
+
+If an `ensure` body raises an exception or performs another non-local transfer while a `throw` is pending, the new abrupt completion replaces the pending `throw`. Because `throw` is not an exception, it is not added to `suppressed_exceptions`.
+
+HIR lowering uses `HThrow(tag, value?)` and `HCatch(tag, body)`. Bytecode lowering uses a dedicated `THROW tag_reg value_reg` instruction and a catch handler-table entry carrying the evaluated catch-tag slot and result slot. VM exception unwind must ignore catch entries; VM throw unwind must ignore rescue entries.
+
+### 10.5.17. Compatibility with Contracts Profile `ensure`
 
 Contracts Profile already uses `ensure` as a postcondition statement:
 
@@ -22586,6 +22638,8 @@ AstUntil(cond, body)
 AstDoWhile(body, cond)
 AstLoop(body)
 AstBreak(value?)
+AstThrow(tag, value?)
+AstCatch(tag, body)
 AstCase(scrutinee, arms[], else_body?, strict = false)
 AstBlock(params?, body, implicit_placeholders?)
 AstPostfixChain(base, tails[])
@@ -22703,6 +22757,8 @@ HSeq(items[])
 HIf(cond, then_body, else_body)
 HLoop(kind, cond?, body)
 HBreak(value?)
+HThrow(tag, value?)
+HCatch(tag, body)
 HTry(body, handlers[], ensure?)
 ```
 
@@ -23881,6 +23937,7 @@ IvarIC(
 | `JUMP_IF_NULL reg, label` | переход, если значение `null` |
 | `RETURN reg` | вернуть значение caller'у |
 | `RAISE reg` | поднять исключение |
+| `THROW tag_reg, value_reg` | начать tagged non-exception unwind для `throw` / `catch` |
 | `SAFEPOINT` | poll cancellation / scheduler / GC cooperation |
 
 Для compiled bytecode обязательны такие правила:

@@ -854,6 +854,30 @@ void test_try_rescue_ensure_emission() {
   expect(ensure != nullptr, "ensure handler code exists");
 }
 
+void test_throw_catch_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("catch(:enough):\n"
+              "  throw :enough, 42\n");
+
+  expect(emit_result.module.init.has_entry_code_id,
+         "catch module init emitted");
+  const amber::bytecode::BcCode *code =
+      code_by_id(emit_result.module, emit_result.module.init.entry_code_id);
+  expect(code != nullptr, "catch module init code exists");
+  expect(contains_opcode(*code, amber::bytecode::Opcode::Throw),
+         "throw body emits THROW");
+  expect(code->handler_table.size() == 1,
+         "catch emits one protected handler entry");
+  expect(amber::bytecode::handler_kind(code->handler_table[0].flags) ==
+             amber::bytecode::kHandlerKindCatch,
+         "catch handler kind is encoded");
+
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+}
+
 void test_integer_specialized_send_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("def fast():\n"
@@ -947,6 +971,7 @@ int main() {
   test_object_model_emission();
   test_property_emission();
   test_try_rescue_ensure_emission();
+  test_throw_catch_emission();
   test_integer_specialized_send_emission();
   test_unknown_integer_send_stays_dynamic();
   std::cout << "emitter_tests: ok\n";

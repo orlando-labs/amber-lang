@@ -266,6 +266,38 @@ void test_exception_edges_have_native_root_and_slowpath_metadata() {
          "exception handler pc has a native root map");
 }
 
+void test_throw_edges_have_native_slowpath_metadata() {
+  amber::bytecode::BcModule module;
+  module.format_version = {1, 0};
+  module.language_version = {1, 0};
+
+  amber::bytecode::BcCode code;
+  code.code_id = 1;
+  code.kind = amber::bytecode::CodeKind::Method;
+  code.reg_count = 2;
+  code.instructions.push_back(
+      {amber::bytecode::Opcode::Throw, {{0, false}, {1, false}}});
+  code.instructions.push_back({amber::bytecode::Opcode::Return, {{1, false}}});
+  module.code_objects.push_back(code);
+
+  amber::mir::Module mir_module;
+  mir_module.module_name = "native.manual";
+  amber::native::NativeModule native_module =
+      amber::native::compile_native_module(module, mir_module);
+  const amber::native::NativeValidationResult validation =
+      amber::native::validate_native_module(native_module, &module);
+  expect(validation.ok(),
+         amber::native::diagnostics_to_json(validation.diagnostics));
+
+  const amber::native::NativeCodeObject *native_code =
+      native_code_for_bc(native_module, 1);
+  expect(native_code != nullptr, "manual throw native code object exists");
+  expect(has_stub_kind(*native_code, "throw", false),
+         "THROW records runtime throw stub");
+  expect(has_slowpath_kind(*native_code, "throw"),
+         "THROW records language-control slowpath");
+}
+
 void test_native_root_maps_cover_gc_boundary_kinds() {
   amber::bytecode::BcModule module;
   module.format_version = {1, 0};
@@ -498,6 +530,7 @@ int main() {
   test_native_metadata_preserves_call_and_root_maps();
   test_reflective_send_dyn_uses_slow_stub_metadata();
   test_exception_edges_have_native_root_and_slowpath_metadata();
+  test_throw_edges_have_native_slowpath_metadata();
   test_native_root_maps_cover_gc_boundary_kinds();
   test_native_trampoline_safepoint_preserves_heap_argument_root();
   test_native_validation_rejects_missing_slowpath_metadata();

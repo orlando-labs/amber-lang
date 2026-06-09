@@ -163,6 +163,8 @@ const char *token_kind_name(TokenKind kind) {
     return "KEYWORD_AND";
   case TokenKind::KeywordBreak:
     return "KEYWORD_BREAK";
+  case TokenKind::KeywordCatch:
+    return "KEYWORD_CATCH";
   case TokenKind::KeywordCase:
     return "KEYWORD_CASE";
   case TokenKind::KeywordCaseBang:
@@ -223,6 +225,8 @@ const char *token_kind_name(TokenKind kind) {
     return "KEYWORD_RESCUE";
   case TokenKind::KeywordEnsure:
     return "KEYWORD_ENSURE";
+  case TokenKind::KeywordThrow:
+    return "KEYWORD_THROW";
   case TokenKind::KeywordTry:
     return "KEYWORD_TRY";
   case TokenKind::KeywordTrue:

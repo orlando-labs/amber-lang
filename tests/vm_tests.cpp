@@ -7684,6 +7684,83 @@ void test_source_try_rescue_ensure_execution() {
          "ensure must run before break exits protected body");
 }
 
+void test_source_throw_catch_execution() {
+  amber::runtime::ExecutionResult deep = execute_emitted_init(
+      "def deep_nested_code():\n"
+      "  throw :enough, 42\n"
+      "\n"
+      "catch(:enough):\n"
+      "  deep_nested_code()\n");
+  expect(deep.ok(), "deep throw/catch execution failed");
+  expect(deep.value.is_integer() && deep.value.as_integer() == 42,
+         "catch should return thrown payload from deep call");
+
+  amber::runtime::ExecutionResult bare = execute_emitted_init(
+      "catch :enough:\n"
+      "  throw :enough, 7\n");
+  expect(bare.ok(), "bare catch execution failed");
+  expect(bare.value.is_integer() && bare.value.as_integer() == 7,
+         "bare catch should return thrown payload");
+
+  amber::runtime::ExecutionResult null_payload = execute_emitted_init(
+      "catch :enough:\n"
+      "  throw :enough\n");
+  expect(null_payload.ok(), "throw without payload execution failed");
+  expect(null_payload.value.is_null(),
+         "throw without payload should deliver null");
+
+  amber::runtime::ExecutionResult evaluated_tag_once = execute_emitted_init(
+      "tag = :enough\n"
+      "catch tag:\n"
+      "  tag = :other\n"
+      "  throw :enough, 21\n");
+  expect(evaluated_tag_once.ok(), "catch tag snapshot execution failed");
+  expect(evaluated_tag_once.value.is_integer() &&
+             evaluated_tag_once.value.as_integer() == 21,
+         "catch should use tag value evaluated before body");
+
+  amber::runtime::ExecutionResult nested = execute_emitted_init(
+      "catch :outer:\n"
+      "  catch :inner:\n"
+      "    throw :outer, 33\n");
+  expect(nested.ok(), "mismatched inner catch execution failed");
+  expect(nested.value.is_integer() && nested.value.as_integer() == 33,
+         "mismatched catch should continue to outer matching catch");
+
+  amber::runtime::ExecutionResult not_rescued = execute_emitted_init(
+      "catch :enough:\n"
+      "  try:\n"
+      "    throw :enough, 17\n"
+      "  rescue:\n"
+      "    99\n");
+  expect(not_rescued.ok(), "throw through rescue execution failed");
+  expect(not_rescued.value.is_integer() &&
+             not_rescued.value.as_integer() == 17,
+         "rescue must not catch throw/catch control flow");
+
+  amber::runtime::ExecutionResult ensure_result = execute_emitted_init(
+      "x = 0\n"
+      "y = 0\n"
+      "res = catch :enough:\n"
+      "  try:\n"
+      "    throw :enough, 11\n"
+      "  ensure:\n"
+      "    x = 5\n"
+      "    y = 1 + 2\n"
+      "res + x + y\n");
+  expect(ensure_result.ok(), "throw through ensure execution failed");
+  expect(ensure_result.value.is_integer() &&
+             ensure_result.value.as_integer() == 19,
+         "ensure should run before matching catch resumes");
+
+  amber::runtime::ExecutionResult unhandled =
+      execute_emitted_init("throw :missing, 1\n");
+  expect(!unhandled.ok(), "unhandled throw should fail");
+  expect(unhandled.fault.has_value() &&
+             unhandled.fault->error_name == "UncaughtThrowError",
+         "unhandled throw should report UncaughtThrowError");
+}
+
 void test_manual_ensure_suppresses_pending_exception() {
   using namespace amber::bytecode;
 
@@ -7891,6 +7968,7 @@ int main() {
   test_manual_pattern_deconstruct_protocol_sequence();
   test_manual_pattern_deconstruct_protocol_map();
   test_source_try_rescue_ensure_execution();
+  test_source_throw_catch_execution();
   test_manual_raise_handler_table_recovers();
   test_manual_raise_unwinds_closure_to_outer_handler();
   test_manual_raise_unwinds_method_send_to_outer_handler();

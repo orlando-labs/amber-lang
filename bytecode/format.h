@@ -136,6 +136,7 @@ enum class Opcode : std::uint8_t {
   Return = 0x34,
   Raise = 0x35,
   Safepoint = 0x36,
+  Throw = 0x37,
   PPrepSeq = 0x40,
   PPrepMap = 0x41,
   PCheckEq = 0x42,
@@ -205,6 +206,7 @@ struct HandlerEntry {
 inline constexpr std::uint32_t kHandlerKindLegacyRescue = 0x0U;
 inline constexpr std::uint32_t kHandlerKindRescue = 0x1U;
 inline constexpr std::uint32_t kHandlerKindEnsure = 0x2U;
+inline constexpr std::uint32_t kHandlerKindCatch = 0x3U;
 inline constexpr std::uint32_t kHandlerKindMask = 0xFU;
 inline constexpr std::uint32_t kHandlerExceptionSlotShift = 4U;
 inline constexpr std::uint32_t kHandlerResultSlotShift = 16U;

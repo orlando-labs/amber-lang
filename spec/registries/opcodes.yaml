@@ -134,6 +134,8 @@ opcodes:
     byte: 0x35
   - name: SAFEPOINT
     byte: 0x36
+  - name: THROW
+    byte: 0x37
   - name: P_PREP_SEQ
     byte: 0x40
   - name: P_PREP_MAP

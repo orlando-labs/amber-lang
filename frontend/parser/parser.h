@@ -115,6 +115,8 @@ private:
   std::unique_ptr<ast::Expr> parse_loop_expr(const char *kind);
   std::unique_ptr<ast::Expr> parse_do_while_expr();
   std::unique_ptr<ast::Expr> parse_break_expr();
+  std::unique_ptr<ast::Expr> parse_throw_expr();
+  std::unique_ptr<ast::Expr> parse_catch_expr();
   std::unique_ptr<ast::Expr> parse_raise_expr();
   std::unique_ptr<ast::Expr> parse_try_expr();
   std::unique_ptr<ast::Expr> parse_case_expr(bool strict);

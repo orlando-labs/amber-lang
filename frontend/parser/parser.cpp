@@ -2226,6 +2226,54 @@ std::unique_ptr<ast::Expr> Parser::parse_break_expr() {
   return node;
 }
 
+std::unique_ptr<ast::Expr> Parser::parse_throw_expr() {
+  const lexer::Token start = advance();
+  std::unique_ptr<ast::Expr> tag;
+  std::unique_ptr<ast::Expr> value;
+  if (!starts_primary()) {
+    error(start, "`throw` requires a tag expression");
+    tag = ast::make_expr("AstError", start.span);
+  } else {
+    tag = parse_expression(1, StopMode::Normal);
+  }
+  if (match(lexer::TokenKind::Comma)) {
+    value = parse_expression(1, StopMode::Normal);
+  }
+
+  const lexer::Span end_span =
+      value != nullptr ? value->span : (tag != nullptr ? tag->span : start.span);
+  auto node =
+      ast::make_expr("AstThrow", ast::join_spans(start.span, end_span));
+  if (tag != nullptr) {
+    node->node_field("tag", std::move(tag));
+  }
+  if (value != nullptr) {
+    node->node_field("value", std::move(value));
+  }
+  return node;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_catch_expr() {
+  const lexer::Token start = advance();
+  std::unique_ptr<ast::Expr> tag;
+  if (match(lexer::TokenKind::LParen)) {
+    tag = parse_expression(1, StopMode::Normal);
+    consume(lexer::TokenKind::RParen, "expected ')' after catch tag");
+  } else {
+    tag = parse_expression(1, StopMode::ControlHeader);
+  }
+  consume(lexer::TokenKind::Colon, "expected ':' after catch tag");
+  std::vector<std::unique_ptr<ast::Expr>> body =
+      parse_control_body(BodyContext::Def);
+  const lexer::Span end_span =
+      body.empty() ? previous().span : body.back()->span;
+  auto node =
+      ast::make_expr("AstCatch", ast::join_spans(start.span, end_span));
+  node->node_field("tag", std::move(tag));
+  node->list_field("body", std::move(body));
+  return node;
+}
+
 std::unique_ptr<ast::Expr> Parser::parse_raise_expr() {
   const lexer::Token start = advance();
   std::unique_ptr<ast::Expr> value;
@@ -2767,6 +2815,14 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   if (token.kind == lexer::TokenKind::KeywordBreak) {
     --current_;
     return parse_break_expr();
+  }
+  if (token.kind == lexer::TokenKind::KeywordThrow) {
+    --current_;
+    return parse_throw_expr();
+  }
+  if (token.kind == lexer::TokenKind::KeywordCatch) {
+    --current_;
+    return parse_catch_expr();
   }
   if (token.kind == lexer::TokenKind::KeywordRaise) {
     --current_;
@@ -3665,6 +3721,8 @@ bool Parser::starts_primary() const {
   case lexer::TokenKind::Plus:
   case lexer::TokenKind::Minus:
   case lexer::TokenKind::KeywordNot:
+  case lexer::TokenKind::KeywordCatch:
+  case lexer::TokenKind::KeywordThrow:
   case lexer::TokenKind::KeywordRaise:
   case lexer::TokenKind::KeywordTry:
     return true;
@@ -3693,6 +3751,8 @@ bool Parser::starts_bare_arg() const {
   case lexer::TokenKind::LParen:
   case lexer::TokenKind::LBracket:
   case lexer::TokenKind::LBrace:
+  case lexer::TokenKind::KeywordCatch:
+  case lexer::TokenKind::KeywordThrow:
   case lexer::TokenKind::KeywordRaise:
   case lexer::TokenKind::KeywordTry:
     return true;

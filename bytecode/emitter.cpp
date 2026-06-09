@@ -425,10 +425,12 @@ private:
   void compile_if_for_effect(const ast::Expr &expr);
   std::uint32_t compile_if(const ast::Expr &expr);
   std::uint32_t compile_try(const ast::Expr &expr);
+  std::uint32_t compile_catch(const ast::Expr &expr);
   void compile_ensure_for_normal_path(const ast::Expr *ensure_body,
                                       std::uint32_t result_reg,
                                       const lexer::Span &span);
   void compile_raise(const ast::Expr &expr);
+  void compile_throw(const ast::Expr &expr);
   std::uint32_t compile_logical(const ast::Expr &expr);
   std::uint32_t compile_compare_chain(const ast::Expr &expr);
   void compile_loop_for_effect(const ast::Expr &expr);
@@ -1752,6 +1754,10 @@ void CodeEmitter::compile_expr_for_effect(const ast::Expr &expr) {
   }
   if (expr.kind == "HRaise") {
     compile_raise(expr);
+    return;
+  }
+  if (expr.kind == "HThrow") {
+    compile_throw(expr);
     return;
   }
   compile_expr(expr);
@@ -3192,6 +3198,25 @@ void CodeEmitter::compile_raise(const ast::Expr &expr) {
   emit_instruction(Opcode::Raise, {{value_reg, false}}, expr.span);
 }
 
+void CodeEmitter::compile_throw(const ast::Expr &expr) {
+  const ast::Expr *tag = node_field(expr, "tag");
+  if (tag == nullptr) {
+    diag(expr.span, "BC2001", "HThrow is missing tag");
+    emit_type_error(expr.span);
+    return;
+  }
+  const std::uint32_t tag_reg = compile_expr(*tag);
+  std::uint32_t value_reg = 0;
+  if (const ast::Expr *value = node_field(expr, "value")) {
+    value_reg = compile_expr(*value);
+  } else {
+    value_reg = alloc_temp();
+    emit_instruction(Opcode::LoadNull, {{value_reg, false}}, expr.span);
+  }
+  emit_instruction(Opcode::Throw, {{tag_reg, false}, {value_reg, false}},
+                   expr.span);
+}
+
 void CodeEmitter::compile_ensure_for_normal_path(const ast::Expr *ensure_body,
                                                  std::uint32_t result_reg,
                                                  const lexer::Span &span) {
@@ -3273,6 +3298,44 @@ std::uint32_t CodeEmitter::compile_try(const ast::Expr &expr) {
           {protected_from, protected_to, handler_pc, handler.code_id,
            handler_flags(kHandlerKindEnsure, handler.exception_slot, dst)});
     }
+  }
+
+  last_value_reg_ = dst;
+  return dst;
+}
+
+std::uint32_t CodeEmitter::compile_catch(const ast::Expr &expr) {
+  const ast::Expr *tag = node_field(expr, "tag");
+  const ast::Expr *body = node_field(expr, "body");
+  const std::uint32_t dst = alloc_temp();
+  if (tag == nullptr || body == nullptr) {
+    diag(expr.span, "BC2001", "HCatch is missing tag or body");
+    emit_instruction(Opcode::LoadNull, {{dst, false}}, expr.span);
+    last_value_reg_ = dst;
+    return dst;
+  }
+
+  const std::uint32_t raw_tag_reg = compile_expr(*tag);
+  const std::uint32_t tag_reg = alloc_temp();
+  emit_instruction(Opcode::Move, {{tag_reg, false}, {raw_tag_reg, false}},
+                   tag->span);
+  const std::uint32_t protected_from = current_pc();
+  compile_seq_to_reg(*body, dst, body->span);
+  const std::uint32_t protected_to = current_pc();
+
+  const std::size_t normal_jump =
+      emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
+  const std::uint32_t handler_pc = current_pc();
+  const std::size_t handler_jump =
+      emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
+  const std::uint32_t end_pc = current_pc();
+  patch_operand(normal_jump, 0, end_pc, false);
+  patch_operand(handler_jump, 0, end_pc, false);
+
+  if (protected_from < protected_to) {
+    code_.handler_table.push_back(
+        {protected_from, protected_to, handler_pc, 0,
+         handler_flags(kHandlerKindCatch, tag_reg, dst)});
   }
 
   last_value_reg_ = dst;
@@ -4047,8 +4110,15 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   if (expr.kind == "HTry") {
     return compile_try(expr);
   }
+  if (expr.kind == "HCatch") {
+    return compile_catch(expr);
+  }
   if (expr.kind == "HRaise") {
     compile_raise(expr);
+    return alloc_temp();
+  }
+  if (expr.kind == "HThrow") {
+    compile_throw(expr);
     return alloc_temp();
   }
   if (expr.kind == "HMatchDispatch") {
