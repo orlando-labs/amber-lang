@@ -13,7 +13,7 @@ work-package matrix to concrete repository artifacts. Use it with the generated
 
 | Work package | Status | Primary artifacts | Verification |
 | --- | --- | --- | --- |
-| `W0` repo/tooling | done | `Makefile`, `tools/amberc`, `tools/ambertest`, `spec/registries/*` | `make build`, `build/amberc --version` |
+| `W0` repo/tooling | done | `Makefile`, `tools/amberc`, `tools/ambertest`, `spec/registries/*`, `.github/workflows/ci.yml` | `make build`, `build/amberc --version`, clean-clone CI (clang + g++) running `make build`/`test`/`conformance` |
 | `W1` lexer/parser/AST | done | `frontend/lexer`, `frontend/parser`, `frontend/ast`, `corpus/parse` | parser/lexer unit tests, parse corpus |
 | `W2` binder/signatures/diagnostics | done | `frontend/binder`, `frontend/checker`, `spec/registries/diagnostics.yaml`, `corpus/bind`, `corpus/check` | binder/checker tests, negative diagnostic corpus |
 | `W3` patterns/HIR/lowering | done | `frontend/pattern`, `frontend/hir`, `corpus/hir` | HIR and pattern tests, HIR golden corpus |
@@ -27,7 +27,7 @@ work-package matrix to concrete repository artifacts. Use it with the generated
 | `W11` modern profile runtime | done | `profile/{capabilities,effects,replay,data,wasm_accel,modern}.*`, profile engineering docs | profile, bytecode, package, and VM tests |
 | `W12` documentation/spec sync | done | `tools/spec_sync.py`, `docs/engineering/spec-anchor-map-v1.md`, this dashboard, changelog, migration notes | `make spec-sync-check` |
 | `W13` compiler-contract closure | done | source/comment/numeric/range rules, operator lowering, prelude/runtime-error/token registries, top-level pre-scan, bytecode verifier operand/range/dataflow checks, runtime UNINIT guards, unified `CALL` packet/object-call dispatch, call-cache shape guards, and structured source trace frames | `make test`, `make conformance`, `make spec-sync-check` |
-| `W14` build/bootstrap/conformance closure | done | `build/build.*`, `tools/amberc build`, `tests/fixtures/w14_build`, `.amberbc` `PROF`, runtime profile gate, M11 conformance bundle | `make test`, `make conformance`, `make spec-sync-check` |
+| `W14` build/bootstrap/conformance closure | done | `buildsys/build.*`, `tools/amberc build`, `tests/fixtures/w14_build`, `.amberbc` `PROF`, runtime profile gate, M11 conformance bundle | `make test`, `make conformance`, `make spec-sync-check` |
 | `W15` native-readiness metadata | done | `optimizer/native.*` `slowpath_table`, exception-edge root maps, invalidation fallback metadata, hardened `native-verify`, frozen-image readiness guard checks | `make test`, `make conformance`, `make spec-sync-check` |
 
 ## Release Gates

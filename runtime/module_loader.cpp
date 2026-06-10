@@ -1,6 +1,6 @@
 #include "runtime/module_loader.h"
 
-#include "build/build.h"
+#include "buildsys/build.h"
 #include "runtime/vm.h"
 
 #include <algorithm>

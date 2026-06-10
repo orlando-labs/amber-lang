@@ -10,11 +10,11 @@ decoded and verified before the command reports success.
 
 Implemented surface:
 
-- manifest parser and stable JSON summary in [build/build.h](/Users/slowpilot/workspace/amber/build/build.h:1)
-- build command in [tools/amberc/main.cpp](/Users/slowpilot/workspace/amber/tools/amberc/main.cpp:1)
-- `PROF` bytecode metadata in [bytecode/format.h](/Users/slowpilot/workspace/amber/bytecode/format.h:1)
-- unsupported-profile loader rejection in [runtime/module_loader.cpp](/Users/slowpilot/workspace/amber/runtime/module_loader.cpp:1)
-- CLI smoke fixture in [tests/fixtures/w14_build/amber.build.json](/Users/slowpilot/workspace/amber/tests/fixtures/w14_build/amber.build.json:1)
+- manifest parser and stable JSON summary in [buildsys/build.h](../../buildsys/build.h:1)
+- build command in [tools/amberc/main.cpp](../../tools/amberc/main.cpp:1)
+- `PROF` bytecode metadata in [bytecode/format.h](../../bytecode/format.h:1)
+- unsupported-profile loader rejection in [runtime/module_loader.cpp](../../runtime/module_loader.cpp:1)
+- CLI smoke fixture in [tests/fixtures/w14_build/amber.build.json](../../tests/fixtures/w14_build/amber.build.json:1)
 
 ## Manifest Shape
 

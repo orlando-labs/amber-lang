@@ -11,7 +11,7 @@ module init code through the current VM.
 
 Implemented surface:
 
-- public `RuntimeModuleLoader` in [runtime/module_loader.h](/Users/slowpilot/workspace/amber/runtime/module_loader.h:1);
+- public `RuntimeModuleLoader` in [runtime/module_loader.h](../../runtime/module_loader.h:1);
 - serialized module mapping via `add_serialized_module(name, bytes)`;
 - verifier-gated load failure as `BytecodeVerificationError`;
 - dependency linking over decoded `DepEntry.module_name_str_id` names;

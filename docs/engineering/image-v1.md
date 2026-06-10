@@ -11,12 +11,12 @@ loaded behind a runtime freeze barrier.
 Implemented surface:
 
 - image schema, builder, parser, verifier, JSON inspection, and diagnostics in
-  [frozen/image.h](/Users/slowpilot/workspace/amber/frozen/image.h:1) and
-  [frozen/image.cpp](/Users/slowpilot/workspace/amber/frozen/image.cpp:1)
+  [frozen/image.h](../../frozen/image.h:1) and
+  [frozen/image.cpp](../../frozen/image.cpp:1)
 - runtime loader in
-  [runtime/frozen_image.h](/Users/slowpilot/workspace/amber/runtime/frozen_image.h:1)
-  and [runtime/frozen_image.cpp](/Users/slowpilot/workspace/amber/runtime/frozen_image.cpp:1)
-- CLI commands in [tools/amberc/main.cpp](/Users/slowpilot/workspace/amber/tools/amberc/main.cpp:1):
+  [runtime/frozen_image.h](../../runtime/frozen_image.h:1)
+  and [runtime/frozen_image.cpp](../../runtime/frozen_image.cpp:1)
+- CLI commands in [tools/amberc/main.cpp](../../tools/amberc/main.cpp:1):
   - `amberc image-build <amber.toml> <out.amberimg>`
   - `amberc image-inspect <file.amberimg>`
   - `amberc image-verify <file.amberimg>`

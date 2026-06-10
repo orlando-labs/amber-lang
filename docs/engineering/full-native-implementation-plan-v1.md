@@ -71,7 +71,7 @@ can reuse the same MIR, eligibility, ABI, runtime helper, and metadata contracts
   `runtime/native_bridge.cpp`.
 - Runtime world, heap, values, dispatch, exceptions, scheduler, and GC:
   `runtime/vm.h`, `runtime/vm.cpp`.
-- Build manifest and cache discipline: `build/build.h`, `build/build.cpp`,
+- Build manifest and cache discipline: `buildsys/build.h`, `buildsys/build.cpp`,
   `tools/amberc/main.cpp`.
 - Frozen image native metadata embedding: `frozen/image.cpp`,
   `runtime/frozen_image.cpp`.
@@ -139,8 +139,8 @@ Tasks:
 
 Files:
 
-- `build/build.h`
-- `build/build.cpp`
+- `buildsys/build.h`
+- `buildsys/build.cpp`
 - `tools/amberc/main.cpp`
 - `docs/engineering/build-v1.md`
 - `tests/build_tests.cpp`
@@ -429,8 +429,8 @@ Tasks:
 Files:
 
 - `tools/amberc/main.cpp`
-- `build/build.h`
-- `build/build.cpp`
+- `buildsys/build.h`
+- `buildsys/build.cpp`
 - `Makefile`
 - `tests/build_tests.cpp`
 

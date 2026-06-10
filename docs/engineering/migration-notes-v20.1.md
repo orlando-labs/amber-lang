@@ -43,7 +43,7 @@ module and fixtures. W15 updates native/frozen metadata validation:
 | `docs/engineering/implementation-status-v1.md` | Status dashboard for W0-W15 and release gates. |
 | `spec/changelog/v20.1.md` | Changelog for the current v20.1 implementation baseline. |
 | `docs/engineering/migration-notes-v20.1.md` | This migration note. |
-| `build/build.*` | `amber.build.v1` manifest parser, profile normalization, and summary JSON helpers. |
+| `buildsys/build.*` | `amber.build.v1` manifest parser, profile normalization, and summary JSON helpers. |
 | `docs/engineering/build-v1.md` | W14 build/bootstrap/conformance engineering note. |
 | `docs/engineering/native-v1.md` | W15 native-readiness metadata engineering note. |
 | `tests/fixtures/w14_build/` | CLI smoke fixture for `amberc build`. |

@@ -8,15 +8,15 @@ path yet; it exposes a separately testable artifact for `ISS-067` and
 `ISS-068`.
 
 W10.4 now consumes this layer through `amber.native.v1`; see
-[native-v1.md](/Users/slowpilot/workspace/amber/docs/engineering/native-v1.md:1)
+[native-v1.md](../../docs/engineering/native-v1.md:1)
 for the native/JIT metadata and frozen runtime bridge.
 
 Implemented surface:
 
-- typed MIR schema in [optimizer/mir.h](/Users/slowpilot/workspace/amber/optimizer/mir.h:1)
+- typed MIR schema in [optimizer/mir.h](../../optimizer/mir.h:1)
 - HIR-to-MIR lowering, validator, deterministic JSON/text dumps, and pass
-  harness in [optimizer/mir.cpp](/Users/slowpilot/workspace/amber/optimizer/mir.cpp:1)
-- CLI inspection in [tools/amberc/main.cpp](/Users/slowpilot/workspace/amber/tools/amberc/main.cpp:1):
+  harness in [optimizer/mir.cpp](../../optimizer/mir.cpp:1)
+- CLI inspection in [tools/amberc/main.cpp](../../tools/amberc/main.cpp:1):
   - `amberc mir <file>`
   - `amberc mir-dump <file>`
   - `amberc mir-verify <file>`

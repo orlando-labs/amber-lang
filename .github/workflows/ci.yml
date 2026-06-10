@@ -1,0 +1,59 @@
+name: ci
+
+# Clean-clone CI: every job starts from a fresh checkout (no local build/ tree),
+# so it exercises the same path a new contributor hits with `git clone && make`.
+# The gcc lane exists specifically to catch libstdc++-only portability breaks
+# (e.g. headers that compile under clang/libc++ via transitive includes but fail
+# under g++/libstdc++).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: build+test (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: clang
+            cxx: clang++
+          - cc: gcc
+            cxx: g++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libncurses-dev python3
+
+      - name: Print compiler version
+        run: ${{ matrix.cxx }} --version
+
+      # Clean-clone build: no pre-existing build/ artifacts are checked in.
+      - name: make build
+        run: make build CXX=${{ matrix.cxx }}
+
+      - name: make test
+        run: make test CXX=${{ matrix.cxx }}
+
+      - name: make conformance
+        run: make conformance CXX=${{ matrix.cxx }}
+
+  spec-sync:
+    name: spec-sync-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3
+      - name: make spec-sync-check
+        run: make spec-sync-check

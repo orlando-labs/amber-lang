@@ -1,5 +1,6 @@
 #include "bytecode/emitter.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstddef>
 #include <iomanip>

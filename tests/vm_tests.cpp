@@ -209,6 +209,32 @@ void test_execute_emitted_method() {
   expect(exec.value.as_integer() == 7, "echo should return argument");
 }
 
+// Regression for bench/polyglot/repro/direct_method_capture_failure.am:
+// executing a compiled top-level method directly by its entry_code_id must
+// materialize the closure captures that module initialization would create.
+// Before the fix this faulted with "VMError: capture slot out of range"
+// because main()'s body captures the sibling helper() but direct entry never
+// ran module init to bind it.
+void test_direct_entry_materializes_sibling_captures() {
+  const amber::bytecode::EmitResult emit_result = emit_ok("def helper(value):\n"
+                                                          "  value + 1\n"
+                                                          "\n"
+                                                          "def main():\n"
+                                                          "  helper(41)\n"
+                                                          "\n"
+                                                          "main()\n");
+  const amber::bytecode::BcMethod *main_method =
+      method_by_name(emit_result.module, "main");
+  expect(main_method != nullptr, "main method should exist");
+
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, main_method->entry_code_id);
+  expect(exec.ok(), "direct main entry should not fault on sibling captures");
+  expect(exec.value.is_integer(), "direct main entry should return integer");
+  expect(exec.value.as_integer() == 42,
+         "direct main entry should return helper(41) == 42");
+}
+
 void test_execute_module_init_calls_top_level_def() {
   amber::bytecode::EmitResult emit_result = emit_ok("def f(x):\n"
                                                     "  x + 42\n"
@@ -8187,6 +8213,7 @@ void test_runtime_io_v2_low_level_wait_trace() {
 
 int main() {
   test_execute_emitted_method();
+  test_direct_entry_materializes_sibling_captures();
   test_execute_module_init_calls_top_level_def();
   test_execute_native_range_literal();
   test_execute_emitted_collection_literals();

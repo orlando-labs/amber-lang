@@ -7,7 +7,7 @@ package-swap API.
 Implemented surface:
 
 - restricted `amber.toml` parsing through
-  [package/package.h](/Users/slowpilot/workspace/amber/package/package.h:1);
+  [package/package.h](../../package/package.h:1);
 - supported manifest sections: `[package]`, repeated `[[modules]]`, and
   `[dependencies]` with string versions;
 - deterministic `amber.lock` rendering with sorted dependencies and stable

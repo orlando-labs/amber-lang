@@ -12,18 +12,18 @@ rather than unsafe host-code shortcuts.
 
 Implemented surface:
 
-- native/JIT metadata schema in [optimizer/native.h](/Users/slowpilot/workspace/amber/optimizer/native.h:1)
+- native/JIT metadata schema in [optimizer/native.h](../../optimizer/native.h:1)
 - metadata generation, validation, JSON, and text dumps in
-  [optimizer/native.cpp](/Users/slowpilot/workspace/amber/optimizer/native.cpp:1)
+  [optimizer/native.cpp](../../optimizer/native.cpp:1)
 - frozen-world runtime bridge in
-  [runtime/native_bridge.h](/Users/slowpilot/workspace/amber/runtime/native_bridge.h:1)
-  and [runtime/native_bridge.cpp](/Users/slowpilot/workspace/amber/runtime/native_bridge.cpp:1)
-- CLI inspection in [tools/amberc/main.cpp](/Users/slowpilot/workspace/amber/tools/amberc/main.cpp:1):
+  [runtime/native_bridge.h](../../runtime/native_bridge.h:1)
+  and [runtime/native_bridge.cpp](../../runtime/native_bridge.cpp:1)
+- CLI inspection in [tools/amberc/main.cpp](../../tools/amberc/main.cpp:1):
   - `amberc native <file>`
   - `amberc native-dump <file>`
   - `amberc native-verify <file>`
 - frozen image embedding through
-  [frozen/image.cpp](/Users/slowpilot/workspace/amber/frozen/image.cpp:1),
+  [frozen/image.cpp](../../frozen/image.cpp:1),
   which stores deterministic `amber.native.v1` metadata summaries inside
   `.amberimg` artifacts.
 

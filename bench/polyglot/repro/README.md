@@ -36,7 +36,7 @@ Expected output:
 42
 ```
 
-Current failing VM path:
+Direct method entry path (now fixed):
 
 ```sh
 /private/tmp/direct_method_capture_repro_runner/amberbc_run \
@@ -44,14 +44,18 @@ Current failing VM path:
   main
 ```
 
-Current failure:
+Expected output:
 
 ```text
-VMError: capture slot out of range
-VMError: capture slot out of range
-  at c3:0 (direct_method_capture_failure.am:9:3)
+42
 ```
 
-The direct method entry has capture metadata for the sibling helper, but
-`execute_code(... method.entry_code_id ...)` starts the code object without the
-closure captures materialized by module initialization.
+Historically this faulted with `VMError: capture slot out of range` because the
+direct method entry has capture metadata for the sibling helper, but
+`execute_code(... method.entry_code_id ...)` started the code object without the
+closure captures materialized by module initialization. `Vm::execute` now calls
+`prepare_direct_entry_captures`, which runs module init on demand and binds the
+captured siblings before the entry runs (`runtime/vm.cpp`).
+
+This case is locked in as a C++ regression test:
+`test_direct_entry_materializes_sibling_captures` in `tests/vm_tests.cpp`.

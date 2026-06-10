@@ -6,9 +6,9 @@ and loader-time object-model linking still live in later slices.
 
 Implemented surface:
 
-- typed schema in [bytecode/format.h](/Users/slowpilot/workspace/amber/bytecode/format.h:1)
-- canonical serializer/deserializer + verifier skeleton in [bytecode/format.cpp](/Users/slowpilot/workspace/amber/bytecode/format.cpp:1)
-- CLI inspection in [tools/amberc/main.cpp](/Users/slowpilot/workspace/amber/tools/amberc/main.cpp:1):
+- typed schema in [bytecode/format.h](../../bytecode/format.h:1)
+- canonical serializer/deserializer + verifier skeleton in [bytecode/format.cpp](../../bytecode/format.cpp:1)
+- CLI inspection in [tools/amberc/main.cpp](../../tools/amberc/main.cpp:1):
   - `amberc bc <file>`
   - `amberc bc-disasm <file>`
   - `amberc metadata <file.amberbc> --json`
@@ -17,7 +17,7 @@ Implemented surface:
 - `amberc amberbc-verify <file>`
 - `amberc amberbc-disasm <file>`
 - `amberc build <amber.build.json>`
-- HIR-to-bytecode emission in [bytecode/emitter.cpp](/Users/slowpilot/workspace/amber/bytecode/emitter.cpp:1)
+- HIR-to-bytecode emission in [bytecode/emitter.cpp](../../bytecode/emitter.cpp:1)
 
 ## Container
 

@@ -21,7 +21,7 @@ MIR_SRCS := optimizer/mir.cpp
 NATIVE_SRCS := optimizer/native.cpp
 FROZEN_SRCS := frozen/image.cpp
 PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp profile/data.cpp profile/wasm_accel.cpp profile/modern.cpp
-BUILD_SRCS := build/build.cpp
+BUILD_SRCS := buildsys/build.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 IO_SRCS := runtime/io.cpp
 RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp $(IO_SRCS) runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
@@ -87,8 +87,8 @@ FORMAT_FILES := \
 	profile/wasm_accel.h \
 	profile/modern.cpp \
 	profile/modern.h \
-	build/build.cpp \
-	build/build.h \
+	buildsys/build.cpp \
+	buildsys/build.h \
 	frozen/image.cpp \
 	frozen/image.h \
 	bytecode/format.cpp \
