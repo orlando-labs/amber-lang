@@ -3,15 +3,15 @@
 Status: proposed language design; not implemented in the current parser,
 bytecode, VM, or native backend.
 
-Amber numeric semantics use arbitrary-precision `BigInt` as the default
-resolution of `Int`. A compile-time numeric profile may opt into a fixed-width
-`Int` for performance-sensitive packages. The goal is to preserve safe default
-integer semantics while giving VM and native builds a predictable fixed-width
-path when a package explicitly asks for it.
+Amber numeric semantics use a fixed-width `Int` by default, selected through a
+compile-time numeric profile. Arbitrary-precision arithmetic remains available
+through explicit `BigInt` values. The goal is to keep ordinary VM and native
+integer paths predictable while preserving an opt-in path for unbounded
+integers.
 
 ## Source Preamble
 
-Canonical fixed-width source spelling:
+Canonical source spelling:
 
 ```amber
 numeric:
@@ -30,9 +30,9 @@ statements.
 
 Accepted `int` values:
 
-- `BigInt`
 - `Int8`, `Int16`, `Int32`, `Int64`
 - `UInt8`, `UInt16`, `UInt32`, `UInt64`
+- `BigInt`
 
 Accepted `overflow` values:
 
@@ -43,13 +43,9 @@ Accepted `overflow` values:
 If a source file omits the preamble, defaults are:
 
 ```text
-int: BigInt
+int: Int64
 overflow: checked
 ```
-
-When `int: BigInt`, the `overflow` value is accepted for profile shape
-stability but has no effect on ordinary `Int` arithmetic, because `BigInt`
-operations do not overflow by width.
 
 ## Manifest Mirror
 
@@ -76,42 +72,39 @@ the default numeric profile otherwise.
 
 ## Type Semantics
 
-`Int` is a compile-time alias for the selected integer type. It is not a
-runtime-mutable property and it is not ordinary user-defined type aliasing.
+`Int` is a compile-time alias for the selected fixed-width integer type. It is
+not a runtime-mutable property and it is not ordinary user-defined type aliasing.
 
 Examples under the default profile:
 
 ```amber
-type Int = BigInt # conceptual resolution only, not surface syntax
+type Int = Int64 # conceptual resolution only, not surface syntax
 
-x = 3           # Int, resolved as BigInt
+x = 3           # Int, resolved as Int64
 y = BigInt(3)   # explicit arbitrary-precision value
 ```
 
 Public ABI metadata records the resolved concrete type. If a package exports a
-function accepting `Int` while its numeric profile resolves `Int` to `BigInt`,
-dependent packages see the boundary as `BigInt`, even if their own `Int` alias
+function accepting `Int` while its numeric profile resolves `Int` to `Int64`,
+dependent packages see the boundary as `Int64`, even if their own `Int` alias
 uses a different fixed-width type.
 
-`BigInt` is a distinct arbitrary-precision numeric type. Under the default
-numeric profile, `Int` resolves to `BigInt`. Under a fixed-width profile,
-`BigInt` remains available explicitly and is never introduced by implicit
-promotion from fixed-width `Int`.
+`BigInt` is a distinct arbitrary-precision numeric type. It does not inherit the
+fixed-width overflow policy and is never introduced by implicit promotion from
+`Int`.
 
 ## Literals
 
 Unsuffixed integer literals have type `Int`, meaning the selected concrete
-integer type.
+fixed-width type.
 
 ```amber
-n = 123 # Int -> BigInt by default
+n = 123 # Int -> Int64 by default
 ```
 
-A literal has arbitrary precision under the default `BigInt` profile. Under a
-fixed-width `Int` profile, a literal outside the selected range is a
-compile-time diagnostic unless it is explicitly targeted as `BigInt`, for
-example through `BigInt(...)` or an explicit `BigInt` boundary accepted by the
-checker/lowering pipeline.
+A literal outside the selected `Int` range is a compile-time diagnostic unless
+it is explicitly targeted as `BigInt`, for example through `BigInt(...)` or an
+explicit `BigInt` boundary accepted by the checker/lowering pipeline.
 
 The lexer/parser may keep integer literal text at arbitrary precision for
 diagnostics and for explicit `BigInt` construction, but ordinary fixed-width
@@ -119,8 +112,7 @@ lowering must reject out-of-range `Int` literals before bytecode execution.
 
 ## Overflow Semantics
 
-The selected overflow mode applies only to ordinary fixed-width `Int`
-arithmetic. It has no effect when `Int` resolves to `BigInt`.
+The selected overflow mode applies to ordinary fixed-width `Int` arithmetic.
 
 `checked`:
 
@@ -153,21 +145,19 @@ type, not on an abstract promoting `Int`.
 Implementation expectations:
 
 - bytecode/profile metadata records the numeric profile used for compilation;
-- integer constants are range-checked only when the resolved `Int` type is
-  fixed-width;
+- integer constants are range-checked against the resolved `Int` type;
 - VM quick paths dispatch to concrete fixed-width helpers for checked,
   wrapping, or saturating arithmetic;
 - native lowering can emit direct fixed-width arithmetic and only the overflow
   checks required by the selected policy;
-- default `BigInt` operations use runtime helpers and allocation-aware
+- `BigInt` operations use explicit runtime helpers and allocation-aware
   slowpaths;
 - there is no hidden `will overflow -> promote to BigInt` edge on ordinary
-  fixed-width `Int` operations.
+  `Int` operations.
 
-This keeps the default language safe and arbitrary-precision, while fixed-width
-profiles keep hot integer loops predictable for both the interpreter and
-generated native code. Programs that need fixed-width performance opt in at the
-package/profile level.
+This keeps hot integer loops predictable for both the interpreter and generated
+native code. Programs that need arbitrary precision choose `BigInt` explicitly
+and pay its allocation, GC-root, and helper-call costs only at those sites.
 
 ## Cross-Package Rules
 
@@ -178,8 +168,7 @@ types rather than the local alias spelling.
 Rules:
 
 - source preamble and manifest numeric profile must agree in package builds;
-- exported `Int` is serialized as the resolved concrete type, including
-  `BigInt` under the default profile;
+- exported `Int` is serialized as the resolved concrete type;
 - imports do not inherit the importing package's `Int` alias at already-compiled
   dependency boundaries;
 - diagnostics should report both the local alias spelling and the resolved
