@@ -261,6 +261,9 @@ def compile_amberbc_runner(root: Path, build_dir: Path, cxx: str) -> Path:
         root / "profile" / "wasm_accel.cpp",
         root / "profile" / "modern.cpp",
         root / "package" / "package.cpp",
+        root / "runtime" / "context.cpp",
+        root / "runtime" / "text.cpp",
+        root / "runtime" / "io.cpp",
         root / "runtime" / "vm.cpp",
     ]
     run_command(

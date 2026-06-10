@@ -14,9 +14,13 @@ thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stderr;
 thread_local std::string tls_runtime_task_annotation;
 thread_local std::uint64_t tls_runtime_native_thread_id = 0;
 thread_local RuntimeTextSourceLocation tls_runtime_text_source_location;
+thread_local const RuntimeIoWaitObserver *tls_runtime_io_wait_observer =
+    nullptr;
+thread_local std::uint32_t tls_runtime_io_wait_depth = 0;
 
 std::atomic<std::uint64_t> g_runtime_output_order{1};
 std::atomic<std::uint64_t> g_runtime_native_thread_ids{1};
+std::atomic<std::uint64_t> g_runtime_io_wait_ids{1};
 
 RuntimeTextSourceLocationScope::RuntimeTextSourceLocationScope(
     RuntimeTextSourceLocation location)
@@ -41,9 +45,7 @@ RuntimeTaskScope::~RuntimeTaskScope() {
   tls_runtime_task_cancel_flag = previous_cancel_flag_;
 }
 
-RuntimeTaskSyncScope::RuntimeTaskSyncScope() {
-  ++tls_runtime_task_sync_depth;
-}
+RuntimeTaskSyncScope::RuntimeTaskSyncScope() { ++tls_runtime_task_sync_depth; }
 
 RuntimeTaskSyncScope::~RuntimeTaskSyncScope() {
   if (tls_runtime_task_sync_depth > 0) {
@@ -51,9 +53,56 @@ RuntimeTaskSyncScope::~RuntimeTaskSyncScope() {
   }
 }
 
+RuntimeIoWaitObserverScope::RuntimeIoWaitObserverScope(
+    const RuntimeIoWaitObserver *observer)
+    : previous_observer_(tls_runtime_io_wait_observer) {
+  tls_runtime_io_wait_observer = observer;
+}
+
+RuntimeIoWaitObserverScope::~RuntimeIoWaitObserverScope() {
+  tls_runtime_io_wait_observer = previous_observer_;
+}
+
+RuntimeIoWaitScope::RuntimeIoWaitScope(
+    std::string operation, std::string resource, RuntimeIoWaitInterest interest,
+    std::uint64_t resource_id, std::optional<std::chrono::milliseconds> timeout)
+    : observer_(tls_runtime_io_wait_observer), active_(observer_ != nullptr) {
+  ++tls_runtime_io_wait_depth;
+  if (!active_) {
+    return;
+  }
+  record_.wait_id =
+      g_runtime_io_wait_ids.fetch_add(1, std::memory_order_relaxed);
+  record_.task_id = tls_runtime_task_id;
+  record_.strand_id = tls_runtime_strand_id;
+  record_.worker_id = tls_runtime_worker_id;
+  record_.resource_id = resource_id;
+  record_.interest = interest;
+  record_.operation = std::move(operation);
+  record_.resource = std::move(resource);
+  if (timeout.has_value()) {
+    record_.has_timeout = true;
+    record_.timeout_millis = timeout->count();
+  }
+  (*observer_)(record_, true);
+}
+
+RuntimeIoWaitScope::~RuntimeIoWaitScope() {
+  if (active_ && observer_ != nullptr) {
+    (*observer_)(record_, false);
+  }
+  if (tls_runtime_io_wait_depth > 0) {
+    --tls_runtime_io_wait_depth;
+  }
+}
+
 std::uint64_t current_runtime_owner_strand_id() {
   return tls_runtime_strand_id != 0 ? tls_runtime_strand_id
                                     : tls_runtime_worker_id;
+}
+
+std::uint32_t current_runtime_io_wait_depth() {
+  return tls_runtime_io_wait_depth;
 }
 
 std::uint64_t current_runtime_worker_id() { return tls_runtime_worker_id; }

@@ -1,5 +1,6 @@
 #include "runtime/vm.h"
 #include "runtime/context.h"
+#include "runtime/io.h"
 
 #include <algorithm>
 #include <atomic>
@@ -46,8 +47,7 @@ void increment_kind_allocation(RuntimeHeapStats &stats, HeapObjectKind kind) {
 }
 
 bool decode_keyword_utf8_codepoint(const std::string &source,
-                                   std::size_t offset,
-                                   std::uint32_t *codepoint,
+                                   std::size_t offset, std::uint32_t *codepoint,
                                    std::size_t *byte_count) {
   if (offset >= source.size()) {
     return false;
@@ -108,13 +108,12 @@ bool keyword_identifier_part(std::uint32_t codepoint) {
 
 bool reserved_keyword_identifier(const std::string &text) {
   static const std::unordered_set<std::string_view> keywords = {
-      "and",    "attr",   "break",  "case",    "class",  "class_method",
-      "class_prop",       "def",    "do",      "elif",   "else",
-      "elsif",  "export", "extend", "false",   "from",   "if",
-      "import", "in",     "include", "loop",    "mixin",  "noop",
-      "not",    "null",   "or",     "package", "pass",   "prop",
-      "true",   "unless", "until",  "when",
-      "while"};
+      "and",        "attr",    "break",   "case",  "class", "class_method",
+      "class_prop", "def",     "do",      "elif",  "else",  "elsif",
+      "export",     "extend",  "false",   "from",  "if",    "import",
+      "in",         "include", "loop",    "mixin", "noop",  "not",
+      "null",       "or",      "package", "pass",  "prop",  "true",
+      "unless",     "until",   "when",    "while"};
   return keywords.find(text) != keywords.end();
 }
 
@@ -183,6 +182,17 @@ RuntimeSyncBoundaryError runtime_isolation_error() {
 
 std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
     const Value &value, std::unordered_set<std::uint64_t> *visited) {
+  if (value.is_io_value()) {
+    const std::shared_ptr<RuntimeIoValue> io_value = value.as_io_value();
+    if (io_value == nullptr) {
+      return RuntimeSyncBoundaryError{"TypeError", "IO value is null"};
+    }
+    if (!io_value->shareable()) {
+      return RuntimeSyncBoundaryError{"IsolationError",
+                                      "IO value is strand-confined"};
+    }
+    return std::nullopt;
+  }
   if (value.is_watch_cell()) {
     const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();
     if (cell == nullptr) {
@@ -1449,6 +1459,90 @@ RuntimeAwaitableStats RuntimeAwaitable::stats() const { return impl_->stats(); }
 
 namespace {
 
+RuntimeIoProviderStatus
+unsupported_io_provider_operation(const std::string &operation) {
+  RuntimeIoProviderStatus status;
+  status.handled = false;
+  status.ok = false;
+  status.error_name = "UnsupportedOperationError";
+  status.message = "recorded IO provider does not implement " + operation;
+  return status;
+}
+
+} // namespace
+
+RuntimeIoProviderStatus RuntimeIoProvider::fs_exists(const std::string &path) {
+  (void)path;
+  return unsupported_io_provider_operation("fs.exists?");
+}
+
+RuntimeIoProviderStatus RuntimeIoProvider::fs_file(const std::string &path) {
+  (void)path;
+  return unsupported_io_provider_operation("fs.file?");
+}
+
+RuntimeIoProviderStatus RuntimeIoProvider::fs_dir(const std::string &path) {
+  (void)path;
+  return unsupported_io_provider_operation("fs.dir?");
+}
+
+RuntimeIoProviderStatus
+RuntimeIoProvider::fs_metadata(const std::string &path) {
+  (void)path;
+  return unsupported_io_provider_operation("fs.metadata");
+}
+
+RuntimeIoProviderStatus
+RuntimeIoProvider::fs_read_bytes(const std::string &path,
+                                 std::optional<std::size_t> limit) {
+  (void)path;
+  (void)limit;
+  return unsupported_io_provider_operation("fs.read_bytes");
+}
+
+RuntimeIoProviderStatus
+RuntimeIoProvider::fs_write_bytes(const std::string &path,
+                                  const std::string &bytes, bool create,
+                                  bool truncate, bool append) {
+  (void)path;
+  (void)bytes;
+  (void)create;
+  (void)truncate;
+  (void)append;
+  return unsupported_io_provider_operation("fs.write_bytes");
+}
+
+RuntimeIoProviderStatus RuntimeIoProvider::fs_mkdir(const std::string &path) {
+  (void)path;
+  return unsupported_io_provider_operation("fs.mkdir");
+}
+
+RuntimeIoProviderStatus RuntimeIoProvider::fs_mkdir_p(const std::string &path) {
+  (void)path;
+  return unsupported_io_provider_operation("fs.mkdir_p");
+}
+
+RuntimeIoProviderStatus RuntimeIoProvider::fs_remove(const std::string &path) {
+  (void)path;
+  return unsupported_io_provider_operation("fs.remove");
+}
+
+RuntimeIoProviderStatus RuntimeIoProvider::fs_rename(const std::string &from,
+                                                     const std::string &to) {
+  (void)from;
+  (void)to;
+  return unsupported_io_provider_operation("fs.rename");
+}
+
+RuntimeIoProviderStatus RuntimeIoProvider::fs_copy(const std::string &from,
+                                                   const std::string &to) {
+  (void)from;
+  (void)to;
+  return unsupported_io_provider_operation("fs.copy");
+}
+
+namespace {
+
 RuntimeMoveResult runtime_move_result_error(RuntimeMoveSlotState state,
                                             std::string error_name,
                                             std::string message) {
@@ -2477,6 +2571,9 @@ private:
     }
     if (lhs.is_logger()) {
       return lhs.as_logger() == rhs.as_logger();
+    }
+    if (lhs.is_io_value()) {
+      return lhs.as_io_value() == rhs.as_io_value();
     }
     if (lhs.is_instance_object()) {
       return lhs.as_instance_object() == rhs.as_instance_object();
@@ -6077,11 +6174,11 @@ Value RuntimeHeap::make_set_value(std::vector<Value> items, bool frozen) {
     if (!normalized.has_value()) {
       throw RuntimeTaskFailure(error.error_name, error.message);
     }
-    const bool exists = std::find_if(unique_items.begin(), unique_items.end(),
-                                     [&](const Value &seen) {
-                                       return collection_keys_equal(
-                                           seen, *normalized);
-                                     }) != unique_items.end();
+    const bool exists =
+        std::find_if(unique_items.begin(), unique_items.end(),
+                     [&](const Value &seen) {
+                       return collection_keys_equal(seen, *normalized);
+                     }) != unique_items.end();
     if (!exists) {
       unique_items.push_back(std::move(*normalized));
     }
@@ -6333,6 +6430,10 @@ Value Value::flow_module(std::shared_ptr<RuntimeFlowModule> value) {
   return {std::move(value)};
 }
 
+Value Value::io_value(std::shared_ptr<RuntimeIoValue> value) {
+  return {std::move(value)};
+}
+
 Value Value::threaded_collection(
     std::shared_ptr<RuntimeThreadedCollection> value) {
   return {std::move(value)};
@@ -6451,6 +6552,10 @@ bool Value::is_logger() const {
   return std::holds_alternative<std::shared_ptr<RuntimeLogger>>(payload);
 }
 
+bool Value::is_io_value() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeIoValue>>(payload);
+}
+
 bool Value::is_watch_cell() const {
   return std::holds_alternative<std::shared_ptr<RuntimeWatchCell>>(payload);
 }
@@ -6548,6 +6653,10 @@ std::shared_ptr<RuntimeLogger> Value::as_logger() const {
   return std::get<std::shared_ptr<RuntimeLogger>>(payload);
 }
 
+std::shared_ptr<RuntimeIoValue> Value::as_io_value() const {
+  return std::get<std::shared_ptr<RuntimeIoValue>>(payload);
+}
+
 std::shared_ptr<RuntimeWatchCell> Value::as_watch_cell() const {
   return std::get<std::shared_ptr<RuntimeWatchCell>>(payload);
 }
@@ -6580,16 +6689,16 @@ using amber::bytecode::BcModule;
 using amber::bytecode::CodeKind;
 using amber::bytecode::Constant;
 using amber::bytecode::ConstantKind;
-using amber::bytecode::Instruction;
-using amber::bytecode::Opcode;
-using amber::bytecode::SlotLayoutEntry;
 using amber::bytecode::handler_exception_slot;
 using amber::bytecode::handler_kind;
 using amber::bytecode::handler_result_slot;
+using amber::bytecode::Instruction;
+using amber::bytecode::kHandlerKindCatch;
 using amber::bytecode::kHandlerKindEnsure;
 using amber::bytecode::kHandlerKindLegacyRescue;
 using amber::bytecode::kHandlerKindRescue;
-using amber::bytecode::kHandlerKindCatch;
+using amber::bytecode::Opcode;
+using amber::bytecode::SlotLayoutEntry;
 
 constexpr std::uint32_t kMethodFlagInstance =
     amber::bytecode::kMethodFlagInstance;
@@ -6604,8 +6713,7 @@ constexpr const char *kNativeRangeMarker = "__amber_range";
 constexpr std::int64_t kPatternFailModeSoft = 0;
 constexpr std::int64_t kPatternFailModeMatchError = 1;
 
-bool instance_is_native_range(
-    const std::shared_ptr<InstanceValue> &instance) {
+bool instance_is_native_range(const std::shared_ptr<InstanceValue> &instance) {
   if (instance == nullptr ||
       instance->class_index != kNativeSyntheticClassIndex) {
     return false;
@@ -6665,6 +6773,26 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Object";
   case RuntimeNativeTypeKind::Range:
     return "Range";
+  case RuntimeNativeTypeKind::Bytes:
+    return "Bytes";
+  case RuntimeNativeTypeKind::ByteBuffer:
+    return "io.ByteBuffer";
+  case RuntimeNativeTypeKind::ByteSlice:
+    return "io.ByteSlice";
+  case RuntimeNativeTypeKind::IoPipe:
+    return "io.Pipe";
+  case RuntimeNativeTypeKind::Fs:
+    return "fs";
+  case RuntimeNativeTypeKind::FsPath:
+    return "fs.Path";
+  case RuntimeNativeTypeKind::FsFile:
+    return "fs.File";
+  case RuntimeNativeTypeKind::NetEndpoint:
+    return "net.Endpoint";
+  case RuntimeNativeTypeKind::NetTcp:
+    return "net.tcp";
+  case RuntimeNativeTypeKind::NetUdp:
+    return "net.udp";
   }
   return "NativeType";
 }
@@ -6938,6 +7066,11 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_logger()) {
     return value.as_logger() == nullptr ? "<io.Logger null>" : "<io.Logger>";
   }
+  if (value.is_io_value()) {
+    const std::shared_ptr<RuntimeIoValue> io_value = value.as_io_value();
+    return io_value == nullptr ? "<io null>"
+                               : std::string("<") + io_value->type_name() + ">";
+  }
 
   const void *identity = heap_identity_for(value);
   if (identity != nullptr &&
@@ -7023,7 +7156,7 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     if (instance_is_native_range(instance)) {
       out << " Range";
     } else if (context->module != nullptr &&
-        instance->class_index < context->module->classes.size()) {
+               instance->class_index < context->module->classes.size()) {
       const std::uint32_t symbol_id =
           context->module->classes[instance->class_index].class_name_sym_id;
       const std::optional<std::string> name =
@@ -7115,8 +7248,8 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
           std::min(map->entries.size(), context->options.max_items);
       for (std::size_t i = 0; i < limit; ++i) {
         out << indent_text(depth + 1U)
-            << runtime_stringify_value_impl(context, map->entries[i].key,
-                                            mode, depth + 1U)
+            << runtime_stringify_value_impl(context, map->entries[i].key, mode,
+                                            depth + 1U)
             << ": "
             << runtime_stringify_value_impl(context, map->entries[i].value,
                                             mode, depth + 1U)
@@ -7793,18 +7926,18 @@ double floor_mod_double(double lhs, double rhs) {
 }
 
 std::int64_t bit_xor_int64(std::int64_t lhs, std::int64_t rhs) {
-  return static_cast<std::int64_t>(
-      static_cast<std::uint64_t>(lhs) ^ static_cast<std::uint64_t>(rhs));
+  return static_cast<std::int64_t>(static_cast<std::uint64_t>(lhs) ^
+                                   static_cast<std::uint64_t>(rhs));
 }
 
 std::int64_t bit_and_int64(std::int64_t lhs, std::int64_t rhs) {
-  return static_cast<std::int64_t>(
-      static_cast<std::uint64_t>(lhs) & static_cast<std::uint64_t>(rhs));
+  return static_cast<std::int64_t>(static_cast<std::uint64_t>(lhs) &
+                                   static_cast<std::uint64_t>(rhs));
 }
 
 std::int64_t bit_or_int64(std::int64_t lhs, std::int64_t rhs) {
-  return static_cast<std::int64_t>(
-      static_cast<std::uint64_t>(lhs) | static_cast<std::uint64_t>(rhs));
+  return static_cast<std::int64_t>(static_cast<std::uint64_t>(lhs) |
+                                   static_cast<std::uint64_t>(rhs));
 }
 
 std::int64_t shl_int64(std::int64_t lhs, std::int64_t rhs) {
@@ -7909,6 +8042,9 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   if (lhs.is_logger()) {
     return lhs.as_logger() == rhs.as_logger();
   }
+  if (lhs.is_io_value()) {
+    return lhs.as_io_value() == rhs.as_io_value();
+  }
   if (lhs.is_watch_handle()) {
     return lhs.as_watch_handle() == rhs.as_watch_handle();
   }
@@ -8005,7 +8141,8 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     for (const MapEntry &entry : left->entries) {
       bool found = false;
       for (std::size_t i = 0; i < right->entries.size(); ++i) {
-        if (!matched[i] && collection_keys_equal(entry.key, right->entries[i].key)) {
+        if (!matched[i] &&
+            collection_keys_equal(entry.key, right->entries[i].key)) {
           matched[i] = true;
           found = true;
           if (!value_equals(entry.value, right->entries[i].value)) {
@@ -8076,12 +8213,18 @@ class Vm {
 public:
   explicit Vm(const BcModule &module,
               std::shared_ptr<RuntimeState> state = nullptr,
-              std::string module_id = {})
+              std::string module_id = {},
+              const RuntimeWorldOptions *world_options = nullptr,
+              const RuntimeCapabilityResolution *capabilities = nullptr,
+              const RuntimeEffectValidation *effects = nullptr,
+              std::function<void(RuntimeTraceEvent)> trace_recorder = {})
       : module_(module), initial_string_count_(module.strings.size()),
         initial_symbol_count_(module.symbols.size()),
         state_(state == nullptr ? std::make_shared<RuntimeState>()
                                 : std::move(state)),
-        module_id_(std::move(module_id)) {
+        module_id_(std::move(module_id)), world_options_(world_options),
+        capabilities_(capabilities), effects_(effects),
+        trace_recorder_(std::move(trace_recorder)) {
     state_->initialize_for_module(module_);
   }
 
@@ -8222,7 +8365,8 @@ private:
 
     if (!state_->module_init_completed && module_.init.has_entry_code_id &&
         module_.init.entry_code_id != code_id) {
-      Vm init_vm(module_, state_, module_id_);
+      Vm init_vm(module_, state_, module_id_, world_options_, capabilities_,
+                 effects_, trace_recorder_);
       ExecutionResult init_result = init_vm.execute(
           module_.init.entry_code_id, {}, Value::null(), Value::null());
       if (!init_result.ok()) {
@@ -8583,7 +8727,8 @@ private:
       return std::nullopt;
     }
 
-    Vm nested(module_, state_, module_id_);
+    Vm nested(module_, state_, module_id_, world_options_, capabilities_,
+              effects_, trace_recorder_);
     nested.push_frame(*code, args, closure->captures, closure->self,
                       Value::null(), std::nullopt);
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
@@ -8709,8 +8854,8 @@ private:
     state_->heap.collect_garbage(collect_gc_roots(), *requested, true);
   }
 
-  RuntimeTextSourceLocation
-  text_source_location_for(const Frame &frame, std::uint32_t pc) const {
+  RuntimeTextSourceLocation text_source_location_for(const Frame &frame,
+                                                     std::uint32_t pc) const {
     RuntimeTextSourceLocation out;
     out.code_id = frame.code == nullptr ? 0U : frame.code->code_id;
     out.pc = pc;
@@ -8748,8 +8893,8 @@ private:
     for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
       if (it->code != nullptr && it->code->kind == CodeKind::Module) {
         return text_source_location_for(
-            *it, it->active_call_pc.value_or(
-                     static_cast<std::uint32_t>(it->pc)));
+            *it,
+            it->active_call_pc.value_or(static_cast<std::uint32_t>(it->pc)));
       }
     }
 
@@ -9033,8 +9178,8 @@ private:
     case Opcode::SendSpread:
     case Opcode::SendDynSpread:
     case Opcode::CallSpread: {
-      const bool is_call = insn.opcode == Opcode::Call ||
-                           insn.opcode == Opcode::CallSpread;
+      const bool is_call =
+          insn.opcode == Opcode::Call || insn.opcode == Opcode::CallSpread;
       const bool is_dynamic = insn.opcode == Opcode::SendDyn ||
                               insn.opcode == Opcode::SendDynSpread;
       const bool expanded = insn.opcode == Opcode::SendSpread ||
@@ -10396,8 +10541,7 @@ private:
     out->pos_args.reserve(pos_count);
     for (std::uint32_t i = 0; i < pos_count; ++i) {
       std::uint32_t kind = bytecode::kSpreadOperandValue;
-      if (expanded &&
-          !operand_u32(frame, insn, operand_index++, &kind)) {
+      if (expanded && !operand_u32(frame, insn, operand_index++, &kind)) {
         return false;
       }
       std::uint32_t reg = 0;
@@ -10411,9 +10555,9 @@ private:
       if (kind == bytecode::kSpreadOperandValue) {
         out->pos_args.push_back(std::move(value));
       } else if (kind == bytecode::kSpreadOperandExpand) {
-        if (!append_spread_sequence_items(
-                frame, value, SpreadSequenceTarget::PositionalCall,
-                &out->pos_args)) {
+        if (!append_spread_sequence_items(frame, value,
+                                          SpreadSequenceTarget::PositionalCall,
+                                          &out->pos_args)) {
           return false;
         }
       } else {
@@ -10430,8 +10574,7 @@ private:
     out->kw_args.reserve(kw_count);
     for (std::uint32_t i = 0; i < kw_count; ++i) {
       std::uint32_t kind = bytecode::kSpreadOperandValue;
-      if (expanded &&
-          !operand_u32(frame, insn, operand_index++, &kind)) {
+      if (expanded && !operand_u32(frame, insn, operand_index++, &kind)) {
         return false;
       }
       std::uint32_t name_symbol_id = 0;
@@ -11281,6 +11424,36 @@ private:
     }
     if (path == "io.Logger") {
       return Value::native_type(RuntimeNativeTypeKind::Logger);
+    }
+    if (path == "Bytes") {
+      return Value::native_type(RuntimeNativeTypeKind::Bytes);
+    }
+    if (path == "io.ByteBuffer") {
+      return Value::native_type(RuntimeNativeTypeKind::ByteBuffer);
+    }
+    if (path == "io.ByteSlice") {
+      return Value::native_type(RuntimeNativeTypeKind::ByteSlice);
+    }
+    if (path == "io.Pipe") {
+      return Value::native_type(RuntimeNativeTypeKind::IoPipe);
+    }
+    if (path == "fs") {
+      return Value::native_type(RuntimeNativeTypeKind::Fs);
+    }
+    if (path == "fs.Path") {
+      return Value::native_type(RuntimeNativeTypeKind::FsPath);
+    }
+    if (path == "fs.File") {
+      return Value::native_type(RuntimeNativeTypeKind::FsFile);
+    }
+    if (path == "net.Endpoint") {
+      return Value::native_type(RuntimeNativeTypeKind::NetEndpoint);
+    }
+    if (path == "net.tcp") {
+      return Value::native_type(RuntimeNativeTypeKind::NetTcp);
+    }
+    if (path == "net.udp") {
+      return Value::native_type(RuntimeNativeTypeKind::NetUdp);
     }
     if (path == "Amber") {
       return Value::native_type(RuntimeNativeTypeKind::Amber);
@@ -12148,12 +12321,10 @@ private:
 
   std::optional<std::size_t>
   normalize_sequence_index(const Frame &frame, std::int64_t index,
-                           std::size_t size,
-                           const std::string &context) {
+                           std::size_t size, const std::string &context) {
     const std::int64_t size_i64 = static_cast<std::int64_t>(size);
     const std::int64_t normalized = index < 0 ? size_i64 + index : index;
-    if (normalized < 0 ||
-        static_cast<std::uint64_t>(normalized) >= size) {
+    if (normalized < 0 || static_cast<std::uint64_t>(normalized) >= size) {
       set_fault(frame, "IndexError", context + " index is out of bounds");
       return std::nullopt;
     }
@@ -12170,10 +12341,8 @@ private:
     return static_cast<std::size_t>(normalized);
   }
 
-  std::optional<std::vector<Value>>
-  slice_sequence_items_by_range(const Frame &frame,
-                                const std::vector<Value> &items,
-                                const Value &range) {
+  std::optional<std::vector<Value>> slice_sequence_items_by_range(
+      const Frame &frame, const std::vector<Value> &items, const Value &range) {
     const std::optional<RangeBounds> bounds =
         extract_range_bounds(frame, range);
     if (fault_.has_value() || !bounds.has_value()) {
@@ -12188,9 +12357,8 @@ private:
       return std::nullopt;
     }
 
-    const std::optional<std::size_t> start =
-        normalize_sequence_index(frame, *bounds->start, items.size(),
-                                 "array slice");
+    const std::optional<std::size_t> start = normalize_sequence_index(
+        frame, *bounds->start, items.size(), "array slice");
     if (!start.has_value()) {
       return std::nullopt;
     }
@@ -12198,9 +12366,8 @@ private:
     std::int64_t normalized_finish = 0;
     bool inclusive = bounds->inclusive_end;
     if (bounds->finish.has_value()) {
-      const std::optional<std::size_t> finish =
-          normalize_sequence_index(frame, *bounds->finish, items.size(),
-                                   "array slice");
+      const std::optional<std::size_t> finish = normalize_sequence_index(
+          frame, *bounds->finish, items.size(), "array slice");
       if (!finish.has_value()) {
         return std::nullopt;
       }
@@ -13214,8 +13381,8 @@ private:
         return true;
       }
       const double diff = value - *bounds->float_start;
-      const double remainder = std::fmod(std::fabs(diff),
-                                         std::fabs(bounds->float_step));
+      const double remainder =
+          std::fmod(std::fabs(diff), std::fabs(bounds->float_step));
       constexpr double epsilon = 1e-9;
       *out = remainder <= epsilon ||
              std::fabs(remainder - std::fabs(bounds->float_step)) <= epsilon;
@@ -13513,7 +13680,8 @@ private:
     if (fault_.has_value() || !bounds.has_value()) {
       return false;
     }
-    *out = !bounds->start_value.has_value() || !bounds->finish_value.has_value();
+    *out =
+        !bounds->start_value.has_value() || !bounds->finish_value.has_value();
     return true;
   }
 
@@ -14749,7 +14917,8 @@ private:
                     "missing default thunk for parameter slot");
           return false;
         }
-        Vm nested(module_, state_, module_id_);
+        Vm nested(module_, state_, module_id_, world_options_, capabilities_,
+                  effects_, trace_recorder_);
         const ExecutionResult result =
             nested.execute(method.default_thunk_ids[thunk_index], frame.regs,
                            frame.self, frame.block);
@@ -14781,7 +14950,8 @@ private:
       return out;
     }
 
-    Vm nested(module_, state_, module_id_);
+    Vm nested(module_, state_, module_id_, world_options_, capabilities_,
+              effects_, trace_recorder_);
     nested.push_frame(*entry, {}, {}, self, block, std::nullopt);
     Frame &nested_frame = nested.frames_.back();
     const std::size_t copy_count =
@@ -14811,7 +14981,8 @@ private:
 
   NestedExecution execute_prepared_frame(Frame frame) {
     NestedExecution out;
-    Vm nested(module_, state_, module_id_);
+    Vm nested(module_, state_, module_id_, world_options_, capabilities_,
+              effects_, trace_recorder_);
     nested.frames_.push_back(std::move(frame));
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
       nested.step();
@@ -15618,8 +15789,8 @@ private:
         make_list_value(std::move(suppressed_values));
   }
 
-  std::vector<PreservedRegister>
-  snapshot_active_catch_tags(Frame &frame, std::uint32_t pc) {
+  std::vector<PreservedRegister> snapshot_active_catch_tags(Frame &frame,
+                                                            std::uint32_t pc) {
     std::vector<PreservedRegister> preserved;
     if (frame.code == nullptr) {
       return preserved;
@@ -15632,11 +15803,9 @@ private:
         continue;
       }
       const std::uint32_t slot = handler_exception_slot(entry.flags);
-      const bool already_preserved =
-          std::any_of(preserved.begin(), preserved.end(),
-                      [slot](const PreservedRegister &item) {
-                        return item.reg == slot;
-                      });
+      const bool already_preserved = std::any_of(
+          preserved.begin(), preserved.end(),
+          [slot](const PreservedRegister &item) { return item.reg == slot; });
       if (already_preserved) {
         continue;
       }
@@ -15648,8 +15817,9 @@ private:
     return preserved;
   }
 
-  bool restore_preserved_registers(
-      Frame &caller, const std::vector<PreservedRegister> &preserved) {
+  bool
+  restore_preserved_registers(Frame &caller,
+                              const std::vector<PreservedRegister> &preserved) {
     for (const PreservedRegister &item : preserved) {
       if (item.reg >= caller.regs.size()) {
         set_fault(caller, "VMError", "preserved register is out of range");
@@ -15677,9 +15847,8 @@ private:
       caller.initialized.resize(caller.regs.size(), 0U);
     }
     for (std::size_t index = 0; index < count; ++index) {
-      const bool initialized =
-          index < completed.initialized.size() &&
-          completed.initialized[index] != 0U;
+      const bool initialized = index < completed.initialized.size() &&
+                               completed.initialized[index] != 0U;
       if (!initialized) {
         caller.regs[index] = Value::null();
         caller.initialized[index] = 0U;
@@ -15692,8 +15861,8 @@ private:
                                   caller.regs[index]);
     }
     caller.last_result = completed.last_result;
-    if (!restore_preserved_registers(
-            caller, completed.preserved_registers_on_return)) {
+    if (!restore_preserved_registers(caller,
+                                     completed.preserved_registers_on_return)) {
       return false;
     }
     return true;
@@ -15706,9 +15875,8 @@ private:
       frames_.pop_back();
       if (exception != nullptr &&
           completed_frame.pending_exception_on_return.has_value()) {
-        append_suppressed_exception(*exception,
-                                    *completed_frame
-                                         .pending_exception_on_return);
+        append_suppressed_exception(
+            *exception, *completed_frame.pending_exception_on_return);
       }
       if (completed_frame.merge_registers_to_caller && !frames_.empty()) {
         Frame &caller = frames_.back();
@@ -15732,8 +15900,7 @@ private:
       std::vector<PreservedRegister> preserved_registers_on_return = {}) {
     materialize_integer_regs(target);
     Frame handler = acquire_frame(handler_code);
-    const std::size_t count =
-        std::min(handler.regs.size(), target.regs.size());
+    const std::size_t count = std::min(handler.regs.size(), target.regs.size());
     for (std::size_t index = 0; index < count; ++index) {
       const bool initialized =
           index < target.initialized.size() && target.initialized[index] != 0U;
@@ -15802,15 +15969,15 @@ private:
     if (frames_.empty()) {
       if (pending_exception.has_value()) {
         const std::string error_name = exception_error_name(*pending_exception);
-        fault_ = make_fault(completed_frame, error_name,
-                            "unhandled exception " +
-                                value_to_debug_string(*pending_exception,
-                                                      &module_));
+        fault_ =
+            make_fault(completed_frame, error_name,
+                       "unhandled exception " +
+                           value_to_debug_string(*pending_exception, &module_));
       } else if (pending_throw.has_value()) {
-        fault_ = make_fault(
-            completed_frame, "UncaughtThrowError",
-            "uncaught throw " +
-                value_to_debug_string(pending_throw->tag, &module_));
+        fault_ =
+            make_fault(completed_frame, "UncaughtThrowError",
+                       "uncaught throw " +
+                           value_to_debug_string(pending_throw->tag, &module_));
       } else {
         final_value_ = value;
       }
@@ -15820,8 +15987,7 @@ private:
 
     Frame &caller = frames_.back();
     caller.active_call_pc.reset();
-    if (merge_registers &&
-        !merge_frame_registers(caller, completed_frame)) {
+    if (merge_registers && !merge_frame_registers(caller, completed_frame)) {
       recycle_frame(std::move(completed_frame));
       return;
     }
@@ -15847,14 +16013,13 @@ private:
   bool raise_value(const Frame &raising_frame, const Value &exception) {
     Value active_exception = exception;
     if (raising_frame.pending_exception_on_return.has_value()) {
-      append_suppressed_exception(
-          active_exception, *raising_frame.pending_exception_on_return);
+      append_suppressed_exception(active_exception,
+                                  *raising_frame.pending_exception_on_return);
     }
 
     std::size_t target_index = 0;
     const bytecode::HandlerEntry *handler = nullptr;
-    if (!find_unwind_target(UnwindReason::Exception, &target_index,
-                            &handler)) {
+    if (!find_unwind_target(UnwindReason::Exception, &target_index, &handler)) {
       const std::string error_name = exception_error_name(active_exception);
       const std::string message =
           "unhandled exception " +
@@ -15916,10 +16081,10 @@ private:
       if (!find_unwind_target(UnwindReason::Throw, &target_index, &handler)) {
         const Frame &fault_frame =
             frames_.empty() ? throwing_frame : frames_.back();
-        fault_ = make_fault(
-            fault_frame, "UncaughtThrowError",
-            "uncaught throw " +
-                value_to_debug_string(active_throw.tag, &module_));
+        fault_ =
+            make_fault(fault_frame, "UncaughtThrowError",
+                       "uncaught throw " +
+                           value_to_debug_string(active_throw.tag, &module_));
         return false;
       }
       if (target_index >= frames_.size()) {
@@ -16035,30 +16200,37 @@ private:
     BcModule module_copy = module_;
     std::shared_ptr<RuntimeState> runtime_state = state_;
     std::string module_id = module_id_;
+    const RuntimeWorldOptions *world_options = world_options_;
+    const RuntimeCapabilityResolution *capabilities = capabilities_;
+    const RuntimeEffectValidation *effects = effects_;
+    std::function<void(RuntimeTraceEvent)> trace_recorder = trace_recorder_;
     const std::uint32_t code_id = closure->code_id;
     std::vector<Value> captures = closure->captures;
     Value self = closure->self;
-    return [module_copy = std::move(module_copy),
-            runtime_state = std::move(runtime_state),
-            module_id = std::move(module_id), code_id,
-            captures = std::move(captures),
-            self = std::move(self)](const std::vector<Value> &args) mutable {
-      const BcCode *code = find_code(module_copy, code_id);
-      if (code == nullptr) {
-        throw RuntimeTaskFailure("VMError", "closure code id is unknown");
-      }
-      Vm nested(module_copy, runtime_state, module_id);
-      nested.push_frame(*code, args, captures, self, Value::null(),
-                        std::nullopt);
-      while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
-        nested.step();
-      }
-      if (nested.fault_.has_value()) {
-        throw RuntimeTaskFailure(nested.fault_->error_name,
-                                 nested.fault_->message);
-      }
-      return nested.final_value_;
-    };
+    return
+        [module_copy = std::move(module_copy),
+         runtime_state = std::move(runtime_state),
+         module_id = std::move(module_id), code_id,
+         captures = std::move(captures), self = std::move(self), world_options,
+         capabilities, effects, trace_recorder = std::move(trace_recorder)](
+            const std::vector<Value> &args) mutable {
+          const BcCode *code = find_code(module_copy, code_id);
+          if (code == nullptr) {
+            throw RuntimeTaskFailure("VMError", "closure code id is unknown");
+          }
+          Vm nested(module_copy, runtime_state, module_id, world_options,
+                    capabilities, effects, trace_recorder);
+          nested.push_frame(*code, args, captures, self, Value::null(),
+                            std::nullopt);
+          while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
+            nested.step();
+          }
+          if (nested.fault_.has_value()) {
+            throw RuntimeTaskFailure(nested.fault_->error_name,
+                                     nested.fault_->message);
+          }
+          return nested.final_value_;
+        };
   }
 
   std::optional<Value>
@@ -16523,6 +16695,266 @@ private:
     return SendStatus::Matched;
   }
 
+  bool set_fault_from_io_status(const Frame &frame,
+                                const RuntimeIoStatus &result) {
+    if (result.ok || result.would_block) {
+      return true;
+    }
+    set_fault(frame, result.error_name.empty() ? "IOError" : result.error_name,
+              result.message.empty() ? "IO operation failed" : result.message);
+    return false;
+  }
+
+  void
+  record_io_event(const std::string &name,
+                  std::vector<replay::TraceAttribute> attributes = {}) const {
+    if (trace_recorder_) {
+      trace_recorder_(replay::make_event(name, std::move(attributes)));
+    }
+  }
+
+  bool check_io_effect_policy(const Frame &frame,
+                              const std::string &effect_name) {
+    if (world_options_ == nullptr) {
+      return true;
+    }
+    const std::vector<std::string> requested_effects =
+        effect::normalize_effects({effect_name});
+    record_io_event(
+        "effect.boundary",
+        {{"effects", effect::effect_row_to_text(requested_effects)}});
+    if (effects_ != nullptr && !effects_->ok &&
+        !effects_->diagnostics.empty()) {
+      set_fault(frame, "EffectViolationError",
+                effects_->diagnostics.front().message);
+      return false;
+    }
+    if (world_options_->enforce_effects &&
+        !effect::effects_subset_of(requested_effects,
+                                   world_options_->allowed_effects)) {
+      set_fault(frame, "EffectViolationError",
+                "effect is not allowed: " +
+                    effect::effect_row_to_text(requested_effects));
+      return false;
+    }
+    return true;
+  }
+
+  bool check_external_io_provider(const Frame &frame) {
+    if (world_options_ != nullptr && world_options_->enforce_replay) {
+      record_io_event("io.provider.denied");
+      if (world_options_->io_provider == nullptr) {
+        set_fault(frame, "ReplayProviderError",
+                  "external IO requires a recorded provider in replay mode");
+      } else {
+        set_fault(frame, "ReplayProviderError",
+                  "external IO operation is not routed through the recorded "
+                  "provider in replay mode");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  bool replay_io_provider_active() const {
+    return world_options_ != nullptr && world_options_->enforce_replay &&
+           world_options_->io_provider != nullptr;
+  }
+
+  bool set_fault_from_provider_status(const Frame &frame,
+                                      const RuntimeIoProviderStatus &status,
+                                      const std::string &operation) {
+    if (!status.handled) {
+      record_io_event("io.provider.denied", {{"operation", operation}});
+      set_fault(frame, "ReplayProviderError",
+                status.message.empty()
+                    ? "recorded IO provider does not implement " + operation
+                    : status.message);
+      return false;
+    }
+    if (!status.ok) {
+      set_fault(frame,
+                status.error_name.empty() ? "IOError" : status.error_name,
+                status.message.empty() ? "recorded IO provider failed"
+                                       : status.message);
+      return false;
+    }
+    return true;
+  }
+
+  bool check_io_policy(const Frame &frame, const std::string &effect_name,
+                       const std::string &capability_name,
+                       const std::string &target, bool external = true) {
+    if (world_options_ == nullptr) {
+      return true;
+    }
+    if (!check_io_effect_policy(frame, effect_name)) {
+      return false;
+    }
+
+    record_io_event("capability.check",
+                    {{"capability", capability_name}, {"target", target}});
+    if (capabilities_ == nullptr ||
+        !capability::capability_set_allows(capabilities_->effective,
+                                           capability_name, target)) {
+      record_io_event("capability.denied",
+                      {{"capability", capability_name}, {"target", target}});
+      set_fault(frame, "CapabilityError",
+                "capability is not granted: " + capability_name +
+                    (target.empty() ? std::string{} : "=" + target));
+      return false;
+    }
+
+    if (external && !check_external_io_provider(frame)) {
+      return false;
+    }
+    return true;
+  }
+
+  void record_io_wait(const std::string &operation,
+                      const std::string &resource) const {
+    record_io_event("io.wait",
+                    {{"operation", operation}, {"resource", resource}});
+  }
+
+  template <typename T>
+  std::shared_ptr<T> io_value_as(const Frame &frame, const Value &value,
+                                 const std::string &expected) {
+    if (!value.is_io_value()) {
+      set_fault(frame, "TypeError", "expected " + expected);
+      return nullptr;
+    }
+    std::shared_ptr<T> converted =
+        std::dynamic_pointer_cast<T>(value.as_io_value());
+    if (converted == nullptr) {
+      set_fault(frame, "TypeError", "expected " + expected);
+    }
+    return converted;
+  }
+
+  std::optional<std::string> io_bytes_from_value(const Frame &frame,
+                                                 const Value &value) {
+    if (value.is_string()) {
+      const std::optional<std::string> text =
+          string_text_from_id(value.as_string().string_id);
+      if (!text.has_value()) {
+        set_fault(frame, "VMError", "string ref is invalid");
+      }
+      return text;
+    }
+    if (!value.is_io_value()) {
+      set_fault(frame, "TypeError",
+                "expected Bytes, ByteSlice, ByteBuffer, or Str");
+      return std::nullopt;
+    }
+    const std::shared_ptr<RuntimeIoValue> io_value = value.as_io_value();
+    if (const auto bytes = std::dynamic_pointer_cast<RuntimeBytes>(io_value)) {
+      return bytes->string();
+    }
+    if (const auto slice =
+            std::dynamic_pointer_cast<RuntimeByteSlice>(io_value)) {
+      return slice->bytes()->string();
+    }
+    if (const auto buffer =
+            std::dynamic_pointer_cast<RuntimeByteBuffer>(io_value)) {
+      const RuntimeIoStatus access = buffer->access_status();
+      if (!set_fault_from_io_status(frame, access)) {
+        return std::nullopt;
+      }
+      return buffer->bytes();
+    }
+    set_fault(frame, "TypeError",
+              "expected Bytes, ByteSlice, ByteBuffer, or Str");
+    return std::nullopt;
+  }
+
+  std::shared_ptr<RuntimePath> io_path_from_value(const Frame &frame,
+                                                  const Value &value) {
+    if (value.is_string()) {
+      const std::optional<std::string> text =
+          string_text_from_id(value.as_string().string_id);
+      if (!text.has_value()) {
+        set_fault(frame, "VMError", "path string ref is invalid");
+        return nullptr;
+      }
+      return std::make_shared<RuntimePath>(*text);
+    }
+    return io_value_as<RuntimePath>(frame, value, "fs.Path or Str");
+  }
+
+  std::shared_ptr<RuntimeEndpoint> io_endpoint_from_value(const Frame &frame,
+                                                          const Value &value) {
+    return io_value_as<RuntimeEndpoint>(frame, value, "net.Endpoint");
+  }
+
+  std::optional<std::chrono::milliseconds>
+  io_timeout_from_value(const Frame &frame, const Value &value) {
+    if (value.is_null()) {
+      return std::chrono::milliseconds::max();
+    }
+    double seconds = 0.0;
+    if (value.is_integer()) {
+      seconds = static_cast<double>(value.as_integer());
+    } else if (value.is_float()) {
+      seconds = value.as_float();
+    } else {
+      set_fault(frame, "TypeError", "timeout must be numeric or null");
+      return std::nullopt;
+    }
+    if (!std::isfinite(seconds) || seconds < 0.0) {
+      set_fault(frame, "ArgumentError", "timeout must be non-negative");
+      return std::nullopt;
+    }
+    const double milliseconds = seconds * 1000.0;
+    if (milliseconds >
+        static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+      return std::chrono::milliseconds::max();
+    }
+    return std::chrono::milliseconds(static_cast<std::int64_t>(milliseconds));
+  }
+
+  std::optional<std::chrono::milliseconds> io_timeout_from_keywords(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
+    const std::optional<Value> timeout = keyword_arg_value(kw_args, "timeout");
+    return io_timeout_from_value(frame, timeout.value_or(Value::null()));
+  }
+
+  std::optional<RuntimeIsolationMode> io_isolation_from_keywords(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
+    const std::optional<Value> value = keyword_arg_value(kw_args, "isolation");
+    if (!value.has_value()) {
+      return RuntimeIsolationMode::Checked;
+    }
+    const std::optional<std::string> name = text_from_symbol_or_string(*value);
+    if (!name.has_value()) {
+      set_fault(frame, "TypeError", "isolation must be Symbol or Str");
+      return std::nullopt;
+    }
+    const std::optional<RuntimeIsolationMode> isolation =
+        runtime_isolation_mode_from_name(*name);
+    if (!isolation.has_value()) {
+      set_fault(frame, "ArgumentError", "unsupported isolation mode");
+    }
+    return isolation;
+  }
+
+  Value io_bytes_value(std::string bytes) {
+    return Value::io_value(std::make_shared<RuntimeBytes>(std::move(bytes)));
+  }
+
+  Value io_endpoint_value(RuntimeEndpoint endpoint) {
+    return Value::io_value(
+        std::make_shared<RuntimeEndpoint>(std::move(endpoint)));
+  }
+
+  Value io_read_result_value(const RuntimeIoStatus &result) {
+    return result.would_block
+               ? Value::null()
+               : Value::integer(static_cast<std::int64_t>(result.count));
+  }
+
   SendStatus try_apply_native_stdlib_send(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
@@ -16540,6 +16972,20 @@ private:
                   "native stdlib selector does not accept block arguments");
         return false;
       }
+      return true;
+    };
+    auto bool_keyword = [&](const std::string &name, bool fallback,
+                            bool *value) -> bool {
+      const std::optional<Value> argument = keyword_arg_value(kw_args, name);
+      if (!argument.has_value()) {
+        *value = fallback;
+        return true;
+      }
+      if (!argument->is_bool()) {
+        set_fault(frame, "TypeError", name + " must be Bool");
+        return false;
+      }
+      *value = argument->as_bool();
       return true;
     };
 
@@ -16592,6 +17038,30 @@ private:
         return SendStatus::NotHandled;
       }
       if (kind == RuntimeNativeTypeKind::Io) {
+        if (selector == "ByteBuffer") {
+          if (args.empty()) {
+            if (!kw_args.empty() || !require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::native_type(RuntimeNativeTypeKind::ByteBuffer);
+            return SendStatus::Matched;
+          }
+          return try_apply_native_stdlib_send(
+              frame, Value::native_type(RuntimeNativeTypeKind::ByteBuffer),
+              "new", args, block, kw_args, out);
+        }
+        if (selector == "Pipe") {
+          if (args.empty() && kw_args.empty()) {
+            if (!require_no_block()) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::native_type(RuntimeNativeTypeKind::IoPipe);
+            return SendStatus::Matched;
+          }
+          return try_apply_native_stdlib_send(
+              frame, Value::native_type(RuntimeNativeTypeKind::IoPipe),
+              "__call__", args, block, kw_args, out);
+        }
         if (selector == "Buffer") {
           if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
             if (!kw_args.empty()) {
@@ -16734,6 +17204,882 @@ private:
         *out = Value::logger(
             std::make_shared<RuntimeLogger>(writer, level, color_mode));
         return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Bytes) {
+        if (selector != "new") {
+          return SendStatus::NotHandled;
+        }
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::string> bytes =
+            io_bytes_from_value(frame, args[0]);
+        if (!bytes.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = io_bytes_value(*bytes);
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::ByteBuffer) {
+        if (selector != "new" && selector != "from" && selector != "wrap") {
+          return SendStatus::NotHandled;
+        }
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "new") {
+          if (!args[0].is_integer()) {
+            set_fault(frame, "TypeError", "ByteBuffer capacity must be Int");
+            return SendStatus::Faulted;
+          }
+          if (args[0].as_integer() < 0) {
+            set_fault(frame, "ArgumentError",
+                      "ByteBuffer capacity must be non-negative");
+            return SendStatus::Faulted;
+          }
+          *out = Value::io_value(std::make_shared<RuntimeByteBuffer>(
+              static_cast<std::size_t>(args[0].as_integer())));
+          return SendStatus::Matched;
+        }
+        const std::optional<std::string> bytes =
+            io_bytes_from_value(frame, args[0]);
+        if (!bytes.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::io_value(
+            std::make_shared<RuntimeByteBuffer>(RuntimeBytes(*bytes)));
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::IoPipe) {
+        if (selector != "new" && selector != "__call__") {
+          return SendStatus::NotHandled;
+        }
+        if (args.size() > 1U ||
+            !reject_unknown_keywords(frame, kw_args,
+                                     {"capacity", "isolation"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        Value capacity_value = args.empty()
+                                   ? keyword_arg_value(kw_args, "capacity")
+                                         .value_or(Value::integer(65536))
+                                   : args[0];
+        if (!capacity_value.is_integer()) {
+          set_fault(frame, "TypeError", "pipe capacity must be Int");
+          return SendStatus::Faulted;
+        }
+        const std::optional<RuntimeIsolationMode> isolation =
+            io_isolation_from_keywords(frame, kw_args);
+        if (!isolation.has_value()) {
+          return SendStatus::Faulted;
+        }
+        RuntimePipeResult pipe =
+            RuntimePipe::create(capacity_value.as_integer(), *isolation);
+        if (!set_fault_from_io_status(frame, pipe)) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "__call__") {
+          *out = Value::io_value(pipe.pipe);
+        } else {
+          *out = make_tuple_value(
+              {Value::io_value(pipe.reader), Value::io_value(pipe.writer)});
+        }
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::FsPath) {
+        if (selector != "new") {
+          return SendStatus::NotHandled;
+        }
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const std::shared_ptr<RuntimePath> path =
+            io_path_from_value(frame, args[0]);
+        if (path == nullptr) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::io_value(path);
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::FsFile && selector == "open") {
+        if ((args.size() != 1U && args.size() != 2U) ||
+            !reject_unknown_keywords(frame, kw_args,
+                                     {"create", "truncate", "append",
+                                      "exclusive", "permissions",
+                                      "isolation"})) {
+          return SendStatus::Faulted;
+        }
+        const std::shared_ptr<RuntimePath> path =
+            io_path_from_value(frame, args[0]);
+        if (path == nullptr) {
+          return SendStatus::Faulted;
+        }
+        RuntimeFileMode mode = RuntimeFileMode::Read;
+        if (args.size() == 2U) {
+          const std::optional<std::string> name =
+              text_from_symbol_or_string(args[1]);
+          if (!name.has_value()) {
+            set_fault(frame, "TypeError", "file mode must be Symbol or Str");
+            return SendStatus::Faulted;
+          }
+          const std::optional<RuntimeFileMode> parsed =
+              runtime_file_mode_from_name(*name);
+          if (!parsed.has_value()) {
+            set_fault(frame, "ArgumentError", "unsupported file mode");
+            return SendStatus::Faulted;
+          }
+          mode = *parsed;
+        }
+        RuntimeFileOpenOptions options;
+        if (!bool_keyword("create", false, &options.create) ||
+            !bool_keyword("truncate", false, &options.truncate) ||
+            !bool_keyword("append", false, &options.append) ||
+            !bool_keyword("exclusive", false, &options.exclusive)) {
+          return SendStatus::Faulted;
+        }
+        if (const std::optional<Value> permissions =
+                keyword_arg_value(kw_args, "permissions")) {
+          if (!permissions->is_null()) {
+            if (!permissions->is_integer()) {
+              set_fault(frame, "TypeError", "permissions must be Int or null");
+              return SendStatus::Faulted;
+            }
+            if (permissions->as_integer() < 0 ||
+                permissions->as_integer() > 07777) {
+              set_fault(frame, "ArgumentError", "permissions are out of range");
+              return SendStatus::Faulted;
+            }
+            options.permissions =
+                static_cast<std::uint32_t>(permissions->as_integer());
+          }
+        }
+        const std::optional<RuntimeIsolationMode> isolation =
+            io_isolation_from_keywords(frame, kw_args);
+        if (!isolation.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if ((mode == RuntimeFileMode::Read && options.truncate) ||
+            (mode == RuntimeFileMode::Append && options.truncate)) {
+          set_fault(frame, "ArgumentError",
+                    mode == RuntimeFileMode::Read
+                        ? "read mode cannot truncate"
+                        : "append mode cannot truncate");
+          return SendStatus::Faulted;
+        }
+        if (options.exclusive && !options.create) {
+          set_fault(frame, "ArgumentError",
+                    "exclusive open requires create: true");
+          return SendStatus::Faulted;
+        }
+        const bool provider_active = replay_io_provider_active();
+        if ((mode == RuntimeFileMode::Read ||
+             mode == RuntimeFileMode::ReadWrite) &&
+            !check_io_policy(frame, "fs_read", "fs.read", path->string(),
+                             !provider_active)) {
+          return SendStatus::Faulted;
+        }
+        if ((mode == RuntimeFileMode::Write ||
+             mode == RuntimeFileMode::Append ||
+             mode == RuntimeFileMode::ReadWrite) &&
+            !check_io_policy(frame, "fs_write", "fs.write", path->string(),
+                             !provider_active)) {
+          return SendStatus::Faulted;
+        }
+        record_io_wait("file.open", path->string());
+        Value file_value;
+        if (provider_active) {
+          std::string initial_bytes;
+          if (mode == RuntimeFileMode::Read ||
+              mode == RuntimeFileMode::ReadWrite) {
+            RuntimeIoProviderStatus status =
+                world_options_->io_provider->fs_read_bytes(path->string(),
+                                                           std::nullopt);
+            if (!set_fault_from_provider_status(frame, status,
+                                                "fs.File.open")) {
+              return SendStatus::Faulted;
+            }
+            initial_bytes = std::move(status.bytes);
+          }
+          RuntimeMemoryFileCloseCallback close_callback;
+          if (mode == RuntimeFileMode::Write ||
+              mode == RuntimeFileMode::Append ||
+              mode == RuntimeFileMode::ReadWrite) {
+            const std::shared_ptr<RuntimeIoProvider> provider =
+                world_options_->io_provider;
+            const std::string provider_path = path->string();
+            const bool create = options.create;
+            const bool truncate = options.truncate;
+            const bool append = mode == RuntimeFileMode::Append;
+            close_callback =
+                [provider, provider_path, create, truncate,
+                 append](const std::string &bytes) -> RuntimeIoStatus {
+              RuntimeIoProviderStatus status = provider->fs_write_bytes(
+                  provider_path, bytes, create, truncate, append);
+              RuntimeIoStatus result;
+              if (!status.handled) {
+                result.error_name = "ReplayProviderError";
+                result.message =
+                    status.message.empty()
+                        ? "recorded IO provider does not implement "
+                          "fs.File.close"
+                        : status.message;
+                return result;
+              }
+              if (!status.ok) {
+                result.error_name =
+                    status.error_name.empty() ? "IOError" : status.error_name;
+                result.message = status.message.empty()
+                                     ? "recorded IO provider failed"
+                                     : status.message;
+                return result;
+              }
+              result.ok = true;
+              result.count = status.count;
+              return result;
+            };
+          }
+          file_value = Value::io_value(std::make_shared<RuntimeMemoryFile>(
+              path->string(), mode, std::move(initial_bytes), *isolation,
+              std::move(close_callback)));
+        } else {
+          RuntimeFileOpenResult opened =
+              RuntimeFile::open(*path, mode, options, *isolation);
+          if (!set_fault_from_io_status(frame, opened)) {
+            return SendStatus::Faulted;
+          }
+          file_value = Value::io_value(opened.file);
+        }
+        if (block.is_null()) {
+          *out = std::move(file_value);
+          return SendStatus::Matched;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "fs.File.open");
+        if (!invoker.has_value()) {
+          if (const auto opened_resource =
+                  std::dynamic_pointer_cast<RuntimeIoResource>(
+                      file_value.as_io_value())) {
+            (void)opened_resource->close();
+          }
+          return SendStatus::Faulted;
+        }
+        try {
+          Value block_result = (*invoker)({file_value});
+          std::shared_ptr<RuntimeIoResource> opened_resource =
+              io_value_as<RuntimeIoResource>(frame, file_value, "fs.File");
+          RuntimeIoStatus close_result = opened_resource == nullptr
+                                             ? RuntimeIoStatus{}
+                                             : opened_resource->close();
+          if (!set_fault_from_io_status(frame, close_result)) {
+            return SendStatus::Faulted;
+          }
+          *out = std::move(block_result);
+        } catch (const RuntimeTaskFailure &failure) {
+          if (const auto opened_resource =
+                  std::dynamic_pointer_cast<RuntimeIoResource>(
+                      file_value.as_io_value())) {
+            (void)opened_resource->close();
+          }
+          set_fault(frame, failure.error_name(), failure.message());
+          return SendStatus::Faulted;
+        }
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::NetEndpoint) {
+        if (selector == "new") {
+          if (!require_arity(2) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!args[0].is_string() || !args[1].is_integer()) {
+            set_fault(frame, "TypeError", "Endpoint.new expects Str and Int");
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::string> host =
+              string_text_from_id(args[0].as_string().string_id);
+          if (!host.has_value() || args[1].as_integer() < 0 ||
+              args[1].as_integer() > 65535) {
+            set_fault(frame, "ArgumentError", "invalid endpoint");
+            return SendStatus::Faulted;
+          }
+          *out = io_endpoint_value(RuntimeEndpoint{
+              *host, static_cast<std::uint16_t>(args[1].as_integer())});
+          return SendStatus::Matched;
+        }
+        if (selector == "parse") {
+          if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!args[0].is_string()) {
+            set_fault(frame, "TypeError", "Endpoint.parse expects Str");
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::string> text =
+              string_text_from_id(args[0].as_string().string_id);
+          RuntimeEndpoint endpoint;
+          RuntimeIoStatus parsed =
+              text.has_value() ? RuntimeEndpoint::parse(*text, &endpoint)
+                               : RuntimeIoStatus{};
+          if (!text.has_value()) {
+            set_fault(frame, "VMError", "endpoint string ref is invalid");
+            return SendStatus::Faulted;
+          }
+          if (!set_fault_from_io_status(frame, parsed)) {
+            return SendStatus::Faulted;
+          }
+          *out = io_endpoint_value(std::move(endpoint));
+          return SendStatus::Matched;
+        }
+        return SendStatus::NotHandled;
+      }
+      if (kind == RuntimeNativeTypeKind::Fs) {
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "Path" || selector == "File") {
+          const RuntimeNativeTypeKind member_kind =
+              selector == "Path" ? RuntimeNativeTypeKind::FsPath
+                                 : RuntimeNativeTypeKind::FsFile;
+          if (args.empty()) {
+            if (!kw_args.empty()) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::native_type(member_kind);
+            return SendStatus::Matched;
+          }
+          if (selector == "File") {
+            set_fault(frame, "TypeError", "fs.File is not directly callable");
+            return SendStatus::Faulted;
+          }
+          return try_apply_native_stdlib_send(frame,
+                                              Value::native_type(member_kind),
+                                              "new", args, block, kw_args, out);
+        }
+        if (selector == "exists?" || selector == "file?" ||
+            selector == "dir?" || selector == "metadata" ||
+            selector == "read_bytes" || selector == "read_text" ||
+            selector == "mkdir" || selector == "mkdir_p" ||
+            selector == "remove") {
+          if (!require_arity(1)) {
+            return SendStatus::Faulted;
+          }
+          const std::shared_ptr<RuntimePath> path =
+              io_path_from_value(frame, args[0]);
+          if (path == nullptr) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "exists?" || selector == "file?" ||
+              selector == "dir?") {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        selector + " does not accept keywords");
+              return SendStatus::Faulted;
+            }
+            bool value = false;
+            const bool provider_active = replay_io_provider_active();
+            if (!check_io_policy(frame, "fs_metadata", "fs.metadata",
+                                 path->string(), !provider_active)) {
+              return SendStatus::Faulted;
+            }
+            if (provider_active) {
+              RuntimeIoProviderStatus status =
+                  selector == "exists?"
+                      ? world_options_->io_provider->fs_exists(path->string())
+                      : (selector == "file?"
+                             ? world_options_->io_provider->fs_file(
+                                   path->string())
+                             : world_options_->io_provider->fs_dir(
+                                   path->string()));
+              if (!set_fault_from_provider_status(frame, status, selector)) {
+                return SendStatus::Faulted;
+              }
+              *out = Value::boolean(status.boolean);
+              return SendStatus::Matched;
+            }
+            RuntimeIoStatus result =
+                selector == "exists?"
+                    ? runtime_fs_exists(*path, &value)
+                    : (selector == "file?" ? runtime_fs_file(*path, &value)
+                                           : runtime_fs_dir(*path, &value));
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::boolean(value);
+            return SendStatus::Matched;
+          }
+          if (selector == "metadata") {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "metadata does not accept keywords");
+              return SendStatus::Faulted;
+            }
+            const bool provider_active = replay_io_provider_active();
+            if (!check_io_policy(frame, "fs_metadata", "fs.metadata",
+                                 path->string(), !provider_active)) {
+              return SendStatus::Faulted;
+            }
+            auto metadata = std::make_shared<RuntimeMetadata>();
+            if (provider_active) {
+              RuntimeIoProviderStatus status =
+                  world_options_->io_provider->fs_metadata(path->string());
+              if (!set_fault_from_provider_status(frame, status, selector)) {
+                return SendStatus::Faulted;
+              }
+              metadata->path = *path;
+              metadata->size = status.size;
+              metadata->file = status.file;
+              metadata->directory = status.directory;
+              metadata->symlink = status.symlink;
+              *out = Value::io_value(metadata);
+              return SendStatus::Matched;
+            }
+            RuntimeIoStatus result = runtime_fs_metadata(*path, metadata.get());
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::io_value(metadata);
+            return SendStatus::Matched;
+          }
+          if (selector == "read_bytes" || selector == "read_text") {
+            if (!reject_unknown_keywords(frame, kw_args,
+                                         {"limit", "encoding"})) {
+              return SendStatus::Faulted;
+            }
+            std::optional<std::size_t> limit;
+            if (const std::optional<Value> value =
+                    keyword_arg_value(kw_args, "limit")) {
+              if (!value->is_null()) {
+                if (!value->is_integer()) {
+                  set_fault(frame, "TypeError", "limit must be Int or null");
+                  return SendStatus::Faulted;
+                }
+                if (value->as_integer() < 0) {
+                  set_fault(frame, "ArgumentError",
+                            "limit must be non-negative");
+                  return SendStatus::Faulted;
+                }
+                limit = static_cast<std::size_t>(value->as_integer());
+              }
+            }
+            if (selector == "read_text") {
+              if (const std::optional<Value> encoding =
+                      keyword_arg_value(kw_args, "encoding")) {
+                const std::optional<std::string> name =
+                    text_from_symbol_or_string(*encoding);
+                if (!name.has_value()) {
+                  set_fault(frame, "TypeError",
+                            "encoding must be Symbol or Str");
+                  return SendStatus::Faulted;
+                }
+                if (*name != "utf8") {
+                  set_fault(frame, "ArgumentError",
+                            "only utf8 encoding is supported");
+                  return SendStatus::Faulted;
+                }
+              }
+            }
+            const bool provider_active = replay_io_provider_active();
+            if (!check_io_policy(frame, "fs_read", "fs.read", path->string(),
+                                 !provider_active)) {
+              return SendStatus::Faulted;
+            }
+            record_io_wait("fs.read", path->string());
+            if (provider_active) {
+              RuntimeIoProviderStatus status =
+                  world_options_->io_provider->fs_read_bytes(path->string(),
+                                                             limit);
+              if (!set_fault_from_provider_status(frame, status, selector)) {
+                return SendStatus::Faulted;
+              }
+              if (limit.has_value() && status.bytes.size() > *limit) {
+                set_fault(frame, "ArgumentError", "read_bytes limit exceeded");
+                return SendStatus::Faulted;
+              }
+              *out = selector == "read_text"
+                         ? string_value_from_text(std::move(status.bytes))
+                         : io_bytes_value(std::move(status.bytes));
+              return SendStatus::Matched;
+            }
+            std::shared_ptr<RuntimeBytes> bytes;
+            RuntimeIoStatus result =
+                runtime_fs_read_bytes(*path, limit, &bytes);
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = selector == "read_text"
+                       ? string_value_from_text(bytes->string())
+                       : Value::io_value(bytes);
+            return SendStatus::Matched;
+          }
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      selector + " does not accept keywords");
+            return SendStatus::Faulted;
+          }
+          const bool provider_active = replay_io_provider_active();
+          if (!check_io_policy(frame, "fs_write", "fs.write", path->string(),
+                               !provider_active)) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait("fs.write", path->string());
+          if (provider_active) {
+            RuntimeIoProviderStatus status =
+                selector == "mkdir"
+                    ? world_options_->io_provider->fs_mkdir(path->string())
+                    : (selector == "mkdir_p"
+                           ? world_options_->io_provider->fs_mkdir_p(
+                                 path->string())
+                           : world_options_->io_provider->fs_remove(
+                                 path->string()));
+            if (!set_fault_from_provider_status(frame, status, selector)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::null();
+            return SendStatus::Matched;
+          }
+          RuntimeIoStatus result =
+              selector == "mkdir"
+                  ? runtime_fs_mkdir(*path)
+                  : (selector == "mkdir_p" ? runtime_fs_mkdir_p(*path)
+                                           : runtime_fs_remove(*path));
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::null();
+          return SendStatus::Matched;
+        }
+        if (selector == "write_bytes" || selector == "write_text") {
+          if (!require_arity(2) ||
+              !reject_unknown_keywords(frame, kw_args,
+                                       {"create", "truncate", "encoding"})) {
+            return SendStatus::Faulted;
+          }
+          const std::shared_ptr<RuntimePath> path =
+              io_path_from_value(frame, args[0]);
+          if (path == nullptr) {
+            return SendStatus::Faulted;
+          }
+          std::optional<std::string> bytes;
+          if (selector == "write_text") {
+            if (!args[1].is_string()) {
+              set_fault(frame, "TypeError", "write_text expects Str text");
+              return SendStatus::Faulted;
+            }
+            bytes = string_text_from_id(args[1].as_string().string_id);
+            if (const std::optional<Value> encoding =
+                    keyword_arg_value(kw_args, "encoding")) {
+              const std::optional<std::string> name =
+                  text_from_symbol_or_string(*encoding);
+              if (!name.has_value() || *name != "utf8") {
+                set_fault(frame,
+                          name.has_value() ? "ArgumentError" : "TypeError",
+                          "only utf8 encoding is supported");
+                return SendStatus::Faulted;
+              }
+            }
+          } else {
+            bytes = io_bytes_from_value(frame, args[1]);
+          }
+          if (!bytes.has_value()) {
+            return SendStatus::Faulted;
+          }
+          bool create = true;
+          bool truncate = true;
+          if (!bool_keyword("create", true, &create) ||
+              !bool_keyword("truncate", true, &truncate)) {
+            return SendStatus::Faulted;
+          }
+          const bool provider_active = replay_io_provider_active();
+          if (!check_io_policy(frame, "fs_write", "fs.write", path->string(),
+                               !provider_active)) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait("fs.write", path->string());
+          if (provider_active) {
+            RuntimeIoProviderStatus status =
+                world_options_->io_provider->fs_write_bytes(
+                    path->string(), *bytes, create, truncate);
+            if (!set_fault_from_provider_status(frame, status, selector)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::null();
+            return SendStatus::Matched;
+          }
+          RuntimeIoStatus result =
+              runtime_fs_write_bytes(*path, *bytes, create, truncate);
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::null();
+          return SendStatus::Matched;
+        }
+        if (selector == "rename" || selector == "copy") {
+          if (!require_arity(2) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          const std::shared_ptr<RuntimePath> from =
+              io_path_from_value(frame, args[0]);
+          const std::shared_ptr<RuntimePath> to =
+              io_path_from_value(frame, args[1]);
+          if (from == nullptr || to == nullptr) {
+            return SendStatus::Faulted;
+          }
+          const bool provider_active = replay_io_provider_active();
+          if (selector == "copy" &&
+              !check_io_policy(frame, "fs_read", "fs.read", from->string(),
+                               !provider_active)) {
+            return SendStatus::Faulted;
+          }
+          if (!check_io_policy(frame, "fs_write", "fs.write",
+                               selector == "rename" ? from->string()
+                                                    : to->string(),
+                               !provider_active)) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "rename" &&
+              !check_io_policy(frame, "fs_write", "fs.write", to->string(),
+                               !provider_active)) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait(selector == "rename" ? "fs.rename" : "fs.copy",
+                         from->string());
+          if (provider_active) {
+            RuntimeIoProviderStatus status =
+                selector == "rename"
+                    ? world_options_->io_provider->fs_rename(from->string(),
+                                                             to->string())
+                    : world_options_->io_provider->fs_copy(from->string(),
+                                                           to->string());
+            if (!set_fault_from_provider_status(frame, status, selector)) {
+              return SendStatus::Faulted;
+            }
+            *out = selector == "copy"
+                       ? Value::integer(static_cast<std::int64_t>(status.count))
+                       : Value::null();
+            return SendStatus::Matched;
+          }
+          std::size_t count = 0;
+          RuntimeIoStatus result = selector == "rename"
+                                       ? runtime_fs_rename(*from, *to)
+                                       : runtime_fs_copy(*from, *to, &count);
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = selector == "copy"
+                     ? Value::integer(static_cast<std::int64_t>(count))
+                     : Value::null();
+          return SendStatus::Matched;
+        }
+        return SendStatus::NotHandled;
+      }
+      if (kind == RuntimeNativeTypeKind::NetTcp) {
+        if (selector != "connect" && selector != "listen") {
+          return SendStatus::NotHandled;
+        }
+        const bool keywords_ok =
+            selector == "connect"
+                ? reject_unknown_keywords(frame, kw_args,
+                                          {"timeout", "isolation"})
+                : reject_unknown_keywords(
+                      frame, kw_args, {"backlog", "reuse_addr", "isolation"});
+        if (!keywords_ok) {
+          return SendStatus::Faulted;
+        }
+        RuntimeEndpoint endpoint;
+        if (selector == "connect" && args.size() == 1U) {
+          const std::shared_ptr<RuntimeEndpoint> parsed =
+              io_endpoint_from_value(frame, args[0]);
+          if (parsed == nullptr) {
+            return SendStatus::Faulted;
+          }
+          endpoint = *parsed;
+        } else {
+          if (args.size() != 2U || !args[0].is_string() ||
+              !args[1].is_integer()) {
+            set_fault(frame, "TypeError", selector + " expects host and port");
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::string> host =
+              string_text_from_id(args[0].as_string().string_id);
+          if (!host.has_value() || args[1].as_integer() < 0 ||
+              args[1].as_integer() > 65535) {
+            set_fault(frame, "ArgumentError", "invalid network endpoint");
+            return SendStatus::Faulted;
+          }
+          endpoint = RuntimeEndpoint{
+              *host, static_cast<std::uint16_t>(args[1].as_integer())};
+        }
+        const std::optional<RuntimeIsolationMode> isolation =
+            io_isolation_from_keywords(frame, kw_args);
+        if (!isolation.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "connect") {
+          const std::optional<std::chrono::milliseconds> timeout =
+              io_timeout_from_keywords(frame, kw_args);
+          if (!timeout.has_value()) {
+            return SendStatus::Faulted;
+          }
+          if (!check_io_policy(frame, "net_connect", "net.connect",
+                               endpoint.to_string())) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait("tcp.connect", endpoint.to_string());
+          RuntimeTcpConnectResult connected =
+              RuntimeTcpStream::connect(endpoint, *timeout, *isolation);
+          if (!set_fault_from_io_status(frame, connected)) {
+            return SendStatus::Faulted;
+          }
+          Value stream_value = Value::io_value(connected.stream);
+          if (block.is_null()) {
+            *out = std::move(stream_value);
+            return SendStatus::Matched;
+          }
+          std::optional<NativeBlockInvoker> invoker =
+              make_native_block_invoker(frame, block, "net.tcp.connect");
+          if (!invoker.has_value()) {
+            connected.stream->close();
+            return SendStatus::Faulted;
+          }
+          try {
+            Value block_result = (*invoker)({stream_value});
+            RuntimeIoStatus close_result = connected.stream->close();
+            if (!set_fault_from_io_status(frame, close_result)) {
+              return SendStatus::Faulted;
+            }
+            *out = std::move(block_result);
+          } catch (const RuntimeTaskFailure &failure) {
+            connected.stream->close();
+            set_fault(frame, failure.error_name(), failure.message());
+            return SendStatus::Faulted;
+          }
+          return SendStatus::Matched;
+        }
+        int backlog = 128;
+        if (const std::optional<Value> value =
+                keyword_arg_value(kw_args, "backlog")) {
+          if (!value->is_integer()) {
+            set_fault(frame, "TypeError", "backlog must be Int");
+            return SendStatus::Faulted;
+          }
+          backlog = static_cast<int>(value->as_integer());
+        }
+        if (backlog <= 0) {
+          set_fault(frame, "ArgumentError", "backlog must be positive");
+          return SendStatus::Faulted;
+        }
+        bool reuse_addr = false;
+        if (!bool_keyword("reuse_addr", false, &reuse_addr)) {
+          return SendStatus::Faulted;
+        }
+        if (!check_io_policy(frame, "net_listen", "net.listen",
+                             endpoint.to_string())) {
+          return SendStatus::Faulted;
+        }
+        record_io_wait("tcp.listen", endpoint.to_string());
+        RuntimeTcpListenResult listening = RuntimeTcpListener::listen(
+            endpoint, backlog, reuse_addr, *isolation);
+        if (!set_fault_from_io_status(frame, listening)) {
+          return SendStatus::Faulted;
+        }
+        Value listener_value = Value::io_value(listening.listener);
+        if (block.is_null()) {
+          *out = std::move(listener_value);
+          return SendStatus::Matched;
+        }
+        std::optional<NativeBlockInvoker> invoker =
+            make_native_block_invoker(frame, block, "net.tcp.listen");
+        if (!invoker.has_value()) {
+          listening.listener->close();
+          return SendStatus::Faulted;
+        }
+        try {
+          Value block_result = (*invoker)({listener_value});
+          RuntimeIoStatus close_result = listening.listener->close();
+          if (!set_fault_from_io_status(frame, close_result)) {
+            return SendStatus::Faulted;
+          }
+          *out = std::move(block_result);
+        } catch (const RuntimeTaskFailure &failure) {
+          listening.listener->close();
+          set_fault(frame, failure.error_name(), failure.message());
+          return SendStatus::Faulted;
+        }
+        return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::NetUdp) {
+        if (selector == "bind") {
+          if (!require_arity(2) ||
+              !reject_unknown_keywords(frame, kw_args, {"isolation"}) ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!args[0].is_string() || !args[1].is_integer()) {
+            set_fault(frame, "TypeError", "udp.bind expects host and port");
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::string> host =
+              string_text_from_id(args[0].as_string().string_id);
+          if (!host.has_value() || args[1].as_integer() < 0 ||
+              args[1].as_integer() > 65535) {
+            set_fault(frame, "ArgumentError", "invalid UDP endpoint");
+            return SendStatus::Faulted;
+          }
+          const std::optional<RuntimeIsolationMode> isolation =
+              io_isolation_from_keywords(frame, kw_args);
+          if (!isolation.has_value()) {
+            return SendStatus::Faulted;
+          }
+          const RuntimeEndpoint endpoint{
+              *host, static_cast<std::uint16_t>(args[1].as_integer())};
+          if (!check_io_policy(frame, "net_udp", "net.udp",
+                               endpoint.to_string())) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait("udp.bind", endpoint.to_string());
+          RuntimeUdpBindResult bound =
+              RuntimeUdpSocket::bind(endpoint, *isolation);
+          if (!set_fault_from_io_status(frame, bound)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::io_value(bound.socket);
+          return SendStatus::Matched;
+        }
+        if (selector == "open") {
+          if (!args.empty() ||
+              !reject_unknown_keywords(frame, kw_args,
+                                       {"family", "isolation"}) ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::string family = "inet";
+          if (const std::optional<Value> value =
+                  keyword_arg_value(kw_args, "family")) {
+            const std::optional<std::string> name =
+                text_from_symbol_or_string(*value);
+            if (!name.has_value()) {
+              set_fault(frame, "TypeError", "family must be Symbol or Str");
+              return SendStatus::Faulted;
+            }
+            family = *name;
+          }
+          const std::optional<RuntimeIsolationMode> isolation =
+              io_isolation_from_keywords(frame, kw_args);
+          if (!isolation.has_value()) {
+            return SendStatus::Faulted;
+          }
+          if (!check_io_policy(frame, "net_udp", "net.udp", family)) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait("udp.open", family);
+          RuntimeUdpBindResult opened =
+              RuntimeUdpSocket::open(family, *isolation);
+          if (!set_fault_from_io_status(frame, opened)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::io_value(opened.socket);
+          return SendStatus::Matched;
+        }
+        return SendStatus::NotHandled;
       }
       if (kind == RuntimeNativeTypeKind::Range) {
         if (selector != "new") {
@@ -16949,6 +18295,1506 @@ private:
         *out = Value::threaded_collection(
             std::make_shared<RuntimeThreadedCollection>(
                 *items, workers, RuntimeFlowOptions{}, scatter_policy));
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_io_value()) {
+      const std::shared_ptr<RuntimeIoValue> io_value = receiver.as_io_value();
+      if (io_value == nullptr) {
+        set_fault(frame, "TypeError", "IO value is null");
+        return SendStatus::Faulted;
+      }
+
+      if (const auto bytes =
+              std::dynamic_pointer_cast<RuntimeBytes>(io_value)) {
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "count") {
+          if (!require_arity(0) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(static_cast<std::int64_t>(bytes->count()));
+          return SendStatus::Matched;
+        }
+        if (selector == "empty?") {
+          if (!require_arity(0) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(bytes->empty());
+          return SendStatus::Matched;
+        }
+        if (selector == "[]") {
+          if (!require_arity(1) || !kw_args.empty() || !args[0].is_integer()) {
+            if (!args.empty() && !args[0].is_integer()) {
+              set_fault(frame, "TypeError", "Bytes index must be Int");
+            }
+            return SendStatus::Faulted;
+          }
+          RuntimeByteResult result = bytes->at(args[0].as_integer());
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(result.byte);
+          return SendStatus::Matched;
+        }
+        if (selector == "slice") {
+          if ((args.size() != 1U && args.size() != 2U) || !kw_args.empty() ||
+              !args[0].is_integer() ||
+              (args.size() == 2U && !args[1].is_null() &&
+               !args[1].is_integer())) {
+            set_fault(frame, "TypeError",
+                      "Bytes.slice expects Int start/length");
+            return SendStatus::Faulted;
+          }
+          std::optional<std::size_t> length;
+          if (args.size() == 2U && !args[1].is_null()) {
+            if (args[1].as_integer() < 0) {
+              set_fault(frame, "ArgumentError",
+                        "slice length must be non-negative");
+              return SendStatus::Faulted;
+            }
+            length = static_cast<std::size_t>(args[1].as_integer());
+          }
+          std::int64_t start = args[0].as_integer();
+          if (start < 0) {
+            start += static_cast<std::int64_t>(bytes->count());
+          }
+          if (start < 0 || static_cast<std::size_t>(start) > bytes->count()) {
+            set_fault(frame, "IndexError", "Bytes slice is out of bounds");
+            return SendStatus::Faulted;
+          }
+          *out = Value::io_value(bytes->slice(args[0].as_integer(), length));
+          return SendStatus::Matched;
+        }
+        if (selector == "to_str") {
+          if (args.size() > 1U ||
+              !reject_unknown_keywords(frame, kw_args, {"encoding"})) {
+            return SendStatus::Faulted;
+          }
+          Value encoding = !args.empty()
+                               ? args[0]
+                               : keyword_arg_value(kw_args, "encoding")
+                                     .value_or(Value::null());
+          std::string name = "utf8";
+          if (!encoding.is_null()) {
+            const std::optional<std::string> parsed =
+                text_from_symbol_or_string(encoding);
+            if (!parsed.has_value()) {
+              set_fault(frame, "TypeError", "encoding must be Symbol or Str");
+              return SendStatus::Faulted;
+            }
+            name = *parsed;
+          }
+          RuntimeIoStatus result = bytes->to_string(name);
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = string_value_from_text(result.bytes);
+          return SendStatus::Matched;
+        }
+        if (selector == "hex") {
+          if (!require_arity(0) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          *out = string_value_from_text(bytes->hex());
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto buffer =
+              std::dynamic_pointer_cast<RuntimeByteBuffer>(io_value)) {
+        RuntimeIoStatus access = buffer->access_status();
+        if (!set_fault_from_io_status(frame, access)) {
+          return SendStatus::Faulted;
+        }
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "capacity" || selector == "position" ||
+            selector == "limit" || selector == "count" ||
+            selector == "remaining" || selector == "empty?" ||
+            selector == "full?") {
+          if (!require_arity(0) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "empty?") {
+            *out = Value::boolean(buffer->empty());
+          } else if (selector == "full?") {
+            *out = Value::boolean(buffer->full());
+          } else {
+            const std::size_t value =
+                selector == "capacity"
+                    ? buffer->capacity()
+                    : (selector == "position"
+                           ? buffer->position()
+                           : (selector == "limit"
+                                  ? buffer->limit()
+                                  : (selector == "count"
+                                         ? buffer->count()
+                                         : buffer->remaining())));
+            *out = Value::integer(static_cast<std::int64_t>(value));
+          }
+          return SendStatus::Matched;
+        }
+        if (selector == "clear!" || selector == "flip!" ||
+            selector == "rewind!" || selector == "compact!") {
+          if (!require_arity(0) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          RuntimeIoStatus result =
+              selector == "clear!"
+                  ? buffer->clear()
+                  : (selector == "flip!"
+                         ? buffer->flip()
+                         : (selector == "rewind!" ? buffer->rewind()
+                                                  : buffer->compact()));
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = selector == "clear!" ? Value::null() : receiver;
+          return SendStatus::Matched;
+        }
+        if (selector == "get!" || selector == "get_at") {
+          if ((selector == "get!" && !require_arity(0)) ||
+              (selector == "get_at" && !require_arity(1)) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "get_at" && !args[0].is_integer()) {
+            set_fault(frame, "TypeError", "ByteBuffer index must be Int");
+            return SendStatus::Faulted;
+          }
+          RuntimeByteResult result = selector == "get!"
+                                         ? buffer->get()
+                                         : buffer->get_at(args[0].as_integer());
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(result.byte);
+          return SendStatus::Matched;
+        }
+        if (selector == "put!" || selector == "put_all!") {
+          if (!require_arity(1) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          RuntimeIoStatus result;
+          if (selector == "put!") {
+            if (!args[0].is_integer()) {
+              set_fault(frame, "TypeError", "ByteBuffer byte must be Int");
+              return SendStatus::Faulted;
+            }
+            result = buffer->put(args[0].as_integer());
+          } else {
+            const std::optional<std::string> input =
+                io_bytes_from_value(frame, args[0]);
+            if (!input.has_value()) {
+              return SendStatus::Faulted;
+            }
+            result = buffer->put_all(*input);
+          }
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = receiver;
+          return SendStatus::Matched;
+        }
+        if (selector == "read_slice" || selector == "write_slice") {
+          if (args.size() > 1U || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          std::optional<std::size_t> length;
+          if (!args.empty() && !args[0].is_null()) {
+            if (!args[0].is_integer()) {
+              set_fault(frame, "TypeError", "slice length must be Int or null");
+              return SendStatus::Faulted;
+            }
+            if (args[0].as_integer() < 0) {
+              set_fault(frame, "ArgumentError",
+                        "slice length must be non-negative");
+              return SendStatus::Faulted;
+            }
+            length = static_cast<std::size_t>(args[0].as_integer());
+          }
+          if ((selector == "read_slice" && !buffer->read_mode()) ||
+              (selector == "write_slice" && buffer->read_mode())) {
+            set_fault(frame, "ArgumentError",
+                      selector == "read_slice"
+                          ? "read_slice requires read mode"
+                          : "write_slice requires write mode");
+            return SendStatus::Faulted;
+          }
+          *out = Value::io_value(selector == "read_slice"
+                                     ? buffer->read_slice(length)
+                                     : buffer->write_slice(length));
+          return SendStatus::Matched;
+        }
+        if (selector == "slice") {
+          if ((args.size() != 1U && args.size() != 2U) || !kw_args.empty() ||
+              !args[0].is_integer()) {
+            set_fault(frame, "TypeError", "ByteBuffer.slice expects Int start");
+            return SendStatus::Faulted;
+          }
+          std::optional<std::size_t> length;
+          if (args.size() == 2U && !args[1].is_null()) {
+            if (!args[1].is_integer()) {
+              set_fault(frame, "TypeError", "slice length must be Int or null");
+              return SendStatus::Faulted;
+            }
+            if (args[1].as_integer() < 0) {
+              set_fault(frame, "ArgumentError",
+                        "slice length must be non-negative");
+              return SendStatus::Faulted;
+            }
+            length = static_cast<std::size_t>(args[1].as_integer());
+          }
+          std::int64_t start = args[0].as_integer();
+          if (start < 0) {
+            start += static_cast<std::int64_t>(buffer->count());
+          }
+          if (start < 0 || static_cast<std::size_t>(start) > buffer->count()) {
+            set_fault(frame, "IndexError", "ByteBuffer slice is out of bounds");
+            return SendStatus::Faulted;
+          }
+          *out =
+              Value::io_value(buffer->byte_slice(args[0].as_integer(), length));
+          return SendStatus::Matched;
+        }
+        if (selector == "bytes" || selector == "copy_bytes" ||
+            selector == "freeze_bytes!") {
+          if (!require_arity(0) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::io_value(
+              selector == "bytes"
+                  ? std::make_shared<RuntimeBytes>(buffer->bytes())
+                  : (selector == "copy_bytes" ? buffer->copy_bytes()
+                                              : buffer->freeze_bytes()));
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto slice =
+              std::dynamic_pointer_cast<RuntimeByteSlice>(io_value)) {
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "count" || selector == "bytes" ||
+            selector == "copy_bytes" || selector == "owner" ||
+            selector == "shareable?") {
+          if (!require_arity(0) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "count") {
+            *out = Value::integer(static_cast<std::int64_t>(slice->count()));
+          } else if (selector == "shareable?") {
+            *out = Value::boolean(slice->shareable());
+          } else if (selector == "owner") {
+            const std::shared_ptr<RuntimeByteBuffer> owner = slice->owner();
+            *out = owner == nullptr ? Value::null() : Value::io_value(owner);
+          } else {
+            *out = Value::io_value(selector == "bytes" ? slice->bytes()
+                                                       : slice->copy_bytes());
+          }
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto path = std::dynamic_pointer_cast<RuntimePath>(io_value)) {
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "/" || selector == "join") {
+          if (args.empty() || !kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "path join expects at least one part");
+            return SendStatus::Faulted;
+          }
+          RuntimePath joined = *path;
+          for (const Value &argument : args) {
+            const std::shared_ptr<RuntimePath> part =
+                io_path_from_value(frame, argument);
+            if (part == nullptr) {
+              return SendStatus::Faulted;
+            }
+            joined = joined.join(*part);
+          }
+          *out = Value::io_value(std::make_shared<RuntimePath>(joined));
+          return SendStatus::Matched;
+        }
+        if (selector == "basename" || selector == "extname" ||
+            selector == "parent" || selector == "absolute?" ||
+            selector == "normalize" || selector == "to_str") {
+          if (!require_arity(0) || !kw_args.empty()) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "absolute?") {
+            *out = Value::boolean(path->absolute());
+          } else if (selector == "parent") {
+            *out =
+                Value::io_value(std::make_shared<RuntimePath>(path->parent()));
+          } else if (selector == "normalize") {
+            *out = Value::io_value(
+                std::make_shared<RuntimePath>(path->normalize()));
+          } else {
+            *out = string_value_from_text(selector == "basename"
+                                              ? path->basename()
+                                              : (selector == "extname"
+                                                     ? path->extname()
+                                                     : path->string()));
+          }
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto pipe = std::dynamic_pointer_cast<RuntimePipe>(io_value)) {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "reader") {
+          *out = Value::io_value(pipe->reader());
+          return SendStatus::Matched;
+        }
+        if (selector == "writer") {
+          *out = Value::io_value(pipe->writer());
+          return SendStatus::Matched;
+        }
+        if (selector == "capacity") {
+          *out = Value::integer(static_cast<std::int64_t>(pipe->capacity()));
+          return SendStatus::Matched;
+        }
+        if (selector == "buffered") {
+          *out = Value::integer(static_cast<std::int64_t>(pipe->buffered()));
+          return SendStatus::Matched;
+        }
+        if (selector == "closed?") {
+          *out = Value::boolean(pipe->closed());
+          return SendStatus::Matched;
+        }
+        if (selector == "close!") {
+          RuntimeIoStatus result = pipe->close();
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::null();
+          return SendStatus::Matched;
+        }
+      }
+
+      const auto file = std::dynamic_pointer_cast<RuntimeFile>(io_value);
+      const auto memory_file =
+          std::dynamic_pointer_cast<RuntimeMemoryFile>(io_value);
+      const auto pipe_reader =
+          std::dynamic_pointer_cast<RuntimePipeReader>(io_value);
+      const auto pipe_writer =
+          std::dynamic_pointer_cast<RuntimePipeWriter>(io_value);
+      const auto tcp_stream =
+          std::dynamic_pointer_cast<RuntimeTcpStream>(io_value);
+      const bool is_file_like = file != nullptr || memory_file != nullptr;
+      const bool is_reader =
+          is_file_like || pipe_reader != nullptr || tcp_stream != nullptr;
+      const bool is_writer =
+          is_file_like || pipe_writer != nullptr || tcp_stream != nullptr;
+      auto file_like_path = [&]() -> RuntimePath {
+        return file != nullptr ? file->path() : memory_file->path();
+      };
+      auto file_like_mode = [&]() -> RuntimeFileMode {
+        return file != nullptr ? file->mode() : memory_file->mode();
+      };
+      auto read_once = [&](RuntimeByteBuffer &buffer,
+                           std::chrono::milliseconds timeout,
+                           bool nonblocking) -> RuntimeIoStatus {
+        if (file != nullptr) {
+          return nonblocking ? file->try_read(buffer)
+                             : file->read(buffer, timeout);
+        }
+        if (memory_file != nullptr) {
+          return nonblocking ? memory_file->try_read(buffer)
+                             : memory_file->read(buffer, timeout);
+        }
+        if (pipe_reader != nullptr) {
+          return nonblocking ? pipe_reader->try_read(buffer)
+                             : pipe_reader->read(buffer, timeout);
+        }
+        return nonblocking ? tcp_stream->try_read(buffer)
+                           : tcp_stream->read(buffer, timeout);
+      };
+      auto write_once = [&](const std::string &bytes,
+                            std::chrono::milliseconds timeout,
+                            bool nonblocking) -> RuntimeIoStatus {
+        if (file != nullptr) {
+          return nonblocking ? file->try_write(bytes)
+                             : file->write(bytes, timeout);
+        }
+        if (memory_file != nullptr) {
+          return nonblocking ? memory_file->try_write(bytes)
+                             : memory_file->write(bytes, timeout);
+        }
+        if (pipe_writer != nullptr) {
+          return nonblocking ? pipe_writer->try_write(bytes)
+                             : pipe_writer->write(bytes, timeout);
+        }
+        return nonblocking ? tcp_stream->try_write(bytes)
+                           : tcp_stream->write(bytes, timeout);
+      };
+      auto check_reader_policy = [&]() -> bool {
+        if (is_file_like) {
+          return check_io_policy(frame, "fs_read", "fs.read",
+                                 file_like_path().string(),
+                                 memory_file == nullptr);
+        }
+        if (tcp_stream != nullptr) {
+          return check_io_effect_policy(frame, "net_connect") &&
+                 check_external_io_provider(frame);
+        }
+        record_io_event("io.pipe.read");
+        return true;
+      };
+      auto check_writer_policy = [&]() -> bool {
+        if (is_file_like) {
+          return check_io_policy(frame, "fs_write", "fs.write",
+                                 file_like_path().string(),
+                                 memory_file == nullptr);
+        }
+        if (tcp_stream != nullptr) {
+          return check_io_effect_policy(frame, "net_connect") &&
+                 check_external_io_provider(frame);
+        }
+        record_io_event("io.pipe.write");
+        return true;
+      };
+
+      if (is_reader && (selector == "read!" || selector == "try_read!")) {
+        const bool nonblocking = selector == "try_read!";
+        if (!require_arity(1) ||
+            !reject_unknown_keywords(
+                frame, kw_args,
+                nonblocking ? std::initializer_list<const char *>{}
+                            : std::initializer_list<const char *>{"timeout"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const std::shared_ptr<RuntimeByteBuffer> buffer =
+            io_value_as<RuntimeByteBuffer>(frame, args[0], "io.ByteBuffer");
+        if (buffer == nullptr) {
+          return SendStatus::Faulted;
+        }
+        std::chrono::milliseconds timeout = std::chrono::milliseconds::max();
+        if (!nonblocking) {
+          const std::optional<std::chrono::milliseconds> parsed =
+              io_timeout_from_keywords(frame, kw_args);
+          if (!parsed.has_value()) {
+            return SendStatus::Faulted;
+          }
+          timeout = *parsed;
+        }
+        if (!check_reader_policy()) {
+          return SendStatus::Faulted;
+        }
+        if (!nonblocking) {
+          record_io_wait("reader.read", io_value->type_name());
+        }
+        RuntimeIoStatus result = read_once(*buffer, timeout, nonblocking);
+        if (!set_fault_from_io_status(frame, result)) {
+          return SendStatus::Faulted;
+        }
+        *out = io_read_result_value(result);
+        return SendStatus::Matched;
+      }
+
+      if (is_reader && (selector == "read_exact!" || selector == "read_all!" ||
+                        selector == "read_line!" || selector == "each_chunk")) {
+        if (selector == "read_exact!") {
+          if (!require_arity(1) ||
+              !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!args[0].is_integer()) {
+            set_fault(frame, "TypeError", "read_exact count must be Int");
+            return SendStatus::Faulted;
+          }
+          if (args[0].as_integer() < 0) {
+            set_fault(frame, "ArgumentError",
+                      "read_exact count must be non-negative");
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::chrono::milliseconds> timeout =
+              io_timeout_from_keywords(frame, kw_args);
+          if (!timeout.has_value()) {
+            return SendStatus::Faulted;
+          }
+          if (!check_reader_policy()) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait("reader.read_exact", io_value->type_name());
+          const auto deadline =
+              *timeout == std::chrono::milliseconds::max()
+                  ? std::optional<std::chrono::steady_clock::time_point>{}
+                  : std::optional<std::chrono::steady_clock::time_point>{
+                        std::chrono::steady_clock::now() + *timeout};
+          const std::size_t expected =
+              static_cast<std::size_t>(args[0].as_integer());
+          RuntimeByteBuffer buffer(expected);
+          while (buffer.count() < expected) {
+            const std::chrono::milliseconds remaining =
+                !deadline.has_value()
+                    ? std::chrono::milliseconds::max()
+                    : std::max(
+                          std::chrono::milliseconds(0),
+                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                              *deadline - std::chrono::steady_clock::now()));
+            RuntimeIoStatus result = read_once(buffer, remaining, false);
+            if (result.eof) {
+              set_fault(frame, "EOFError",
+                        "stream ended before requested byte count");
+              return SendStatus::Faulted;
+            }
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+          }
+          *out = io_bytes_value(buffer.bytes());
+          return SendStatus::Matched;
+        }
+
+        if (!args.empty() ||
+            !reject_unknown_keywords(
+                frame, kw_args,
+                selector == "read_all!"
+                    ? std::initializer_list<const char *>{"limit", "chunk_size"}
+                    : (selector == "read_line!"
+                           ? std::initializer_list<const char *>{"limit",
+                                                                 "timeout"}
+                           : std::initializer_list<const char *>{"size",
+                                                                 "timeout"}))) {
+          return SendStatus::Faulted;
+        }
+        std::size_t chunk_size = 8192;
+        const char *size_keyword =
+            selector == "each_chunk" ? "size" : "chunk_size";
+        if (const std::optional<Value> value =
+                keyword_arg_value(kw_args, size_keyword)) {
+          if (!value->is_integer()) {
+            set_fault(frame, "TypeError",
+                      std::string(size_keyword) + " must be Int");
+            return SendStatus::Faulted;
+          }
+          if (value->as_integer() <= 0) {
+            set_fault(frame, "ArgumentError",
+                      std::string(size_keyword) + " must be positive");
+            return SendStatus::Faulted;
+          }
+          chunk_size = static_cast<std::size_t>(value->as_integer());
+        }
+        std::optional<std::size_t> limit;
+        if (const std::optional<Value> value =
+                keyword_arg_value(kw_args, "limit")) {
+          if (!value->is_null()) {
+            if (!value->is_integer()) {
+              set_fault(frame, "TypeError", "limit must be Int or null");
+              return SendStatus::Faulted;
+            }
+            if (value->as_integer() < 0) {
+              set_fault(frame, "ArgumentError", "limit must be non-negative");
+              return SendStatus::Faulted;
+            }
+            limit = static_cast<std::size_t>(value->as_integer());
+          }
+        }
+        const std::optional<std::chrono::milliseconds> timeout =
+            selector == "read_all!"
+                ? std::optional<
+                      std::chrono::milliseconds>{std::chrono::milliseconds::
+                                                     max()}
+                : io_timeout_from_keywords(frame, kw_args);
+        if (!timeout.has_value()) {
+          return SendStatus::Faulted;
+        }
+        const auto read_deadline =
+            *timeout == std::chrono::milliseconds::max()
+                ? std::optional<std::chrono::steady_clock::time_point>{}
+                : std::optional<std::chrono::steady_clock::time_point>{
+                      std::chrono::steady_clock::now() + *timeout};
+        auto remaining_read_timeout = [&]() {
+          return !read_deadline.has_value()
+                     ? std::chrono::milliseconds::max()
+                     : std::max(std::chrono::milliseconds(0),
+                                std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(
+                                    *read_deadline -
+                                    std::chrono::steady_clock::now()));
+        };
+        if (selector == "read_line!") {
+          if (!check_reader_policy()) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait("reader.read_line", io_value->type_name());
+          std::string line;
+          while (true) {
+            RuntimeByteBuffer buffer(1);
+            RuntimeIoStatus result =
+                read_once(buffer, remaining_read_timeout(), false);
+            if (result.eof) {
+              *out =
+                  line.empty() ? Value::null() : string_value_from_text(line);
+              return SendStatus::Matched;
+            }
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            const char byte = buffer.bytes()[0];
+            if (byte == '\n') {
+              *out = string_value_from_text(line);
+              return SendStatus::Matched;
+            }
+            line.push_back(byte);
+            if (limit.has_value() && line.size() > *limit) {
+              set_fault(frame, "ArgumentError", "read_line limit exceeded");
+              return SendStatus::Faulted;
+            }
+          }
+        }
+        std::optional<NativeBlockInvoker> invoker;
+        if (selector == "each_chunk") {
+          invoker = make_native_block_invoker(frame, block, "each_chunk");
+          if (!invoker.has_value()) {
+            return SendStatus::Faulted;
+          }
+        } else if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (!check_reader_policy()) {
+          return SendStatus::Faulted;
+        }
+        record_io_wait(selector == "each_chunk" ? "reader.each_chunk"
+                                                : "reader.read_all",
+                       io_value->type_name());
+        std::string accumulated;
+        while (true) {
+          RuntimeByteBuffer buffer(chunk_size);
+          RuntimeIoStatus result =
+              read_once(buffer, remaining_read_timeout(), false);
+          if (result.eof) {
+            *out = selector == "each_chunk"
+                       ? Value::null()
+                       : io_bytes_value(std::move(accumulated));
+            return SendStatus::Matched;
+          }
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          const std::string chunk = buffer.bytes();
+          if (selector == "each_chunk") {
+            try {
+              (void)(*invoker)({io_bytes_value(chunk)});
+            } catch (const RuntimeTaskFailure &failure) {
+              set_fault(frame, failure.error_name(), failure.message());
+              return SendStatus::Faulted;
+            }
+          } else {
+            if (limit.has_value() &&
+                accumulated.size() + chunk.size() > *limit) {
+              set_fault(frame, "ArgumentError", "read_all limit exceeded");
+              return SendStatus::Faulted;
+            }
+            accumulated += chunk;
+          }
+        }
+      }
+
+      if (is_writer && (selector == "write!" || selector == "try_write!" ||
+                        selector == "write_all!" || selector == "puts!")) {
+        const bool nonblocking = selector == "try_write!";
+        if (!require_arity(1) ||
+            !reject_unknown_keywords(
+                frame, kw_args,
+                selector == "puts!"
+                    ? std::initializer_list<const char *>{"encoding", "timeout"}
+                    : (nonblocking
+                           ? std::initializer_list<const char *>{}
+                           : std::initializer_list<const char *>{"timeout"})) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::optional<std::string> bytes;
+        if (selector == "puts!") {
+          if (!args[0].is_string()) {
+            set_fault(frame, "TypeError", "puts! expects Str");
+            return SendStatus::Faulted;
+          }
+          bytes = string_text_from_id(args[0].as_string().string_id);
+          if (!bytes.has_value()) {
+            set_fault(frame, "VMError", "puts string ref is invalid");
+            return SendStatus::Faulted;
+          }
+          if (const std::optional<Value> encoding =
+                  keyword_arg_value(kw_args, "encoding")) {
+            const std::optional<std::string> name =
+                text_from_symbol_or_string(*encoding);
+            if (!name.has_value() || *name != "utf8") {
+              set_fault(frame, name.has_value() ? "ArgumentError" : "TypeError",
+                        "only utf8 encoding is supported");
+              return SendStatus::Faulted;
+            }
+          }
+          bytes->push_back('\n');
+        } else {
+          bytes = io_bytes_from_value(frame, args[0]);
+        }
+        if (!bytes.has_value()) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::chrono::milliseconds> timeout =
+            nonblocking
+                ? std::optional<
+                      std::chrono::milliseconds>{std::chrono::milliseconds(0)}
+                : io_timeout_from_keywords(frame, kw_args);
+        if (!timeout.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!check_writer_policy()) {
+          return SendStatus::Faulted;
+        }
+        if (!nonblocking) {
+          record_io_wait("writer.write", io_value->type_name());
+        }
+        if (selector == "write_all!" || selector == "puts!") {
+          const auto deadline =
+              *timeout == std::chrono::milliseconds::max()
+                  ? std::optional<std::chrono::steady_clock::time_point>{}
+                  : std::optional<std::chrono::steady_clock::time_point>{
+                        std::chrono::steady_clock::now() + *timeout};
+          std::size_t offset = 0;
+          while (offset < bytes->size()) {
+            const std::chrono::milliseconds remaining =
+                !deadline.has_value()
+                    ? std::chrono::milliseconds::max()
+                    : std::max(
+                          std::chrono::milliseconds(0),
+                          std::chrono::duration_cast<std::chrono::milliseconds>(
+                              *deadline - std::chrono::steady_clock::now()));
+            RuntimeIoStatus result =
+                write_once(bytes->substr(offset), remaining, false);
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            if (result.count == 0) {
+              set_fault(frame, "IOError", "writer made no progress");
+              return SendStatus::Faulted;
+            }
+            offset += result.count;
+          }
+          *out = Value::null();
+          return SendStatus::Matched;
+        }
+        RuntimeIoStatus result = write_once(*bytes, *timeout, nonblocking);
+        if (!set_fault_from_io_status(frame, result)) {
+          return SendStatus::Faulted;
+        }
+        *out = io_read_result_value(result);
+        return SendStatus::Matched;
+      }
+
+      if (is_writer && selector == "flush!") {
+        if (!args.empty() ||
+            !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::chrono::milliseconds> timeout =
+            io_timeout_from_keywords(frame, kw_args);
+        if (!timeout.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!check_writer_policy()) {
+          return SendStatus::Faulted;
+        }
+        record_io_wait("writer.flush", io_value->type_name());
+        RuntimeIoStatus result =
+            file != nullptr ? file->flush(*timeout)
+                            : (memory_file != nullptr
+                                   ? memory_file->flush(*timeout)
+                                   : (pipe_writer != nullptr
+                                          ? pipe_writer->flush(*timeout)
+                                          : tcp_stream->flush(*timeout)));
+        if (!set_fault_from_io_status(frame, result)) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+
+      if (is_file_like) {
+        if (selector == "path" || selector == "mode" || selector == "tell!" ||
+            selector == "size!" || selector == "metadata!" ||
+            selector == "sync!" || selector == "seek!") {
+          if (selector == "seek!") {
+            if (!require_arity(1) ||
+                !reject_unknown_keywords(frame, kw_args, {"whence"}) ||
+                !require_no_block() || !args[0].is_integer()) {
+              if (!args.empty() && !args[0].is_integer()) {
+                set_fault(frame, "TypeError", "seek offset must be Int");
+              }
+              return SendStatus::Faulted;
+            }
+            RuntimeSeekWhence whence = RuntimeSeekWhence::Start;
+            if (const std::optional<Value> value =
+                    keyword_arg_value(kw_args, "whence")) {
+              const std::optional<std::string> name =
+                  text_from_symbol_or_string(*value);
+              if (!name.has_value()) {
+                set_fault(frame, "TypeError", "whence must be Symbol or Str");
+                return SendStatus::Faulted;
+              }
+              const std::optional<RuntimeSeekWhence> parsed =
+                  runtime_seek_whence_from_name(*name);
+              if (!parsed.has_value()) {
+                set_fault(frame, "ArgumentError", "unsupported seek whence");
+                return SendStatus::Faulted;
+              }
+              whence = *parsed;
+            }
+            if (!check_io_policy(frame, "fs_metadata", "fs.metadata",
+                                 file_like_path().string(),
+                                 memory_file == nullptr)) {
+              return SendStatus::Faulted;
+            }
+            RuntimeIoStatus result =
+                file != nullptr
+                    ? file->seek(args[0].as_integer(), whence)
+                    : memory_file->seek(args[0].as_integer(), whence);
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::integer(static_cast<std::int64_t>(result.count));
+            return SendStatus::Matched;
+          }
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "path") {
+            *out = Value::io_value(
+                std::make_shared<RuntimePath>(file_like_path()));
+          } else if (selector == "mode") {
+            const char *name =
+                file_like_mode() == RuntimeFileMode::Read
+                    ? "read"
+                    : (file_like_mode() == RuntimeFileMode::Write
+                           ? "write"
+                           : (file_like_mode() == RuntimeFileMode::Append
+                                  ? "append"
+                                  : "read_write"));
+            *out = Value::symbol(intern_runtime_symbol(name));
+          } else if (selector == "metadata!") {
+            if (!check_io_policy(frame, "fs_metadata", "fs.metadata",
+                                 file_like_path().string(),
+                                 memory_file == nullptr)) {
+              return SendStatus::Faulted;
+            }
+            auto metadata = std::make_shared<RuntimeMetadata>();
+            RuntimeIoStatus result =
+                file != nullptr ? file->metadata(metadata.get())
+                                : memory_file->metadata(metadata.get());
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::io_value(metadata);
+          } else {
+            const bool syncing = selector == "sync!";
+            if (!check_io_policy(frame, syncing ? "fs_write" : "fs_metadata",
+                                 syncing ? "fs.write" : "fs.metadata",
+                                 file_like_path().string(),
+                                 memory_file == nullptr)) {
+              return SendStatus::Faulted;
+            }
+            RuntimeIoStatus result;
+            if (selector == "tell!") {
+              result = file != nullptr ? file->tell() : memory_file->tell();
+            } else if (selector == "size!") {
+              result = file != nullptr ? file->size() : memory_file->size();
+            } else {
+              result = file != nullptr ? file->sync() : memory_file->sync();
+            }
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out =
+                selector == "sync!"
+                    ? Value::null()
+                    : Value::integer(static_cast<std::int64_t>(result.count));
+          }
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto endpoint =
+              std::dynamic_pointer_cast<RuntimeEndpoint>(io_value)) {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "host") {
+          *out = string_value_from_text(endpoint->host);
+        } else if (selector == "port") {
+          *out = Value::integer(endpoint->port);
+        } else if (selector == "family") {
+          *out = Value::symbol(intern_runtime_symbol(endpoint->family()));
+        } else if (selector == "to_str") {
+          *out = string_value_from_text(endpoint->to_string());
+        } else {
+          return SendStatus::NotHandled;
+        }
+        return SendStatus::Matched;
+      }
+
+      if ((pipe_reader != nullptr || pipe_writer != nullptr) &&
+          selector == "pipe") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const std::shared_ptr<RuntimePipe> owner =
+            pipe_reader != nullptr ? pipe_reader->pipe() : pipe_writer->pipe();
+        *out = owner == nullptr ? Value::null() : Value::io_value(owner);
+        return SendStatus::Matched;
+      }
+
+      if (tcp_stream != nullptr) {
+        if (selector == "local_endpoint" || selector == "remote_endpoint") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = io_endpoint_value(selector == "local_endpoint"
+                                       ? tcp_stream->local_endpoint()
+                                       : tcp_stream->remote_endpoint());
+          return SendStatus::Matched;
+        }
+        if (selector == "shutdown!" || selector == "close_read!" ||
+            selector == "close_write!") {
+          if ((selector == "shutdown!" && args.size() > 1U) ||
+              (selector != "shutdown!" && !args.empty()) || !kw_args.empty() ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          RuntimeShutdownSide side = RuntimeShutdownSide::Both;
+          if (selector == "shutdown!" && !args.empty()) {
+            const std::optional<std::string> name =
+                text_from_symbol_or_string(args[0]);
+            if (!name.has_value()) {
+              set_fault(frame, "TypeError",
+                        "shutdown side must be Symbol or Str");
+              return SendStatus::Faulted;
+            }
+            const std::optional<RuntimeShutdownSide> parsed =
+                runtime_shutdown_side_from_name(*name);
+            if (!parsed.has_value()) {
+              set_fault(frame, "ArgumentError", "unsupported shutdown side");
+              return SendStatus::Faulted;
+            }
+            side = *parsed;
+          }
+          if (!check_io_effect_policy(frame, "net_connect") ||
+              !check_external_io_provider(frame)) {
+            return SendStatus::Faulted;
+          }
+          RuntimeIoStatus result =
+              selector == "close_read!"
+                  ? tcp_stream->close_read()
+                  : (selector == "close_write!" ? tcp_stream->close_write()
+                                                : tcp_stream->shutdown(side));
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::null();
+          return SendStatus::Matched;
+        }
+        if (selector == "set_option!" || selector == "get_option") {
+          if ((selector == "set_option!" && !require_arity(2)) ||
+              (selector == "get_option" && !require_arity(1)) ||
+              !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::string> name =
+              text_from_symbol_or_string(args[0]);
+          if (!name.has_value()) {
+            set_fault(frame, "TypeError",
+                      "socket option must be Symbol or Str");
+            return SendStatus::Faulted;
+          }
+          if (*name != "nodelay" && *name != "keepalive" &&
+              *name != "recv_buffer" && *name != "send_buffer") {
+            set_fault(frame, "ArgumentError", "unsupported TCP stream option");
+            return SendStatus::Faulted;
+          }
+          if (selector == "set_option!") {
+            if (*name == "nodelay" || *name == "keepalive") {
+              if (!args[1].is_bool()) {
+                set_fault(frame, "TypeError",
+                          "socket option value must be Bool");
+                return SendStatus::Faulted;
+              }
+            } else if (*name == "recv_buffer" || *name == "send_buffer") {
+              if (!args[1].is_integer()) {
+                set_fault(frame, "TypeError",
+                          "socket option value must be Int");
+                return SendStatus::Faulted;
+              }
+            } else {
+              set_fault(frame, "ArgumentError",
+                        "unsupported TCP stream option");
+              return SendStatus::Faulted;
+            }
+            if (!check_io_effect_policy(frame, "net_connect") ||
+                !check_external_io_provider(frame)) {
+              return SendStatus::Faulted;
+            }
+            RuntimeIoStatus result;
+            if (*name == "nodelay") {
+              result = tcp_stream->set_nodelay(args[1].as_bool());
+            } else if (*name == "keepalive") {
+              result = tcp_stream->set_keepalive(args[1].as_bool());
+            } else if (*name == "recv_buffer") {
+              result = tcp_stream->set_recv_buffer(args[1].as_integer());
+            } else {
+              result = tcp_stream->set_send_buffer(args[1].as_integer());
+            }
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::null();
+          } else {
+            if (!check_io_effect_policy(frame, "net_connect") ||
+                !check_external_io_provider(frame)) {
+              return SendStatus::Faulted;
+            }
+            std::int64_t value = 0;
+            RuntimeIoStatus result = tcp_stream->get_option(*name, &value);
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = (*name == "nodelay" || *name == "keepalive")
+                       ? Value::boolean(value != 0)
+                       : Value::integer(value);
+          }
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto listener =
+              std::dynamic_pointer_cast<RuntimeTcpListener>(io_value)) {
+        if (selector == "accept!" || selector == "try_accept!") {
+          const bool nonblocking = selector == "try_accept!";
+          if (!args.empty() ||
+              !reject_unknown_keywords(
+                  frame, kw_args,
+                  nonblocking
+                      ? std::initializer_list<const char *>{}
+                      : std::initializer_list<const char *>{"timeout"}) ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::chrono::milliseconds timeout(0);
+          if (!nonblocking) {
+            const std::optional<std::chrono::milliseconds> parsed =
+                io_timeout_from_keywords(frame, kw_args);
+            if (!parsed.has_value()) {
+              return SendStatus::Faulted;
+            }
+            timeout = *parsed;
+          }
+          if (!check_io_effect_policy(frame, "net_accept") ||
+              !check_external_io_provider(frame)) {
+            return SendStatus::Faulted;
+          }
+          if (!nonblocking) {
+            record_io_wait("tcp.accept",
+                           listener->local_endpoint().to_string());
+          }
+          RuntimeTcpAcceptResult result =
+              nonblocking ? listener->try_accept() : listener->accept(timeout);
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = result.would_block ? Value::null()
+                                    : Value::io_value(result.stream);
+          return SendStatus::Matched;
+        }
+        if (selector == "local_endpoint") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = io_endpoint_value(listener->local_endpoint());
+          return SendStatus::Matched;
+        }
+        if (selector == "set_option!" || selector == "get_option") {
+          if ((selector == "set_option!" && !require_arity(2)) ||
+              (selector == "get_option" && !require_arity(1)) ||
+              !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::string> name =
+              text_from_symbol_or_string(args[0]);
+          if (!name.has_value()) {
+            set_fault(frame, "TypeError",
+                      "socket option must be Symbol or Str");
+            return SendStatus::Faulted;
+          }
+          if (*name != "reuse_addr" && *name != "reuse_port") {
+            set_fault(frame, "ArgumentError",
+                      "unsupported TCP listener option");
+            return SendStatus::Faulted;
+          }
+          if (selector == "set_option!") {
+            if (!args[1].is_bool()) {
+              set_fault(frame, "TypeError",
+                        "listener option value must be Bool");
+              return SendStatus::Faulted;
+            }
+            if (*name != "reuse_addr" && *name != "reuse_port") {
+              set_fault(frame, "ArgumentError",
+                        "unsupported TCP listener option");
+              return SendStatus::Faulted;
+            }
+            if (!check_io_effect_policy(frame, "net_listen") ||
+                !check_external_io_provider(frame)) {
+              return SendStatus::Faulted;
+            }
+            RuntimeIoStatus result =
+                *name == "reuse_addr"
+                    ? listener->set_reuse_addr(args[1].as_bool())
+                    : listener->set_reuse_port(args[1].as_bool());
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::null();
+          } else {
+            if (!check_io_effect_policy(frame, "net_listen") ||
+                !check_external_io_provider(frame)) {
+              return SendStatus::Faulted;
+            }
+            std::int64_t value = 0;
+            RuntimeIoStatus result = listener->get_option(*name, &value);
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::boolean(value != 0);
+          }
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto udp =
+              std::dynamic_pointer_cast<RuntimeUdpSocket>(io_value)) {
+        if (selector == "recv_from!" || selector == "try_recv_from!") {
+          const bool nonblocking = selector == "try_recv_from!";
+          if (!args.empty() ||
+              !reject_unknown_keywords(
+                  frame, kw_args,
+                  nonblocking
+                      ? std::initializer_list<const char *>{"max", "truncate"}
+                      : std::initializer_list<const char *>{"max", "truncate",
+                                                            "timeout"}) ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::size_t max = 65507;
+          if (const std::optional<Value> value =
+                  keyword_arg_value(kw_args, "max")) {
+            if (!value->is_integer()) {
+              set_fault(frame, "TypeError", "UDP max must be Int");
+              return SendStatus::Faulted;
+            }
+            if (value->as_integer() <= 0 || value->as_integer() > 65507) {
+              set_fault(frame, "ArgumentError", "UDP max is out of range");
+              return SendStatus::Faulted;
+            }
+            max = static_cast<std::size_t>(value->as_integer());
+          }
+          bool truncate = false;
+          if (!bool_keyword("truncate", false, &truncate)) {
+            return SendStatus::Faulted;
+          }
+          std::chrono::milliseconds timeout(0);
+          if (!nonblocking) {
+            const std::optional<std::chrono::milliseconds> parsed =
+                io_timeout_from_keywords(frame, kw_args);
+            if (!parsed.has_value()) {
+              return SendStatus::Faulted;
+            }
+            timeout = *parsed;
+          }
+          if (!check_io_effect_policy(frame, "net_udp") ||
+              !check_external_io_provider(frame)) {
+            return SendStatus::Faulted;
+          }
+          if (!nonblocking) {
+            record_io_wait("udp.recv_from", udp->local_endpoint().to_string());
+          }
+          RuntimeDatagramResult result =
+              nonblocking ? udp->try_recv_from(max, truncate)
+                          : udp->recv_from(max, truncate, timeout);
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out =
+              result.would_block
+                  ? Value::null()
+                  : make_tuple_value({io_bytes_value(std::move(result.bytes)),
+                                      io_endpoint_value(result.endpoint)});
+          return SendStatus::Matched;
+        }
+        if (selector == "send_to!" || selector == "try_send_to!") {
+          const bool nonblocking = selector == "try_send_to!";
+          if (!require_arity(2) ||
+              !reject_unknown_keywords(
+                  frame, kw_args,
+                  nonblocking
+                      ? std::initializer_list<const char *>{}
+                      : std::initializer_list<const char *>{"timeout"}) ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::string> bytes =
+              io_bytes_from_value(frame, args[0]);
+          const std::shared_ptr<RuntimeEndpoint> endpoint =
+              io_endpoint_from_value(frame, args[1]);
+          if (!bytes.has_value() || endpoint == nullptr) {
+            return SendStatus::Faulted;
+          }
+          std::chrono::milliseconds timeout(0);
+          if (!nonblocking) {
+            const std::optional<std::chrono::milliseconds> parsed =
+                io_timeout_from_keywords(frame, kw_args);
+            if (!parsed.has_value()) {
+              return SendStatus::Faulted;
+            }
+            timeout = *parsed;
+          }
+          if (!check_io_effect_policy(frame, "net_udp") ||
+              !check_external_io_provider(frame)) {
+            return SendStatus::Faulted;
+          }
+          if (!nonblocking) {
+            record_io_wait("udp.send_to", endpoint->to_string());
+          }
+          RuntimeIoStatus result =
+              nonblocking ? udp->try_send_to(*bytes, *endpoint)
+                          : udp->send_to(*bytes, *endpoint, timeout);
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = io_read_result_value(result);
+          return SendStatus::Matched;
+        }
+        if (selector == "connect!") {
+          if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const std::shared_ptr<RuntimeEndpoint> endpoint =
+              io_endpoint_from_value(frame, args[0]);
+          if (endpoint == nullptr) {
+            return SendStatus::Faulted;
+          }
+          if (!check_io_effect_policy(frame, "net_udp") ||
+              !check_external_io_provider(frame)) {
+            return SendStatus::Faulted;
+          }
+          RuntimeIoStatus result = udp->connect(*endpoint);
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::null();
+          return SendStatus::Matched;
+        }
+        if (selector == "recv!" || selector == "send!") {
+          if ((selector == "recv!" && !args.empty()) ||
+              (selector == "send!" && !require_arity(1)) ||
+              !reject_unknown_keywords(
+                  frame, kw_args,
+                  selector == "recv!"
+                      ? std::initializer_list<const char *>{"max", "truncate",
+                                                            "timeout"}
+                      : std::initializer_list<const char *>{"timeout"}) ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::chrono::milliseconds> timeout =
+              io_timeout_from_keywords(frame, kw_args);
+          if (!timeout.has_value()) {
+            return SendStatus::Faulted;
+          }
+          if (selector == "send!") {
+            const std::optional<std::string> bytes =
+                io_bytes_from_value(frame, args[0]);
+            if (!bytes.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!check_io_effect_policy(frame, "net_udp") ||
+                !check_external_io_provider(frame)) {
+              return SendStatus::Faulted;
+            }
+            record_io_wait("udp.send", udp->local_endpoint().to_string());
+            RuntimeIoStatus result = udp->send(*bytes, *timeout);
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::integer(static_cast<std::int64_t>(result.count));
+            return SendStatus::Matched;
+          }
+          std::size_t max = 65507;
+          if (const std::optional<Value> value =
+                  keyword_arg_value(kw_args, "max")) {
+            if (!value->is_integer()) {
+              set_fault(frame, "TypeError", "UDP max must be Int");
+              return SendStatus::Faulted;
+            }
+            if (value->as_integer() <= 0 || value->as_integer() > 65507) {
+              set_fault(frame, "ArgumentError", "UDP max is out of range");
+              return SendStatus::Faulted;
+            }
+            max = static_cast<std::size_t>(value->as_integer());
+          }
+          bool truncate = false;
+          if (!bool_keyword("truncate", false, &truncate)) {
+            return SendStatus::Faulted;
+          }
+          if (!check_io_effect_policy(frame, "net_udp") ||
+              !check_external_io_provider(frame)) {
+            return SendStatus::Faulted;
+          }
+          record_io_wait("udp.recv", udp->local_endpoint().to_string());
+          std::string bytes;
+          RuntimeIoStatus result = udp->recv(max, truncate, *timeout, &bytes);
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = io_bytes_value(std::move(bytes));
+          return SendStatus::Matched;
+        }
+        if (selector == "local_endpoint") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = io_endpoint_value(udp->local_endpoint());
+          return SendStatus::Matched;
+        }
+        if (selector == "set_option!" || selector == "get_option") {
+          if ((selector == "set_option!" && !require_arity(2)) ||
+              (selector == "get_option" && !require_arity(1)) ||
+              !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::string> name =
+              text_from_symbol_or_string(args[0]);
+          if (!name.has_value()) {
+            set_fault(frame, "TypeError",
+                      "socket option must be Symbol or Str");
+            return SendStatus::Faulted;
+          }
+          if (*name != "recv_buffer" && *name != "send_buffer") {
+            set_fault(frame, "ArgumentError", "unsupported UDP socket option");
+            return SendStatus::Faulted;
+          }
+          if (selector == "set_option!") {
+            if (!args[1].is_integer()) {
+              set_fault(frame, "TypeError", "UDP buffer option must be Int");
+              return SendStatus::Faulted;
+            }
+            if (*name != "recv_buffer" && *name != "send_buffer") {
+              set_fault(frame, "ArgumentError",
+                        "unsupported UDP socket option");
+              return SendStatus::Faulted;
+            }
+            if (!check_io_effect_policy(frame, "net_udp") ||
+                !check_external_io_provider(frame)) {
+              return SendStatus::Faulted;
+            }
+            RuntimeIoStatus result =
+                *name == "recv_buffer"
+                    ? udp->set_recv_buffer(args[1].as_integer())
+                    : udp->set_send_buffer(args[1].as_integer());
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::null();
+          } else {
+            if (!check_io_effect_policy(frame, "net_udp") ||
+                !check_external_io_provider(frame)) {
+              return SendStatus::Faulted;
+            }
+            std::int64_t value = 0;
+            RuntimeIoStatus result = udp->get_option(*name, &value);
+            if (!set_fault_from_io_status(frame, result)) {
+              return SendStatus::Faulted;
+            }
+            *out = Value::integer(value);
+          }
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto resource =
+              std::dynamic_pointer_cast<RuntimeIoResource>(io_value)) {
+        if (selector == "closed?") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(resource->closed());
+          return SendStatus::Matched;
+        }
+        if (selector == "close!") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!resource->closed() &&
+              !set_fault_from_io_status(frame, resource->access_status())) {
+            return SendStatus::Faulted;
+          }
+          RuntimeIoStatus result;
+          if (file != nullptr) {
+            result = file->close();
+          } else if (pipe_reader != nullptr) {
+            result = pipe_reader->close();
+          } else if (pipe_writer != nullptr) {
+            result = pipe_writer->close();
+          } else if (tcp_stream != nullptr) {
+            result = tcp_stream->close();
+          } else if (const auto listener =
+                         std::dynamic_pointer_cast<RuntimeTcpListener>(
+                             io_value)) {
+            result = listener->close();
+          } else if (const auto udp =
+                         std::dynamic_pointer_cast<RuntimeUdpSocket>(
+                             io_value)) {
+            result = udp->close();
+          } else {
+            return SendStatus::NotHandled;
+          }
+          if (!set_fault_from_io_status(frame, result)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::null();
+          return SendStatus::Matched;
+        }
+      }
+
+      if (const auto metadata =
+              std::dynamic_pointer_cast<RuntimeMetadata>(io_value)) {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "path") {
+          *out = Value::io_value(std::make_shared<RuntimePath>(metadata->path));
+        } else if (selector == "size") {
+          *out = Value::integer(static_cast<std::int64_t>(metadata->size));
+        } else if (selector == "file?") {
+          *out = Value::boolean(metadata->file);
+        } else if (selector == "dir?") {
+          *out = Value::boolean(metadata->directory);
+        } else if (selector == "symlink?") {
+          *out = Value::boolean(metadata->symlink);
+        } else {
+          return SendStatus::NotHandled;
+        }
         return SendStatus::Matched;
       }
     }
@@ -18146,9 +20992,9 @@ private:
         sequence_collection_selector || selector == "===";
     const bool lazy_seq_collection_selector = sequence_collection_selector;
     const bool numeric_selector =
-        selector_in({"+", "-", "*", "/", "%", "//", ">", "<",
-                     ">=", "<=", "==", "!=", "<=>", "&", "|", "^", "<<",
-                     ">>", "**", "u+", "u-"});
+        selector_in({"+", "-",  "*",  "/",  "%",  "//",  ">",
+                     "<", ">=", "<=", "==", "!=", "<=>", "&",
+                     "|", "^",  "<<", ">>", "**", "u+",  "u-"});
     const bool integer_times_selector =
         receiver.is_integer() && selector == "times";
     const bool builtin_selector =
@@ -18506,11 +21352,10 @@ private:
                 set_fault(frame, error.error_name, error.message);
                 return LazySeqVisitStatus::Faulted;
               }
-              auto group = std::find_if(groups.begin(), groups.end(),
-                                        [&](const auto &entry) {
-                                          return collection_keys_equal(
-                                              entry.first, *normalized_key);
-                                        });
+              auto group = std::find_if(
+                  groups.begin(), groups.end(), [&](const auto &entry) {
+                    return collection_keys_equal(entry.first, *normalized_key);
+                  });
               if (group == groups.end()) {
                 groups.push_back({*normalized_key, {}});
                 group = groups.end() - 1;
@@ -18698,8 +21543,8 @@ private:
         if (fault_.has_value() || !bounds.has_value()) {
           return SendStatus::Faulted;
         }
-        const bool open_ended =
-            !bounds->start_value.has_value() || !bounds->finish_value.has_value();
+        const bool open_ended = !bounds->start_value.has_value() ||
+                                !bounds->finish_value.has_value();
         if (open_ended) {
           if (collection_selector == "lazy") {
             if (!require_arity(0) || !require_no_block()) {
@@ -18771,9 +21616,9 @@ private:
               return SendStatus::Faulted;
             }
             if (bounds->float_range) {
-              *out = Value::floating(
-                  *bounds->float_start +
-                  static_cast<double>(index) * bounds->float_step);
+              *out = Value::floating(*bounds->float_start +
+                                     static_cast<double>(index) *
+                                         bounds->float_step);
               return SendStatus::Matched;
             }
             std::int64_t current = *bounds->start;
@@ -19171,11 +22016,10 @@ private:
                 set_fault(frame, error.error_name, error.message);
                 return SendStatus::Faulted;
               }
-              auto group = std::find_if(groups.begin(), groups.end(),
-                                        [&](const auto &entry) {
-                                          return collection_keys_equal(
-                                              entry.first, *normalized_key);
-                                        });
+              auto group = std::find_if(
+                  groups.begin(), groups.end(), [&](const auto &entry) {
+                    return collection_keys_equal(entry.first, *normalized_key);
+                  });
               if (group == groups.end()) {
                 groups.push_back({*normalized_key, {}});
                 group = groups.end() - 1;
@@ -19312,8 +22156,8 @@ private:
           }
           std::int64_t count = 0;
           for (const MapEntry &entry : *extracted) {
-            const std::optional<Value> predicate = call_block_to_value(
-                frame, block, {entry.key, entry.value});
+            const std::optional<Value> predicate =
+                call_block_to_value(frame, block, {entry.key, entry.value});
             if (!predicate.has_value()) {
               return SendStatus::Faulted;
             }
@@ -19489,8 +22333,8 @@ private:
           std::vector<Value> mapped;
           mapped.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
-            const std::optional<Value> value = call_block_to_value(
-                frame, block, {entry.key, entry.value});
+            const std::optional<Value> value =
+                call_block_to_value(frame, block, {entry.key, entry.value});
             if (!value.has_value()) {
               return SendStatus::Faulted;
             }
@@ -19510,8 +22354,8 @@ private:
           std::vector<MapEntry> filtered;
           filtered.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
-            const std::optional<Value> predicate = call_block_to_value(
-                frame, block, {entry.key, entry.value});
+            const std::optional<Value> predicate =
+                call_block_to_value(frame, block, {entry.key, entry.value});
             if (!predicate.has_value()) {
               return SendStatus::Faulted;
             }
@@ -19534,8 +22378,8 @@ private:
           std::vector<MapEntry> transformed;
           transformed.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
-            const std::optional<Value> value = call_block_to_value(
-                frame, block, {entry.key, entry.value});
+            const std::optional<Value> value =
+                call_block_to_value(frame, block, {entry.key, entry.value});
             if (!value.has_value()) {
               return SendStatus::Faulted;
             }
@@ -19559,8 +22403,8 @@ private:
           std::vector<MapEntry> transformed;
           transformed.reserve(extracted->size());
           for (const MapEntry &entry : *extracted) {
-            const std::optional<Value> value = call_block_to_value(
-                frame, block, {entry.value, entry.key});
+            const std::optional<Value> value =
+                call_block_to_value(frame, block, {entry.value, entry.key});
             if (!value.has_value()) {
               return SendStatus::Faulted;
             }
@@ -19595,8 +22439,7 @@ private:
       if (selector == "times") {
         if (!require_arity(0) || !kw_args.empty()) {
           if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "Int#times does not accept keywords");
+            set_fault(frame, "TypeError", "Int#times does not accept keywords");
           }
           return SendStatus::Faulted;
         }
@@ -19755,9 +22598,8 @@ private:
           return SendStatus::Faulted;
         }
         if (args[0].is_float()) {
-          *out =
-              Value::floating(std::pow(static_cast<double>(lhs),
-                                       args[0].as_float()));
+          *out = Value::floating(
+              std::pow(static_cast<double>(lhs), args[0].as_float()));
           return SendStatus::Matched;
         }
         if (!require_integer_arg(0, &rhs)) {
@@ -19778,8 +22620,7 @@ private:
             !require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
-        if ((selector == "<<" || selector == ">>") &&
-            (rhs < 0 || rhs >= 64)) {
+        if ((selector == "<<" || selector == ">>") && (rhs < 0 || rhs >= 64)) {
           set_fault(frame, "ArgumentError",
                     "shift amount must be between 0 and 63");
           return SendStatus::Faulted;
@@ -20128,10 +22969,9 @@ private:
                     "shift amount must be between 0 and 63");
           return FastSendStatus::Faulted;
         }
-        return write_integer_reg_unboxed(
-                   frame, dst,
-                   selector == "<<" ? shl_int64(lhs, rhs)
-                                    : shr_int64(lhs, rhs))
+        return write_integer_reg_unboxed(frame, dst,
+                                         selector == "<<" ? shl_int64(lhs, rhs)
+                                                          : shr_int64(lhs, rhs))
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
@@ -20218,14 +23058,12 @@ private:
                  : FastSendStatus::Faulted;
     }
     if (collection_selector == "[]") {
-      const std::optional<std::size_t> normalized =
-          normalize_sequence_index(frame, single_integer_arg, items->size(),
-                                   "collection");
+      const std::optional<std::size_t> normalized = normalize_sequence_index(
+          frame, single_integer_arg, items->size(), "collection");
       if (!normalized.has_value()) {
         return FastSendStatus::Faulted;
       }
-      return write_reg_fast_plain(
-                 frame, dst, (*items)[*normalized])
+      return write_reg_fast_plain(frame, dst, (*items)[*normalized])
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
@@ -20357,10 +23195,10 @@ private:
                   "shift amount must be between 0 and 63");
         return FastSendStatus::Faulted;
       }
-      return write_integer_reg_unboxed(
-                 frame, dst,
-                 opcode == QuickOpcode::SendIShl ? shl_int64(lhs, rhs)
-                                                 : shr_int64(lhs, rhs))
+      return write_integer_reg_unboxed(frame, dst,
+                                       opcode == QuickOpcode::SendIShl
+                                           ? shl_int64(lhs, rhs)
+                                           : shr_int64(lhs, rhs))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     default:
@@ -20506,8 +23344,7 @@ private:
     args.reserve(pos_count);
     for (std::uint32_t i = 0; i < pos_count; ++i) {
       std::uint32_t kind = bytecode::kSpreadOperandValue;
-      if (expanded &&
-          !operand_u32(frame, insn, operand_index++, &kind)) {
+      if (expanded && !operand_u32(frame, insn, operand_index++, &kind)) {
         return false;
       }
       std::uint32_t reg = 0;
@@ -20539,8 +23376,7 @@ private:
     kw_args.reserve(kw_count);
     for (std::uint32_t i = 0; i < kw_count; ++i) {
       std::uint32_t kind = bytecode::kSpreadOperandValue;
-      if (expanded &&
-          !operand_u32(frame, insn, operand_index++, &kind)) {
+      if (expanded && !operand_u32(frame, insn, operand_index++, &kind)) {
         return false;
       }
       std::uint32_t name_symbol_id = 0;
@@ -21187,8 +24023,7 @@ private:
         normalized_items.reserve(items.size());
         for (const Value &item : items) {
           CollectionKeyError error;
-          std::optional<Value> normalized =
-              normalize_set_element(item, &error);
+          std::optional<Value> normalized = normalize_set_element(item, &error);
           if (!normalized.has_value()) {
             set_fault(frame, error.error_name, error.message);
             return;
@@ -21249,8 +24084,7 @@ private:
         normalized_items.reserve(items.size());
         for (const Value &item : items) {
           CollectionKeyError error;
-          std::optional<Value> normalized =
-              normalize_set_element(item, &error);
+          std::optional<Value> normalized = normalize_set_element(item, &error);
           if (!normalized.has_value()) {
             set_fault(frame, error.error_name, error.message);
             return;
@@ -21259,9 +24093,8 @@ private:
         }
         items = std::move(normalized_items);
       }
-      const Value value =
-          make_set ? make_set_value(std::move(items))
-                   : make_list_value(std::move(items));
+      const Value value = make_set ? make_set_value(std::move(items))
+                                   : make_list_value(std::move(items));
       if (!write_reg(frame, dst, value)) {
         return;
       }
@@ -21365,11 +24198,11 @@ private:
           if (fault_.has_value()) {
             return;
           }
-          auto existing = std::find_if(
-              entries.begin(), entries.end(),
-              [key_or_symbol](const MapEntry &entry) {
-                return entry.symbol_id == key_or_symbol;
-              });
+          auto existing =
+              std::find_if(entries.begin(), entries.end(),
+                           [key_or_symbol](const MapEntry &entry) {
+                             return entry.symbol_id == key_or_symbol;
+                           });
           if (existing == entries.end()) {
             entries.push_back({key_or_symbol, std::move(value)});
           } else {
@@ -21942,6 +24775,28 @@ private:
 
       if (packet.callee.is_native_type()) {
         const RuntimeNativeTypeKind kind = packet.callee.as_native_type().kind;
+        if (kind == RuntimeNativeTypeKind::Bytes ||
+            kind == RuntimeNativeTypeKind::ByteBuffer ||
+            kind == RuntimeNativeTypeKind::IoPipe ||
+            kind == RuntimeNativeTypeKind::FsPath ||
+            kind == RuntimeNativeTypeKind::NetEndpoint) {
+          Value result = Value::null();
+          const std::string constructor_selector =
+              kind == RuntimeNativeTypeKind::IoPipe ? "__call__" : "new";
+          const SendStatus status = try_apply_native_stdlib_send(
+              frame, packet.callee, constructor_selector, packet.pos_args,
+              packet.block, packet.kw_args, &result);
+          if (status == SendStatus::Faulted) {
+            return;
+          }
+          if (status == SendStatus::Matched) {
+            if (!write_reg(frame, packet.dst, std::move(result))) {
+              return;
+            }
+            ++frame.pc;
+            return;
+          }
+        }
         if (is_conversion_type(kind)) {
           if (packet.pos_args.size() != 1U) {
             set_fault(frame, "TypeError",
@@ -22598,6 +25453,10 @@ private:
   std::size_t initial_symbol_count_ = 0;
   std::shared_ptr<RuntimeState> state_;
   std::string module_id_;
+  const RuntimeWorldOptions *world_options_ = nullptr;
+  const RuntimeCapabilityResolution *capabilities_ = nullptr;
+  const RuntimeEffectValidation *effects_ = nullptr;
+  std::function<void(RuntimeTraceEvent)> trace_recorder_;
   std::unordered_map<std::uint32_t, QuickCode> quick_codes_;
   std::unordered_map<std::uint32_t, DirectClosureKind> direct_closure_kinds_;
   std::unordered_map<std::uint32_t, std::vector<Frame>> frame_pool_;
@@ -22874,9 +25733,60 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
   impl_->state->initialize_for_module(*impl_->module);
   impl_->record_event(replay::make_event(
       "task.started", {{"code_id", std::to_string(code_id)}}));
+  const auto wait_interest_name = [](RuntimeIoWaitInterest interest) {
+    switch (interest) {
+    case RuntimeIoWaitInterest::Read:
+      return "read";
+    case RuntimeIoWaitInterest::Write:
+      return "write";
+    case RuntimeIoWaitInterest::Accept:
+      return "accept";
+    case RuntimeIoWaitInterest::Connect:
+      return "connect";
+    case RuntimeIoWaitInterest::Flush:
+      return "flush";
+    case RuntimeIoWaitInterest::Close:
+      return "close";
+    case RuntimeIoWaitInterest::Metadata:
+      return "metadata";
+    case RuntimeIoWaitInterest::Open:
+      return "open";
+    case RuntimeIoWaitInterest::Other:
+      break;
+    }
+    return "other";
+  };
+  RuntimeIoWaitObserver io_wait_observer =
+      [impl = impl_, wait_interest_name](const RuntimeIoWaitRecord &record,
+                                         bool entering) {
+        std::vector<replay::TraceAttribute> attributes{
+            {"phase", entering ? "enter" : "exit"},
+            {"operation", record.operation},
+            {"resource", record.resource},
+            {"interest", wait_interest_name(record.interest)},
+            {"wait_id", std::to_string(record.wait_id)},
+            {"resource_id", std::to_string(record.resource_id)},
+            {"task_id", std::to_string(record.task_id)},
+            {"strand_id", std::to_string(record.strand_id)},
+            {"worker_id", std::to_string(record.worker_id)}};
+        if (record.has_timeout) {
+          attributes.push_back(
+              {"timeout_ms", std::to_string(record.timeout_millis)});
+        }
+        impl->record_event(
+            replay::make_event("io.wait", std::move(attributes)));
+      };
+  RuntimeIoWaitObserverScope io_wait_scope(impl_->options.record_replay_trace ||
+                                                   impl_->options.enforce_replay
+                                               ? &io_wait_observer
+                                               : nullptr);
   const std::string module_id =
       impl_->package.has_value() ? impl_->package->manifest.root_module : "";
-  Vm vm(*impl_->module, impl_->state, module_id);
+  Vm vm(*impl_->module, impl_->state, module_id, &impl_->options,
+        &impl_->capabilities, &impl_->effects,
+        [impl = impl_](RuntimeTraceEvent event) {
+          impl->record_event(std::move(event));
+        });
   ExecutionResult result =
       vm.execute(code_id, args, std::move(self), std::move(block));
   if (result.ok()) {
@@ -24746,6 +27656,11 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_logger()) {
     return value.as_logger() == nullptr ? "<io.Logger null>" : "<io.Logger>";
   }
+  if (value.is_io_value()) {
+    const std::shared_ptr<RuntimeIoValue> io_value = value.as_io_value();
+    return io_value == nullptr ? "<io null>"
+                               : std::string("<") + io_value->type_name() + ">";
+  }
   if (value.is_watch_cell()) {
     const std::shared_ptr<RuntimeWatchCell> cell = value.as_watch_cell();
     if (cell == nullptr) {
@@ -24903,8 +27818,8 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
       if (i != 0U) {
         out << ", ";
       }
-      out << value_to_debug_string(map->entries[i].key, module,
-                                   runtime_strings, runtime_symbols)
+      out << value_to_debug_string(map->entries[i].key, module, runtime_strings,
+                                   runtime_symbols)
           << ": "
           << value_to_debug_string(map->entries[i].value, module,
                                    runtime_strings, runtime_symbols);

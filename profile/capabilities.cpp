@@ -44,6 +44,7 @@ const std::set<std::string> &canonical_name_set() {
                                               "fs.metadata",
                                               "net.connect",
                                               "net.listen",
+                                              "net.udp",
                                               "env.read",
                                               "env.write",
                                               "process.spawn",

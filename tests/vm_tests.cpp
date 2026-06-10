@@ -12,12 +12,16 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unistd.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -104,8 +108,93 @@ std::string
 string_value_text_or_die(const amber::runtime::Value &value,
                          const amber::bytecode::BcModule &module,
                          const amber::runtime::ExecutionResult &result);
-amber::runtime::ExecutionResult
-execute_emitted_init(const std::string &source);
+amber::runtime::ExecutionResult execute_emitted_init(const std::string &source);
+
+amber::runtime::RuntimeIoProviderStatus provider_ok() {
+  amber::runtime::RuntimeIoProviderStatus status;
+  status.handled = true;
+  status.ok = true;
+  return status;
+}
+
+class TestIoProvider final : public amber::runtime::RuntimeIoProvider {
+public:
+  std::unordered_map<std::string, std::string> files;
+
+  amber::runtime::RuntimeIoProviderStatus
+  fs_exists(const std::string &path) override {
+    amber::runtime::RuntimeIoProviderStatus status = provider_ok();
+    status.boolean = files.find(path) != files.end();
+    return status;
+  }
+
+  amber::runtime::RuntimeIoProviderStatus
+  fs_file(const std::string &path) override {
+    return fs_exists(path);
+  }
+
+  amber::runtime::RuntimeIoProviderStatus
+  fs_dir(const std::string &path) override {
+    (void)path;
+    amber::runtime::RuntimeIoProviderStatus status = provider_ok();
+    status.boolean = false;
+    return status;
+  }
+
+  amber::runtime::RuntimeIoProviderStatus
+  fs_metadata(const std::string &path) override {
+    auto found = files.find(path);
+    if (found == files.end()) {
+      amber::runtime::RuntimeIoProviderStatus status = provider_ok();
+      status.ok = false;
+      status.error_name = "FileNotFoundError";
+      status.message = "provider file not found";
+      return status;
+    }
+    amber::runtime::RuntimeIoProviderStatus status = provider_ok();
+    status.size = found->second.size();
+    status.file = true;
+    return status;
+  }
+
+  amber::runtime::RuntimeIoProviderStatus
+  fs_read_bytes(const std::string &path,
+                std::optional<std::size_t> limit) override {
+    auto found = files.find(path);
+    if (found == files.end()) {
+      amber::runtime::RuntimeIoProviderStatus status = provider_ok();
+      status.ok = false;
+      status.error_name = "FileNotFoundError";
+      status.message = "provider file not found";
+      return status;
+    }
+    if (limit.has_value() && found->second.size() > *limit) {
+      amber::runtime::RuntimeIoProviderStatus status = provider_ok();
+      status.ok = false;
+      status.error_name = "ArgumentError";
+      status.message = "read_bytes limit exceeded";
+      return status;
+    }
+    amber::runtime::RuntimeIoProviderStatus status = provider_ok();
+    status.bytes = found->second;
+    status.count = status.bytes.size();
+    return status;
+  }
+
+  amber::runtime::RuntimeIoProviderStatus
+  fs_write_bytes(const std::string &path, const std::string &bytes, bool create,
+                 bool truncate, bool append = false) override {
+    (void)create;
+    amber::runtime::RuntimeIoProviderStatus status = provider_ok();
+    if (append && !truncate) {
+      files[path] += bytes;
+    } else {
+      files[path] = bytes;
+    }
+    status.count = bytes.size();
+    return status;
+  }
+};
 
 void test_execute_emitted_method() {
   const amber::bytecode::EmitResult emit_result = emit_ok("def echo(x):\n"
@@ -150,8 +239,7 @@ void test_execute_native_range_literal() {
          "native Range literal materialized item count");
   for (std::size_t i = 0; i < items->items.size(); ++i) {
     expect(items->items[i].is_integer() &&
-               items->items[i].as_integer() ==
-                   static_cast<std::int64_t>(i),
+               items->items[i].as_integer() == static_cast<std::int64_t>(i),
            "native Range literal materialized item");
   }
 
@@ -252,8 +340,9 @@ void test_execute_emitted_collection_literals() {
               "lookup[:answer] = items[1] + 1\n"
               "[items[0], items[1], lookup[:answer]]\n");
   amber::runtime::ExecutionResult index_store_exec =
-      amber::runtime::execute_code(index_store_result.module,
-                                   index_store_result.module.init.entry_code_id);
+      amber::runtime::execute_code(
+          index_store_result.module,
+          index_store_result.module.init.entry_code_id);
   expect(index_store_exec.ok(), "index assignment execution failed");
   const std::shared_ptr<amber::runtime::ListValue> index_store_items =
       index_store_exec.value.as_list();
@@ -397,13 +486,12 @@ void test_execute_emitted_collection_literals() {
 }
 
 void test_execute_emitted_v20_7_spread() {
-  amber::bytecode::EmitResult emit_result =
-      emit_ok("def collect(a, b, c):\n"
-              "  [a, b, c]\n"
-              "\n"
-              "def probe():\n"
-              "  args = [2, 3]\n"
-              "  collect(1, *args)\n");
+  amber::bytecode::EmitResult emit_result = emit_ok("def collect(a, b, c):\n"
+                                                    "  [a, b, c]\n"
+                                                    "\n"
+                                                    "def probe():\n"
+                                                    "  args = [2, 3]\n"
+                                                    "  collect(1, *args)\n");
   const amber::bytecode::BcMethod *method =
       method_by_name(emit_result.module, "probe");
   expect(method != nullptr, "positional spread probe method exists");
@@ -7651,11 +7739,10 @@ void test_manual_raise_unhandled_fault_trace() {
 }
 
 void test_source_try_rescue_ensure_execution() {
-  const std::string binding_source =
-      "try:\n"
-      "  raise \"boom\"\n"
-      "rescue |e|:\n"
-      "  e\n";
+  const std::string binding_source = "try:\n"
+                                     "  raise \"boom\"\n"
+                                     "rescue |e|:\n"
+                                     "  e\n";
   const amber::bytecode::EmitResult binding_emit = emit_ok(binding_source);
   const amber::bytecode::DecodeResult binding_decoded =
       amber::bytecode::deserialize_module(
@@ -7674,25 +7761,25 @@ void test_source_try_rescue_ensure_execution() {
   expect(binding_local != nullptr && binding_local->initialized,
          "rescue binding appears initialized in execution locals");
 
-  amber::runtime::ExecutionResult typed_rescue = execute_emitted_init(
-      "class Boom:\n"
-      "  def init():\n"
-      "    pass\n"
-      "try:\n"
-      "  raise Boom()\n"
-      "rescue Boom:\n"
-      "  7\n");
+  amber::runtime::ExecutionResult typed_rescue =
+      execute_emitted_init("class Boom:\n"
+                           "  def init():\n"
+                           "    pass\n"
+                           "try:\n"
+                           "  raise Boom()\n"
+                           "rescue Boom:\n"
+                           "  7\n");
   expect(typed_rescue.ok(), "typed rescue execution failed");
   expect(typed_rescue.value.is_integer() &&
              typed_rescue.value.as_integer() == 7,
          "typed rescue matcher should catch matching class instances");
 
-  amber::runtime::ExecutionResult normal_ensure = execute_emitted_init(
-      "x = 0\n"
-      "try:\n"
-      "  5\n"
-      "ensure:\n"
-      "  x = 9\n");
+  amber::runtime::ExecutionResult normal_ensure =
+      execute_emitted_init("x = 0\n"
+                           "try:\n"
+                           "  5\n"
+                           "ensure:\n"
+                           "  x = 9\n");
   expect(normal_ensure.ok(), "normal ensure execution failed");
   expect(normal_ensure.value.is_integer() &&
              normal_ensure.value.as_integer() == 5,
@@ -7703,27 +7790,27 @@ void test_source_try_rescue_ensure_execution() {
              x_local->value.as_integer() == 9,
          "ensure normal path side effect is visible");
 
-  amber::runtime::ExecutionResult nested_ensure = execute_emitted_init(
-      "x = 0\n"
-      "try:\n"
-      "  try:\n"
-      "    raise \"boom\"\n"
-      "  ensure:\n"
-      "    x = 9\n"
-      "rescue:\n"
-      "  x\n");
+  amber::runtime::ExecutionResult nested_ensure =
+      execute_emitted_init("x = 0\n"
+                           "try:\n"
+                           "  try:\n"
+                           "    raise \"boom\"\n"
+                           "  ensure:\n"
+                           "    x = 9\n"
+                           "rescue:\n"
+                           "  x\n");
   expect(nested_ensure.ok(), "nested ensure rethrow execution failed");
   expect(nested_ensure.value.is_integer() &&
              nested_ensure.value.as_integer() == 9,
          "ensure must run before exception continues to outer rescue");
 
-  amber::runtime::ExecutionResult break_ensure = execute_emitted_init(
-      "x = 0\n"
-      "loop:\n"
-      "  try:\n"
-      "    break 5\n"
-      "  ensure:\n"
-      "    x = 9\n");
+  amber::runtime::ExecutionResult break_ensure =
+      execute_emitted_init("x = 0\n"
+                           "loop:\n"
+                           "  try:\n"
+                           "    break 5\n"
+                           "  ensure:\n"
+                           "    x = 9\n");
   expect(break_ensure.ok(), "break ensure execution failed");
   expect(break_ensure.value.is_integer() &&
              break_ensure.value.as_integer() == 5,
@@ -7736,69 +7823,68 @@ void test_source_try_rescue_ensure_execution() {
 }
 
 void test_source_throw_catch_execution() {
-  amber::runtime::ExecutionResult deep = execute_emitted_init(
-      "def deep_nested_code():\n"
-      "  throw :enough, 42\n"
-      "\n"
-      "catch(:enough):\n"
-      "  deep_nested_code()\n");
+  amber::runtime::ExecutionResult deep =
+      execute_emitted_init("def deep_nested_code():\n"
+                           "  throw :enough, 42\n"
+                           "\n"
+                           "catch(:enough):\n"
+                           "  deep_nested_code()\n");
   expect(deep.ok(), "deep throw/catch execution failed");
   expect(deep.value.is_integer() && deep.value.as_integer() == 42,
          "catch should return thrown payload from deep call");
 
-  amber::runtime::ExecutionResult bare = execute_emitted_init(
-      "catch :enough:\n"
-      "  throw :enough, 7\n");
+  amber::runtime::ExecutionResult bare =
+      execute_emitted_init("catch :enough:\n"
+                           "  throw :enough, 7\n");
   expect(bare.ok(), "bare catch execution failed");
   expect(bare.value.is_integer() && bare.value.as_integer() == 7,
          "bare catch should return thrown payload");
 
-  amber::runtime::ExecutionResult null_payload = execute_emitted_init(
-      "catch :enough:\n"
-      "  throw :enough\n");
+  amber::runtime::ExecutionResult null_payload =
+      execute_emitted_init("catch :enough:\n"
+                           "  throw :enough\n");
   expect(null_payload.ok(), "throw without payload execution failed");
   expect(null_payload.value.is_null(),
          "throw without payload should deliver null");
 
-  amber::runtime::ExecutionResult evaluated_tag_once = execute_emitted_init(
-      "tag = :enough\n"
-      "catch tag:\n"
-      "  tag = :other\n"
-      "  throw :enough, 21\n");
+  amber::runtime::ExecutionResult evaluated_tag_once =
+      execute_emitted_init("tag = :enough\n"
+                           "catch tag:\n"
+                           "  tag = :other\n"
+                           "  throw :enough, 21\n");
   expect(evaluated_tag_once.ok(), "catch tag snapshot execution failed");
   expect(evaluated_tag_once.value.is_integer() &&
              evaluated_tag_once.value.as_integer() == 21,
          "catch should use tag value evaluated before body");
 
-  amber::runtime::ExecutionResult nested = execute_emitted_init(
-      "catch :outer:\n"
-      "  catch :inner:\n"
-      "    throw :outer, 33\n");
+  amber::runtime::ExecutionResult nested =
+      execute_emitted_init("catch :outer:\n"
+                           "  catch :inner:\n"
+                           "    throw :outer, 33\n");
   expect(nested.ok(), "mismatched inner catch execution failed");
   expect(nested.value.is_integer() && nested.value.as_integer() == 33,
          "mismatched catch should continue to outer matching catch");
 
-  amber::runtime::ExecutionResult not_rescued = execute_emitted_init(
-      "catch :enough:\n"
-      "  try:\n"
-      "    throw :enough, 17\n"
-      "  rescue:\n"
-      "    99\n");
+  amber::runtime::ExecutionResult not_rescued =
+      execute_emitted_init("catch :enough:\n"
+                           "  try:\n"
+                           "    throw :enough, 17\n"
+                           "  rescue:\n"
+                           "    99\n");
   expect(not_rescued.ok(), "throw through rescue execution failed");
-  expect(not_rescued.value.is_integer() &&
-             not_rescued.value.as_integer() == 17,
+  expect(not_rescued.value.is_integer() && not_rescued.value.as_integer() == 17,
          "rescue must not catch throw/catch control flow");
 
-  amber::runtime::ExecutionResult ensure_result = execute_emitted_init(
-      "x = 0\n"
-      "y = 0\n"
-      "res = catch :enough:\n"
-      "  try:\n"
-      "    throw :enough, 11\n"
-      "  ensure:\n"
-      "    x = 5\n"
-      "    y = 1 + 2\n"
-      "res + x + y\n");
+  amber::runtime::ExecutionResult ensure_result =
+      execute_emitted_init("x = 0\n"
+                           "y = 0\n"
+                           "res = catch :enough:\n"
+                           "  try:\n"
+                           "    throw :enough, 11\n"
+                           "  ensure:\n"
+                           "    x = 5\n"
+                           "    y = 1 + 2\n"
+                           "res + x + y\n");
   expect(ensure_result.ok(), "throw through ensure execution failed");
   expect(ensure_result.value.is_integer() &&
              ensure_result.value.as_integer() == 19,
@@ -7848,10 +7934,10 @@ void test_manual_ensure_suppresses_pending_exception() {
   primary->class_index = 0;
   auto cleanup = std::make_shared<amber::runtime::InstanceValue>();
   cleanup->class_index = 1;
-  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
-      module, 1,
-      {amber::runtime::Value::instance(primary),
-       amber::runtime::Value::instance(cleanup)});
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(module, 1,
+                                   {amber::runtime::Value::instance(primary),
+                                    amber::runtime::Value::instance(cleanup)});
   expect(!exec.ok() && exec.fault.has_value() &&
              exec.fault->error_name == "Cleanup",
          "cleanup exception should replace pending exception");
@@ -7868,6 +7954,235 @@ void test_manual_ensure_suppresses_pending_exception() {
          "suppressed exception preserves original pending exception");
 }
 
+void test_runtime_io_v2_source_surface() {
+  amber::runtime::ExecutionResult buffer = execute_emitted_init(
+      "buf = io.ByteBuffer(4)\n"
+      "buf.put!(65)\n"
+      "buf.put!(66)\n"
+      "buf.flip!()\n"
+      "[buf.get!(), buf.remaining(), buf.bytes().hex()]\n");
+  expect(buffer.ok(),
+         "ByteBuffer v2 source execution failed: " +
+             (buffer.fault.has_value()
+                  ? buffer.fault->error_name + " " + buffer.fault->message
+                  : std::string{}));
+  expect(buffer.value.is_list(), "ByteBuffer source result should be Array");
+  const auto buffer_items = buffer.value.as_list()->items;
+  expect(
+      buffer_items.size() == 3 && buffer_items[0].is_integer() &&
+          buffer_items[0].as_integer() == 65 && buffer_items[1].is_integer() &&
+          buffer_items[1].as_integer() == 1 && buffer_items[2].is_string() &&
+          buffer_items[2].as_string().string_id <
+              buffer.runtime_strings.size() &&
+          buffer.runtime_strings[buffer_items[2].as_string().string_id] == "42",
+      "ByteBuffer v2 source contract mismatch");
+
+  amber::runtime::ExecutionResult path =
+      execute_emitted_init("p = fs.Path(\"/tmp\") / \"amber.txt\"\n"
+                           "[p.basename(), p.extname(), p.absolute?()]\n");
+  expect(path.ok(), "Path v2 source execution failed");
+  expect(path.value.is_list(), "Path source result should be Array");
+  const auto path_items = path.value.as_list()->items;
+  expect(path_items.size() == 3 && path_items[0].is_string() &&
+             path_items[1].is_string() && path_items[2].is_bool() &&
+             path_items[2].as_bool(),
+         "Path v2 source contract mismatch");
+
+  amber::runtime::ExecutionResult pipe =
+      execute_emitted_init("pair = io.Pipe.new(capacity: 2)\n"
+                           "r = pair[0]\n"
+                           "w = pair[1]\n"
+                           "a = w.try_write!(\"abc\")\n"
+                           "buf = io.ByteBuffer(2)\n"
+                           "b = r.read!(buf)\n"
+                           "w.close!()\n"
+                           "buf.clear!()\n"
+                           "c = r.read!(buf)\n"
+                           "buf.clear!()\n"
+                           "d = r.read!(buf)\n"
+                           "[a, b, c, d]\n");
+  expect(pipe.ok(), "Pipe v2 source execution failed");
+  expect(pipe.value.is_list(), "Pipe source result should be Array");
+  const auto pipe_items = pipe.value.as_list()->items;
+  expect(pipe_items.size() == 4 && pipe_items[0].as_integer() == 2 &&
+             pipe_items[1].as_integer() == 2 &&
+             pipe_items[2].as_integer() == 0 && pipe_items[3].as_integer() == 0,
+         "Pipe v2 source contract mismatch");
+
+  const std::string file_path =
+      "/tmp/amber_vm_io_" + std::to_string(::getpid()) + ".txt";
+  amber::runtime::ExecutionResult file =
+      execute_emitted_init("path = \"" + file_path +
+                           "\"\n"
+                           "fs.write_text(path, \"hello\")\n"
+                           "fs.File.open(path, :read) |f|:\n"
+                           "  [f.size!(), f.read_all!().to_str()]\n");
+  expect(file.ok(), "File v2 source execution failed");
+  expect(file.value.is_list(), "File source result should be Array");
+  const auto file_items = file.value.as_list()->items;
+  expect(file_items.size() == 2 && file_items[0].is_integer() &&
+             file_items[0].as_integer() == 5 && file_items[1].is_string(),
+         "File v2 source contract mismatch");
+  ::unlink(file_path.c_str());
+}
+
+void test_runtime_io_v2_policy_and_replay() {
+  const std::string file_path =
+      "/tmp/amber_vm_io_policy_" + std::to_string(::getpid()) + ".txt";
+  {
+    std::ofstream output(file_path, std::ios::binary | std::ios::trunc);
+    output << "policy";
+  }
+
+  amber::bytecode::EmitResult emitted =
+      emit_ok("fs.read_bytes(\"" + file_path + "\").count()\n");
+  emitted.module.capabilities.push_back(
+      amber::capability::make_capability("fs.read", file_path));
+
+  amber::runtime::RuntimeWorldOptions allowed_options;
+  allowed_options.enforce_effects = true;
+  allowed_options.allowed_effects = {"fs"};
+  allowed_options.capability_grants.push_back(
+      amber::capability::make_capability("fs.read", file_path));
+  allowed_options.record_replay_trace = true;
+  amber::runtime::RuntimeWorld allowed_world(emitted.module, allowed_options);
+  amber::runtime::ExecutionResult allowed =
+      allowed_world.execute(emitted.module.init.entry_code_id);
+  expect(allowed.ok() && allowed.value.is_integer() &&
+             allowed.value.as_integer() == 6,
+         "RuntimeWorld should allow scoped file IO");
+  const amber::runtime::RuntimeReplayTrace trace = allowed_world.replay_trace();
+  bool saw_io_wait = false;
+  for (const amber::runtime::RuntimeTraceEvent &event : trace.events) {
+    saw_io_wait = saw_io_wait || event.name == "io.wait";
+  }
+  expect(saw_io_wait, "file IO should emit io.wait trace metadata");
+
+  amber::runtime::RuntimeWorldOptions effect_options = allowed_options;
+  effect_options.record_replay_trace = false;
+  effect_options.allowed_effects = {"net"};
+  amber::runtime::RuntimeWorld effect_world(emitted.module, effect_options);
+  amber::runtime::ExecutionResult effect_denied =
+      effect_world.execute(emitted.module.init.entry_code_id);
+  expect(!effect_denied.ok() && effect_denied.fault.has_value() &&
+             effect_denied.fault->error_name == "EffectViolationError",
+         "IO effect denial should precede capability and host access");
+
+  amber::runtime::RuntimeWorldOptions capability_options = allowed_options;
+  capability_options.record_replay_trace = false;
+  capability_options.capability_grants.clear();
+  amber::runtime::RuntimeWorld capability_world(emitted.module,
+                                                capability_options);
+  amber::runtime::ExecutionResult capability_denied =
+      capability_world.execute(emitted.module.init.entry_code_id);
+  expect(!capability_denied.ok() && capability_denied.fault.has_value() &&
+             capability_denied.fault->error_name == "CapabilityError",
+         "missing file capability should fail before host access");
+
+  amber::bytecode::EmitResult invalid = emit_ok("fs.read_bytes(1)\n");
+  amber::runtime::RuntimeWorld invalid_world(invalid.module, effect_options);
+  amber::runtime::ExecutionResult invalid_result =
+      invalid_world.execute(invalid.module.init.entry_code_id);
+  expect(!invalid_result.ok() && invalid_result.fault.has_value() &&
+             invalid_result.fault->error_name == "TypeError",
+         "local IO argument errors should precede policy errors");
+
+  amber::runtime::RuntimeWorldOptions replay_options = allowed_options;
+  replay_options.record_replay_trace = false;
+  replay_options.enforce_replay = true;
+  amber::runtime::RuntimeWorld replay_world(emitted.module, replay_options);
+  amber::runtime::ExecutionResult replay_denied =
+      replay_world.execute(emitted.module.init.entry_code_id);
+  expect(!replay_denied.ok() && replay_denied.fault.has_value() &&
+             replay_denied.fault->error_name == "ReplayProviderError",
+         "replay mode should reject direct host file IO without provider");
+
+  ::unlink(file_path.c_str());
+}
+
+void test_runtime_io_v2_replay_provider_file_surface() {
+  amber::bytecode::EmitResult emitted = emit_ok(
+      "fs.File.open(\"out.txt\", :write, create: true, truncate: true) |f|:\n"
+      "  f.write_all!(\"abc\")\n"
+      "fs.read_text(\"out.txt\")\n");
+  emitted.module.capabilities.push_back(
+      amber::capability::make_capability("fs.write", "out.txt"));
+  emitted.module.capabilities.push_back(
+      amber::capability::make_capability("fs.read", "out.txt"));
+
+  auto provider = std::make_shared<TestIoProvider>();
+  amber::runtime::RuntimeWorldOptions options;
+  options.enforce_effects = true;
+  options.allowed_effects = {"fs"};
+  options.enforce_replay = true;
+  options.record_replay_trace = true;
+  options.io_provider = provider;
+  options.capability_grants.push_back(
+      amber::capability::make_capability("fs.write", "out.txt"));
+  options.capability_grants.push_back(
+      amber::capability::make_capability("fs.read", "out.txt"));
+
+  amber::runtime::RuntimeWorld world(emitted.module, options);
+  amber::runtime::ExecutionResult result =
+      world.execute(emitted.module.init.entry_code_id);
+  expect(result.ok(),
+         "provider-backed fs.File.open should execute in replay mode: " +
+             (result.fault.has_value()
+                  ? result.fault->error_name + " " + result.fault->message
+                  : std::string{}));
+  expect(provider->files["out.txt"] == "abc",
+         "provider-backed file close should commit written bytes");
+  const std::string provider_text =
+      string_value_text_or_die(result.value, emitted.module, result);
+  expect(provider_text == "abc",
+         "provider-backed fs.read_text should return committed bytes, got " +
+             provider_text);
+}
+
+void test_runtime_io_v2_low_level_wait_trace() {
+  amber::bytecode::EmitResult emitted =
+      emit_ok("pair = io.Pipe.new(capacity: 1)\n"
+              "r = pair[0]\n"
+              "w = pair[1]\n"
+              "w.write!(\"x\")\n"
+              "buf = io.ByteBuffer(1)\n"
+              "r.read!(buf)\n");
+
+  amber::runtime::RuntimeWorldOptions options;
+  options.record_replay_trace = true;
+  amber::runtime::RuntimeWorld world(emitted.module, options);
+  amber::runtime::ExecutionResult result =
+      world.execute(emitted.module.init.entry_code_id);
+  expect(result.ok(), "pipe read trace scenario should execute");
+
+  bool saw_enter = false;
+  bool saw_exit = false;
+  for (const amber::runtime::RuntimeTraceEvent &event :
+       world.replay_trace().events) {
+    if (event.name != "io.wait") {
+      continue;
+    }
+    bool pipe_read = false;
+    bool enter = false;
+    bool exit = false;
+    for (const amber::replay::TraceAttribute &attribute : event.attributes) {
+      if (attribute.key == "operation" && attribute.value == "pipe read") {
+        pipe_read = true;
+      }
+      if (attribute.key == "phase" && attribute.value == "enter") {
+        enter = true;
+      }
+      if (attribute.key == "phase" && attribute.value == "exit") {
+        exit = true;
+      }
+    }
+    saw_enter = saw_enter || (pipe_read && enter);
+    saw_exit = saw_exit || (pipe_read && exit);
+  }
+  expect(saw_enter && saw_exit,
+         "low-level pipe read should emit io.wait enter and exit events");
+}
+
 } // namespace
 
 int main() {
@@ -7881,6 +8196,10 @@ int main() {
   test_runtime_text_output_helpers_and_io_sinks();
   test_runtime_logger_source_surface_and_annotations();
   test_runtime_logger_parallel_native_threads_and_tasks();
+  test_runtime_io_v2_source_surface();
+  test_runtime_io_v2_policy_and_replay();
+  test_runtime_io_v2_replay_provider_file_surface();
+  test_runtime_io_v2_low_level_wait_trace();
   test_top_level_function_closure_captures_sibling_function();
   test_direct_top_level_method_entry_materializes_module_captures();
   test_top_level_function_self_recursion();

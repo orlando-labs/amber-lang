@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace amber::runtime {
@@ -19,6 +20,8 @@ extern thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stderr;
 extern thread_local std::string tls_runtime_task_annotation;
 extern thread_local std::uint64_t tls_runtime_native_thread_id;
 extern thread_local RuntimeTextSourceLocation tls_runtime_text_source_location;
+extern thread_local const RuntimeIoWaitObserver *tls_runtime_io_wait_observer;
+extern thread_local std::uint32_t tls_runtime_io_wait_depth;
 
 extern std::atomic<std::uint64_t> g_runtime_output_order;
 extern std::atomic<std::uint64_t> g_runtime_native_thread_ids;
@@ -56,6 +59,35 @@ public:
   ~RuntimeTaskSyncScope();
 };
 
+class RuntimeIoWaitObserverScope {
+public:
+  explicit RuntimeIoWaitObserverScope(const RuntimeIoWaitObserver *observer);
+  RuntimeIoWaitObserverScope(const RuntimeIoWaitObserverScope &) = delete;
+  RuntimeIoWaitObserverScope &
+  operator=(const RuntimeIoWaitObserverScope &) = delete;
+  ~RuntimeIoWaitObserverScope();
+
+private:
+  const RuntimeIoWaitObserver *previous_observer_ = nullptr;
+};
+
+class RuntimeIoWaitScope {
+public:
+  RuntimeIoWaitScope(
+      std::string operation, std::string resource,
+      RuntimeIoWaitInterest interest, std::uint64_t resource_id = 0,
+      std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+  RuntimeIoWaitScope(const RuntimeIoWaitScope &) = delete;
+  RuntimeIoWaitScope &operator=(const RuntimeIoWaitScope &) = delete;
+  ~RuntimeIoWaitScope();
+
+private:
+  RuntimeIoWaitRecord record_;
+  const RuntimeIoWaitObserver *observer_ = nullptr;
+  bool active_ = false;
+};
+
 std::uint64_t current_runtime_owner_strand_id();
+std::uint32_t current_runtime_io_wait_depth();
 
 } // namespace amber::runtime

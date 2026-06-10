@@ -23,7 +23,8 @@ FROZEN_SRCS := frozen/image.cpp
 PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp profile/data.cpp profile/wasm_accel.cpp profile/modern.cpp
 BUILD_SRCS := build/build.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
-RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
+IO_SRCS := runtime/io.cpp
+RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp $(IO_SRCS) runtime/vm.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(CHECKER_SRCS) $(HIR_SRCS)
@@ -49,6 +50,7 @@ EMITTER_TEST_SRCS := tests/emitter_tests.cpp $(CORE_SRCS)
 VM_TEST_SRCS := tests/vm_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_COLLECTIONS_TEST_SRCS := tests/stdlib_collections_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_TASK_TEST_SRCS := tests/stdlib_task_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
+IO_TEST_SRCS := tests/io_tests.cpp runtime/context.cpp runtime/text.cpp $(IO_SRCS)
 MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BUILD_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
 PACKAGE_TEST_SRCS := tests/package_tests.cpp $(PROFILE_SRCS) $(PACKAGE_SRCS) $(LEXER_SRCS)
 
@@ -99,6 +101,8 @@ FORMAT_FILES := \
 	runtime/native_bridge.h \
 	runtime/context.cpp \
 	runtime/context.h \
+	runtime/io.cpp \
+	runtime/io.h \
 	runtime/text.cpp \
 	runtime/frozen_image.cpp \
 	runtime/frozen_image.h \
@@ -127,13 +131,14 @@ FORMAT_FILES := \
 	tests/iamber_tests.cpp \
 	tests/vm_tests.cpp \
 	tests/stdlib_collections_tests.cpp \
-	tests/stdlib_task_tests.cpp
+	tests/stdlib_task_tests.cpp \
+	tests/io_tests.cpp
 
 .PHONY: all build test conformance spec-sync-check fmt clean
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/io_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -199,6 +204,9 @@ $(BUILD_DIR)/stdlib_collections_tests: $(STDLIB_COLLECTIONS_TEST_SRCS) | $(BUILD
 $(BUILD_DIR)/stdlib_task_tests: $(STDLIB_TASK_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STDLIB_TASK_TEST_SRCS) $(LDFLAGS) -o $@
 
+$(BUILD_DIR)/io_tests: $(IO_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(IO_TEST_SRCS) $(LDFLAGS) -o $@
+
 $(BUILD_DIR)/module_loader_tests: $(MODULE_LOADER_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODULE_LOADER_TEST_SRCS) $(LDFLAGS) -o $@
 
@@ -222,6 +230,7 @@ test: build
 	$(BUILD_DIR)/vm_tests
 	$(BUILD_DIR)/stdlib_collections_tests
 	$(BUILD_DIR)/stdlib_task_tests
+	$(BUILD_DIR)/io_tests
 	$(BUILD_DIR)/module_loader_tests
 	$(BUILD_DIR)/package_tests
 	$(BUILD_DIR)/iamber_tests

@@ -2353,7 +2353,8 @@ native_runtime_sources(const std::filesystem::path &root) {
       "profile/replay.cpp",       "profile/data.cpp",
       "profile/wasm_accel.cpp",   "profile/modern.cpp",
       "package/package.cpp",      "runtime/context.cpp",
-      "runtime/text.cpp",         "runtime/vm.cpp",
+      "runtime/text.cpp",         "runtime/io.cpp",
+      "runtime/vm.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());

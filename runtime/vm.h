@@ -35,6 +35,7 @@ class RuntimeMutex;
 class RuntimeTaskHandle;
 class RuntimeTaskModule;
 class RuntimeLogger;
+class RuntimeIoValue;
 class RuntimeTextWriter;
 class RuntimeThreadedCollection;
 class RuntimeWatchCell;
@@ -129,7 +130,17 @@ enum class RuntimeNativeTypeKind {
   Map,
   Null,
   Object,
-  Range
+  Range,
+  Bytes,
+  ByteBuffer,
+  ByteSlice,
+  IoPipe,
+  Fs,
+  FsPath,
+  FsFile,
+  NetEndpoint,
+  NetTcp,
+  NetUdp
 };
 
 struct NativeTypeValue {
@@ -155,7 +166,8 @@ struct Value {
       std::shared_ptr<RuntimeFlowModule>,
       std::shared_ptr<RuntimeThreadedCollection>,
       std::shared_ptr<RuntimeTextWriter>, std::shared_ptr<RuntimeLogger>,
-      std::shared_ptr<RuntimeWatchCell>, std::shared_ptr<RuntimeWatchHandle>>;
+      std::shared_ptr<RuntimeIoValue>, std::shared_ptr<RuntimeWatchCell>,
+      std::shared_ptr<RuntimeWatchHandle>>;
 
   Payload payload;
 
@@ -181,6 +193,7 @@ struct Value {
   threaded_collection(std::shared_ptr<RuntimeThreadedCollection> value);
   static Value text_writer(std::shared_ptr<RuntimeTextWriter> value);
   static Value logger(std::shared_ptr<RuntimeLogger> value);
+  static Value io_value(std::shared_ptr<RuntimeIoValue> value);
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
 
@@ -209,6 +222,7 @@ struct Value {
   bool is_threaded_collection() const;
   bool is_text_writer() const;
   bool is_logger() const;
+  bool is_io_value() const;
   bool is_watch_cell() const;
   bool is_watch_handle() const;
 
@@ -236,6 +250,7 @@ struct Value {
   std::shared_ptr<RuntimeThreadedCollection> as_threaded_collection() const;
   std::shared_ptr<RuntimeTextWriter> as_text_writer() const;
   std::shared_ptr<RuntimeLogger> as_logger() const;
+  std::shared_ptr<RuntimeIoValue> as_io_value() const;
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
 };
@@ -703,6 +718,34 @@ struct RuntimeNativeWaitResult {
   std::string error_name;
   std::string message;
 };
+
+enum class RuntimeIoWaitInterest {
+  Other,
+  Read,
+  Write,
+  Accept,
+  Connect,
+  Flush,
+  Close,
+  Metadata,
+  Open
+};
+
+struct RuntimeIoWaitRecord {
+  std::uint64_t wait_id = 0;
+  std::uint64_t task_id = 0;
+  std::uint64_t strand_id = 0;
+  std::uint64_t worker_id = 0;
+  std::uint64_t resource_id = 0;
+  RuntimeIoWaitInterest interest = RuntimeIoWaitInterest::Other;
+  std::string operation;
+  std::string resource;
+  bool has_timeout = false;
+  std::int64_t timeout_millis = 0;
+};
+
+using RuntimeIoWaitObserver =
+    std::function<void(const RuntimeIoWaitRecord &, bool entering)>;
 
 std::uint64_t current_runtime_worker_id();
 std::uint64_t current_runtime_strand_id();
@@ -1713,6 +1756,43 @@ struct RuntimeEffectCheckResult {
   std::vector<std::string> effects;
 };
 
+struct RuntimeIoProviderStatus {
+  bool handled = false;
+  bool ok = false;
+  bool boolean = false;
+  std::uint64_t size = 0;
+  bool file = false;
+  bool directory = false;
+  bool symlink = false;
+  std::size_t count = 0;
+  std::string bytes;
+  std::string error_name;
+  std::string message;
+};
+
+class RuntimeIoProvider {
+public:
+  virtual ~RuntimeIoProvider() = default;
+
+  virtual RuntimeIoProviderStatus fs_exists(const std::string &path);
+  virtual RuntimeIoProviderStatus fs_file(const std::string &path);
+  virtual RuntimeIoProviderStatus fs_dir(const std::string &path);
+  virtual RuntimeIoProviderStatus fs_metadata(const std::string &path);
+  virtual RuntimeIoProviderStatus
+  fs_read_bytes(const std::string &path, std::optional<std::size_t> limit);
+  virtual RuntimeIoProviderStatus fs_write_bytes(const std::string &path,
+                                                 const std::string &bytes,
+                                                 bool create, bool truncate,
+                                                 bool append = false);
+  virtual RuntimeIoProviderStatus fs_mkdir(const std::string &path);
+  virtual RuntimeIoProviderStatus fs_mkdir_p(const std::string &path);
+  virtual RuntimeIoProviderStatus fs_remove(const std::string &path);
+  virtual RuntimeIoProviderStatus fs_rename(const std::string &from,
+                                            const std::string &to);
+  virtual RuntimeIoProviderStatus fs_copy(const std::string &from,
+                                          const std::string &to);
+};
+
 struct RuntimeWorldOptions {
   std::vector<RuntimeCapabilityGrant> capability_grants;
   std::vector<std::string> allowed_effects;
@@ -1723,6 +1803,7 @@ struct RuntimeWorldOptions {
   std::uint64_t virtual_time_start = 1;
   std::uint64_t virtual_time_step = 1;
   RuntimeReplayTrace expected_replay;
+  std::shared_ptr<RuntimeIoProvider> io_provider;
 };
 
 struct TraceFrame {
