@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -225,7 +226,10 @@ std::string remove_numeric_separators(const std::string &value) {
   return out;
 }
 
-std::int64_t parse_integer_literal(const std::string &value) {
+// Returns nullopt when the literal does not fit the resolved `Int` type
+// (Int64 in the default numeric profile). Per amber.numeric-profile.v1 this
+// is a compile-time diagnostic, never a crash or silent wrap.
+std::optional<std::int64_t> parse_integer_literal(const std::string &value) {
   std::string text = remove_numeric_separators(value);
   int base = 10;
   std::size_t start = 0;
@@ -238,7 +242,30 @@ std::int64_t parse_integer_literal(const std::string &value) {
       start = 2;
     }
   }
-  return std::stoll(text.substr(start), nullptr, base);
+  std::int64_t result = 0;
+  for (std::size_t i = start; i < text.size(); ++i) {
+    const char c = text[i];
+    int digit = 0;
+    if (c >= '0' && c <= '9') {
+      digit = c - '0';
+    } else if (c >= 'a' && c <= 'f') {
+      digit = c - 'a' + 10;
+    } else if (c >= 'A' && c <= 'F') {
+      digit = c - 'A' + 10;
+    } else {
+      return std::nullopt;
+    }
+    if (digit >= base) {
+      return std::nullopt;
+    }
+    if (__builtin_mul_overflow(result, static_cast<std::int64_t>(base),
+                               &result) ||
+        __builtin_add_overflow(result, static_cast<std::int64_t>(digit),
+                               &result)) {
+      return std::nullopt;
+    }
+  }
+  return result;
 }
 
 bool is_integer_literal_expr(const ast::Expr &expr) {
@@ -580,6 +607,12 @@ private:
   std::optional<std::uint32_t> last_value_reg_;
   std::vector<LoopContext> loops_;
   std::vector<std::uint8_t> integer_local_slots_;
+  // Explicit `return` support: every HReturn stores its value into
+  // return_value_reg_ and records a pending jump. compile_try reroutes
+  // pending jumps recorded inside a protected body through an inline copy
+  // of the ensure body; emit() patches the survivors to the return epilogue.
+  std::optional<std::uint32_t> return_value_reg_;
+  std::vector<std::size_t> return_jump_indices_;
 };
 
 class Emitter {
@@ -607,6 +640,7 @@ public:
         static_cast<std::uint32_t>(program_->procedures.size() + 1U);
 
     const ast::Expr &root = *program_->root;
+    apply_numeric_profile(root);
     gather_dependencies(root);
     assign_exports(root);
     compile_procedures();
@@ -614,6 +648,54 @@ public:
     build_exports(root);
     build_init(root);
     return {std::move(module_), std::move(diagnostics_)};
+  }
+
+  // amber.numeric-profile.v1: resolve the module numeric profile before any
+  // literal interning and mirror it into module attrs for the VM/native lanes.
+  void apply_numeric_profile(const ast::Expr &root) {
+    const std::string int_type = string_field(root, "numeric_int");
+    const std::string overflow = string_field(root, "numeric_overflow");
+    if (!int_type.empty()) {
+      numeric_int_type_ = int_type;
+    }
+    if (!overflow.empty()) {
+      numeric_overflow_ = overflow;
+    }
+    if (numeric_int_type_ == "UInt64" || numeric_int_type_ == "BigInt") {
+      diag(root.span, "BC2004",
+           "numeric profile `int: " + numeric_int_type_ +
+               "` is not supported by the reference implementation yet");
+    }
+    if (!int_type.empty() || !overflow.empty()) {
+      module_.attrs.push_back({intern_string("amber.numeric.int"),
+                               intern_string(numeric_int_type_)});
+      module_.attrs.push_back({intern_string("amber.numeric.overflow"),
+                               intern_string(numeric_overflow_)});
+    }
+  }
+
+  // Largest value an unsuffixed non-negative literal may hold under the
+  // resolved `Int` type. Negative bounds are runtime unary-minus territory.
+  std::int64_t numeric_literal_max() const {
+    if (numeric_int_type_ == "Int8") {
+      return 127;
+    }
+    if (numeric_int_type_ == "Int16") {
+      return 32767;
+    }
+    if (numeric_int_type_ == "Int32") {
+      return 2147483647;
+    }
+    if (numeric_int_type_ == "UInt8") {
+      return 255;
+    }
+    if (numeric_int_type_ == "UInt16") {
+      return 65535;
+    }
+    if (numeric_int_type_ == "UInt32") {
+      return 4294967295LL;
+    }
+    return std::numeric_limits<std::int64_t>::max();
   }
 
   std::uint32_t intern_string(const std::string &value) {
@@ -759,7 +841,16 @@ public:
     if (token == "INTEGER") {
       Constant constant;
       constant.kind = ConstantKind::Integer;
-      constant.int_value = parse_integer_literal(value);
+      const std::optional<std::int64_t> parsed = parse_integer_literal(value);
+      if (!parsed.has_value() || *parsed > numeric_literal_max()) {
+        diag({}, "BC2003",
+             "integer literal `" + value + "` is out of range for Int (" +
+                 numeric_int_type_ +
+                 "); use BigInt(\"...\") for arbitrary precision");
+        constant.int_value = 0;
+        return intern_constant(constant);
+      }
+      constant.int_value = *parsed;
       return intern_constant(constant);
     }
     if (token == "FLOAT") {
@@ -1237,6 +1328,8 @@ private:
   std::unordered_map<std::string, ProcedureMethodInfo> declared_exports_;
   std::unordered_map<std::string, std::uint32_t> declared_classes_;
   std::uint32_t next_code_id_ = 1;
+  std::string numeric_int_type_ = "Int64";
+  std::string numeric_overflow_ = "checked";
 
   friend class CodeEmitter;
 };
@@ -1299,6 +1392,18 @@ BcCode CodeEmitter::emit() {
   emit_instruction(Opcode::Return, {{*last_value_reg_, false}},
                    procedure_->span);
 
+  if (!return_jump_indices_.empty()) {
+    const std::uint32_t return_pc = current_pc();
+    for (std::size_t jump : return_jump_indices_) {
+      patch_operand(jump, 0, return_pc, false);
+    }
+    return_jump_indices_.clear();
+    emit_instruction(Opcode::CloseUpvalues, {{0, false}}, procedure_->span);
+    emit_instruction(Opcode::Return,
+                     {{return_value_reg_.value_or(*last_value_reg_), false}},
+                     procedure_->span);
+  }
+
   code_.reg_count = next_temp_;
   return code_;
 }
@@ -1340,11 +1445,21 @@ BcCode CodeEmitter::emit_clause_pattern_probe(const ast::Expr &clause) {
     patch_fail_patches(fail_patches, current_pc());
   }
 
+  const std::uint32_t fail_pc = current_pc();
   emit_instruction(Opcode::PFail, {{kPatternFailModeSoft, false}}, clause.span);
   const std::uint32_t fail_reg = alloc_temp();
   emit_instruction(Opcode::LoadBool, {{fail_reg, false}, {0, false}},
                    clause.span);
   emit_instruction(Opcode::Return, {{fail_reg, false}}, clause.span);
+
+  if (!return_jump_indices_.empty()) {
+    diag(clause.span, "BC2001",
+         "`return` is not supported inside clause guards in v1");
+    for (std::size_t jump : return_jump_indices_) {
+      patch_operand(jump, 0, fail_pc, false);
+    }
+    return_jump_indices_.clear();
+  }
 
   code_.reg_count = next_temp_;
   return code_;
@@ -3285,6 +3400,10 @@ std::uint32_t CodeEmitter::compile_try(const ast::Expr &expr) {
           ? std::optional<std::size_t>{
                 loops_.back().break_jump_indices.size()}
           : std::nullopt;
+  const std::optional<std::size_t> return_snapshot =
+      ensure_body != nullptr
+          ? std::optional<std::size_t>{return_jump_indices_.size()}
+          : std::nullopt;
   const std::uint32_t protected_from = current_pc();
   compile_seq_to_reg(*body, dst, body->span);
   const std::uint32_t protected_to = current_pc();
@@ -3308,6 +3427,22 @@ std::uint32_t CodeEmitter::compile_try(const ast::Expr &expr) {
         loops_.back().result_reg.value_or(dst);
     compile_ensure_for_normal_path(ensure_body, break_result_reg, expr.span);
     loops_.back().break_jump_indices.push_back(
+        emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));
+  }
+  if (ensure_body != nullptr && return_snapshot.has_value() &&
+      return_jump_indices_.size() > *return_snapshot) {
+    std::vector<std::size_t> return_jumps(
+        return_jump_indices_.begin() +
+            static_cast<std::ptrdiff_t>(*return_snapshot),
+        return_jump_indices_.end());
+    return_jump_indices_.resize(*return_snapshot);
+    const std::uint32_t return_ensure_pc = current_pc();
+    for (std::size_t jump : return_jumps) {
+      patch_operand(jump, 0, return_ensure_pc, false);
+    }
+    compile_ensure_for_normal_path(ensure_body, return_value_reg_.value_or(dst),
+                                   expr.span);
+    return_jump_indices_.push_back(
         emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));
   }
   const std::uint32_t handler_pc = current_pc();
@@ -3420,9 +3555,18 @@ BcCode CodeEmitter::emit_ensure_handler(const ast::Expr &ensure_body,
     *exception_slot = exception_reg;
   }
   compile_seq(ensure_body, false);
+  const std::uint32_t tail_pc = current_pc();
   const std::uint32_t null_reg = alloc_temp();
   emit_instruction(Opcode::LoadNull, {{null_reg, false}}, ensure_body.span);
   emit_handler_return(null_reg, ensure_body.span);
+  if (!return_jump_indices_.empty()) {
+    diag(ensure_body.span, "BC2001",
+         "`return` is not supported inside `ensure` clauses in v1");
+    for (std::size_t jump : return_jump_indices_) {
+      patch_operand(jump, 0, tail_pc, false);
+    }
+    return_jump_indices_.clear();
+  }
   code_.reg_count = next_temp_;
   return code_;
 }
@@ -3505,9 +3649,18 @@ BcCode CodeEmitter::emit_rescue_handler(const ast::Expr &try_expr,
          handler_flags(kHandlerKindEnsure, handler.exception_slot,
                        exception_reg)});
   }
+  const std::uint32_t tail_pc = current_pc();
   const std::uint32_t null_reg = alloc_temp();
   emit_instruction(Opcode::LoadNull, {{null_reg, false}}, try_expr.span);
   emit_handler_return(null_reg, try_expr.span);
+  if (!return_jump_indices_.empty()) {
+    diag(try_expr.span, "BC2001",
+         "`return` is not supported inside `rescue` clauses in v1");
+    for (std::size_t jump : return_jump_indices_) {
+      patch_operand(jump, 0, tail_pc, false);
+    }
+    return_jump_indices_.clear();
+  }
   code_.reg_count = next_temp_;
   return code_;
 }
@@ -4175,6 +4328,22 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
       }
     }
     loops_.back().break_jump_indices.push_back(
+        emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));
+    return alloc_temp();
+  }
+  if (expr.kind == "HReturn") {
+    std::uint32_t value_reg = 0;
+    if (const ast::Expr *value = node_field(expr, "value")) {
+      value_reg = compile_expr(*value);
+    } else {
+      value_reg = alloc_temp();
+      emit_instruction(Opcode::LoadNull, {{value_reg, false}}, expr.span);
+    }
+    if (!return_value_reg_.has_value()) {
+      return_value_reg_ = alloc_temp();
+    }
+    emit_value_to_reg(*return_value_reg_, value_reg, expr.span);
+    return_jump_indices_.push_back(
         emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));
     return alloc_temp();
   }

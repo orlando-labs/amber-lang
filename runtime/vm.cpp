@@ -6402,6 +6402,18 @@ Value Value::native_function(RuntimeNativeFunctionKind kind) {
   return {NativeFunctionValue{kind}};
 }
 
+Value Value::native_error_class(std::uint16_t error_id) {
+  return {NativeErrorClassValue{error_id}};
+}
+
+Value Value::error_instance(std::shared_ptr<ErrorInstanceValue> value) {
+  return {std::move(value)};
+}
+
+Value Value::big_int(std::shared_ptr<BigIntValue> value) {
+  return {std::move(value)};
+}
+
 Value Value::task_module(std::shared_ptr<RuntimeTaskModule> value) {
   return {std::move(value)};
 }
@@ -6511,6 +6523,18 @@ bool Value::is_native_function() const {
   return std::holds_alternative<NativeFunctionValue>(payload);
 }
 
+bool Value::is_native_error_class() const {
+  return std::holds_alternative<NativeErrorClassValue>(payload);
+}
+
+bool Value::is_error_instance() const {
+  return std::holds_alternative<std::shared_ptr<ErrorInstanceValue>>(payload);
+}
+
+bool Value::is_big_int() const {
+  return std::holds_alternative<std::shared_ptr<BigIntValue>>(payload);
+}
+
 bool Value::is_task_module() const {
   return std::holds_alternative<std::shared_ptr<RuntimeTaskModule>>(payload);
 }
@@ -6610,6 +6634,18 @@ NativeTypeValue Value::as_native_type() const {
 
 NativeFunctionValue Value::as_native_function() const {
   return std::get<NativeFunctionValue>(payload);
+}
+
+NativeErrorClassValue Value::as_native_error_class() const {
+  return std::get<NativeErrorClassValue>(payload);
+}
+
+std::shared_ptr<ErrorInstanceValue> Value::as_error_instance() const {
+  return std::get<std::shared_ptr<ErrorInstanceValue>>(payload);
+}
+
+std::shared_ptr<BigIntValue> Value::as_big_int() const {
+  return std::get<std::shared_ptr<BigIntValue>>(payload);
 }
 
 std::shared_ptr<RuntimeTaskModule> Value::as_task_module() const {
@@ -6753,6 +6789,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Str";
   case RuntimeNativeTypeKind::Int:
     return "Int";
+  case RuntimeNativeTypeKind::BigInt:
+    return "BigInt";
   case RuntimeNativeTypeKind::Float:
     return "Float";
   case RuntimeNativeTypeKind::Bool:
@@ -7050,6 +7088,22 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_native_function()) {
     return std::string("<function ") +
            native_function_name(value.as_native_function().kind) + ">";
+  }
+  if (value.is_native_error_class()) {
+    return runtime_error_name(value.as_native_error_class().error_id);
+  }
+  if (value.is_error_instance()) {
+    const std::shared_ptr<ErrorInstanceValue> error_instance =
+        value.as_error_instance();
+    if (error_instance == nullptr) {
+      return "<error null>";
+    }
+    return std::string(runtime_error_name(error_instance->error_id)) + ": " +
+           error_instance->message;
+  }
+  if (value.is_big_int()) {
+    const std::shared_ptr<BigIntValue> big = value.as_big_int();
+    return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
   }
   if (value.is_text_writer()) {
     const std::shared_ptr<RuntimeTextWriter> writer = value.as_text_writer();
@@ -7918,6 +7972,10 @@ std::int64_t floor_div_int64(std::int64_t lhs, std::int64_t rhs) {
 }
 
 std::int64_t floor_mod_int64(std::int64_t lhs, std::int64_t rhs) {
+  if (rhs == -1) {
+    // Guards the INT64_MIN % -1 overflow; the result is always zero.
+    return 0;
+  }
   return lhs - floor_div_int64(lhs, rhs) * rhs;
 }
 
@@ -7948,25 +8006,682 @@ std::int64_t shr_int64(std::int64_t lhs, std::int64_t rhs) {
   return static_cast<std::int64_t>(static_cast<std::uint64_t>(lhs) >> rhs);
 }
 
-std::optional<std::int64_t> pow_int64_nonnegative(std::int64_t lhs,
-                                                  std::int64_t rhs) {
-  if (rhs < 0) {
+// Mirrors spec/registries/runtime_errors.yaml (registry order).
+constexpr const char *kRuntimeErrorNames[] = {
+    "NameError",
+    "ArgumentError",
+    "KeywordArgumentError",
+    "MatchError",
+    "UncaughtThrowError",
+    "TypeError",
+    "ValueError",
+    "NoMethodError",
+    "ImportError",
+    "ModuleInitError",
+    "WatchTargetError",
+    "EmptyCollectionError",
+    "InfiniteCollectionError",
+    "IndexError",
+    "KeyError",
+    "ZeroDivisionError",
+    "OverflowError",
+    "IsolationError",
+    "DestroyedAccessError",
+    "UseAfterFreeError",
+    "PinnedObjectError",
+    "LifetimeError",
+    "TaskError",
+    "TaskNotDoneError",
+    "TaskFailedError",
+    "IncludeCycleError",
+    "WorldFrozenError",
+    "SuperclassMismatchError",
+    "TimeoutError",
+    "CancelledError",
+    "ChannelClosedError",
+    "DeadlockError",
+    "OwnershipError",
+    "AtomicError",
+    "AtomicCompatibilityError",
+    "FlowError",
+    "FlowCancelledError",
+    "FlowPartitionError",
+    "FlowGatherError",
+    "MoveError",
+    "MovedValueError",
+    "CapabilityError",
+    "UnsupportedProfileError",
+    "EffectViolationError",
+    "DeterminismError",
+    "ReplayDivergenceError",
+};
+
+constexpr std::uint16_t kRuntimeErrorCount =
+    static_cast<std::uint16_t>(sizeof(kRuntimeErrorNames) /
+                               sizeof(kRuntimeErrorNames[0]));
+
+} // namespace
+
+const char *runtime_error_name(std::uint16_t error_id) {
+  if (error_id >= kRuntimeErrorCount) {
+    return "Error";
+  }
+  return kRuntimeErrorNames[error_id];
+}
+
+std::optional<std::uint16_t> runtime_error_id(const std::string &name) {
+  for (std::uint16_t i = 0; i < kRuntimeErrorCount; ++i) {
+    if (name == kRuntimeErrorNames[i]) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
+                                                const std::string &overflow) {
+  NumericPolicy policy;
+  if (overflow == "checked" || overflow.empty()) {
+    policy.mode = NumericOverflowMode::Checked;
+  } else if (overflow == "wrapping") {
+    policy.mode = NumericOverflowMode::Wrapping;
+  } else if (overflow == "saturating") {
+    policy.mode = NumericOverflowMode::Saturating;
+  } else {
     return std::nullopt;
   }
-  std::uint64_t result = 1;
-  std::uint64_t base = static_cast<std::uint64_t>(lhs);
+  if (int_type == "Int64" || int_type.empty()) {
+    return policy;
+  }
+  if (int_type == "Int8") {
+    policy.min = -128;
+    policy.max = 127;
+    policy.bits = 8;
+    return policy;
+  }
+  if (int_type == "Int16") {
+    policy.min = -32768;
+    policy.max = 32767;
+    policy.bits = 16;
+    return policy;
+  }
+  if (int_type == "Int32") {
+    policy.min = -2147483648LL;
+    policy.max = 2147483647LL;
+    policy.bits = 32;
+    return policy;
+  }
+  if (int_type == "UInt8") {
+    policy.min = 0;
+    policy.max = 255;
+    policy.bits = 8;
+    return policy;
+  }
+  if (int_type == "UInt16") {
+    policy.min = 0;
+    policy.max = 65535;
+    policy.bits = 16;
+    return policy;
+  }
+  if (int_type == "UInt32") {
+    policy.min = 0;
+    policy.max = 4294967295LL;
+    policy.bits = 32;
+    return policy;
+  }
+  return std::nullopt;
+}
+
+namespace {
+
+// Wraps an int64 value (already exact mod 2^64) into the policy width:
+// masking plus sign extension for signed widths, masking for unsigned ones.
+std::int64_t numeric_wrap_to_width(std::int64_t value,
+                                   const NumericPolicy &policy) {
+  if (policy.bits >= 64U) {
+    return value;
+  }
+  const std::uint64_t mask = (std::uint64_t{1} << policy.bits) - 1U;
+  std::uint64_t wrapped = static_cast<std::uint64_t>(value) & mask;
+  if (policy.min < 0) {
+    const std::uint64_t sign_bit = std::uint64_t{1} << (policy.bits - 1U);
+    if ((wrapped & sign_bit) != 0U) {
+      wrapped |= ~mask;
+    }
+  }
+  return static_cast<std::int64_t>(wrapped);
+}
+
+// Resolves an arithmetic result against the policy. `exact` is the true
+// result when `overflowed64` is false; otherwise it is the int64-wrapped
+// value (exact mod 2^64, which keeps wrapping-mode results correct).
+// `positive_overflow` gives the saturation direction for the overflow case.
+// Returns false only for checked-mode overflow (caller raises OverflowError).
+bool numeric_resolve(std::int64_t exact, bool overflowed64,
+                     bool positive_overflow, const NumericPolicy &policy,
+                     std::int64_t *out) {
+  if (!overflowed64 && exact >= policy.min && exact <= policy.max) {
+    *out = exact;
+    return true;
+  }
+  switch (policy.mode) {
+  case NumericOverflowMode::Wrapping:
+    *out = numeric_wrap_to_width(exact, policy);
+    return true;
+  case NumericOverflowMode::Saturating:
+    if (overflowed64) {
+      *out = positive_overflow ? policy.max : policy.min;
+    } else {
+      *out = exact > policy.max ? policy.max : policy.min;
+    }
+    return true;
+  case NumericOverflowMode::Checked:
+  default:
+    return false;
+  }
+}
+
+// Fixed-width Int arithmetic under the module numeric profile. Each helper
+// resolves wrapping/saturating overflow inline and returns false only for
+// checked-mode overflow, which the caller reports as OverflowError.
+bool numeric_add_int64(std::int64_t lhs, std::int64_t rhs,
+                       const NumericPolicy &policy, std::int64_t *out) {
+  std::int64_t result = 0;
+  const bool overflowed = __builtin_add_overflow(lhs, rhs, &result);
+  return numeric_resolve(result, overflowed, lhs > 0, policy, out);
+}
+
+bool numeric_sub_int64(std::int64_t lhs, std::int64_t rhs,
+                       const NumericPolicy &policy, std::int64_t *out) {
+  std::int64_t result = 0;
+  const bool overflowed = __builtin_sub_overflow(lhs, rhs, &result);
+  return numeric_resolve(result, overflowed, lhs >= 0, policy, out);
+}
+
+bool numeric_mul_int64(std::int64_t lhs, std::int64_t rhs,
+                       const NumericPolicy &policy, std::int64_t *out) {
+  std::int64_t result = 0;
+  const bool overflowed = __builtin_mul_overflow(lhs, rhs, &result);
+  return numeric_resolve(result, overflowed, (lhs < 0) == (rhs < 0), policy,
+                         out);
+}
+
+bool numeric_neg_int64(std::int64_t value, const NumericPolicy &policy,
+                       std::int64_t *out) {
+  if (value == std::numeric_limits<std::int64_t>::min()) {
+    return numeric_resolve(value, true, true, policy, out);
+  }
+  return numeric_resolve(-value, false, value < 0, policy, out);
+}
+
+// Division overflow: INT64_MIN / -1 at full width, or a narrow-width result
+// such as Int8 -128 / -1 == 128. Division by zero is handled by the caller
+// (ZeroDivisionError) before these helpers run.
+bool numeric_div_int64(std::int64_t lhs, std::int64_t rhs,
+                       const NumericPolicy &policy, std::int64_t *out) {
+  if (lhs == std::numeric_limits<std::int64_t>::min() && rhs == -1) {
+    return numeric_resolve(lhs, true, true, policy, out);
+  }
+  return numeric_resolve(lhs / rhs, false, true, policy, out);
+}
+
+bool numeric_floor_div_int64(std::int64_t lhs, std::int64_t rhs,
+                             const NumericPolicy &policy, std::int64_t *out) {
+  if (lhs == std::numeric_limits<std::int64_t>::min() && rhs == -1) {
+    return numeric_resolve(lhs, true, true, policy, out);
+  }
+  return numeric_resolve(floor_div_int64(lhs, rhs), false, true, policy, out);
+}
+
+// Arithmetic (sign-extending) right shift; both gcc and clang implement
+// signed >> as arithmetic shift, which C++20 also mandates.
+std::int64_t shr_int64_arithmetic(std::int64_t value, std::int64_t shift) {
+  return value >> shift;
+}
+
+// Shift-left overflow: any set bit shifted past bit 62 (or a sign change).
+bool numeric_shl_int64(std::int64_t lhs, std::int64_t rhs,
+                       const NumericPolicy &policy, std::int64_t *out) {
+  const std::int64_t shifted = shl_int64(lhs, rhs);
+  const bool overflowed = shr_int64_arithmetic(shifted, rhs) != lhs;
+  return numeric_resolve(shifted, overflowed, lhs >= 0, policy, out);
+}
+
+// Integer pow with per-step overflow detection; negative exponents are
+// resolved by the caller (float fallback) before this helper runs.
+bool numeric_pow_int64(std::int64_t lhs, std::int64_t rhs,
+                       const NumericPolicy &policy, std::int64_t *out) {
+  std::int64_t result = 1;
+  std::int64_t base = lhs;
   std::uint64_t exponent = static_cast<std::uint64_t>(rhs);
+  bool overflowed = false;
   while (exponent > 0) {
     if ((exponent & 1U) != 0U) {
-      result *= base;
+      if (__builtin_mul_overflow(result, base, &result)) {
+        overflowed = true;
+      }
+    }
+    exponent >>= 1U;
+    if (exponent > 0 && __builtin_mul_overflow(base, base, &base)) {
+      // exponent > 0 guarantees a later multiply consumes this power, so a
+      // squaring overflow always implies a true overflow. Two's-complement
+      // wrap stays exact mod 2^64, so the wrapping-mode result is unaffected.
+      overflowed = true;
+    }
+  }
+  const bool positive_overflow =
+      !(lhs < 0 && (static_cast<std::uint64_t>(rhs) & 1U) != 0U);
+  return numeric_resolve(result, overflowed, positive_overflow, policy, out);
+}
+
+// --- BigInt magnitude arithmetic (amber.numeric-profile.v1) ---------------
+// Magnitudes are little-endian base-2^32 limb vectors internally so that all
+// products and partial divisions fit 64-bit accumulators (-Wpedantic builds
+// stay free of __int128). BigIntValue stores base-2^64 limbs; conversion
+// happens at the boundaries.
+
+std::vector<std::uint32_t> big_u32_from_value(const BigIntValue &value) {
+  std::vector<std::uint32_t> out;
+  out.reserve(value.magnitude.size() * 2U);
+  for (std::uint64_t limb : value.magnitude) {
+    out.push_back(static_cast<std::uint32_t>(limb & 0xFFFFFFFFULL));
+    out.push_back(static_cast<std::uint32_t>(limb >> 32U));
+  }
+  while (!out.empty() && out.back() == 0U) {
+    out.pop_back();
+  }
+  return out;
+}
+
+std::shared_ptr<BigIntValue> big_from_u32(bool negative,
+                                          const std::vector<std::uint32_t> &mag) {
+  auto out = std::make_shared<BigIntValue>();
+  for (std::size_t i = 0; i < mag.size(); i += 2U) {
+    std::uint64_t limb = mag[i];
+    if (i + 1U < mag.size()) {
+      limb |= static_cast<std::uint64_t>(mag[i + 1U]) << 32U;
+    }
+    out->magnitude.push_back(limb);
+  }
+  while (!out->magnitude.empty() && out->magnitude.back() == 0U) {
+    out->magnitude.pop_back();
+  }
+  out->negative = negative && !out->magnitude.empty();
+  return out;
+}
+
+int big_compare_mag_u32(const std::vector<std::uint32_t> &lhs,
+                        const std::vector<std::uint32_t> &rhs) {
+  if (lhs.size() != rhs.size()) {
+    return lhs.size() < rhs.size() ? -1 : 1;
+  }
+  for (std::size_t i = lhs.size(); i-- > 0;) {
+    if (lhs[i] != rhs[i]) {
+      return lhs[i] < rhs[i] ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+std::vector<std::uint32_t> big_add_mag_u32(const std::vector<std::uint32_t> &lhs,
+                                           const std::vector<std::uint32_t> &rhs) {
+  std::vector<std::uint32_t> out;
+  out.reserve(std::max(lhs.size(), rhs.size()) + 1U);
+  std::uint64_t carry = 0;
+  for (std::size_t i = 0; i < lhs.size() || i < rhs.size(); ++i) {
+    std::uint64_t sum = carry;
+    if (i < lhs.size()) {
+      sum += lhs[i];
+    }
+    if (i < rhs.size()) {
+      sum += rhs[i];
+    }
+    out.push_back(static_cast<std::uint32_t>(sum & 0xFFFFFFFFULL));
+    carry = sum >> 32U;
+  }
+  if (carry != 0U) {
+    out.push_back(static_cast<std::uint32_t>(carry));
+  }
+  return out;
+}
+
+// Requires lhs >= rhs.
+std::vector<std::uint32_t> big_sub_mag_u32(const std::vector<std::uint32_t> &lhs,
+                                           const std::vector<std::uint32_t> &rhs) {
+  std::vector<std::uint32_t> out;
+  out.reserve(lhs.size());
+  std::int64_t borrow = 0;
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    std::int64_t diff = static_cast<std::int64_t>(lhs[i]) - borrow;
+    if (i < rhs.size()) {
+      diff -= static_cast<std::int64_t>(rhs[i]);
+    }
+    if (diff < 0) {
+      diff += 0x100000000LL;
+      borrow = 1;
+    } else {
+      borrow = 0;
+    }
+    out.push_back(static_cast<std::uint32_t>(diff));
+  }
+  while (!out.empty() && out.back() == 0U) {
+    out.pop_back();
+  }
+  return out;
+}
+
+std::vector<std::uint32_t> big_mul_mag_u32(const std::vector<std::uint32_t> &lhs,
+                                           const std::vector<std::uint32_t> &rhs) {
+  if (lhs.empty() || rhs.empty()) {
+    return {};
+  }
+  std::vector<std::uint32_t> out(lhs.size() + rhs.size(), 0U);
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    std::uint64_t carry = 0;
+    for (std::size_t j = 0; j < rhs.size(); ++j) {
+      std::uint64_t acc = static_cast<std::uint64_t>(lhs[i]) * rhs[j] +
+                          out[i + j] + carry;
+      out[i + j] = static_cast<std::uint32_t>(acc & 0xFFFFFFFFULL);
+      carry = acc >> 32U;
+    }
+    std::size_t k = i + rhs.size();
+    while (carry != 0U) {
+      const std::uint64_t acc = static_cast<std::uint64_t>(out[k]) + carry;
+      out[k] = static_cast<std::uint32_t>(acc & 0xFFFFFFFFULL);
+      carry = acc >> 32U;
+      ++k;
+    }
+  }
+  while (!out.empty() && out.back() == 0U) {
+    out.pop_back();
+  }
+  return out;
+}
+
+std::size_t big_bit_length_u32(const std::vector<std::uint32_t> &mag) {
+  if (mag.empty()) {
+    return 0;
+  }
+  std::uint32_t top = mag.back();
+  std::size_t bits = (mag.size() - 1U) * 32U;
+  while (top != 0U) {
+    ++bits;
+    top >>= 1U;
+  }
+  return bits;
+}
+
+bool big_get_bit_u32(const std::vector<std::uint32_t> &mag, std::size_t bit) {
+  const std::size_t limb = bit / 32U;
+  if (limb >= mag.size()) {
+    return false;
+  }
+  return ((mag[limb] >> (bit % 32U)) & 1U) != 0U;
+}
+
+void big_set_bit_u32(std::vector<std::uint32_t> *mag, std::size_t bit) {
+  const std::size_t limb = bit / 32U;
+  if (limb >= mag->size()) {
+    mag->resize(limb + 1U, 0U);
+  }
+  (*mag)[limb] |= std::uint32_t{1} << (bit % 32U);
+}
+
+// Binary shift-subtract long division on magnitudes. O(bits * limbs) — slow
+// for huge operands but simple and allocation-light; fine for a reference
+// implementation. Requires a non-zero divisor.
+void big_divmod_mag_u32(const std::vector<std::uint32_t> &dividend,
+                        const std::vector<std::uint32_t> &divisor,
+                        std::vector<std::uint32_t> *quotient,
+                        std::vector<std::uint32_t> *remainder) {
+  quotient->clear();
+  remainder->clear();
+  if (big_compare_mag_u32(dividend, divisor) < 0) {
+    *remainder = dividend;
+    while (!remainder->empty() && remainder->back() == 0U) {
+      remainder->pop_back();
+    }
+    return;
+  }
+  std::vector<std::uint32_t> current;
+  for (std::size_t bit = big_bit_length_u32(dividend); bit-- > 0;) {
+    // current = (current << 1) | dividend[bit]
+    std::uint32_t carry = big_get_bit_u32(dividend, bit) ? 1U : 0U;
+    for (std::size_t i = 0; i < current.size(); ++i) {
+      const std::uint32_t next_carry = current[i] >> 31U;
+      current[i] = (current[i] << 1U) | carry;
+      carry = next_carry;
+    }
+    if (carry != 0U) {
+      current.push_back(carry);
+    }
+    if (big_compare_mag_u32(current, divisor) >= 0) {
+      current = big_sub_mag_u32(current, divisor);
+      big_set_bit_u32(quotient, bit);
+    }
+  }
+  *remainder = std::move(current);
+  while (!remainder->empty() && remainder->back() == 0U) {
+    remainder->pop_back();
+  }
+  while (!quotient->empty() && quotient->back() == 0U) {
+    quotient->pop_back();
+  }
+}
+
+std::shared_ptr<BigIntValue> big_from_int64(std::int64_t value) {
+  auto out = std::make_shared<BigIntValue>();
+  if (value == 0) {
+    return out;
+  }
+  out->negative = value < 0;
+  // Negate via uint64 to keep INT64_MIN well-defined.
+  const std::uint64_t magnitude =
+      value < 0 ? ~static_cast<std::uint64_t>(value) + 1U
+                : static_cast<std::uint64_t>(value);
+  out->magnitude.push_back(magnitude);
+  return out;
+}
+
+std::optional<std::int64_t> big_to_int64(const BigIntValue &value) {
+  if (value.magnitude.empty()) {
+    return 0;
+  }
+  if (value.magnitude.size() > 1U) {
+    return std::nullopt;
+  }
+  const std::uint64_t magnitude = value.magnitude[0];
+  if (value.negative) {
+    if (magnitude > static_cast<std::uint64_t>(
+                        std::numeric_limits<std::int64_t>::max()) +
+                        1U) {
+      return std::nullopt;
+    }
+    return static_cast<std::int64_t>(~magnitude + 1U);
+  }
+  if (magnitude >
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    return std::nullopt;
+  }
+  return static_cast<std::int64_t>(magnitude);
+}
+
+int big_compare_signed(const BigIntValue &lhs, const BigIntValue &rhs) {
+  if (lhs.negative != rhs.negative) {
+    return lhs.negative ? -1 : 1;
+  }
+  const int mag_order = big_compare_mag_u32(big_u32_from_value(lhs),
+                                            big_u32_from_value(rhs));
+  return lhs.negative ? -mag_order : mag_order;
+}
+
+std::shared_ptr<BigIntValue> big_add_signed(const BigIntValue &lhs,
+                                            const BigIntValue &rhs) {
+  const std::vector<std::uint32_t> lhs_mag = big_u32_from_value(lhs);
+  const std::vector<std::uint32_t> rhs_mag = big_u32_from_value(rhs);
+  if (lhs.negative == rhs.negative) {
+    return big_from_u32(lhs.negative, big_add_mag_u32(lhs_mag, rhs_mag));
+  }
+  const int order = big_compare_mag_u32(lhs_mag, rhs_mag);
+  if (order == 0) {
+    return std::make_shared<BigIntValue>();
+  }
+  if (order > 0) {
+    return big_from_u32(lhs.negative, big_sub_mag_u32(lhs_mag, rhs_mag));
+  }
+  return big_from_u32(rhs.negative, big_sub_mag_u32(rhs_mag, lhs_mag));
+}
+
+std::shared_ptr<BigIntValue> big_negate(const BigIntValue &value) {
+  auto out = std::make_shared<BigIntValue>(value);
+  out->negative = !value.negative && !value.magnitude.empty();
+  return out;
+}
+
+std::shared_ptr<BigIntValue> big_mul_signed(const BigIntValue &lhs,
+                                            const BigIntValue &rhs) {
+  return big_from_u32(lhs.negative != rhs.negative,
+                      big_mul_mag_u32(big_u32_from_value(lhs),
+                                      big_u32_from_value(rhs)));
+}
+
+// Truncated division: quotient rounds toward zero, remainder keeps the
+// dividend sign — mirroring fixed-width Int `/`.
+void big_divmod_trunc(const BigIntValue &lhs, const BigIntValue &rhs,
+                      std::shared_ptr<BigIntValue> *quotient,
+                      std::shared_ptr<BigIntValue> *remainder) {
+  std::vector<std::uint32_t> q_mag;
+  std::vector<std::uint32_t> r_mag;
+  big_divmod_mag_u32(big_u32_from_value(lhs), big_u32_from_value(rhs), &q_mag,
+                     &r_mag);
+  *quotient = big_from_u32(lhs.negative != rhs.negative, q_mag);
+  *remainder = big_from_u32(lhs.negative, r_mag);
+}
+
+// Floor modulo (sign of divisor) and floor division — mirroring Int `%`/`//`.
+std::shared_ptr<BigIntValue> big_floor_mod(const BigIntValue &lhs,
+                                           const BigIntValue &rhs) {
+  std::shared_ptr<BigIntValue> quotient;
+  std::shared_ptr<BigIntValue> remainder;
+  big_divmod_trunc(lhs, rhs, &quotient, &remainder);
+  if (remainder->magnitude.empty() ||
+      remainder->negative == rhs.negative) {
+    return remainder;
+  }
+  return big_add_signed(*remainder, rhs);
+}
+
+std::shared_ptr<BigIntValue> big_floor_div(const BigIntValue &lhs,
+                                           const BigIntValue &rhs) {
+  std::shared_ptr<BigIntValue> quotient;
+  std::shared_ptr<BigIntValue> remainder;
+  big_divmod_trunc(lhs, rhs, &quotient, &remainder);
+  if (remainder->magnitude.empty() ||
+      remainder->negative == rhs.negative) {
+    return quotient;
+  }
+  return big_add_signed(*quotient, BigIntValue{true, {1}});
+}
+
+std::shared_ptr<BigIntValue> big_pow(const BigIntValue &base,
+                                     std::uint64_t exponent) {
+  auto result = std::make_shared<BigIntValue>();
+  result->magnitude.push_back(1);
+  auto current = std::make_shared<BigIntValue>(base);
+  while (exponent > 0) {
+    if ((exponent & 1U) != 0U) {
+      result = big_mul_signed(*result, *current);
     }
     exponent >>= 1U;
     if (exponent > 0) {
-      base *= base;
+      current = big_mul_signed(*current, *current);
     }
   }
-  return static_cast<std::int64_t>(result);
+  return result;
 }
+
+std::optional<BigIntValue> big_from_decimal_text(const std::string &text) {
+  std::size_t index = 0;
+  bool negative = false;
+  if (index < text.size() && (text[index] == '+' || text[index] == '-')) {
+    negative = text[index] == '-';
+    ++index;
+  }
+  if (index >= text.size()) {
+    return std::nullopt;
+  }
+  std::vector<std::uint32_t> mag;
+  bool any_digit = false;
+  for (; index < text.size(); ++index) {
+    const char c = text[index];
+    if (c == '_') {
+      continue;
+    }
+    if (c < '0' || c > '9') {
+      return std::nullopt;
+    }
+    any_digit = true;
+    // mag = mag * 10 + digit
+    std::uint64_t carry = static_cast<std::uint64_t>(c - '0');
+    for (std::size_t i = 0; i < mag.size(); ++i) {
+      const std::uint64_t acc = static_cast<std::uint64_t>(mag[i]) * 10U + carry;
+      mag[i] = static_cast<std::uint32_t>(acc & 0xFFFFFFFFULL);
+      carry = acc >> 32U;
+    }
+    while (carry != 0U) {
+      mag.push_back(static_cast<std::uint32_t>(carry & 0xFFFFFFFFULL));
+      carry >>= 32U;
+    }
+  }
+  if (!any_digit) {
+    return std::nullopt;
+  }
+  const std::shared_ptr<BigIntValue> built = big_from_u32(negative, mag);
+  return *built;
+}
+
+} // namespace
+
+std::string big_int_to_decimal_string(const BigIntValue &value) {
+  if (value.magnitude.empty()) {
+    return "0";
+  }
+  // Work in base-2^32 half-limbs so the long division by 10^9 only needs
+  // 64-bit accumulators (keeps -Wpedantic builds free of __int128).
+  std::vector<std::uint32_t> mag;
+  mag.reserve(value.magnitude.size() * 2U);
+  for (std::uint64_t limb : value.magnitude) {
+    mag.push_back(static_cast<std::uint32_t>(limb & 0xFFFFFFFFULL));
+    mag.push_back(static_cast<std::uint32_t>(limb >> 32U));
+  }
+  while (!mag.empty() && mag.back() == 0U) {
+    mag.pop_back();
+  }
+  constexpr std::uint64_t kChunk = 1000000000ULL;
+  std::vector<std::uint32_t> chunks;
+  while (!mag.empty()) {
+    std::uint64_t remainder = 0;
+    for (std::size_t i = mag.size(); i-- > 0;) {
+      const std::uint64_t acc = (remainder << 32U) | mag[i];
+      mag[i] = static_cast<std::uint32_t>(acc / kChunk);
+      remainder = acc % kChunk;
+    }
+    while (!mag.empty() && mag.back() == 0U) {
+      mag.pop_back();
+    }
+    chunks.push_back(static_cast<std::uint32_t>(remainder));
+  }
+  std::string out = value.negative ? "-" : "";
+  out += std::to_string(chunks.back());
+  for (std::size_t i = chunks.size() - 1; i-- > 0;) {
+    const std::string part = std::to_string(chunks[i]);
+    out += std::string(9U - part.size(), '0');
+    out += part;
+  }
+  return out;
+}
+
+namespace {
 
 bool value_equals(const Value &lhs, const Value &rhs) {
   if (lhs.is_watch_cell() || rhs.is_watch_cell()) {
@@ -8008,6 +8723,30 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   }
   if (lhs.is_native_function()) {
     return lhs.as_native_function().kind == rhs.as_native_function().kind;
+  }
+  if (lhs.is_native_error_class()) {
+    return lhs.as_native_error_class().error_id ==
+           rhs.as_native_error_class().error_id;
+  }
+  if (lhs.is_error_instance()) {
+    const std::shared_ptr<ErrorInstanceValue> left = lhs.as_error_instance();
+    const std::shared_ptr<ErrorInstanceValue> right = rhs.as_error_instance();
+    if (left == right) {
+      return true;
+    }
+    return left != nullptr && right != nullptr &&
+           left->error_id == right->error_id &&
+           left->message == right->message;
+  }
+  if (lhs.is_big_int()) {
+    const std::shared_ptr<BigIntValue> left = lhs.as_big_int();
+    const std::shared_ptr<BigIntValue> right = rhs.as_big_int();
+    if (left == right) {
+      return true;
+    }
+    return left != nullptr && right != nullptr &&
+           left->negative == right->negative &&
+           left->magnitude == right->magnitude;
   }
   if (lhs.is_closure()) {
     return lhs.as_closure() == rhs.as_closure();
@@ -8226,11 +8965,38 @@ public:
         capabilities_(capabilities), effects_(effects),
         trace_recorder_(std::move(trace_recorder)) {
     state_->initialize_for_module(module_);
+    resolve_numeric_policy();
+  }
+
+  void resolve_numeric_policy() {
+    std::string int_type;
+    std::string overflow;
+    for (const bytecode::AttrEntry &attr : module_.attrs) {
+      const std::string key = string_or_empty(attr.key_str_id);
+      if (key == "amber.numeric.int") {
+        int_type = string_or_empty(attr.value_str_id);
+      } else if (key == "amber.numeric.overflow") {
+        overflow = string_or_empty(attr.value_str_id);
+      }
+    }
+    const std::optional<NumericPolicy> policy =
+        numeric_policy_for(int_type, overflow);
+    if (!policy.has_value()) {
+      numeric_profile_error_ = "numeric profile `int: " + int_type +
+                               ", overflow: " + overflow +
+                               "` is not supported by this runtime";
+      return;
+    }
+    numeric_policy_ = *policy;
   }
 
   ExecutionResult execute(std::uint32_t code_id, const std::vector<Value> &args,
                           Value self, Value block) {
     const std::size_t watch_event_start = state_->watch_events.size();
+    if (!numeric_profile_error_.empty()) {
+      return with_runtime_names(
+          fail("UnsupportedProfileError", numeric_profile_error_, code_id, 0));
+    }
     const BcCode *entry = find_code(module_, code_id);
     if (entry == nullptr) {
       return with_runtime_names(fail("VMError", "unknown code id", code_id, 0));
@@ -8984,6 +9750,24 @@ private:
   void set_fault(const Frame &frame, const std::string &error_name,
                  const std::string &message) {
     fault_ = make_fault(frame, error_name, message);
+  }
+
+  // Raises a builtin runtime error (spec/registries/runtime_errors.yaml) as a
+  // rescuable exception. Unwinds to the nearest handler when one exists;
+  // otherwise degrades to a terminal fault with the same name/message shape
+  // as set_fault. Callers must return immediately afterwards: on a successful
+  // unwind the current frame reference may no longer be the active frame.
+  void raise_runtime_error(const Frame &frame, const std::string &error_name,
+                           const std::string &message) {
+    const std::optional<std::uint16_t> error_id = runtime_error_id(error_name);
+    if (!error_id.has_value()) {
+      set_fault(frame, error_name, message);
+      return;
+    }
+    auto instance = std::make_shared<ErrorInstanceValue>();
+    instance->error_id = *error_id;
+    instance->message = message;
+    raise_value(frame, Value::error_instance(std::move(instance)));
   }
 
   static bool quick_operand_u32(const Instruction &insn, std::size_t idx,
@@ -10168,8 +10952,12 @@ private:
 
     if (kind == DirectClosureKind::LaneIndex) {
       if (second == 0) {
-        set_fault(frame, "TypeError", "division by zero");
+        raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
         return FastCallStatus::Faulted;
+      }
+      if (first == std::numeric_limits<std::int64_t>::min() && second == -1) {
+        // Let the generic closure body apply the numeric overflow policy.
+        return FastCallStatus::NotHandled;
       }
       *int_out = first - (first / second) * second;
       *int_result = true;
@@ -10881,24 +11669,40 @@ private:
       }
     }
     if (lhs_fast && rhs_fast) {
+      std::int64_t int_result = 0;
       switch (opcode) {
       case Opcode::IAdd:
       case Opcode::IAddK:
-        if (!write_integer_reg_unboxed(frame, dst, fast_lhs + fast_rhs)) {
+        if (!numeric_add_int64(fast_lhs, fast_rhs, numeric_policy_,
+                               &int_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `+`");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(frame, dst, int_result)) {
           return false;
         }
         ++frame.pc;
         return true;
       case Opcode::ISub:
       case Opcode::ISubK:
-        if (!write_integer_reg_unboxed(frame, dst, fast_lhs - fast_rhs)) {
+        if (!numeric_sub_int64(fast_lhs, fast_rhs, numeric_policy_,
+                               &int_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `-`");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(frame, dst, int_result)) {
           return false;
         }
         ++frame.pc;
         return true;
       case Opcode::IMul:
       case Opcode::IMulK:
-        if (!write_integer_reg_unboxed(frame, dst, fast_lhs * fast_rhs)) {
+        if (!numeric_mul_int64(fast_lhs, fast_rhs, numeric_policy_,
+                               &int_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `*`");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(frame, dst, int_result)) {
           return false;
         }
         ++frame.pc;
@@ -10906,10 +11710,15 @@ private:
       case Opcode::IDiv:
       case Opcode::IDivK:
         if (fast_rhs == 0) {
-          set_fault(frame, "TypeError", "division by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
           return false;
         }
-        if (!write_integer_reg_unboxed(frame, dst, fast_lhs / fast_rhs)) {
+        if (!numeric_div_int64(fast_lhs, fast_rhs, numeric_policy_,
+                               &int_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `/`");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(frame, dst, int_result)) {
           return false;
         }
         ++frame.pc;
@@ -10917,7 +11726,7 @@ private:
       case Opcode::IMod:
       case Opcode::IModK:
         if (fast_rhs == 0) {
-          set_fault(frame, "TypeError", "modulo by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "modulo by zero");
           return false;
         }
         if (!write_integer_reg_unboxed(frame, dst,
@@ -10929,11 +11738,15 @@ private:
       case Opcode::IFloorDiv:
       case Opcode::IFloorDivK:
         if (fast_rhs == 0) {
-          set_fault(frame, "TypeError", "division by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
           return false;
         }
-        if (!write_integer_reg_unboxed(frame, dst,
-                                       floor_div_int64(fast_lhs, fast_rhs))) {
+        if (!numeric_floor_div_int64(fast_lhs, fast_rhs, numeric_policy_,
+                                     &int_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `//`");
+          return false;
+        }
+        if (!write_integer_reg_unboxed(frame, dst, int_result)) {
           return false;
         }
         ++frame.pc;
@@ -11027,11 +11840,17 @@ private:
                     "shift amount must be between 0 and 63");
           return false;
         }
-        if (!write_integer_reg_unboxed(
-                frame, dst,
-                (opcode == Opcode::IShl || opcode == Opcode::IShlK)
-                    ? shl_int64(fast_lhs, fast_rhs)
-                    : shr_int64(fast_lhs, fast_rhs))) {
+        if (opcode == Opcode::IShl || opcode == Opcode::IShlK) {
+          if (!numeric_shl_int64(fast_lhs, fast_rhs, numeric_policy_,
+                                 &int_result)) {
+            raise_runtime_error(frame, "OverflowError",
+                                "Int overflow in `<<`");
+            return false;
+          }
+        } else {
+          int_result = shr_int64(fast_lhs, fast_rhs);
+        }
+        if (!write_integer_reg_unboxed(frame, dst, int_result)) {
           return false;
         }
         ++frame.pc;
@@ -11159,24 +11978,37 @@ private:
 
     const std::int64_t lhs = lhs_value.as_integer();
     const std::int64_t rhs = rhs_value.as_integer();
+    std::int64_t boxed_result = 0;
     switch (opcode) {
     case Opcode::IAdd:
     case Opcode::IAddK:
-      if (!write_integer_reg_unboxed(frame, dst, lhs + rhs)) {
+      if (!numeric_add_int64(lhs, rhs, numeric_policy_, &boxed_result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `+`");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(frame, dst, boxed_result)) {
         return false;
       }
       ++frame.pc;
       return true;
     case Opcode::ISub:
     case Opcode::ISubK:
-      if (!write_integer_reg_unboxed(frame, dst, lhs - rhs)) {
+      if (!numeric_sub_int64(lhs, rhs, numeric_policy_, &boxed_result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `-`");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(frame, dst, boxed_result)) {
         return false;
       }
       ++frame.pc;
       return true;
     case Opcode::IMul:
     case Opcode::IMulK:
-      if (!write_integer_reg_unboxed(frame, dst, lhs * rhs)) {
+      if (!numeric_mul_int64(lhs, rhs, numeric_policy_, &boxed_result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `*`");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(frame, dst, boxed_result)) {
         return false;
       }
       ++frame.pc;
@@ -11184,10 +12016,14 @@ private:
     case Opcode::IDiv:
     case Opcode::IDivK:
       if (rhs == 0) {
-        set_fault(frame, "TypeError", "division by zero");
+        raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
         return false;
       }
-      if (!write_integer_reg_unboxed(frame, dst, lhs / rhs)) {
+      if (!numeric_div_int64(lhs, rhs, numeric_policy_, &boxed_result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `/`");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(frame, dst, boxed_result)) {
         return false;
       }
       ++frame.pc;
@@ -11195,7 +12031,7 @@ private:
     case Opcode::IMod:
     case Opcode::IModK:
       if (rhs == 0) {
-        set_fault(frame, "TypeError", "modulo by zero");
+        raise_runtime_error(frame, "ZeroDivisionError", "modulo by zero");
         return false;
       }
       if (!write_integer_reg_unboxed(frame, dst, floor_mod_int64(lhs, rhs))) {
@@ -11206,10 +12042,14 @@ private:
     case Opcode::IFloorDiv:
     case Opcode::IFloorDivK:
       if (rhs == 0) {
-        set_fault(frame, "TypeError", "division by zero");
+        raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
         return false;
       }
-      if (!write_integer_reg_unboxed(frame, dst, floor_div_int64(lhs, rhs))) {
+      if (!numeric_floor_div_int64(lhs, rhs, numeric_policy_, &boxed_result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `//`");
+        return false;
+      }
+      if (!write_integer_reg_unboxed(frame, dst, boxed_result)) {
         return false;
       }
       ++frame.pc;
@@ -11293,11 +12133,15 @@ private:
                   "shift amount must be between 0 and 63");
         return false;
       }
-      if (!write_integer_reg_unboxed(
-              frame, dst,
-              (opcode == Opcode::IShl || opcode == Opcode::IShlK)
-                  ? shl_int64(lhs, rhs)
-                  : shr_int64(lhs, rhs))) {
+      if (opcode == Opcode::IShl || opcode == Opcode::IShlK) {
+        if (!numeric_shl_int64(lhs, rhs, numeric_policy_, &boxed_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `<<`");
+          return false;
+        }
+      } else {
+        boxed_result = shr_int64(lhs, rhs);
+      }
+      if (!write_integer_reg_unboxed(frame, dst, boxed_result)) {
         return false;
       }
       ++frame.pc;
@@ -11404,6 +12248,9 @@ private:
   std::optional<Value>
   lookup_native_prelude_constant(const std::vector<std::string> &segments) {
     const std::string path = join_path_segments(segments);
+    if (const std::optional<std::uint16_t> error_id = runtime_error_id(path)) {
+      return Value::native_error_class(*error_id);
+    }
     if (path == "print") {
       return Value::native_function(RuntimeNativeFunctionKind::Print);
     }
@@ -11463,6 +12310,9 @@ private:
     }
     if (path == "Int") {
       return Value::native_type(RuntimeNativeTypeKind::Int);
+    }
+    if (path == "BigInt") {
+      return Value::native_type(RuntimeNativeTypeKind::BigInt);
     }
     if (path == "Float") {
       return Value::native_type(RuntimeNativeTypeKind::Float);
@@ -13831,6 +14681,7 @@ private:
     switch (kind) {
     case RuntimeNativeTypeKind::Str:
     case RuntimeNativeTypeKind::Int:
+    case RuntimeNativeTypeKind::BigInt:
     case RuntimeNativeTypeKind::Float:
     case RuntimeNativeTypeKind::Bool:
     case RuntimeNativeTypeKind::Symbol:
@@ -13853,6 +14704,9 @@ private:
     }
     if (name == "int") {
       return RuntimeNativeTypeKind::Int;
+    }
+    if (name == "bigint") {
+      return RuntimeNativeTypeKind::BigInt;
     }
     if (name == "float") {
       return RuntimeNativeTypeKind::Float;
@@ -14023,7 +14877,42 @@ private:
         }
         return conversion_ok(Value::integer(parsed));
       }
+      if (value.is_big_int()) {
+        const std::shared_ptr<BigIntValue> big = value.as_big_int();
+        if (big == nullptr) {
+          return conversion_error("TypeError", "BigInt value is null");
+        }
+        const std::optional<std::int64_t> as_int = big_to_int64(*big);
+        if (!as_int.has_value()) {
+          return conversion_error("OverflowError",
+                                  "BigInt value is out of Int range");
+        }
+        return conversion_ok(Value::integer(*as_int));
+      }
       return conversion_error("TypeError", "cannot cast value to Int");
+    }
+    case RuntimeNativeTypeKind::BigInt: {
+      if (value.is_big_int()) {
+        return conversion_ok(value);
+      }
+      if (value.is_integer()) {
+        return conversion_ok(Value::big_int(big_from_int64(value.as_integer())));
+      }
+      if (value.is_string()) {
+        const std::optional<std::string> text =
+            string_text_from_id(value.as_string().string_id);
+        if (!text.has_value()) {
+          return conversion_error("VMError", "string ref is invalid");
+        }
+        std::optional<BigIntValue> parsed = big_from_decimal_text(*text);
+        if (!parsed.has_value()) {
+          return conversion_error("ValueError",
+                                  "String content is not a BigInt");
+        }
+        return conversion_ok(
+            Value::big_int(std::make_shared<BigIntValue>(std::move(*parsed))));
+      }
+      return conversion_error("TypeError", "cannot cast value to BigInt");
     }
     case RuntimeNativeTypeKind::Float: {
       if (value.is_float()) {
@@ -14255,6 +15144,13 @@ private:
   }
 
   std::string exception_error_name(const Value &exception) {
+    if (exception.is_error_instance()) {
+      const std::shared_ptr<ErrorInstanceValue> instance =
+          exception.as_error_instance();
+      if (instance != nullptr) {
+        return runtime_error_name(instance->error_id);
+      }
+    }
     if (exception.is_instance_object()) {
       const std::shared_ptr<InstanceValue> instance =
           exception.as_instance_object();
@@ -14663,6 +15559,13 @@ private:
 
   bool pattern_triple_eq(Frame &frame, const Value &matcher, const Value &value,
                          bool *out) {
+    if (matcher.is_native_error_class()) {
+      *out = value.is_error_instance() &&
+             value.as_error_instance() != nullptr &&
+             value.as_error_instance()->error_id ==
+                 matcher.as_native_error_class().error_id;
+      return true;
+    }
     if (matcher.is_class_object()) {
       const std::uint32_t target_class_index =
           matcher.as_class_object().class_index;
@@ -15971,8 +16874,12 @@ private:
         const std::string error_name = exception_error_name(*pending_exception);
         fault_ =
             make_fault(completed_frame, error_name,
-                       "unhandled exception " +
-                           value_to_debug_string(*pending_exception, &module_));
+                       pending_exception->is_error_instance() &&
+                               pending_exception->as_error_instance() != nullptr
+                           ? pending_exception->as_error_instance()->message
+                           : "unhandled exception " +
+                                 value_to_debug_string(*pending_exception,
+                                                       &module_));
       } else if (pending_throw.has_value()) {
         fault_ =
             make_fault(completed_frame, "UncaughtThrowError",
@@ -16022,8 +16929,11 @@ private:
     if (!find_unwind_target(UnwindReason::Exception, &target_index, &handler)) {
       const std::string error_name = exception_error_name(active_exception);
       const std::string message =
-          "unhandled exception " +
-          value_to_debug_string(active_exception, &module_);
+          active_exception.is_error_instance() &&
+                  active_exception.as_error_instance() != nullptr
+              ? active_exception.as_error_instance()->message
+              : "unhandled exception " +
+                    value_to_debug_string(active_exception, &module_);
       fault_ = make_fault(raising_frame, error_name, message);
       return false;
     }
@@ -20920,6 +21830,228 @@ private:
           selector == "cast?");
     }
 
+    if (receiver.is_native_error_class()) {
+      const std::uint16_t error_id = receiver.as_native_error_class().error_id;
+      if (selector == "new") {
+        if (args.size() > 1U || !require_no_block()) {
+          if (args.size() > 1U) {
+            set_fault(frame, "TypeError", "wrong builtin SEND arity");
+          }
+          return SendStatus::Faulted;
+        }
+        auto instance = std::make_shared<ErrorInstanceValue>();
+        instance->error_id = error_id;
+        if (!args.empty()) {
+          if (args[0].is_string()) {
+            instance->message =
+                string_text_from_id(args[0].as_string().string_id)
+                    .value_or("");
+          } else {
+            instance->message = value_to_debug_string(args[0], &module_);
+          }
+        }
+        *out = Value::error_instance(std::move(instance));
+        return SendStatus::Matched;
+      }
+      if (selector == "name" || selector == "to_str" ||
+          selector == "inspect") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out =
+            Value::string(intern_runtime_string(runtime_error_name(error_id)));
+        return SendStatus::Matched;
+      }
+      if (selector == "===") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(args[0].is_error_instance() &&
+                              args[0].as_error_instance() != nullptr &&
+                              args[0].as_error_instance()->error_id ==
+                                  error_id);
+        return SendStatus::Matched;
+      }
+    }
+
+    if (receiver.is_error_instance()) {
+      const std::shared_ptr<ErrorInstanceValue> instance =
+          receiver.as_error_instance();
+      if (instance == nullptr) {
+        set_fault(frame, "TypeError", "error instance is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "message") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::string(intern_runtime_string(instance->message));
+        return SendStatus::Matched;
+      }
+      if (selector == "name") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::string(
+            intern_runtime_string(runtime_error_name(instance->error_id)));
+        return SendStatus::Matched;
+      }
+      if (selector == "to_str" || selector == "inspect") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::string(intern_runtime_string(
+            std::string(runtime_error_name(instance->error_id)) + ": " +
+            instance->message));
+        return SendStatus::Matched;
+      }
+      if (selector == "class") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::native_error_class(instance->error_id);
+        return SendStatus::Matched;
+      }
+    }
+
+    // BigInt arithmetic (amber.numeric-profile.v1): explicit BigInt operands
+    // only; an expression mixing Int and BigInt produces BigInt because the
+    // arbitrary-precision choice was already explicit in the source.
+    if (receiver.is_big_int() ||
+        (receiver.is_integer() && args.size() == 1U && args[0].is_big_int())) {
+      const auto big_operand =
+          [&](const Value &value) -> std::shared_ptr<BigIntValue> {
+        if (value.is_big_int()) {
+          return value.as_big_int();
+        }
+        return big_from_int64(value.as_integer());
+      };
+      const std::shared_ptr<BigIntValue> lhs_big = big_operand(receiver);
+      if (lhs_big == nullptr) {
+        set_fault(frame, "TypeError", "BigInt value is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "u-" || selector == "u+" || selector == "abs") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (selector == "u+") {
+          *out = receiver;
+        } else if (selector == "u-") {
+          *out = Value::big_int(big_negate(*lhs_big));
+        } else {
+          auto magnitude = std::make_shared<BigIntValue>(*lhs_big);
+          magnitude->negative = false;
+          *out = Value::big_int(std::move(magnitude));
+        }
+        return SendStatus::Matched;
+      }
+      if (selector == "to_int") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::int64_t> as_int = big_to_int64(*lhs_big);
+        if (!as_int.has_value()) {
+          raise_runtime_error(frame, "OverflowError",
+                              "BigInt value is out of Int range");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(*as_int);
+        return SendStatus::Matched;
+      }
+      if (selector == "to_str" || selector == "inspect") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::string(
+            intern_runtime_string(big_int_to_decimal_string(*lhs_big)));
+        return SendStatus::Matched;
+      }
+      if (selector_in({"+", "-", "*", "/", "%", "//", "**", "==", "!=", "<",
+                       "<=", ">", ">=", "<=>"})) {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (!args[0].is_big_int() && !args[0].is_integer()) {
+          if (selector == "==" || selector == "!=") {
+            *out = Value::boolean(selector == "!=");
+            return SendStatus::Matched;
+          }
+          set_fault(frame, "TypeError",
+                    "BigInt arithmetic expects Int or BigInt operand");
+          return SendStatus::Faulted;
+        }
+        const std::shared_ptr<BigIntValue> rhs_big = big_operand(args[0]);
+        if (rhs_big == nullptr) {
+          set_fault(frame, "TypeError", "BigInt value is null");
+          return SendStatus::Faulted;
+        }
+        if (selector == "+") {
+          *out = Value::big_int(big_add_signed(*lhs_big, *rhs_big));
+          return SendStatus::Matched;
+        }
+        if (selector == "-") {
+          *out = Value::big_int(
+              big_add_signed(*lhs_big, *big_negate(*rhs_big)));
+          return SendStatus::Matched;
+        }
+        if (selector == "*") {
+          *out = Value::big_int(big_mul_signed(*lhs_big, *rhs_big));
+          return SendStatus::Matched;
+        }
+        if (selector == "/" || selector == "%" || selector == "//") {
+          if (rhs_big->magnitude.empty()) {
+            raise_runtime_error(frame, "ZeroDivisionError",
+                                selector == "%" ? "modulo by zero"
+                                                : "division by zero");
+            return SendStatus::Faulted;
+          }
+          if (selector == "/") {
+            std::shared_ptr<BigIntValue> quotient;
+            std::shared_ptr<BigIntValue> remainder;
+            big_divmod_trunc(*lhs_big, *rhs_big, &quotient, &remainder);
+            *out = Value::big_int(std::move(quotient));
+          } else if (selector == "%") {
+            *out = Value::big_int(big_floor_mod(*lhs_big, *rhs_big));
+          } else {
+            *out = Value::big_int(big_floor_div(*lhs_big, *rhs_big));
+          }
+          return SendStatus::Matched;
+        }
+        if (selector == "**") {
+          const std::optional<std::int64_t> exponent = big_to_int64(*rhs_big);
+          if (!exponent.has_value() || *exponent < 0) {
+            set_fault(frame, "TypeError",
+                      "BigInt ** expects a non-negative Int exponent");
+            return SendStatus::Faulted;
+          }
+          *out = Value::big_int(
+              big_pow(*lhs_big, static_cast<std::uint64_t>(*exponent)));
+          return SendStatus::Matched;
+        }
+        const int order = big_compare_signed(*lhs_big, *rhs_big);
+        if (selector == "==") {
+          *out = Value::boolean(order == 0);
+        } else if (selector == "!=") {
+          *out = Value::boolean(order != 0);
+        } else if (selector == "<") {
+          *out = Value::boolean(order < 0);
+        } else if (selector == "<=") {
+          *out = Value::boolean(order <= 0);
+        } else if (selector == ">") {
+          *out = Value::boolean(order > 0);
+        } else if (selector == ">=") {
+          *out = Value::boolean(order >= 0);
+        } else {
+          *out = Value::integer(order);
+        }
+        return SendStatus::Matched;
+      }
+      if (receiver.is_big_int()) {
+        return SendStatus::NotHandled;
+      }
+    }
+
     if (const std::optional<RuntimeNativeTypeKind> target =
             conversion_target_for_to_method(selector)) {
       if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
@@ -22473,11 +23605,13 @@ private:
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
         }
-        if (lhs == std::numeric_limits<std::int64_t>::min()) {
-          set_fault(frame, "ArgumentError", "integer unary negation overflows");
+        std::int64_t negated = 0;
+        if (!numeric_neg_int64(lhs, numeric_policy_, &negated)) {
+          raise_runtime_error(frame, "OverflowError",
+                              "Int overflow in unary `-`");
           return SendStatus::Faulted;
         }
-        *out = Value::integer(-lhs);
+        *out = Value::integer(negated);
         return SendStatus::Matched;
       }
       if (selector == "+") {
@@ -22491,7 +23625,12 @@ private:
         if (!require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
-        *out = Value::integer(lhs + rhs);
+        std::int64_t sum = 0;
+        if (!numeric_add_int64(lhs, rhs, numeric_policy_, &sum)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `+`");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(sum);
         return SendStatus::Matched;
       }
       if (selector == "-") {
@@ -22505,7 +23644,12 @@ private:
         if (!require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
-        *out = Value::integer(lhs - rhs);
+        std::int64_t difference = 0;
+        if (!numeric_sub_int64(lhs, rhs, numeric_policy_, &difference)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `-`");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(difference);
         return SendStatus::Matched;
       }
       if (selector == "*") {
@@ -22519,7 +23663,12 @@ private:
         if (!require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
-        *out = Value::integer(lhs * rhs);
+        std::int64_t product = 0;
+        if (!numeric_mul_int64(lhs, rhs, numeric_policy_, &product)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `*`");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(product);
         return SendStatus::Matched;
       }
       if (selector == "/") {
@@ -22529,7 +23678,8 @@ private:
         if (args[0].is_float()) {
           const double float_rhs = args[0].as_float();
           if (float_rhs == 0.0) {
-            set_fault(frame, "TypeError", "division by zero");
+            raise_runtime_error(frame, "ZeroDivisionError",
+                                "division by zero");
             return SendStatus::Faulted;
           }
           *out = Value::floating(static_cast<double>(lhs) / float_rhs);
@@ -22539,10 +23689,15 @@ private:
           return SendStatus::Faulted;
         }
         if (rhs == 0) {
-          set_fault(frame, "TypeError", "division by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
           return SendStatus::Faulted;
         }
-        *out = Value::integer(lhs / rhs);
+        std::int64_t quotient = 0;
+        if (!numeric_div_int64(lhs, rhs, numeric_policy_, &quotient)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `/`");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(quotient);
         return SendStatus::Matched;
       }
       if (selector == "%") {
@@ -22552,7 +23707,7 @@ private:
         if (args[0].is_float()) {
           const double float_rhs = args[0].as_float();
           if (float_rhs == 0.0) {
-            set_fault(frame, "TypeError", "modulo by zero");
+            raise_runtime_error(frame, "ZeroDivisionError", "modulo by zero");
             return SendStatus::Faulted;
           }
           *out = Value::floating(
@@ -22563,7 +23718,7 @@ private:
           return SendStatus::Faulted;
         }
         if (rhs == 0) {
-          set_fault(frame, "TypeError", "modulo by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "modulo by zero");
           return SendStatus::Faulted;
         }
         *out = Value::integer(floor_mod_int64(lhs, rhs));
@@ -22576,7 +23731,8 @@ private:
         if (args[0].is_float()) {
           const double float_rhs = args[0].as_float();
           if (float_rhs == 0.0) {
-            set_fault(frame, "TypeError", "division by zero");
+            raise_runtime_error(frame, "ZeroDivisionError",
+                                "division by zero");
             return SendStatus::Faulted;
           }
           *out =
@@ -22587,10 +23743,15 @@ private:
           return SendStatus::Faulted;
         }
         if (rhs == 0) {
-          set_fault(frame, "TypeError", "division by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
           return SendStatus::Faulted;
         }
-        *out = Value::integer(floor_div_int64(lhs, rhs));
+        std::int64_t quotient = 0;
+        if (!numeric_floor_div_int64(lhs, rhs, numeric_policy_, &quotient)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `//`");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(quotient);
         return SendStatus::Matched;
       }
       if (selector == "**") {
@@ -22605,13 +23766,17 @@ private:
         if (!require_integer_arg(0, &rhs)) {
           return SendStatus::Faulted;
         }
-        if (const std::optional<std::int64_t> integer_power =
-                pow_int64_nonnegative(lhs, rhs)) {
-          *out = Value::integer(*integer_power);
-        } else {
+        if (rhs < 0) {
           *out = Value::floating(
               std::pow(static_cast<double>(lhs), static_cast<double>(rhs)));
+          return SendStatus::Matched;
         }
+        std::int64_t power = 0;
+        if (!numeric_pow_int64(lhs, rhs, numeric_policy_, &power)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `**`");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(power);
         return SendStatus::Matched;
       }
       if (selector == "&" || selector == "|" || selector == "^" ||
@@ -22632,7 +23797,13 @@ private:
         } else if (selector == "^") {
           *out = Value::integer(bit_xor_int64(lhs, rhs));
         } else if (selector == "<<") {
-          *out = Value::integer(shl_int64(lhs, rhs));
+          std::int64_t shifted = 0;
+          if (!numeric_shl_int64(lhs, rhs, numeric_policy_, &shifted)) {
+            raise_runtime_error(frame, "OverflowError",
+                                "Int overflow in `<<`");
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(shifted);
         } else {
           *out = Value::integer(shr_int64(lhs, rhs));
         }
@@ -22734,7 +23905,7 @@ private:
           return SendStatus::Faulted;
         }
         if (rhs == 0.0) {
-          set_fault(frame, "TypeError", "division by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
           return SendStatus::Faulted;
         }
         *out = Value::floating(lhs / rhs);
@@ -22746,7 +23917,7 @@ private:
           return SendStatus::Faulted;
         }
         if (rhs == 0.0) {
-          set_fault(frame, "TypeError", "modulo by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "modulo by zero");
           return SendStatus::Faulted;
         }
         *out = Value::floating(floor_mod_double(lhs, rhs));
@@ -22758,7 +23929,7 @@ private:
           return SendStatus::Faulted;
         }
         if (rhs == 0.0) {
-          set_fault(frame, "TypeError", "division by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
           return SendStatus::Faulted;
         }
         *out = Value::floating(std::floor(lhs / rhs));
@@ -22901,33 +24072,50 @@ private:
       if (!lhs_fast || !rhs_fast) {
         return FastSendStatus::NotHandled;
       }
+      std::int64_t fast_result = 0;
       if (selector == "+") {
-        return write_integer_reg_unboxed(frame, dst, lhs + rhs)
+        if (!numeric_add_int64(lhs, rhs, numeric_policy_, &fast_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `+`");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(frame, dst, fast_result)
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
       if (selector == "-") {
-        return write_integer_reg_unboxed(frame, dst, lhs - rhs)
+        if (!numeric_sub_int64(lhs, rhs, numeric_policy_, &fast_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `-`");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(frame, dst, fast_result)
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
       if (selector == "*") {
-        return write_integer_reg_unboxed(frame, dst, lhs * rhs)
+        if (!numeric_mul_int64(lhs, rhs, numeric_policy_, &fast_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `*`");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(frame, dst, fast_result)
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
       if (selector == "/") {
         if (rhs == 0) {
-          set_fault(frame, "TypeError", "division by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
           return FastSendStatus::Faulted;
         }
-        return write_integer_reg_unboxed(frame, dst, lhs / rhs)
+        if (!numeric_div_int64(lhs, rhs, numeric_policy_, &fast_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `/`");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(frame, dst, fast_result)
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
       if (selector == "%") {
         if (rhs == 0) {
-          set_fault(frame, "TypeError", "modulo by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "modulo by zero");
           return FastSendStatus::Faulted;
         }
         return write_integer_reg_unboxed(frame, dst, floor_mod_int64(lhs, rhs))
@@ -22936,10 +24124,14 @@ private:
       }
       if (selector == "//") {
         if (rhs == 0) {
-          set_fault(frame, "TypeError", "division by zero");
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
           return FastSendStatus::Faulted;
         }
-        return write_integer_reg_unboxed(frame, dst, floor_div_int64(lhs, rhs))
+        if (!numeric_floor_div_int64(lhs, rhs, numeric_policy_, &fast_result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `//`");
+          return FastSendStatus::Faulted;
+        }
+        return write_integer_reg_unboxed(frame, dst, fast_result)
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
@@ -22969,9 +24161,16 @@ private:
                     "shift amount must be between 0 and 63");
           return FastSendStatus::Faulted;
         }
-        return write_integer_reg_unboxed(frame, dst,
-                                         selector == "<<" ? shl_int64(lhs, rhs)
-                                                          : shr_int64(lhs, rhs))
+        if (selector == "<<") {
+          if (!numeric_shl_int64(lhs, rhs, numeric_policy_, &fast_result)) {
+            raise_runtime_error(frame, "OverflowError",
+                                "Int overflow in `<<`");
+            return FastSendStatus::Faulted;
+          }
+        } else {
+          fast_result = shr_int64(lhs, rhs);
+        }
+        return write_integer_reg_unboxed(frame, dst, fast_result)
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
@@ -23112,42 +24311,72 @@ private:
     }
 
     switch (opcode) {
-    case QuickOpcode::SendIAdd:
-      return write_integer_reg_unboxed(frame, dst, lhs + rhs)
-                 ? FastSendStatus::Matched
-                 : FastSendStatus::Faulted;
-    case QuickOpcode::SendISub:
-      return write_integer_reg_unboxed(frame, dst, lhs - rhs)
-                 ? FastSendStatus::Matched
-                 : FastSendStatus::Faulted;
-    case QuickOpcode::SendIMul:
-      return write_integer_reg_unboxed(frame, dst, lhs * rhs)
-                 ? FastSendStatus::Matched
-                 : FastSendStatus::Faulted;
-    case QuickOpcode::SendIDiv:
-      if (rhs == 0) {
-        set_fault(frame, "TypeError", "division by zero");
+    case QuickOpcode::SendIAdd: {
+      std::int64_t result = 0;
+      if (!numeric_add_int64(lhs, rhs, numeric_policy_, &result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `+`");
         return FastSendStatus::Faulted;
       }
-      return write_integer_reg_unboxed(frame, dst, lhs / rhs)
+      return write_integer_reg_unboxed(frame, dst, result)
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
+    }
+    case QuickOpcode::SendISub: {
+      std::int64_t result = 0;
+      if (!numeric_sub_int64(lhs, rhs, numeric_policy_, &result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `-`");
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(frame, dst, result)
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+    case QuickOpcode::SendIMul: {
+      std::int64_t result = 0;
+      if (!numeric_mul_int64(lhs, rhs, numeric_policy_, &result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `*`");
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(frame, dst, result)
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
+    case QuickOpcode::SendIDiv: {
+      if (rhs == 0) {
+        raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
+        return FastSendStatus::Faulted;
+      }
+      std::int64_t result = 0;
+      if (!numeric_div_int64(lhs, rhs, numeric_policy_, &result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `/`");
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(frame, dst, result)
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
     case QuickOpcode::SendIMod:
       if (rhs == 0) {
-        set_fault(frame, "TypeError", "modulo by zero");
+        raise_runtime_error(frame, "ZeroDivisionError", "modulo by zero");
         return FastSendStatus::Faulted;
       }
       return write_integer_reg_unboxed(frame, dst, floor_mod_int64(lhs, rhs))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
-    case QuickOpcode::SendIFloorDiv:
+    case QuickOpcode::SendIFloorDiv: {
       if (rhs == 0) {
-        set_fault(frame, "TypeError", "division by zero");
+        raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
         return FastSendStatus::Faulted;
       }
-      return write_integer_reg_unboxed(frame, dst, floor_div_int64(lhs, rhs))
+      std::int64_t result = 0;
+      if (!numeric_floor_div_int64(lhs, rhs, numeric_policy_, &result)) {
+        raise_runtime_error(frame, "OverflowError", "Int overflow in `//`");
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(frame, dst, result)
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
+    }
     case QuickOpcode::SendILt:
       return write_reg_fast_plain(frame, dst, Value::boolean(lhs < rhs))
                  ? FastSendStatus::Matched
@@ -23189,18 +24418,25 @@ private:
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     case QuickOpcode::SendIShl:
-    case QuickOpcode::SendIShr:
+    case QuickOpcode::SendIShr: {
       if (rhs < 0 || rhs >= 64) {
         set_fault(frame, "ArgumentError",
                   "shift amount must be between 0 and 63");
         return FastSendStatus::Faulted;
       }
-      return write_integer_reg_unboxed(frame, dst,
-                                       opcode == QuickOpcode::SendIShl
-                                           ? shl_int64(lhs, rhs)
-                                           : shr_int64(lhs, rhs))
+      std::int64_t result = 0;
+      if (opcode == QuickOpcode::SendIShl) {
+        if (!numeric_shl_int64(lhs, rhs, numeric_policy_, &result)) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `<<`");
+          return FastSendStatus::Faulted;
+        }
+      } else {
+        result = shr_int64(lhs, rhs);
+      }
+      return write_integer_reg_unboxed(frame, dst, result)
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
+    }
     default:
       return FastSendStatus::NotHandled;
     }
@@ -25465,6 +26701,12 @@ private:
   std::vector<Value> last_completed_regs_;
   std::vector<std::uint8_t> last_completed_initialized_;
   Value final_value_ = Value::null();
+  // Module numeric profile (amber.numeric-profile.v1) resolved from module
+  // attrs ("amber.numeric.int"/"amber.numeric.overflow"); defaults describe
+  // the default profile Int64/checked. `numeric_profile_error_` carries an
+  // unsupported-profile message reported at execute() entry.
+  NumericPolicy numeric_policy_;
+  std::string numeric_profile_error_;
 };
 
 } // namespace
@@ -27640,6 +28882,22 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_native_function()) {
     return std::string("<function ") +
            native_function_name(value.as_native_function().kind) + ">";
+  }
+  if (value.is_native_error_class()) {
+    return runtime_error_name(value.as_native_error_class().error_id);
+  }
+  if (value.is_error_instance()) {
+    const std::shared_ptr<ErrorInstanceValue> error_instance =
+        value.as_error_instance();
+    if (error_instance == nullptr) {
+      return "<error null>";
+    }
+    return std::string(runtime_error_name(error_instance->error_id)) + ": " +
+           error_instance->message;
+  }
+  if (value.is_big_int()) {
+    const std::shared_ptr<BigIntValue> big = value.as_big_int();
+    return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
   }
   if (value.is_text_writer()) {
     const std::shared_ptr<RuntimeTextWriter> writer = value.as_text_writer();

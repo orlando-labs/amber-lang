@@ -462,6 +462,40 @@ BuildManifestResult parse_build_manifest_json(const std::string &source,
             "BuildManifestError",
             "profile feature lists must be arrays of strings", path));
       }
+      if (const JsonValue *numeric = member(*profiles, "numeric")) {
+        if (numeric->kind != JsonValue::Kind::Object) {
+          result.diagnostics.push_back(diagnostic(
+              "BuildManifestError", "'profiles.numeric' must be an object",
+              path));
+        } else {
+          read_string_member(*numeric, "int",
+                             &result.manifest.profiles.numeric_int);
+          read_string_member(*numeric, "overflow",
+                             &result.manifest.profiles.numeric_overflow);
+          const std::string &int_type = result.manifest.profiles.numeric_int;
+          if (!int_type.empty() && int_type != "Int8" && int_type != "Int16" &&
+              int_type != "Int32" && int_type != "Int64" &&
+              int_type != "UInt8" && int_type != "UInt16" &&
+              int_type != "UInt32" && int_type != "UInt64" &&
+              int_type != "BigInt") {
+            result.diagnostics.push_back(diagnostic(
+                "BuildManifestError",
+                "'profiles.numeric.int' must be one of Int8/Int16/Int32/"
+                "Int64, UInt8/UInt16/UInt32/UInt64, or BigInt",
+                path));
+          }
+          const std::string &overflow =
+              result.manifest.profiles.numeric_overflow;
+          if (!overflow.empty() && overflow != "checked" &&
+              overflow != "wrapping" && overflow != "saturating") {
+            result.diagnostics.push_back(diagnostic(
+                "BuildManifestError",
+                "'profiles.numeric.overflow' must be checked, wrapping, or "
+                "saturating",
+                path));
+          }
+        }
+      }
     }
   }
   result.manifest.profiles = normalize_profiles(result.manifest.profiles);

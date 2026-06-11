@@ -134,7 +134,7 @@ FORMAT_FILES := \
 	tests/stdlib_task_tests.cpp \
 	tests/io_tests.cpp
 
-.PHONY: all build test conformance spec-sync-check fmt clean
+.PHONY: all build test conformance backend-equivalence spec-sync-check fmt clean
 
 all: build
 
@@ -263,6 +263,9 @@ test: build
 
 conformance: $(BUILD_DIR)/ambertest
 	$(BUILD_DIR)/ambertest run corpus --bundle M11
+
+backend-equivalence: $(BUILD_DIR)/amberc
+	python3 tools/backend_equivalence.py
 
 spec-sync-check:
 	python3 tools/spec_sync.py check

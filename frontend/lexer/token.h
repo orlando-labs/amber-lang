@@ -105,6 +105,7 @@ enum class TokenKind {
   KeywordProp,
   KeywordRaise,
   KeywordRescue,
+  KeywordReturn,
   KeywordEnsure,
   KeywordThrow,
   KeywordTry,

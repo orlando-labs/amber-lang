@@ -309,3 +309,25 @@ python3 bench/polyglot/run_benchmark.py \
   --no-build \
   --build-dir /private/tmp/amber_polyglot_sha_digest_final
 ```
+
+## Numeric profile v1: checked Int arithmetic cost (2026-06-12)
+
+amber.numeric-profile.v1 landed checked Int64 arithmetic as the default
+profile (`__builtin_*_overflow` + policy resolution in every VM int path,
+checked helpers + `NativeBailout` on overflow in the native lane). Same-day
+same-machine A/B of the arithmetic workload, 10 repeats, against a clean
+`HEAD` worktree without the numeric changes:
+
+```text
+lane                       baseline best   checked best   delta
+amber-interpreted                 0.2984         0.3070    ~+3%
+amber-built (native)              0.0046         0.0056   ~+0.001s (noise-level)
+```
+
+Absolute numbers are not comparable with the earlier tables in this journal
+(different machine power/thermal state — the same-day baseline rerun of the
+unchanged HEAD measured 0.2984s where the old table recorded 0.1409s). The
+delta column is the meaningful result: overflow checking costs ~3% in the
+interpreter, in line with the design expectation that interpreter dispatch
+dominates. Non-default profiles (wrapping/saturating/narrow widths) run
+VM-only; the native lane keeps default-profile semantics via bailout-restart.

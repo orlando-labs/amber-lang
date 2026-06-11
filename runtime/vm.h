@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -121,6 +122,7 @@ enum class RuntimeNativeTypeKind {
   Amber,
   Str,
   Int,
+  BigInt,
   Float,
   Bool,
   Symbol,
@@ -153,6 +155,51 @@ struct NativeFunctionValue {
   RuntimeNativeFunctionKind kind = RuntimeNativeFunctionKind::Print;
 };
 
+// Builtin runtime error classes mirror spec/registries/runtime_errors.yaml.
+// `error_id` indexes the registry-ordered name table (runtime_error_name).
+struct NativeErrorClassValue {
+  std::uint16_t error_id = 0;
+};
+
+struct ErrorInstanceValue {
+  std::uint16_t error_id = 0;
+  std::string message;
+};
+
+// Arbitrary-precision integer per amber.numeric-profile.v1: explicit BigInt
+// values only — fixed-width Int arithmetic never promotes into this type.
+// Canonical form: little-endian base-2^64 magnitude with no trailing zero
+// limbs; zero is an empty magnitude with negative == false.
+struct BigIntValue {
+  bool negative = false;
+  std::vector<std::uint64_t> magnitude;
+};
+
+const char *runtime_error_name(std::uint16_t error_id);
+std::optional<std::uint16_t> runtime_error_id(const std::string &name);
+std::string big_int_to_decimal_string(const BigIntValue &value);
+
+// Overflow policy for fixed-width Int arithmetic (amber.numeric-profile.v1).
+// `checked` raises OverflowError; `wrapping` wraps two's-complement;
+// `saturating` clamps to the type bounds.
+enum class NumericOverflowMode : std::uint8_t { Checked, Wrapping, Saturating };
+
+// Resolved module numeric profile: the selected overflow mode plus the bounds
+// of the concrete `Int` width. Defaults describe the default profile
+// (`int: Int64`, `overflow: checked`). `min == 0` marks unsigned widths.
+struct NumericPolicy {
+  NumericOverflowMode mode = NumericOverflowMode::Checked;
+  std::int64_t min = std::numeric_limits<std::int64_t>::min();
+  std::int64_t max = std::numeric_limits<std::int64_t>::max();
+  std::uint32_t bits = 64;
+};
+
+// Maps a numeric profile `int` type name (e.g. "Int32", "UInt8") to bounds.
+// Returns nullopt for types the reference VM cannot represent (UInt64,
+// BigInt-as-Int) or unknown names.
+std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
+                                                const std::string &overflow);
+
 struct Value {
   using Payload = std::variant<
       std::monostate, bool, std::int64_t, double, SymbolValue, StringValue,
@@ -160,6 +207,8 @@ struct Value {
       std::shared_ptr<InstanceValue>, std::shared_ptr<ListValue>,
       std::shared_ptr<TupleValue>, std::shared_ptr<SetValue>,
       std::shared_ptr<MapValue>, NativeTypeValue, NativeFunctionValue,
+      NativeErrorClassValue, std::shared_ptr<ErrorInstanceValue>,
+      std::shared_ptr<BigIntValue>,
       std::shared_ptr<RuntimeTaskModule>, std::shared_ptr<RuntimeTaskHandle>,
       std::shared_ptr<RuntimeChannel>, std::shared_ptr<RuntimeMutex>,
       std::shared_ptr<RuntimeAtomic>, std::shared_ptr<RuntimeBarrier>,
@@ -182,6 +231,9 @@ struct Value {
   static Value instance(std::shared_ptr<InstanceValue> value);
   static Value native_type(RuntimeNativeTypeKind kind);
   static Value native_function(RuntimeNativeFunctionKind kind);
+  static Value native_error_class(std::uint16_t error_id);
+  static Value error_instance(std::shared_ptr<ErrorInstanceValue> value);
+  static Value big_int(std::shared_ptr<BigIntValue> value);
   static Value task_module(std::shared_ptr<RuntimeTaskModule> value);
   static Value task_handle(std::shared_ptr<RuntimeTaskHandle> value);
   static Value channel(std::shared_ptr<RuntimeChannel> value);
@@ -212,6 +264,9 @@ struct Value {
   bool is_map() const;
   bool is_native_type() const;
   bool is_native_function() const;
+  bool is_native_error_class() const;
+  bool is_error_instance() const;
+  bool is_big_int() const;
   bool is_task_module() const;
   bool is_task_handle() const;
   bool is_channel() const;
@@ -240,6 +295,9 @@ struct Value {
   std::shared_ptr<MapValue> as_map() const;
   NativeTypeValue as_native_type() const;
   NativeFunctionValue as_native_function() const;
+  NativeErrorClassValue as_native_error_class() const;
+  std::shared_ptr<ErrorInstanceValue> as_error_instance() const;
+  std::shared_ptr<BigIntValue> as_big_int() const;
   std::shared_ptr<RuntimeTaskModule> as_task_module() const;
   std::shared_ptr<RuntimeTaskHandle> as_task_handle() const;
   std::shared_ptr<RuntimeChannel> as_channel() const;

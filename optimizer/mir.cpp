@@ -426,6 +426,14 @@ private:
       }
       return emit_value("undef", {}, {}, expr.span);
     }
+    if (expr.kind == "HReturn") {
+      const ast::Expr *value = node_field(expr, "value");
+      const std::string compiled = value == nullptr
+                                       ? emit_value("undef", {}, {}, expr.span)
+                                       : compile_expr(*value);
+      terminate("return", {value_operand(compiled)}, {}, expr.span);
+      return emit_value("undef", {}, {}, expr.span);
+    }
     if (expr.kind == "HIsNull") {
       const ast::Expr *inner = node_field(expr, "expr");
       const std::string value = inner == nullptr

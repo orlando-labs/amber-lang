@@ -1,0 +1,9 @@
+package conformance.run
+
+def probe():
+  xs = [0, 7]
+  mapped = xs.map |x|:
+    if x == 0:
+      return "zero"
+    "nonzero"
+  mapped[0] + ":" + mapped[1]

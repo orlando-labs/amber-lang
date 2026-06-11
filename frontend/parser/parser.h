@@ -114,7 +114,9 @@ private:
   std::unique_ptr<ast::Expr> parse_unless_expr();
   std::unique_ptr<ast::Expr> parse_loop_expr(const char *kind);
   std::unique_ptr<ast::Expr> parse_do_while_expr();
+  std::unique_ptr<ast::Expr> parse_numeric_directive();
   std::unique_ptr<ast::Expr> parse_break_expr();
+  std::unique_ptr<ast::Expr> parse_return_expr();
   std::unique_ptr<ast::Expr> parse_throw_expr();
   std::unique_ptr<ast::Expr> parse_catch_expr();
   std::unique_ptr<ast::Expr> parse_raise_expr();

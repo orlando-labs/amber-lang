@@ -1,7 +1,13 @@
 # amber.numeric-profile.v1
 
-Status: proposed language design; not implemented in the current parser,
-bytecode, VM, or native backend.
+Status: implemented in the reference toolchain (parser `numeric:` preamble,
+emitter literal range checks + `.amberbc` attrs, VM checked/wrapping/saturating
+arithmetic for Int8–Int64 and UInt8–UInt32, explicit `BigInt`, manifest
+`profiles.numeric` mirror with mismatch diagnostics, native lane checked-Int64
+with VM fallback for other profiles). Staged, not yet implemented: `int:
+UInt64` and `int: BigInt` profiles (compile-time diagnostic), per-function
+native support for non-default profiles. Conformance:
+`corpus/run/numeric_*`.
 
 Amber numeric semantics use a fixed-width `Int` by default, selected through a
 compile-time numeric profile. Arbitrary-precision arithmetic remains available
@@ -136,6 +142,21 @@ The selected overflow mode applies to ordinary fixed-width `Int` arithmetic.
 Operations whose mathematical result is naturally non-integer, such as mixed
 `Int`/`Float` operations, continue to follow the ordinary numeric dispatch and
 conversion rules for those operand types.
+
+## Division And Modulo
+
+Fixed-width `Int` division semantics are pinned as follows:
+
+- `/` is truncating division (rounds toward zero);
+- `%` is floor modulo: a nonzero result has the sign of the divisor;
+- `//` is floor division (rounds toward negative infinity);
+- `(a // b) * b + (a % b) == a` holds for all in-range operands;
+- `(a / b) * b + (a % b) == a` does **not** hold for mixed signs because `/`
+  truncates while `%` floors; this pairing is intentional and pinned by
+  conformance (`corpus/run/numeric_division_semantics`);
+- division or modulo by integer zero raises `ZeroDivisionError`;
+- `Int64` `INT64_MIN / -1` (and the `//` equivalent) overflows and follows the
+  selected overflow policy; `INT64_MIN % -1` is `0` and does not overflow.
 
 ## VM And Native Guidance
 

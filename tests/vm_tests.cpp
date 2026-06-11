@@ -235,6 +235,230 @@ void test_direct_entry_materializes_sibling_captures() {
          "direct main entry should return helper(41) == 42");
 }
 
+void test_execute_return_keyword() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "def early(x):\n"
+      "  if x > 10:\n"
+      "    return \"big\"\n"
+      "  \"small\"\n"
+      "\n"
+      "def bare(x):\n"
+      "  x * 2\n"
+      "  return\n"
+      "\n"
+      "def from_loop(n):\n"
+      "  i = 0\n"
+      "  while i < 100:\n"
+      "    if i == n:\n"
+      "      return i * 10\n"
+      "    i = i + 1\n"
+      "  0 - 1\n"
+      "\n"
+      "a = early(20)\n"
+      "b = early(3)\n"
+      "c = bare(21)\n"
+      "d = from_loop(4)\n"
+      "if a == \"big\" and b == \"small\" and c == 42 and d == 40:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect(exec.ok(), "return keyword probe should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "return keyword probe result");
+}
+
+void test_execute_return_runs_nested_ensure_inner_to_outer() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "cell = [\"\"]\n"
+      "\n"
+      "def record(t):\n"
+      "  cell[0] = cell[0] + t\n"
+      "\n"
+      "def inner(v):\n"
+      "  try:\n"
+      "    try:\n"
+      "      if v > 0:\n"
+      "        return \"deep\"\n"
+      "      \"shallow\"\n"
+      "    ensure:\n"
+      "      record(\"I\")\n"
+      "  ensure:\n"
+      "    record(\"O\")\n"
+      "\n"
+      "r = inner(1)\n"
+      "r + \":\" + cell[0]\n");
+  expect(exec.ok(), "return-through-ensure probe should execute");
+  const std::string text = string_value_text_or_die(
+      exec.value, amber::bytecode::BcModule{}, exec);
+  expect(text == "deep:IO",
+         "return must run nested ensure bodies inner-to-outer");
+}
+
+void test_execute_zero_division_error() {
+  const amber::runtime::ExecutionResult fault_exec =
+      execute_emitted_init("1 / 0\n");
+  expect(!fault_exec.ok() && fault_exec.fault.has_value() &&
+             fault_exec.fault->error_name == "ZeroDivisionError",
+         "unhandled division by zero should fault as ZeroDivisionError");
+
+  const amber::runtime::ExecutionResult rescued = execute_emitted_init(
+      "def f():\n"
+      "  try:\n"
+      "    1 / 0\n"
+      "  rescue ZeroDivisionError |e|:\n"
+      "    e.message()\n"
+      "\n"
+      "f()\n");
+  expect(rescued.ok(), "rescued division by zero should execute");
+  const std::string text = string_value_text_or_die(
+      rescued.value, amber::bytecode::BcModule{}, rescued);
+  expect(text == "division by zero",
+         "ZeroDivisionError should be rescuable with message");
+
+  const amber::runtime::ExecutionResult modulo =
+      execute_emitted_init("7 % 0\n");
+  expect(!modulo.ok() && modulo.fault.has_value() &&
+             modulo.fault->error_name == "ZeroDivisionError",
+         "modulo by zero should fault as ZeroDivisionError");
+}
+
+void test_execute_checked_int_overflow() {
+  const amber::runtime::ExecutionResult add_overflow =
+      execute_emitted_init("9223372036854775807 + 1\n");
+  expect(!add_overflow.ok() && add_overflow.fault.has_value() &&
+             add_overflow.fault->error_name == "OverflowError",
+         "checked Int64 add overflow should raise OverflowError");
+
+  const amber::runtime::ExecutionResult mul_overflow =
+      execute_emitted_init("4611686018427387904 * 4\n");
+  expect(!mul_overflow.ok() && mul_overflow.fault.has_value() &&
+             mul_overflow.fault->error_name == "OverflowError",
+         "checked Int64 mul overflow should raise OverflowError");
+
+  const amber::runtime::ExecutionResult div_overflow = execute_emitted_init(
+      "a = 0 - 9223372036854775807\n"
+      "b = a - 1\n"
+      "b / (0 - 1)\n");
+  expect(!div_overflow.ok() && div_overflow.fault.has_value() &&
+             div_overflow.fault->error_name == "OverflowError",
+         "INT64_MIN / -1 should raise OverflowError");
+
+  const amber::runtime::ExecutionResult shl_overflow =
+      execute_emitted_init("1 << 63\n");
+  expect(!shl_overflow.ok() && shl_overflow.fault.has_value() &&
+             shl_overflow.fault->error_name == "OverflowError",
+         "checked Int64 shift-left overflow should raise OverflowError");
+
+  const amber::runtime::ExecutionResult pow_overflow =
+      execute_emitted_init("3 ** 64\n");
+  expect(!pow_overflow.ok() && pow_overflow.fault.has_value() &&
+             pow_overflow.fault->error_name == "OverflowError",
+         "checked Int64 pow overflow should raise OverflowError");
+
+  const amber::runtime::ExecutionResult rescued = execute_emitted_init(
+      "def f():\n"
+      "  try:\n"
+      "    9223372036854775807 + 1\n"
+      "  rescue OverflowError |e|:\n"
+      "    \"caught: \" + e.message()\n"
+      "\n"
+      "f()\n");
+  expect(rescued.ok(), "rescued overflow should execute");
+  const std::string text = string_value_text_or_die(
+      rescued.value, amber::bytecode::BcModule{}, rescued);
+  expect(text == "caught: Int overflow in `+`",
+         "OverflowError should be rescuable");
+
+  const amber::runtime::ExecutionResult in_loop = execute_emitted_init(
+      "x = 9223372036854775800\n"
+      "i = 0\n"
+      "while i < 100:\n"
+      "  x = x + 1\n"
+      "  i = i + 1\n"
+      "x\n");
+  expect(!in_loop.ok() && in_loop.fault.has_value() &&
+             in_loop.fault->error_name == "OverflowError",
+         "quickened loop add overflow should raise OverflowError");
+}
+
+void test_execute_numeric_profile_modes() {
+  const amber::runtime::ExecutionResult wrap = execute_emitted_init(
+      "numeric:\n"
+      "  int: Int64\n"
+      "  overflow: wrapping\n"
+      "\n"
+      "9223372036854775807 + 1\n");
+  expect(wrap.ok(), "wrapping profile should execute");
+  expect(wrap.value.is_integer() &&
+             wrap.value.as_integer() ==
+                 std::numeric_limits<std::int64_t>::min(),
+         "wrapping Int64 overflow wraps to INT64_MIN");
+
+  const amber::runtime::ExecutionResult saturate = execute_emitted_init(
+      "numeric:\n"
+      "  int: Int8\n"
+      "  overflow: saturating\n"
+      "\n"
+      "a = 100 + 100\n"
+      "b = 0 - 100 - 100\n"
+      "a * 3 + b\n");
+  expect(saturate.ok(), "saturating profile should execute");
+  expect(saturate.value.is_integer() && saturate.value.as_integer() == -1,
+         "saturating Int8: a==127, b==-128, 127*3 clamps to 127, "
+         "127 + -128 == -1");
+
+  const amber::runtime::ExecutionResult narrow_checked = execute_emitted_init(
+      "numeric:\n"
+      "  int: Int8\n"
+      "\n"
+      "100 + 100\n");
+  expect(!narrow_checked.ok() && narrow_checked.fault.has_value() &&
+             narrow_checked.fault->error_name == "OverflowError",
+         "checked Int8 overflow raises OverflowError");
+}
+
+void test_execute_big_int_explicit_type() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "big = BigInt(9223372036854775807)\n"
+      "square = big * big\n"
+      "mixed = 5 + BigInt(10)\n"
+      "back = BigInt(42).to_int()\n"
+      "\"#{square}:#{mixed}:#{back}\"\n");
+  expect(exec.ok(), "BigInt probe should execute");
+  const std::string text = string_value_text_or_die(
+      exec.value, amber::bytecode::BcModule{}, exec);
+  expect(text == "85070591730234615847396907784232501249:15:42",
+         "explicit BigInt arithmetic is exact and mixes with Int");
+
+  const amber::runtime::ExecutionResult to_int_overflow = execute_emitted_init(
+      "BigInt(\"123456789012345678901234567890\").to_int()\n");
+  expect(!to_int_overflow.ok() && to_int_overflow.fault.has_value() &&
+             to_int_overflow.fault->error_name == "OverflowError",
+         "BigInt#to_int out of Int range raises OverflowError");
+
+  const amber::runtime::ExecutionResult div_zero =
+      execute_emitted_init("BigInt(1) / BigInt(0)\n");
+  expect(!div_zero.ok() && div_zero.fault.has_value() &&
+             div_zero.fault->error_name == "ZeroDivisionError",
+         "BigInt division by zero raises ZeroDivisionError");
+}
+
+void test_execute_mixed_sign_division_semantics() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "a = 7 / (0 - 2)\n"
+      "b = 7 % (0 - 2)\n"
+      "c = 7 // (0 - 2)\n"
+      "d = (0 - 7) / 2\n"
+      "e = (0 - 7) % 2\n"
+      "f = (0 - 7) // 2\n"
+      "\"#{a}:#{b}:#{c}:#{d}:#{e}:#{f}\"\n");
+  expect(exec.ok(), "mixed-sign division probe should execute");
+  const std::string text = string_value_text_or_die(
+      exec.value, amber::bytecode::BcModule{}, exec);
+  expect(text == "-3:-1:-4:-3:1:-4",
+         "`/` truncates while `%` and `//` floor (pinned semantics)");
+}
+
 void test_execute_module_init_calls_top_level_def() {
   amber::bytecode::EmitResult emit_result = emit_ok("def f(x):\n"
                                                     "  x + 42\n"
@@ -8214,6 +8438,13 @@ void test_runtime_io_v2_low_level_wait_trace() {
 int main() {
   test_execute_emitted_method();
   test_direct_entry_materializes_sibling_captures();
+  test_execute_return_keyword();
+  test_execute_return_runs_nested_ensure_inner_to_outer();
+  test_execute_zero_division_error();
+  test_execute_checked_int_overflow();
+  test_execute_numeric_profile_modes();
+  test_execute_big_int_explicit_type();
+  test_execute_mixed_sign_division_semantics();
   test_execute_module_init_calls_top_level_def();
   test_execute_native_range_literal();
   test_execute_emitted_collection_literals();

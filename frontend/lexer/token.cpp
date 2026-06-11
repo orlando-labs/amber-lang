@@ -231,6 +231,8 @@ const char *token_kind_name(TokenKind kind) {
     return "KEYWORD_RAISE";
   case TokenKind::KeywordRescue:
     return "KEYWORD_RESCUE";
+  case TokenKind::KeywordReturn:
+    return "KEYWORD_RETURN";
   case TokenKind::KeywordEnsure:
     return "KEYWORD_ENSURE";
   case TokenKind::KeywordThrow:

@@ -23,6 +23,10 @@ struct BuildProfileSet {
   std::vector<std::string> required_features;
   std::vector<std::string> optional_features;
   std::vector<std::string> forbidden_features;
+  // amber.numeric-profile.v1 manifest mirror (profiles.numeric). Empty means
+  // unspecified: source preambles (or the Int64/checked defaults) apply.
+  std::string numeric_int;
+  std::string numeric_overflow;
 };
 
 struct BuildManifest {

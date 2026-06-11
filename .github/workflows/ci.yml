@@ -46,6 +46,11 @@ jobs:
       - name: make conformance
         run: make conformance CXX=${{ matrix.cxx }}
 
+      # Every corpus/run fixture executes through both the VM lane and the
+      # native lane; outputs must match (backend-equivalence bundle).
+      - name: make backend-equivalence
+        run: make backend-equivalence CXX=${{ matrix.cxx }}
+
   spec-sync:
     name: spec-sync-check
     runs-on: ubuntu-latest

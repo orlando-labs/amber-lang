@@ -698,6 +698,8 @@ ParseResult Parser::parse_expression_unit() {
 ParseModuleResult Parser::parse_module_unit() {
   std::vector<std::unique_ptr<ast::Expr>> items;
   std::string module_name;
+  bool saw_numeric_profile = false;
+  bool saw_non_package_item = false;
 
   while (match(lexer::TokenKind::Newline)) {
   }
@@ -712,6 +714,22 @@ ParseModuleResult Parser::parse_module_unit() {
             break;
           }
         }
+      } else if (item->kind == "AstNumericProfile") {
+        if (saw_numeric_profile) {
+          diagnostics_.push_back({"P0001", "error", "parser",
+                                  "duplicate `numeric:` preamble directive",
+                                  item->span});
+        }
+        if (saw_non_package_item) {
+          diagnostics_.push_back(
+              {"P0001", "error", "parser",
+               "`numeric:` preamble must appear before imports, exports, "
+               "declarations, and statements",
+               item->span});
+        }
+        saw_numeric_profile = true;
+      } else {
+        saw_non_package_item = true;
       }
       append_item_or_merge_clause_def(&items, std::move(item));
     }
@@ -788,6 +806,13 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
   }
   if (at_end() || check(lexer::TokenKind::Dedent)) {
     return nullptr;
+  }
+
+  if (context == BodyContext::Module &&
+      current().kind == lexer::TokenKind::Identifier &&
+      current().lexeme == "numeric" &&
+      peek(1).kind == lexer::TokenKind::Colon) {
+    return parse_numeric_directive();
   }
 
   switch (current().kind) {
@@ -871,6 +896,75 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
   auto stmt = ast::make_expr("AstExprStmt", expr->span);
   stmt->node_field("expr", std::move(expr));
   return stmt;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_numeric_directive() {
+  const lexer::Token start = advance();
+  consume(lexer::TokenKind::Colon, "expected ':' after numeric");
+  consume(lexer::TokenKind::Newline, "expected newline after `numeric:`");
+  consume(lexer::TokenKind::Indent,
+          "expected indented block after `numeric:`");
+
+  static const char *kIntTypes[] = {"Int8",  "Int16",  "Int32",  "Int64",
+                                    "UInt8", "UInt16", "UInt32", "UInt64",
+                                    "BigInt"};
+  std::string int_type;
+  std::string overflow;
+  while (!check(lexer::TokenKind::Dedent) && !at_end()) {
+    while (match(lexer::TokenKind::Newline)) {
+    }
+    if (check(lexer::TokenKind::Dedent) || at_end()) {
+      break;
+    }
+    const lexer::Token key = consume(
+        lexer::TokenKind::Identifier,
+        "expected numeric profile entry name (`int` or `overflow`)");
+    consume(lexer::TokenKind::Colon,
+            "expected ':' after numeric profile entry name");
+    const lexer::Token value = consume(
+        lexer::TokenKind::Identifier, "expected numeric profile entry value");
+    if (key.lexeme == "int") {
+      if (!int_type.empty()) {
+        error(key, "duplicate numeric profile entry `int`");
+      }
+      bool known = false;
+      for (const char *candidate : kIntTypes) {
+        known = known || value.lexeme == candidate;
+      }
+      if (!known) {
+        error(value, "unknown numeric profile `int` value `" + value.lexeme +
+                         "` (expected Int8/Int16/Int32/Int64, "
+                         "UInt8/UInt16/UInt32/UInt64, or BigInt)");
+      }
+      int_type = value.lexeme;
+    } else if (key.lexeme == "overflow") {
+      if (!overflow.empty()) {
+        error(key, "duplicate numeric profile entry `overflow`");
+      }
+      if (value.lexeme != "checked" && value.lexeme != "wrapping" &&
+          value.lexeme != "saturating") {
+        error(value, "unknown numeric profile `overflow` value `" +
+                         value.lexeme +
+                         "` (expected checked, wrapping, or saturating)");
+      }
+      overflow = value.lexeme;
+    } else {
+      error(key, "unknown numeric profile entry `" + key.lexeme +
+                     "` (expected `int` or `overflow`)");
+    }
+    if (!match(lexer::TokenKind::Newline) &&
+        !check(lexer::TokenKind::Dedent)) {
+      break;
+    }
+  }
+  consume(lexer::TokenKind::Dedent,
+          "expected dedent after numeric profile block");
+
+  auto node = ast::make_expr("AstNumericProfile",
+                             ast::join_spans(start.span, previous().span));
+  node->string_field("int_type", int_type.empty() ? "Int64" : int_type);
+  node->string_field("overflow", overflow.empty() ? "checked" : overflow);
+  return node;
 }
 
 std::unique_ptr<ast::Expr> Parser::parse_package_decl() {
@@ -2238,6 +2332,21 @@ std::unique_ptr<ast::Expr> Parser::parse_break_expr() {
   return node;
 }
 
+std::unique_ptr<ast::Expr> Parser::parse_return_expr() {
+  const lexer::Token start = advance();
+  std::unique_ptr<ast::Expr> value;
+  if (!is_stop_token(StopMode::Normal)) {
+    value = parse_expression(1, StopMode::Normal);
+  }
+  auto node = ast::make_expr("AstReturn",
+                             value ? ast::join_spans(start.span, value->span)
+                                   : start.span);
+  if (value) {
+    node->node_field("value", std::move(value));
+  }
+  return node;
+}
+
 std::unique_ptr<ast::Expr> Parser::parse_throw_expr() {
   const lexer::Token start = advance();
   std::unique_ptr<ast::Expr> tag;
@@ -2827,6 +2936,10 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   if (token.kind == lexer::TokenKind::KeywordBreak) {
     --current_;
     return parse_break_expr();
+  }
+  if (token.kind == lexer::TokenKind::KeywordReturn) {
+    --current_;
+    return parse_return_expr();
   }
   if (token.kind == lexer::TokenKind::KeywordThrow) {
     --current_;

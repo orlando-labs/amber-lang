@@ -919,6 +919,7 @@ bool Lexer::is_keyword_text(const std::string &text, TokenKind *kind) {
       {"prop", TokenKind::KeywordProp},
       {"raise", TokenKind::KeywordRaise},
       {"rescue", TokenKind::KeywordRescue},
+      {"return", TokenKind::KeywordReturn},
       {"throw", TokenKind::KeywordThrow},
       {"try", TokenKind::KeywordTry},
       {"true", TokenKind::KeywordTrue},

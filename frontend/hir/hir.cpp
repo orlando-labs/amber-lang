@@ -347,6 +347,19 @@ public:
     auto root = make_node("HModule", module_span());
     root->string_field("module_name", module_name_);
     root->string_field("init", module_proc);
+    for (const std::unique_ptr<ast::Expr> &item : items_) {
+      if (item->kind != "AstNumericProfile") {
+        continue;
+      }
+      for (const ast::StringField &field : item->string_fields) {
+        if (field.name == "int_type") {
+          root->string_field("numeric_int", field.value);
+        } else if (field.name == "overflow") {
+          root->string_field("numeric_overflow", field.value);
+        }
+      }
+      break;
+    }
     root->list_field("imports", lower_imports());
     root->list_field("exports", lower_exports());
     root->list_field("items", std::move(module_items));
@@ -528,7 +541,7 @@ private:
            item.kind != "AstExportStmt" && item.kind != "AstClassDef" &&
            item.kind != "AstMixinDef" && item.kind != "AstDefStmt" &&
            item.kind != "AstClassMethodDef" && item.kind != "AstClauseDef" &&
-           !ast_is_property_decl(item);
+           item.kind != "AstNumericProfile" && !ast_is_property_decl(item);
   }
 
   bool is_module_callable_decl(const ast::Expr &item) const {
@@ -1890,6 +1903,17 @@ private:
       auto node = make_node("HBreak", expr.span);
       if (const ast::Expr *value = node_field(expr, "value")) {
         node->node_field("value", lower_expr(*value));
+      }
+      return node;
+    }
+    if (expr.kind == "AstReturn") {
+      auto node = make_node("HReturn", expr.span);
+      if (const ast::Expr *value = node_field(expr, "value")) {
+        node->node_field("value", lower_expr(*value));
+      } else {
+        // Bare `return` completes the callable with the current `$_`,
+        // matching the implicit body-result rule.
+        node->node_field("value", make_node("HLastGet", expr.span));
       }
       return node;
     }

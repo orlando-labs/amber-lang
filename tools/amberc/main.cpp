@@ -995,6 +995,16 @@ bool native_cpp_collection_selector(const std::string &selector,
          ((selector == "count" || selector == "first") && pos_count == 0U);
 }
 
+// Eligibility allowlist for the cpp-bytecode-direct backend.
+//
+// INVARIANT (amber.native-backend-equivalence.v1): every opcode/selector
+// admitted here must be observably side-effect-free. The native lane handles
+// anything it cannot execute (including checked-Int overflow) by throwing
+// NativeBailout and re-running the WHOLE program under the VM; that restart
+// is only sound while eligible code has produced no observable effects.
+// Do not admit output/IO/channel/shared-state selectors before per-function
+// VM fallback replaces the whole-program restart. `make backend-equivalence`
+// asserts the observable half of this invariant over corpus/run.
 bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                                const amber::bytecode::BcCode &code,
                                std::string *reason) {
@@ -1468,23 +1478,21 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       const std::string selector = module.symbols[symbol_id];
       if (selector == "+") {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(recv) + ") + as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "NativeValue::integer(checked_add_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
       } else if (selector == "-") {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(recv) + ") - as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "NativeValue::integer(checked_sub_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
       } else if (selector == "*") {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(recv) + ") * as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "NativeValue::integer(checked_mul_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
       } else if (selector == "/") {
-        out << "  if (as_int(" << read_reg_expr(arg)
-            << ") == 0) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(recv) + ") / as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "NativeValue::integer(checked_div_int64(as_int(" +
+                                read_reg_expr(recv) + "), as_int(" +
+                                read_reg_expr(arg) + ")))");
       } else if (selector == "%") {
         out << "  if (as_int(" << read_reg_expr(arg)
             << ") == 0) throw NativeBailout();\n";
@@ -1539,7 +1547,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         out << "  if (as_int(" << read_reg_expr(arg)
             << ") < 0 || as_int(" << read_reg_expr(arg)
             << ") >= 64) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(shl_int64(as_int(" +
+        write_reg_stmt(dst, "NativeValue::integer(checked_shl_int64(as_int(" +
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
       } else if (selector == ">>") {
@@ -1589,23 +1597,21 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 1, &lhs);
       operand_u32_value(instruction, 2, &rhs);
       if (instruction.opcode == Opcode::IAdd) {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(lhs) + ") + as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "NativeValue::integer(checked_add_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::ISub) {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(lhs) + ") - as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "NativeValue::integer(checked_sub_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::IMul) {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(lhs) + ") * as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "NativeValue::integer(checked_mul_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::IDiv) {
-        out << "  if (as_int(" << read_reg_expr(rhs)
-            << ") == 0) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(lhs) + ") / as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "NativeValue::integer(checked_div_int64(as_int(" +
+                                read_reg_expr(lhs) + "), as_int(" +
+                                read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::IMod) {
         out << "  if (as_int(" << read_reg_expr(rhs)
             << ") == 0) throw NativeBailout();\n";
@@ -1652,7 +1658,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         out << "  if (as_int(" << read_reg_expr(rhs)
             << ") < 0 || as_int(" << read_reg_expr(rhs)
             << ") >= 64) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(shl_int64(as_int(" +
+        write_reg_stmt(dst, "NativeValue::integer(checked_shl_int64(as_int(" +
                                 read_reg_expr(lhs) + "), as_int(" +
                                 read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::IShr) {
@@ -1700,24 +1706,25 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 2, &const_id);
       const std::int64_t rhs = module.const_pool[const_id].int_value;
       if (instruction.opcode == Opcode::IAddK) {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(lhs) + ") + " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "NativeValue::integer(checked_add_int64(as_int(" +
+                                read_reg_expr(lhs) + "), " +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::ISubK) {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(lhs) + ") - " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "NativeValue::integer(checked_sub_int64(as_int(" +
+                                read_reg_expr(lhs) + "), " +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IMulK) {
-        write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                read_reg_expr(lhs) + ") * " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "NativeValue::integer(checked_mul_int64(as_int(" +
+                                read_reg_expr(lhs) + "), " +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IDivK) {
         if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "NativeValue::integer(as_int(" +
-                                  read_reg_expr(lhs) + ") / " +
-                                  cpp_decimal_i64(rhs) + ")");
+          write_reg_stmt(dst,
+                         "NativeValue::integer(checked_div_int64(as_int(" +
+                             read_reg_expr(lhs) + "), " + cpp_decimal_i64(rhs) +
+                             "))");
         }
       } else if (instruction.opcode == Opcode::IModK) {
         if (rhs == 0) {
@@ -1768,9 +1775,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         if (rhs < 0 || rhs >= 64) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "NativeValue::integer(shl_int64(as_int(" +
-                                  read_reg_expr(lhs) + "), " +
-                                  cpp_decimal_i64(rhs) + "))");
+          write_reg_stmt(dst,
+                         "NativeValue::integer(checked_shl_int64(as_int(" +
+                             read_reg_expr(lhs) + "), " + cpp_decimal_i64(rhs) +
+                             "))");
         }
       } else if (instruction.opcode == Opcode::IShrK) {
         if (rhs < 0 || rhs >= 64) {
@@ -1855,12 +1863,30 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
                       const amber::bytecode::BcModule &module) {
   NativeCppBuildPlan plan;
   std::string first_reason;
-  for (const amber::bytecode::BcCode &code : module.code_objects) {
-    std::string reason;
-    if (native_cpp_code_supported(module, code, &reason)) {
-      plan.native_code_ids.insert(code.code_id);
-    } else if (first_reason.empty()) {
-      first_reason = "c" + std::to_string(code.code_id) + ": " + reason;
+  // The generated C++ implements only the default numeric profile
+  // (int: Int64, overflow: checked). Modules selecting any other profile run
+  // entirely under the VM.
+  for (const amber::bytecode::AttrEntry &attr : module.attrs) {
+    const auto attr_text = [&](std::uint32_t id) -> std::string {
+      return id < module.strings.size() ? module.strings[id] : std::string{};
+    };
+    const std::string key = attr_text(attr.key_str_id);
+    const std::string value = attr_text(attr.value_str_id);
+    if ((key == "amber.numeric.int" && value != "Int64") ||
+        (key == "amber.numeric.overflow" && value != "checked")) {
+      first_reason = "module numeric profile is not the native default (" +
+                     key + ": " + value + ")";
+      break;
+    }
+  }
+  if (first_reason.empty()) {
+    for (const amber::bytecode::BcCode &code : module.code_objects) {
+      std::string reason;
+      if (native_cpp_code_supported(module, code, &reason)) {
+        plan.native_code_ids.insert(code.code_id);
+      } else if (first_reason.empty()) {
+        first_reason = "c" + std::to_string(code.code_id) + ": " + reason;
+      }
     }
   }
 
@@ -2094,6 +2120,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "static std::int64_t floor_div_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  if (rhs == 0) throw NativeBailout();\n";
+  out << "  if (lhs == INT64_MIN && rhs == -1) throw NativeBailout();\n";
   out << "  std::int64_t quotient = lhs / rhs;\n";
   out << "  const std::int64_t remainder = lhs % rhs;\n";
   out << "  if (remainder != 0 && ((remainder < 0) != (rhs < 0))) "
@@ -2102,7 +2129,46 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static std::int64_t floor_mod_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
+  out << "  if (rhs == -1) return 0;\n";
   out << "  return lhs - floor_div_int64(lhs, rhs) * rhs;\n";
+  out << "}\n\n";
+  // Checked Int64 arithmetic (amber.numeric-profile.v1 default profile).
+  // Overflow bails out to the VM, which re-runs the program and raises the
+  // language-level OverflowError; this is observably identical because the
+  // native-eligible subset performs no side effects before bailout.
+  out << "static std::int64_t checked_add_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  std::int64_t result;\n";
+  out << "  if (__builtin_add_overflow(lhs, rhs, &result)) "
+         "throw NativeBailout();\n";
+  out << "  return result;\n";
+  out << "}\n\n";
+  out << "static std::int64_t checked_sub_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  std::int64_t result;\n";
+  out << "  if (__builtin_sub_overflow(lhs, rhs, &result)) "
+         "throw NativeBailout();\n";
+  out << "  return result;\n";
+  out << "}\n\n";
+  out << "static std::int64_t checked_mul_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  std::int64_t result;\n";
+  out << "  if (__builtin_mul_overflow(lhs, rhs, &result)) "
+         "throw NativeBailout();\n";
+  out << "  return result;\n";
+  out << "}\n\n";
+  out << "static std::int64_t checked_div_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  if (rhs == 0) throw NativeBailout();\n";
+  out << "  if (lhs == INT64_MIN && rhs == -1) throw NativeBailout();\n";
+  out << "  return lhs / rhs;\n";
+  out << "}\n\n";
+  out << "static std::int64_t checked_shl_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  const std::int64_t shifted = static_cast<std::int64_t>("
+         "static_cast<std::uint64_t>(lhs) << rhs);\n";
+  out << "  if ((shifted >> rhs) != lhs) throw NativeBailout();\n";
+  out << "  return shifted;\n";
   out << "}\n\n";
   out << "static std::int64_t bit_xor_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
@@ -2189,8 +2255,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (!result.fault.has_value()) return;\n";
   out << "  std::cerr << result.fault->error_name << \": \" << "
          "result.fault->message << \"\\n\";\n";
-  out << "  if (!result.fault->trace_text.empty()) std::cerr << "
-         "result.fault->trace_text;\n";
+  out << "  if (!result.fault->trace_text.empty()) {\n";
+  out << "    std::cerr << result.fault->trace_text;\n";
+  out << "    if (result.fault->trace_text.back() != '\\n') "
+         "std::cerr << \"\\n\";\n";
+  out << "  }\n";
   out << "}\n\n";
   out << "static bool should_print_vm_value(const amber::runtime::Value "
          "&value) { return !value.is_null() && !value.is_closure(); }\n\n";
@@ -2797,7 +2866,57 @@ std::string profile_material(const amber::build::BuildProfileSet &profiles) {
   for (const std::string &feature : profiles.forbidden_features) {
     out << "forbidden=" << feature << "\n";
   }
+  if (!profiles.numeric_int.empty() || !profiles.numeric_overflow.empty()) {
+    out << "numeric.int=" << profiles.numeric_int << "\n";
+    out << "numeric.overflow=" << profiles.numeric_overflow << "\n";
+  }
   return out.str();
+}
+
+std::string module_attr_text(const amber::bytecode::BcModule &module,
+                             const std::string &key) {
+  for (const amber::bytecode::AttrEntry &attr : module.attrs) {
+    if (attr.key_str_id < module.strings.size() &&
+        module.strings[attr.key_str_id] == key) {
+      return attr.value_str_id < module.strings.size()
+                 ? module.strings[attr.value_str_id]
+                 : std::string{};
+    }
+  }
+  return {};
+}
+
+// amber.numeric-profile.v1: the manifest is the reproducibility anchor. A
+// source preamble must agree with profiles.numeric when both are present;
+// when only the manifest selects a profile, it is stamped into the module.
+void reconcile_manifest_numeric_profile(
+    amber::bytecode::BcModule *bc_module,
+    const amber::build::BuildProfileSet &profiles,
+    const std::string &module_path) {
+  if (profiles.numeric_int.empty() && profiles.numeric_overflow.empty()) {
+    return;
+  }
+  const std::string manifest_int =
+      profiles.numeric_int.empty() ? "Int64" : profiles.numeric_int;
+  const std::string manifest_overflow = profiles.numeric_overflow.empty()
+                                            ? "checked"
+                                            : profiles.numeric_overflow;
+  const std::string module_int = module_attr_text(*bc_module,
+                                                  "amber.numeric.int");
+  const std::string module_overflow =
+      module_attr_text(*bc_module, "amber.numeric.overflow");
+  if (!module_int.empty() || !module_overflow.empty()) {
+    if (module_int != manifest_int || module_overflow != manifest_overflow) {
+      throw std::runtime_error(
+          "module numeric preamble (int: " + module_int +
+          ", overflow: " + module_overflow +
+          ") does not match manifest profiles.numeric (int: " + manifest_int +
+          ", overflow: " + manifest_overflow + ") in " + module_path);
+    }
+    return;
+  }
+  add_module_attr(bc_module, "amber.numeric.int", manifest_int);
+  add_module_attr(bc_module, "amber.numeric.overflow", manifest_overflow);
 }
 
 struct BuiltStdlibAbi {
@@ -2892,6 +3011,7 @@ amber::build::BuildArtifactRecord build_one_module(
     if (!module.stdlib) {
       add_stdlib_dependencies(&bc_module, stdlib_abis);
     }
+    reconcile_manifest_numeric_profile(&bc_module, profiles, module.path);
     add_module_attr(&bc_module, "amber.build.module", module.name);
     add_module_attr(&bc_module, "amber.build.source_hash", source_hash);
     add_module_attr(&bc_module, "amber.build.cache_key", cache_key);

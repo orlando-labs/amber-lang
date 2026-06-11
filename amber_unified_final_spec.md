@@ -721,6 +721,37 @@ result = loop:
 break:some_symbol
 ```
 
+### 7.5. `return`
+
+`return` завершает ближайший enclosing callable: тело `def` / `class_method def`, lambda или block. Это **локальный** return: внутри lambda/block он завершает сам lambda/block, а не внешний метод.
+
+Формы:
+
+```amber
+return expr
+return
+```
+
+Правила:
+
+- `return expr` — значением callable становится `expr`;
+- голый `return` — значением callable становится текущее `$_` (то же правило, что и implicit return через последнее выражение, см. §6);
+- `return` на верхнем уровне модуля завершает module-init code этого модуля;
+- при выходе через `return` из защищённого body выполняются все охватывающие `ensure`-блоки в порядке от внутреннего к внешнему (см. §10.5);
+- `return` внутри `rescue`-клаузы, `ensure`-клаузы и clause guard не поддерживается в v1 и является compile-time ошибкой;
+- `return` — это statement-level форма; её значение как выражения не наблюдаемо (управление не возвращается).
+
+```amber
+def find_name(user):
+ if user.missing?:
+ return "unknown"
+ user.name
+
+def normalize(str):
+ str.strip()
+ return # завершает def текущим $_ — результатом strip()
+```
+
 ## 8. Функции, методы, классы и объектная модель
 
 ### 8.1. `def`
@@ -21633,7 +21664,7 @@ These ten issues close the practical bootstrap gap from document to working fron
 - `(` `)` `[` `]` `{` `}` `,`;
 - `&` — prefix marker callable reference;
 - `#` — separator внутри unbound callable reference target `&Class#method`;
-- ключевые слова `not`, `and`, `or`, `in`, `if`, `else`, `elif`, `elsif`, `unless`, `case`, `case!`, `when`, `def`, `class`, `class_method`, `mixin`, `include`, `extend`, `while`, `until`, `do`, `loop`, `break`, `pass`, `noop`, `package`, `import`, `from`, `export`;
+- ключевые слова `not`, `and`, `or`, `in`, `if`, `else`, `elif`, `elsif`, `unless`, `case`, `case!`, `when`, `def`, `class`, `class_method`, `mixin`, `include`, `extend`, `while`, `until`, `do`, `loop`, `break`, `return`, `pass`, `noop`, `package`, `import`, `from`, `export`;
 - `NEWLINE` не разрывает выражение внутри `()`, `[]`, `{}` и внутри интерполяции строк.
 - `case!` лексируется как отдельная keyword-form, а не как `case` + postfix `!`;
 - последовательность `class_method def` образует отдельную parser-level declarative form и не редуцируется к обычному send/call spelling;
@@ -28323,12 +28354,12 @@ Supported v1 forms:
 Rules:
 
 - `_` may appear between digits, never at the start/end and never doubled;
-- parse-time integer has arbitrary precision;
-- runtime `Int` is mathematically unbounded in observable semantics;
-- VM may use tagged small-int and heap BigInt internally;
+- parse-time integer literal text has arbitrary precision (kept for diagnostics and explicit `BigInt(...)` construction);
+- unsuffixed integer literals have type `Int` — the fixed-width type selected by the module's numeric profile (default `Int64`);
+- a literal outside the selected `Int` range is a compile-time diagnostic unless explicitly targeted as `BigInt`;
 - constant pool stores canonical integer magnitude/sign, not target-machine word bytes.
 
-Overflow in tagged fast-path must promote, not wrap.
+Overflow of ordinary `Int` arithmetic follows the module's numeric profile: `checked` (the default) raises `OverflowError`; `wrapping` and `saturating` are opt-in modes. There is no implicit promotion to arbitrary precision; unbounded integers are available only through the explicit `BigInt` type. The authoritative numeric semantics, including the `numeric:` source preamble and manifest mirror, are specified by `amber.numeric-profile.v1` (`docs/engineering/numeric-profile-v1.md`).
 
 #### 12.4.4. Float literals
 

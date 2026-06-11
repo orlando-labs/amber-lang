@@ -17,6 +17,7 @@ errors:
   - IndexError
   - KeyError
   - ZeroDivisionError
+  - OverflowError
   - IsolationError
   - DestroyedAccessError
   - UseAfterFreeError
