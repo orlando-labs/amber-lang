@@ -13873,6 +13873,85 @@ private:
     return class_name.has_value() && *class_name == "Range";
   }
 
+  static bool io_value_type_name_is(const Value &value,
+                                    std::string_view type_name) {
+    if (!value.is_io_value()) {
+      return false;
+    }
+    const std::shared_ptr<RuntimeIoValue> io = value.as_io_value();
+    return io != nullptr && io->type_name() == type_name;
+  }
+
+  // Matcher protocol (spec 9.4): `T === value` for native type objects has
+  // ruby-like `is_a?` semantics — true when the value's runtime kind is the
+  // kind the type object names. Module-style type objects (Kernel, Io, Fs,
+  // ...) name no value kind and match nothing.
+  bool value_matches_native_type_kind(const Value &value,
+                                      RuntimeNativeTypeKind kind) {
+    switch (kind) {
+    case RuntimeNativeTypeKind::Str:
+      return value.is_string();
+    case RuntimeNativeTypeKind::Int:
+      return value.is_integer();
+    case RuntimeNativeTypeKind::BigInt:
+      return value.is_big_int();
+    case RuntimeNativeTypeKind::Float:
+      return value.is_float();
+    case RuntimeNativeTypeKind::Bool:
+      return value.is_bool();
+    case RuntimeNativeTypeKind::Symbol:
+      return value.is_symbol();
+    case RuntimeNativeTypeKind::Array:
+      return value.is_list();
+    case RuntimeNativeTypeKind::Tuple:
+      return value.is_tuple();
+    case RuntimeNativeTypeKind::Set:
+      return value.is_set();
+    case RuntimeNativeTypeKind::Map:
+      return value.is_map();
+    case RuntimeNativeTypeKind::Null:
+      return value.is_null();
+    case RuntimeNativeTypeKind::Object:
+      return true;
+    case RuntimeNativeTypeKind::Range:
+      return value_is_range_instance(value);
+    case RuntimeNativeTypeKind::TaskModule:
+      return value.is_task_module();
+    case RuntimeNativeTypeKind::Channel:
+      return value.is_channel();
+    case RuntimeNativeTypeKind::Mutex:
+      return value.is_mutex();
+    case RuntimeNativeTypeKind::Atomic:
+      return value.is_atomic();
+    case RuntimeNativeTypeKind::Barrier:
+      return value.is_barrier();
+    case RuntimeNativeTypeKind::Flow:
+      return value.is_flow_module();
+    case RuntimeNativeTypeKind::ThreadedCollection:
+      return value.is_threaded_collection();
+    case RuntimeNativeTypeKind::TextBuffer:
+      return value.is_text_writer();
+    case RuntimeNativeTypeKind::Logger:
+      return value.is_logger();
+    case RuntimeNativeTypeKind::Bytes:
+      return io_value_type_name_is(value, "Bytes");
+    case RuntimeNativeTypeKind::ByteBuffer:
+      return io_value_type_name_is(value, "io.ByteBuffer");
+    case RuntimeNativeTypeKind::ByteSlice:
+      return io_value_type_name_is(value, "io.ByteSlice");
+    case RuntimeNativeTypeKind::IoPipe:
+      return io_value_type_name_is(value, "io.Pipe");
+    case RuntimeNativeTypeKind::FsPath:
+      return io_value_type_name_is(value, "fs.Path");
+    case RuntimeNativeTypeKind::FsFile:
+      return io_value_type_name_is(value, "fs.File");
+    case RuntimeNativeTypeKind::NetEndpoint:
+      return io_value_type_name_is(value, "net.Endpoint");
+    default:
+      return false;
+    }
+  }
+
   std::optional<Value>
   load_instance_ivar_or_null(const Frame &frame,
                              const std::shared_ptr<InstanceValue> &instance,
@@ -17901,6 +17980,21 @@ private:
 
     if (receiver.is_native_type()) {
       const RuntimeNativeTypeKind kind = receiver.as_native_type().kind;
+      if (selector == "===") {
+        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "=== does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        // A type object also matches itself, mirroring the class-object
+        // matcher rule in pattern_triple_eq.
+        const bool same_type_object =
+            args[0].is_native_type() && args[0].as_native_type().kind == kind;
+        *out = Value::boolean(same_type_object ||
+                              value_matches_native_type_kind(args[0], kind));
+        return SendStatus::Matched;
+      }
       if (kind == RuntimeNativeTypeKind::Amber) {
         if (selector != "stringify") {
           return SendStatus::NotHandled;

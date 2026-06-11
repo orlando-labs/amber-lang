@@ -1,0 +1,6 @@
+{
+  "schema": "amber.run.v1",
+  "entry": "probe",
+  "status": "ok",
+  "value": "\"int:str:float:bool:null:symbol:array:tuple:set:map:bigint:range:int-arm:five:type\""
+}
