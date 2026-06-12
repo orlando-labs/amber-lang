@@ -26,6 +26,20 @@ extern thread_local std::uint32_t tls_runtime_io_wait_depth;
 extern std::atomic<std::uint64_t> g_runtime_output_order;
 extern std::atomic<std::uint64_t> g_runtime_native_thread_ids;
 
+// Resolves the source location attributed to text output events. A fixed
+// value scope ("this exact location") and a provider scope ("ask the running
+// VM at output time") share the same binding: whichever scope was entered
+// most recently wins, so log replay can pin a captured location while a VM
+// is live on the same thread.
+using RuntimeTextSourceLocationProviderFn =
+    RuntimeTextSourceLocation (*)(const void *ctx);
+
+extern thread_local RuntimeTextSourceLocationProviderFn
+    tls_runtime_text_source_location_provider;
+extern thread_local const void *tls_runtime_text_source_location_provider_ctx;
+
+RuntimeTextSourceLocation resolve_runtime_text_source_location();
+
 class RuntimeTextSourceLocationScope {
 public:
   explicit RuntimeTextSourceLocationScope(RuntimeTextSourceLocation location);
@@ -37,6 +51,23 @@ public:
 
 private:
   RuntimeTextSourceLocation previous_;
+  RuntimeTextSourceLocationProviderFn previous_provider_ = nullptr;
+  const void *previous_provider_ctx_ = nullptr;
+};
+
+class RuntimeTextSourceLocationProviderScope {
+public:
+  RuntimeTextSourceLocationProviderScope(
+      RuntimeTextSourceLocationProviderFn provider, const void *ctx);
+  RuntimeTextSourceLocationProviderScope(
+      const RuntimeTextSourceLocationProviderScope &) = delete;
+  RuntimeTextSourceLocationProviderScope &
+  operator=(const RuntimeTextSourceLocationProviderScope &) = delete;
+  ~RuntimeTextSourceLocationProviderScope();
+
+private:
+  RuntimeTextSourceLocationProviderFn previous_provider_ = nullptr;
+  const void *previous_provider_ctx_ = nullptr;
 };
 
 class RuntimeTaskScope {

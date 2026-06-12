@@ -9015,9 +9015,15 @@ public:
     }
     push_frame(*entry, args, std::move(entry_captures), std::move(self),
                std::move(block), std::nullopt);
+    // Text output events resolve their source location on demand through
+    // this provider; computing the location eagerly per step costs a frame
+    // walk, a span search, and a string copy on every instruction.
+    RuntimeTextSourceLocationProviderScope source_scope(
+        [](const void *ctx) {
+          return static_cast<const Vm *>(ctx)->current_text_source_location();
+        },
+        this);
     while (fault_ == std::nullopt && !frames_.empty()) {
-      RuntimeTextSourceLocationScope source_scope(
-          current_text_source_location());
       step();
     }
     state_->heap.drain_remote_frees();

@@ -14,6 +14,10 @@ thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stderr;
 thread_local std::string tls_runtime_task_annotation;
 thread_local std::uint64_t tls_runtime_native_thread_id = 0;
 thread_local RuntimeTextSourceLocation tls_runtime_text_source_location;
+thread_local RuntimeTextSourceLocationProviderFn
+    tls_runtime_text_source_location_provider = nullptr;
+thread_local const void *tls_runtime_text_source_location_provider_ctx =
+    nullptr;
 thread_local const RuntimeIoWaitObserver *tls_runtime_io_wait_observer =
     nullptr;
 thread_local std::uint32_t tls_runtime_io_wait_depth = 0;
@@ -24,12 +28,40 @@ std::atomic<std::uint64_t> g_runtime_io_wait_ids{1};
 
 RuntimeTextSourceLocationScope::RuntimeTextSourceLocationScope(
     RuntimeTextSourceLocation location)
-    : previous_(std::move(tls_runtime_text_source_location)) {
+    : previous_(std::move(tls_runtime_text_source_location)),
+      previous_provider_(tls_runtime_text_source_location_provider),
+      previous_provider_ctx_(tls_runtime_text_source_location_provider_ctx) {
   tls_runtime_text_source_location = std::move(location);
+  tls_runtime_text_source_location_provider = nullptr;
+  tls_runtime_text_source_location_provider_ctx = nullptr;
 }
 
 RuntimeTextSourceLocationScope::~RuntimeTextSourceLocationScope() {
   tls_runtime_text_source_location = std::move(previous_);
+  tls_runtime_text_source_location_provider = previous_provider_;
+  tls_runtime_text_source_location_provider_ctx = previous_provider_ctx_;
+}
+
+RuntimeTextSourceLocationProviderScope::RuntimeTextSourceLocationProviderScope(
+    RuntimeTextSourceLocationProviderFn provider, const void *ctx)
+    : previous_provider_(tls_runtime_text_source_location_provider),
+      previous_provider_ctx_(tls_runtime_text_source_location_provider_ctx) {
+  tls_runtime_text_source_location_provider = provider;
+  tls_runtime_text_source_location_provider_ctx = ctx;
+}
+
+RuntimeTextSourceLocationProviderScope::
+    ~RuntimeTextSourceLocationProviderScope() {
+  tls_runtime_text_source_location_provider = previous_provider_;
+  tls_runtime_text_source_location_provider_ctx = previous_provider_ctx_;
+}
+
+RuntimeTextSourceLocation resolve_runtime_text_source_location() {
+  if (tls_runtime_text_source_location_provider != nullptr) {
+    return tls_runtime_text_source_location_provider(
+        tls_runtime_text_source_location_provider_ctx);
+  }
+  return tls_runtime_text_source_location;
 }
 
 RuntimeTaskScope::RuntimeTaskScope(std::uint64_t task_id,

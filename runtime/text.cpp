@@ -119,7 +119,7 @@ RuntimeTextWriteResult RuntimeTextWriter::write_str(const std::string &text) {
                                text,
                                g_runtime_output_order.fetch_add(
                                    1, std::memory_order_relaxed),
-                               tls_runtime_text_source_location});
+                               resolve_runtime_text_source_location()});
     return text_write_ok();
   }
   return text_write_error("IOError", "unknown text writer kind");
@@ -368,13 +368,13 @@ public:
       }
       return result;
     }
+    RuntimeTextSourceLocation source = resolve_runtime_text_source_location();
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (closed_) {
         return text_write_error("ClosedResourceError", "logger is closed");
       }
-      queue_.push_back(
-          PendingLogLine{std::move(line), tls_runtime_text_source_location});
+      queue_.push_back(PendingLogLine{std::move(line), std::move(source)});
     }
     cv_.notify_one();
     return text_write_ok();
