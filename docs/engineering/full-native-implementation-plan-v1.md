@@ -3,6 +3,15 @@
 Status: planning document for replacing the current bytecode-trampoline native
 readiness layer with a real host-native execution path.
 
+> 2026-06-12 amendments: the shipping backend is `cpp-bytecode-direct-v1`
+> (bytecode-input transpile in `tools/amberc/main.cpp`), not a MIR-input
+> generator; `amber.mir.v1` has been formally demoted to a
+> validation/diagnostic artifact (see `docs/engineering/mir-v1.md`), which
+> supersedes "Phase 5: MIR Normalization For Native" below. Function-level
+> VM fallback exists as the per-function scalar bridge (see
+> `docs/engineering/native-backend-equivalence-v1.md`); the prebuilt runtime
+> archive cache makes native links ~1s warm.
+
 This plan assumes the current repository state:
 
 - the bytecode VM is the semantic oracle;

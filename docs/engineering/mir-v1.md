@@ -1,13 +1,41 @@
 # amber.mir.v1
 
-Status: implemented for `W10.3` MIR/SSA baseline.
+Status: **demoted to validation/diagnostic artifact** (decision 2026-06-12,
+see below). Originally implemented for the `W10.3` MIR/SSA baseline.
 
-The MIR layer is a deterministic optimizer-facing IR between HIR and future
-native/JIT backends. It does not replace the existing HIR-to-bytecode execution
-path yet; it exposes a separately testable artifact for `ISS-067` and
-`ISS-068`.
+## Decision: MIR is a validation artifact, not a codegen input
 
-W10.4 now consumes this layer through `amber.native.v1`; see
+Recorded 2026-06-12 during the native-backend phase (research plan §5.6,
+work item 15). The facts that drove it:
+
+- the production native lane (`cpp-bytecode-direct-v1` in
+  `tools/amberc/main.cpp`) transpiles **bytecode** directly and is the only
+  lane that ships executables; it never reads MIR;
+- `run_pass_pipeline` has no callers outside `tests/mir_tests.cpp` — no
+  optimization pass has ever run in the execution flow;
+- MIR's string-encoded SSA (`%vN` names, string opcodes) would need a full
+  numeric re-encoding before an optimizing backend could consume it;
+- a MIR-input codegen path alongside the bytecode-direct backend would be a
+  third lowering whose semantics nothing verifies (the backend-equivalence
+  gate covers bytecode-vs-native only).
+
+Consequences:
+
+- MIR remains as: HIR lowering sanity validator, deterministic dump format
+  for diagnostics (`amberc mir/mir-dump/mir-verify`), and the input for
+  `amber.native.v1` *metadata* (eligibility/trampoline descriptors).
+- No new consumers of MIR may be added to execution or codegen paths. If a
+  future optimizing backend needs an IR, it starts from bytecode (the
+  verified, executed format) or introduces a numerically-encoded IR with its
+  own conformance gate — it must not grow out of `amber.mir.v1`.
+- The pass harness stays only as long as its tests do; it documents the
+  schema's invalidation contract, nothing more.
+
+The MIR layer is a deterministic optimizer-facing IR between HIR and the
+`amber.native.v1` metadata layer. It does not participate in the execution
+path.
+
+W10.4 consumes this layer through `amber.native.v1`; see
 [native-v1.md](../../docs/engineering/native-v1.md:1)
 for the native/JIT metadata and frozen runtime bridge.
 
