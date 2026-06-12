@@ -998,7 +998,9 @@ bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
   return (selector == "[]" && pos_count == 1U) ||
          (selector == "[]=" && pos_count == 2U) ||
-         ((selector == "count" || selector == "first") && pos_count == 0U);
+         ((selector == "count" || selector == "first") && pos_count == 0U) ||
+         (selector == "concat" && pos_count == 1U) ||
+         (selector == "to_str" && pos_count == 0U);
 }
 
 // Eligibility allowlist for the cpp-bytecode-direct backend.
@@ -1066,8 +1068,14 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       if (kind != amber::bytecode::ConstantKind::Null &&
           kind != amber::bytecode::ConstantKind::Bool &&
           kind != amber::bytecode::ConstantKind::Integer &&
-          kind != amber::bytecode::ConstantKind::Float) {
+          kind != amber::bytecode::ConstantKind::Float &&
+          kind != amber::bytecode::ConstantKind::StringRef) {
         *reason = "non-scalar constants still use VM fallback";
+        return false;
+      }
+      if (kind == amber::bytecode::ConstantKind::StringRef &&
+          module.const_pool[const_id].ref_id >= module.strings.size()) {
+        *reason = "string constant ref is out of range";
         return false;
       }
       if (kind == amber::bytecode::ConstantKind::Float &&
@@ -1327,6 +1335,10 @@ native_cpp_constant_expr(const amber::bytecode::Constant &constant) {
     std::snprintf(buffer, sizeof(buffer), "%a", constant.float_value);
     return std::string("NativeValue::floating(") + buffer + ")";
   }
+  case amber::bytecode::ConstantKind::StringRef:
+    // The native string table is seeded with the module strings, so the
+    // bytecode ref id is the native string id.
+    return "NativeValue::string_ref(" + std::to_string(constant.ref_id) + ")";
   default:
     return "NativeValue::nullv()";
   }
@@ -1672,6 +1684,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_list_count(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
         write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ")");
+      } else if (selector == "concat") {
+        write_reg_stmt(dst, "native_string_concat(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "to_str") {
+        write_reg_stmt(dst, "native_to_str(" + read_reg_expr(recv) + ")");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -1962,6 +1979,79 @@ std::string emit_embedded_hex_cpp(const std::vector<std::uint8_t> &bytes) {
   return out.str();
 }
 
+// The native string table is seeded with the module's interned strings so
+// LoadK string constants keep their bytecode ids. Hex encoding sidesteps
+// C++ literal escaping for arbitrary byte content.
+std::string emit_module_strings_cpp(const amber::bytecode::BcModule &module) {
+  std::ostringstream out;
+  out << "static const char *kModuleStringHex[] = {\n";
+  for (const std::string &text : module.strings) {
+    out << "  \"" << string_to_hex_text(text) << "\",\n";
+  }
+  if (module.strings.empty()) {
+    out << "  \"\",\n";
+  }
+  out << "};\n";
+  out << "static const std::size_t kModuleStringCount = "
+      << module.strings.size() << "U;\n\n";
+  out << "static std::string native_hex_to_string(const char *hex) {\n";
+  out << "  std::string text;\n";
+  out << "  auto digit = [](char c) -> int {\n";
+  out << "    if (c >= '0' && c <= '9') return c - '0';\n";
+  out << "    if (c >= 'a' && c <= 'f') return 10 + c - 'a';\n";
+  out << "    if (c >= 'A' && c <= 'F') return 10 + c - 'A';\n";
+  out << "    return -1;\n";
+  out << "  };\n";
+  out << "  for (std::size_t i = 0; hex[i] != '\\0' && hex[i + 1U] != '\\0'; "
+         "i += 2U) {\n";
+  out << "    text.push_back(static_cast<char>((digit(hex[i]) << 4) | "
+         "digit(hex[i + 1U])));\n";
+  out << "  }\n";
+  out << "  return text;\n";
+  out << "}\n\n";
+  out << "static std::vector<std::string> &native_strings() {\n";
+  out << "  static std::vector<std::string> *table = [] {\n";
+  out << "    auto *out_table = new std::vector<std::string>();\n";
+  out << "    out_table->reserve(kModuleStringCount);\n";
+  out << "    for (std::size_t i = 0; i < kModuleStringCount; ++i) {\n";
+  out << "      out_table->push_back(native_hex_to_string("
+         "kModuleStringHex[i]));\n";
+  out << "    }\n";
+  out << "    return out_table;\n";
+  out << "  }();\n";
+  out << "  return *table;\n";
+  out << "}\n\n";
+  out << "static std::unordered_map<std::string, std::int64_t> &"
+         "native_string_index() {\n";
+  out << "  static std::unordered_map<std::string, std::int64_t> *index = "
+         "[] {\n";
+  out << "    auto *out_index = new std::unordered_map<std::string, "
+         "std::int64_t>();\n";
+  out << "    const std::vector<std::string> &table = native_strings();\n";
+  out << "    for (std::size_t i = 0; i < table.size(); ++i) {\n";
+  // First content match wins, mirroring the VM's linear intern scan.
+  out << "      out_index->emplace(table[i], "
+         "static_cast<std::int64_t>(i));\n";
+  out << "    }\n";
+  out << "    return out_index;\n";
+  out << "  }();\n";
+  out << "  return *index;\n";
+  out << "}\n\n";
+  out << "static std::int64_t native_intern_string(const std::string &text) "
+         "{\n";
+  out << "  auto &index = native_string_index();\n";
+  out << "  const auto found = index.find(text);\n";
+  out << "  if (found != index.end()) return found->second;\n";
+  out << "  std::vector<std::string> &table = native_strings();\n";
+  out << "  const std::int64_t id = "
+         "static_cast<std::int64_t>(table.size());\n";
+  out << "  table.push_back(text);\n";
+  out << "  index.emplace(text, id);\n";
+  out << "  return id;\n";
+  out << "}\n\n";
+  return out.str();
+}
+
 NativeCppBuildPlan
 build_native_cpp_plan(const RunnableModuleArtifact &artifact,
                       const amber::bytecode::BcModule &module) {
@@ -2063,12 +2153,15 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include <iostream>\n";
   out << "#include <memory>\n";
   out << "#include <optional>\n";
+  out << "#include <charconv>\n";
   out << "#include <sstream>\n";
   out << "#include <string>\n";
+  out << "#include <unordered_map>\n";
   out << "#include <utility>\n";
   out << "#include <vector>\n\n";
   out << "namespace {\n\n";
   out << emit_embedded_hex_cpp(artifact.bytes);
+  out << emit_module_strings_cpp(module);
   out << "struct NativeBailout : public std::exception {\n";
   out << "  const char *what() const noexcept override { return "
          "\"native bailout\"; }\n";
@@ -2077,8 +2170,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeClosure;\n";
   out << "struct NativeCell;\n\n";
   out << "struct NativeValue {\n";
-  out << "  enum class Tag { Null, Bool, Integer, Float, List, Closure };\n";
+  out << "  enum class Tag { Null, Bool, Integer, Float, String, List, "
+         "Closure };\n";
   out << "  Tag tag;\n";
+  // String payloads are ids into the native string table; interning keeps
+  // id equality equivalent to content equality, like the VM.
   out << "  union { std::int64_t scalar_value; double float_value; "
          "void *heap_value; };\n";
   out << "  NativeValue() : tag(Tag::Null), scalar_value(0) {}\n";
@@ -2090,6 +2186,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "out.tag = Tag::Integer; out.scalar_value = value; return out; }\n";
   out << "  static NativeValue floating(double value) { NativeValue out; "
          "out.tag = Tag::Float; out.float_value = value; return out; }\n";
+  out << "  static NativeValue string_ref(std::int64_t string_id) { "
+         "NativeValue out; out.tag = Tag::String; out.scalar_value = "
+         "string_id; return out; }\n";
   out << "  static NativeValue list(std::vector<NativeValue> items);\n";
   out << "  static NativeValue closure(NativeClosure *value);\n";
   out << "};\n\n";
@@ -2335,6 +2434,18 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "static double floor_mod_double_native(double lhs, double rhs) {\n";
   out << "  return lhs - std::floor(lhs / rhs) * rhs;\n";
   out << "}\n\n";
+  out << "static const std::string &native_string_text(const NativeValue "
+         "&value) {\n";
+  out << "  return native_strings()[static_cast<std::size_t>("
+         "value.scalar_value)];\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_concat(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag != NativeValue::Tag::String || "
+         "rhs.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  return NativeValue::string_ref(native_intern_string("
+         "native_string_text(lhs) + native_string_text(rhs)));\n";
+  out << "}\n\n";
   out << "static NativeValue numeric_add(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
@@ -2344,6 +2455,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
          "NativeValue::floating(as_double_numeric(lhs) + "
          "as_double_numeric(rhs));\n";
+  out << "  if (lhs.tag == NativeValue::Tag::String) return "
+         "native_string_concat(lhs, rhs);\n";
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static NativeValue numeric_sub(const NativeValue &lhs, "
@@ -2454,14 +2567,47 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static NativeValue numeric_eq(const NativeValue &lhs, "
          "const NativeValue &rhs, bool negate) {\n";
+  // Mirrors value_equals for scalar kinds: numeric pairs compare by value
+  // (Int/Int exact, otherwise double); other scalar pairs require matching
+  // tags; deep kinds (lists, closures) stay on the VM.
+  out << "  if (lhs.tag == NativeValue::Tag::List || "
+         "lhs.tag == NativeValue::Tag::Closure || "
+         "rhs.tag == NativeValue::Tag::List || "
+         "rhs.tag == NativeValue::Tag::Closure) throw NativeBailout();\n";
   out << "  bool equal;\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) equal = "
          "lhs.scalar_value == rhs.scalar_value;\n";
   out << "  else if (numeric_tag(lhs) && numeric_tag(rhs)) equal = "
          "as_double_numeric(lhs) == as_double_numeric(rhs);\n";
-  out << "  else throw NativeBailout();\n";
+  out << "  else if (lhs.tag != rhs.tag) equal = false;\n";
+  out << "  else if (lhs.tag == NativeValue::Tag::Null) equal = true;\n";
+  out << "  else equal = lhs.scalar_value == rhs.scalar_value;\n";
   out << "  return NativeValue::boolean(negate ? !equal : equal);\n";
+  out << "}\n\n";
+  out << "static NativeValue native_to_str(const NativeValue &value) {\n";
+  out << "  switch (value.tag) {\n";
+  out << "  case NativeValue::Tag::String: return value;\n";
+  out << "  case NativeValue::Tag::Null: return "
+         "NativeValue::string_ref(native_intern_string(\"null\"));\n";
+  out << "  case NativeValue::Tag::Bool: return "
+         "NativeValue::string_ref(native_intern_string("
+         "value.scalar_value != 0 ? \"true\" : \"false\"));\n";
+  out << "  case NativeValue::Tag::Integer: return "
+         "NativeValue::string_ref(native_intern_string("
+         "std::to_string(value.scalar_value)));\n";
+  // Float to_str uses shortest-round-trip formatting (display_float_text),
+  // unlike the precision-6 debug print.
+  out << "  case NativeValue::Tag::Float: {\n";
+  out << "    char buffer[128];\n";
+  out << "    const auto converted = std::to_chars(buffer, "
+         "buffer + sizeof(buffer), value.float_value);\n";
+  out << "    if (converted.ec != std::errc{}) throw NativeBailout();\n";
+  out << "    return NativeValue::string_ref(native_intern_string("
+         "std::string(buffer, converted.ptr)));\n";
+  out << "  }\n";
+  out << "  default: throw NativeBailout();\n";
+  out << "  }\n";
   out << "}\n\n";
   out << "static NativeValue numeric_cmp(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
@@ -2592,14 +2738,13 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
     // non-convertible argument/result values throw NativeBailout, which
     // remains a sound whole-program restart because vm-callable functions
     // are effect-free by construction.
-    out << "static amber::runtime::RuntimeWorld &amber_vm_fallback_world() "
-           "{\n";
-    out << "  struct State {\n";
-    out << "    amber::bytecode::DecodeResult decoded;\n";
-    out << "    std::unique_ptr<amber::runtime::RuntimeWorld> world;\n";
-    out << "  };\n";
-    out << "  static State *state = [] {\n";
-    out << "    auto *out_state = new State();\n";
+    out << "struct AmberVmFallbackState {\n";
+    out << "  amber::bytecode::DecodeResult decoded;\n";
+    out << "  std::unique_ptr<amber::runtime::RuntimeWorld> world;\n";
+    out << "};\n\n";
+    out << "static AmberVmFallbackState &amber_vm_fallback_state() {\n";
+    out << "  static AmberVmFallbackState *state = [] {\n";
+    out << "    auto *out_state = new AmberVmFallbackState();\n";
     out << "    out_state->decoded = "
            "amber::bytecode::deserialize_module(embedded_bytecode());\n";
     out << "    if (!out_state->decoded.ok()) throw NativeBailout();\n";
@@ -2608,10 +2753,19 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
            "out_state->decoded.module);\n";
     out << "    return out_state;\n";
     out << "  }();\n";
-    out << "  return *state->world;\n";
+    out << "  return *state;\n";
+    out << "}\n\n";
+    out << "static amber::runtime::RuntimeWorld &amber_vm_fallback_world() "
+           "{\n";
+    out << "  return *amber_vm_fallback_state().world;\n";
+    out << "}\n\n";
+    out << "static const std::vector<std::string> &"
+           "amber_vm_fallback_module_strings() {\n";
+    out << "  return amber_vm_fallback_state().decoded.module.strings;\n";
     out << "}\n\n";
     out << "static NativeValue amber_vm_fallback_result("
-           "const amber::runtime::Value &value) {\n";
+           "const amber::runtime::Value &value, "
+           "const std::vector<std::string> &vm_strings) {\n";
     out << "  if (value.is_null()) return NativeValue::nullv();\n";
     out << "  if (value.is_bool()) return "
            "NativeValue::boolean(value.as_bool());\n";
@@ -2619,13 +2773,23 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
            "NativeValue::integer(value.as_integer());\n";
     out << "  if (value.is_float()) return "
            "NativeValue::floating(value.as_float());\n";
+    // VM string ids are scoped to the fallback execution; strings cross the
+    // bridge by content and re-intern into the native table.
+    out << "  if (value.is_string()) {\n";
+    out << "    const std::uint32_t string_id = "
+           "value.as_string().string_id;\n";
+    out << "    if (string_id >= vm_strings.size()) throw NativeBailout();\n";
+    out << "    return NativeValue::string_ref(native_intern_string("
+           "vm_strings[string_id]));\n";
+    out << "  }\n";
     out << "  if (value.is_list()) {\n";
     out << "    const auto list = value.as_list();\n";
     out << "    if (list == nullptr) throw NativeBailout();\n";
     out << "    std::vector<NativeValue> items;\n";
     out << "    items.reserve(list->items.size());\n";
     out << "    for (const amber::runtime::Value &item : list->items) {\n";
-    out << "      items.push_back(amber_vm_fallback_result(item));\n";
+    out << "      items.push_back(amber_vm_fallback_result(item, "
+           "vm_strings));\n";
     out << "    }\n";
     out << "    return NativeValue::list(std::move(items));\n";
     out << "  }\n";
@@ -2654,7 +2818,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
     out << "  const amber::runtime::ExecutionResult result = "
            "amber_vm_fallback_world().execute(code_id, vm_args);\n";
     out << "  if (!result.ok()) throw NativeBailout();\n";
-    out << "  return amber_vm_fallback_result(result.value);\n";
+    out << "  return amber_vm_fallback_result(result.value, "
+           "result.runtime_strings.empty() "
+           "? amber_vm_fallback_module_strings() "
+           ": result.runtime_strings);\n";
     out << "}\n\n";
   }
   out << "static std::string native_value_to_debug_string("
@@ -2672,6 +2839,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "    text << value.float_value;\n";
   out << "    return text.str();\n";
   out << "  }\n";
+  // Mirrors value_to_debug_string: quotes around the raw text, no escaping.
+  out << "  case NativeValue::Tag::String: return \"\\\"\" + "
+         "native_string_text(value) + \"\\\"\";\n";
   out << "  case NativeValue::Tag::Closure: return \"<closure>\";\n";
   out << "  case NativeValue::Tag::List: {\n";
   out << "    const auto &items = as_list(value).items;\n";
