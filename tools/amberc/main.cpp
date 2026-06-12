@@ -17,11 +17,14 @@
 #include "profile/wasm_accel.h"
 #include "runtime/vm.h"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <unistd.h>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -2433,6 +2436,148 @@ native_runtime_sources(const std::filesystem::path &root) {
   return out;
 }
 
+// The runtime sources are identical for every native build, so they are
+// compiled once into an archive cached under a key derived from the
+// compiler, flags, runtime sources, and all repo headers (over-hashing only
+// causes a spare rebuild, never a stale archive). The final link force-loads
+// the archive so static-initializer side effects keep parity with linking
+// every translation unit directly.
+const std::vector<std::string> &native_runtime_compile_flags() {
+  static const std::vector<std::string> flags = {"-std=c++17", "-O3",
+                                                 "-DNDEBUG"};
+  return flags;
+}
+
+std::filesystem::path native_runtime_cache_root() {
+  if (const char *env = std::getenv("AMBER_NATIVE_RT_CACHE")) {
+    if (*env != '\0') {
+      return env;
+    }
+  }
+  if (const char *home = std::getenv("HOME")) {
+    if (*home != '\0') {
+      return std::filesystem::path(home) / ".cache" / "amber" / "native-rt";
+    }
+  }
+  return std::filesystem::temp_directory_path() / "amber-native-rt";
+}
+
+std::string capture_command_output(const std::string &command) {
+  std::string out;
+  FILE *pipe = popen(command.c_str(), "r");
+  if (pipe == nullptr) {
+    return out;
+  }
+  char buffer[256];
+  while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    out += buffer;
+  }
+  pclose(pipe);
+  return out;
+}
+
+std::string
+native_runtime_cache_key(const std::string &cxx,
+                         const std::filesystem::path &runtime_root,
+                         const std::vector<std::string> &runtime_sources) {
+  std::ostringstream material;
+  material << "amber.native-rt.v1\n";
+  material << cxx << "\n";
+  material << capture_command_output(shell_single_quote(cxx) + " --version")
+           << "\n";
+  for (const std::string &flag : native_runtime_compile_flags()) {
+    material << flag << "\n";
+  }
+
+  std::vector<std::filesystem::path> hashed_files;
+  for (const std::string &source : runtime_sources) {
+    hashed_files.push_back(source);
+  }
+  const std::vector<std::string> header_dirs = {
+      "runtime", "bytecode", "frontend", "profile",
+      "package", "optimizer", "buildsys", "frozen"};
+  for (const std::string &dir : header_dirs) {
+    const std::filesystem::path root = runtime_root / dir;
+    if (!std::filesystem::exists(root)) {
+      continue;
+    }
+    for (const auto &entry :
+         std::filesystem::recursive_directory_iterator(root)) {
+      if (entry.is_regular_file() && entry.path().extension() == ".h") {
+        hashed_files.push_back(entry.path());
+      }
+    }
+  }
+  std::sort(hashed_files.begin(), hashed_files.end());
+  for (const std::filesystem::path &path : hashed_files) {
+    material << path.lexically_relative(runtime_root).generic_string() << "\n";
+    material << amber::lexer::sha256_hex(read_file(path.string())) << "\n";
+  }
+  return amber::lexer::sha256_hex(material.str());
+}
+
+std::filesystem::path
+ensure_native_runtime_archive(const std::string &cxx,
+                              const std::filesystem::path &runtime_root,
+                              const std::vector<std::string> &runtime_sources) {
+  const std::string key =
+      native_runtime_cache_key(cxx, runtime_root, runtime_sources);
+  const std::filesystem::path cache_root = native_runtime_cache_root();
+  const std::filesystem::path final_path =
+      cache_root / key / "libamber_rt.a";
+  if (std::filesystem::exists(final_path)) {
+    return final_path;
+  }
+
+  const std::filesystem::path temp_dir =
+      cache_root / (key + ".tmp." + std::to_string(::getpid()));
+  std::filesystem::create_directories(temp_dir);
+
+  std::vector<std::string> objects;
+  for (std::size_t i = 0; i < runtime_sources.size(); ++i) {
+    const std::filesystem::path object =
+        temp_dir / ("rt" + std::to_string(i) + ".o");
+    std::vector<std::string> command = {cxx};
+    const std::vector<std::string> &flags = native_runtime_compile_flags();
+    command.insert(command.end(), flags.begin(), flags.end());
+    command.push_back("-I");
+    command.push_back(runtime_root.string());
+    command.push_back("-c");
+    command.push_back(runtime_sources[i]);
+    command.push_back("-o");
+    command.push_back(object.string());
+    const std::string rendered = shell_command(command);
+    if (std::system(rendered.c_str()) != 0) {
+      std::filesystem::remove_all(temp_dir);
+      throw std::runtime_error("native runtime archive compile failed: " +
+                               rendered);
+    }
+    objects.push_back(object.string());
+  }
+
+  const std::filesystem::path temp_archive = temp_dir / "libamber_rt.a";
+  std::vector<std::string> archive_command = {"ar", "rcs",
+                                              temp_archive.string()};
+  archive_command.insert(archive_command.end(), objects.begin(),
+                         objects.end());
+  const std::string rendered_archive = shell_command(archive_command);
+  if (std::system(rendered_archive.c_str()) != 0) {
+    std::filesystem::remove_all(temp_dir);
+    throw std::runtime_error("native runtime archive creation failed: " +
+                             rendered_archive);
+  }
+
+  std::filesystem::create_directories(final_path.parent_path());
+  std::error_code rename_error;
+  std::filesystem::rename(temp_archive, final_path, rename_error);
+  std::filesystem::remove_all(temp_dir);
+  if (rename_error && !std::filesystem::exists(final_path)) {
+    throw std::runtime_error("native runtime archive install failed: " +
+                             final_path.string());
+  }
+  return final_path;
+}
+
 NativeExecutableBuildResult
 build_native_executable(const std::string &argv0,
                         const RunnableModuleArtifact &artifact,
@@ -2451,18 +2596,38 @@ build_native_executable(const std::string &argv0,
 
   const std::filesystem::path runtime_root = detect_native_runtime_root(argv0);
   const std::string cxx = choose_native_cxx();
-  std::vector<std::string> command = {
-      cxx,
-      "-std=c++17",
-      "-O3",
-      "-DNDEBUG",
-      "-I",
-      runtime_root.string(),
-      native_source_path.string(),
-  };
   const std::vector<std::string> runtime_sources =
       native_runtime_sources(runtime_root);
-  command.insert(command.end(), runtime_sources.begin(), runtime_sources.end());
+
+  std::filesystem::path runtime_archive;
+  try {
+    runtime_archive =
+        ensure_native_runtime_archive(cxx, runtime_root, runtime_sources);
+  } catch (const std::exception &) {
+    // Fall back to compiling the runtime sources into the executable
+    // directly (the pre-archive behavior) when the archive cannot be built,
+    // e.g. `ar` is unavailable.
+    runtime_archive.clear();
+  }
+
+  std::vector<std::string> command = {cxx};
+  const std::vector<std::string> &flags = native_runtime_compile_flags();
+  command.insert(command.end(), flags.begin(), flags.end());
+  command.push_back("-I");
+  command.push_back(runtime_root.string());
+  command.push_back(native_source_path.string());
+  if (!runtime_archive.empty()) {
+#if defined(__APPLE__)
+    command.push_back("-Wl,-force_load," + runtime_archive.string());
+#else
+    command.push_back("-Wl,--whole-archive");
+    command.push_back(runtime_archive.string());
+    command.push_back("-Wl,--no-whole-archive");
+#endif
+  } else {
+    command.insert(command.end(), runtime_sources.begin(),
+                   runtime_sources.end());
+  }
   command.push_back("-pthread");
   command.push_back("-o");
   command.push_back(output_path.string());
