@@ -331,3 +331,82 @@ delta column is the meaningful result: overflow checking costs ~3% in the
 interpreter, in line with the design expectation that interpreter dispatch
 dominates. Non-default profiles (wrapping/saturating/narrow widths) run
 VM-only; the native lane keeps default-profile semantics via bailout-restart.
+
+## Phase 2 interpreter tuning (2026-06-12)
+
+Same-day A/B against the pre-change HEAD build, best of 10 direct
+`build/iamber --eval-file` runs per workload (Darwin arm64). The serialized
+`.amberbc` format is unchanged; all changes are VM-internal. Conformance
+corpus (78), full `make test`, and `make backend-equivalence` (22) pass at
+every step.
+
+```text
+workload            baseline   step1    step2    final    speedup
+---------------------------------------------------------------------
+arithmetic            0.3127   0.1621   0.1611   0.1549     2.0x
+calls-collections     0.0145   0.0107   0.0110   0.0104     1.4x
+sha-digest            0.1509   0.0880   0.0717   0.0715     2.1x
+blocks micro (below)  3.50     —        —        0.54       6.5x
+```
+
+Step 1 — on-demand text source locations. `execute()` built a
+`RuntimeTextSourceLocationScope` around every `step()`: a frame walk, a
+source-span search, a file-string copy, and a TLS round trip per
+instruction, only so text output events could be attributed to module
+statements. Sampling profiles attributed ~25-35% of interpreter time to it
+on both arithmetic and sha-digest. Output attribution now resolves through a
+TLS provider installed once per `execute()` loop; text writers call
+`resolve_runtime_text_source_location()` at output-event time and get the
+same module-statement attribution.
+
+Step 2 — quickened list `[]=` + allocation-free selector aliasing. Send
+quickening previously stopped at one positional argument, so the sha-digest
+inner loops (`w[i] = ...`) paid the full generic send path: operand vector
+decode, args vector build, and ~24 selector string compares per store.
+`SendSeqIndexSet` now handles two-argument `[]=` sends on lists with the
+same fault classification as the generic handler (non-list receivers,
+frozen lists, and non-integer indexes still fall back).
+`canonical_collection_selector` returns references to static strings
+instead of allocating per call.
+
+Step 3 — block-call path. Builtin collection blocks (`each`/`map`/...)
+constructed a fresh nested `Vm` per block invocation, which deep-copied the
+entire `BcModule` (strings, symbols, const pool, all code objects),
+re-quickened the block code, and threw both away after one element. Block
+invocations now lease a pooled child Vm with append-only string/symbol
+table sync at the lease boundaries in both directions. The sync also fixes
+a correctness bug: strings interned inside a block escaped as
+`<invalid-string>` because the nested module copy was dropped (pinned in
+`corpus/run/block_string_intern_escape`). On top of that: per-frame pattern
+state (`prepared_seq_regs`/`prepared_map_regs`/`pending_pattern_bindings`)
+moved from `unordered_map` to flat vectors, so block-parameter prologues
+stop paying hash-node malloc/free per invocation; block args pass as
+`initializer_list` instead of heap vectors; per-opcode safepoints check
+atomic mirrors of the remote-free queue depth and pending-GC flag before
+touching the heap mutex; pooled block Vms skip the completed-frame register
+snapshot that `finish_return` captures for `execute()` consumers.
+
+The block microbench (not part of the polyglot suite; kept here for
+reproducibility — 200k iterations x 8-element `each` = 1.6M block calls):
+
+```amber
+def main():
+  data = [1, 2, 3, 4, 5, 6, 7, 8]
+  total = 0
+  i = 0
+  while i < 200000:
+    sum = 0
+    data.each |x|:
+      sum = sum + x
+    total = total + sum
+    i = i + 1
+  total
+```
+
+Remaining known hot spots after this pass (sampled on sha-digest and the
+block micro): interpreter dispatch in `step()`, the integer-sidecar
+read/write helpers, and `Frame` move/destroy traffic in the call path. The
+first two are the Phase 4 value-representation work; the frame moves need a
+`finish_return` restructure that did not pay for its risk in this pass.
+Quickening `LoadIvar`/`StoreIvar` (research plan §5.4) remains open and
+needs an ivar-heavy workload added here first to be measurable.
