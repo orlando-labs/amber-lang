@@ -915,6 +915,7 @@ std::string render_executable_script(const std::string &amberc_ref,
 struct NativeCppBuildPlan {
   std::string source;
   std::set<std::uint32_t> native_code_ids;
+  std::set<std::uint32_t> vm_callable_code_ids;
   std::string fallback_reason;
   std::string backend = "cpp-bytecode-direct-v1";
   bool entry_native = false;
@@ -928,6 +929,7 @@ struct NativeExecutableBuildResult {
   std::string backend;
   std::string cxx;
   std::size_t native_code_count = 0;
+  std::size_t vm_callable_code_count = 0;
   std::size_t total_code_count = 0;
   bool entry_native = false;
   bool uses_bytecode_fallback = true;
@@ -1005,9 +1007,11 @@ bool native_cpp_collection_selector(const std::string &selector,
 // anything it cannot execute (including checked-Int overflow) by throwing
 // NativeBailout and re-running the WHOLE program under the VM; that restart
 // is only sound while eligible code has produced no observable effects.
-// Do not admit output/IO/channel/shared-state selectors before per-function
-// VM fallback replaces the whole-program restart. `make backend-equivalence`
-// asserts the observable half of this invariant over corpus/run.
+// Do not admit output/IO/channel/shared-state selectors here. Code objects
+// rejected by this allowlist may still avoid the whole-program restart via
+// the per-function scalar VM bridge (`native_cpp_code_vm_callable` below),
+// which has its own effect-free constraint. `make backend-equivalence`
+// asserts the observable half of these invariants over corpus/run.
 bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                                const amber::bytecode::BcCode &code,
                                std::string *reason) {
@@ -1196,6 +1200,105 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       *reason = "unsupported opcode for direct native C++: " +
                 amber::bytecode::opcode_name(instruction.opcode);
       return false;
+    }
+  }
+  return true;
+}
+
+// Per-function VM fallback (amber.native-backend-equivalence.v1, step 2).
+//
+// A non-native code object may instead execute through an embedded VM call
+// at runtime — without restarting the whole program — when it provably
+// cannot observe or mutate state shared with the native lane and cannot
+// produce observable effects:
+//   - no captures (cross-function references in this design are captures);
+//   - no closure creation, calls, dynamic sends, or object/class state;
+//   - every send selector is from the pure compute allow-list below.
+// The call site additionally gates at runtime: all arguments must be
+// scalars (immutable, so the value-bridge copy cannot diverge) and the
+// result must convert back to a native value; otherwise the program falls
+// back to the whole-program restart, which stays sound because these
+// functions are effect-free.
+bool native_vm_callable_pure_selector(const std::string &selector) {
+  static const std::set<std::string> pure = {
+      // numeric / comparison / bitwise (Int and Float share selectors)
+      "+", "-", "*", "/", "%", "//", "<", ">", "<=", ">=", "==", "!=",
+      "<=>", "&", "|", "^", "<<", ">>", "**", "u+", "u-", "abs",
+      // conversions and formatting (allocate locally, no effects)
+      "to_str", "to_int", "to_float", "inspect", "cast", "cast?", "to_type",
+      // local collection/string reads and writes
+      "[]", "[]=", "[]?", "count", "length", "size", "first", "empty?",
+      "has_index?", "include?", "includes?", "contains?", "member?",
+      "keys", "values", "entries", "to_a", "to_array", "deconstruct",
+      "deconstruct_keys", "reverse", "sort", "uniq", "concat",
+  };
+  return pure.find(selector) != pure.end();
+}
+
+bool native_cpp_code_vm_callable(const amber::bytecode::BcModule &module,
+                                 const amber::bytecode::BcCode &code,
+                                 std::string *reason) {
+  if (!code.capture_layout.empty()) {
+    *reason = "captures reach shared state";
+    return false;
+  }
+  for (const amber::bytecode::Instruction &instruction : code.instructions) {
+    using amber::bytecode::Opcode;
+    switch (instruction.opcode) {
+    case Opcode::Call:
+    case Opcode::CallSpread:
+      *reason = "calls can reach output helpers";
+      return false;
+    case Opcode::SendDyn:
+    case Opcode::SendDynSpread:
+      *reason = "dynamic selector is not statically pure";
+      return false;
+    case Opcode::MakeClosure:
+      *reason = "closures escape the value bridge";
+      return false;
+    case Opcode::LoadUpval:
+    case Opcode::StoreUpval:
+      *reason = "upvalues reach shared state";
+      return false;
+    case Opcode::LoadIvar:
+    case Opcode::StoreIvar:
+    case Opcode::LoadCvar:
+    case Opcode::StoreCvar:
+      *reason = "object state is shared with the native lane";
+      return false;
+    case Opcode::Send:
+    case Opcode::SendSpread: {
+      std::uint32_t symbol_id = 0;
+      std::uint32_t pos_count = 0;
+      if (!operand_u32_value(instruction, 2, &symbol_id) ||
+          symbol_id >= module.symbols.size() ||
+          !operand_u32_value(instruction, 3, &pos_count)) {
+        *reason = "invalid SEND operand";
+        return false;
+      }
+      if (!native_vm_callable_pure_selector(module.symbols[symbol_id])) {
+        *reason = "selector `" + module.symbols[symbol_id] +
+                  "` is not in the pure allow-list";
+        return false;
+      }
+      const std::size_t per_arg =
+          instruction.opcode == Opcode::SendSpread ? 2U : 1U;
+      const std::size_t kw_index = 4U + pos_count * per_arg;
+      std::uint32_t kw_count = 0;
+      if (!operand_u32_value(instruction, kw_index, &kw_count) ||
+          kw_count != 0U ||
+          !operand_is_no_block(instruction,
+                               kw_index + 1U +
+                                   (instruction.opcode == Opcode::SendSpread
+                                        ? kw_count * 3U
+                                        : kw_count * 2U))) {
+        *reason = "keyword/block sends are not statically pure";
+        return false;
+      }
+      break;
+    }
+    default:
+      break;
     }
   }
   return true;
@@ -1887,7 +1990,14 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
       std::string reason;
       if (native_cpp_code_supported(module, code, &reason)) {
         plan.native_code_ids.insert(code.code_id);
-      } else if (first_reason.empty()) {
+        continue;
+      }
+      std::string vm_callable_reason;
+      if (native_cpp_code_vm_callable(module, code, &vm_callable_reason)) {
+        plan.vm_callable_code_ids.insert(code.code_id);
+        continue;
+      }
+      if (first_reason.empty()) {
         first_reason = "c" + std::to_string(code.code_id) + ": " + reason;
       }
     }
@@ -2206,6 +2316,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
         << "(std::initializer_list<NativeValue> args, "
            "NativeClosure *current_closure);\n";
   }
+  if (!plan.vm_callable_code_ids.empty()) {
+    out << "static NativeValue amber_vm_fallback_call(std::uint32_t code_id, "
+           "std::initializer_list<NativeValue> args);\n";
+  }
   out << "\nstatic NativeValue amber_native_call_code("
          "std::uint32_t code_id, std::initializer_list<NativeValue> args, "
          "NativeClosure *current_closure) {\n";
@@ -2213,6 +2327,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   for (std::uint32_t code_id : plan.native_code_ids) {
     out << "  case " << code_id << ": return "
         << native_cpp_function_name(code_id) << "(args, current_closure);\n";
+  }
+  for (std::uint32_t code_id : plan.vm_callable_code_ids) {
+    out << "  case " << code_id
+        << ": return amber_vm_fallback_call(" << code_id << ", args);\n";
   }
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
@@ -2304,6 +2422,73 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "&result.runtime_symbols) << \"\\n\";\n";
   out << "  return 0;\n";
   out << "}\n\n";
+  if (!plan.vm_callable_code_ids.empty()) {
+    // Per-function VM fallback: a lazily-created embedded world (module
+    // init NOT run — vm-callable functions cannot reach module state)
+    // executes single code objects across a scalar value bridge. Faults and
+    // non-convertible argument/result values throw NativeBailout, which
+    // remains a sound whole-program restart because vm-callable functions
+    // are effect-free by construction.
+    out << "static amber::runtime::RuntimeWorld &amber_vm_fallback_world() "
+           "{\n";
+    out << "  struct State {\n";
+    out << "    amber::bytecode::DecodeResult decoded;\n";
+    out << "    std::unique_ptr<amber::runtime::RuntimeWorld> world;\n";
+    out << "  };\n";
+    out << "  static State *state = [] {\n";
+    out << "    auto *out_state = new State();\n";
+    out << "    out_state->decoded = "
+           "amber::bytecode::deserialize_module(embedded_bytecode());\n";
+    out << "    if (!out_state->decoded.ok()) throw NativeBailout();\n";
+    out << "    out_state->world = "
+           "std::make_unique<amber::runtime::RuntimeWorld>("
+           "out_state->decoded.module);\n";
+    out << "    return out_state;\n";
+    out << "  }();\n";
+    out << "  return *state->world;\n";
+    out << "}\n\n";
+    out << "static NativeValue amber_vm_fallback_result("
+           "const amber::runtime::Value &value) {\n";
+    out << "  if (value.is_null()) return NativeValue::nullv();\n";
+    out << "  if (value.is_bool()) return "
+           "NativeValue::boolean(value.as_bool());\n";
+    out << "  if (value.is_integer()) return "
+           "NativeValue::integer(value.as_integer());\n";
+    out << "  if (value.is_list()) {\n";
+    out << "    const auto list = value.as_list();\n";
+    out << "    if (list == nullptr) throw NativeBailout();\n";
+    out << "    std::vector<NativeValue> items;\n";
+    out << "    items.reserve(list->items.size());\n";
+    out << "    for (const amber::runtime::Value &item : list->items) {\n";
+    out << "      items.push_back(amber_vm_fallback_result(item));\n";
+    out << "    }\n";
+    out << "    return NativeValue::list(std::move(items));\n";
+    out << "  }\n";
+    out << "  throw NativeBailout();\n";
+    out << "}\n\n";
+    out << "static NativeValue amber_vm_fallback_call(std::uint32_t code_id, "
+           "std::initializer_list<NativeValue> args) {\n";
+    out << "  std::vector<amber::runtime::Value> vm_args;\n";
+    out << "  vm_args.reserve(args.size());\n";
+    out << "  for (const NativeValue &arg : args) {\n";
+    out << "    switch (arg.tag) {\n";
+    out << "    case NativeValue::Tag::Null: "
+           "vm_args.push_back(amber::runtime::Value::null()); break;\n";
+    out << "    case NativeValue::Tag::Bool: "
+           "vm_args.push_back(amber::runtime::Value::boolean("
+           "arg.scalar_value != 0)); break;\n";
+    out << "    case NativeValue::Tag::Integer: "
+           "vm_args.push_back(amber::runtime::Value::integer("
+           "arg.scalar_value)); break;\n";
+    out << "    default: throw NativeBailout();\n";
+    out << "    }\n";
+    out << "  }\n";
+    out << "  const amber::runtime::ExecutionResult result = "
+           "amber_vm_fallback_world().execute(code_id, vm_args);\n";
+    out << "  if (!result.ok()) throw NativeBailout();\n";
+    out << "  return amber_vm_fallback_result(result.value);\n";
+    out << "}\n\n";
+  }
   out << "static std::string native_value_to_debug_string("
          "const NativeValue &value) {\n";
   out << "  switch (value.tag) {\n";
@@ -2645,6 +2830,7 @@ build_native_executable(const std::string &argv0,
   result.backend = plan.backend;
   result.cxx = cxx;
   result.native_code_count = plan.native_code_ids.size();
+  result.vm_callable_code_count = plan.vm_callable_code_ids.size();
   result.total_code_count = artifact.module.code_objects.size();
   result.entry_native = plan.entry_native;
   result.uses_bytecode_fallback = plan.uses_bytecode_fallback;
@@ -2800,6 +2986,8 @@ std::string executable_build_result_to_json(
       << ",\n";
   out << "  \"native_code_count\": "
       << (native == nullptr ? 0U : native->native_code_count) << ",\n";
+  out << "  \"vm_fallback_code_count\": "
+      << (native == nullptr ? 0U : native->vm_callable_code_count) << ",\n";
   out << "  \"bytecode_code_count\": "
       << (native == nullptr ? 0U : native->total_code_count) << ",\n";
   out << "  \"bytecode_fallback\": "
