@@ -5064,6 +5064,9 @@ public:
   }
 
   std::uint64_t drain_remote_frees(std::uint64_t worker_id) {
+    if (remote_free_pending_.load(std::memory_order_acquire) == 0) {
+      return 0;
+    }
     std::deque<RemoteFree> pending;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -5073,6 +5076,7 @@ public:
       if (count == 0) {
         return 0;
       }
+      remote_free_pending_.fetch_sub(count, std::memory_order_acq_rel);
       stats_.remote_queue_depth -= count;
       stats_.remote_frees_drained += count;
       for (const RemoteFree &entry : pending) {
@@ -5162,6 +5166,7 @@ public:
 
     std::lock_guard<std::mutex> lock(mutex_);
     pending_gc_cycle_.reset();
+    gc_request_pending_.store(false, std::memory_order_release);
     ++stats_.gc_cycles;
     if (from_safepoint) {
       ++stats_.gc_safepoint_collections;
@@ -5309,10 +5314,14 @@ public:
   void request_garbage_collection(RuntimeGcCycle cycle) {
     std::lock_guard<std::mutex> lock(mutex_);
     pending_gc_cycle_ = cycle;
+    gc_request_pending_.store(true, std::memory_order_release);
     ++stats_.gc_requested;
   }
 
   std::optional<RuntimeGcCycle> pending_gc_request() const {
+    if (!gc_request_pending_.load(std::memory_order_acquire)) {
+      return std::nullopt;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     return pending_gc_cycle_;
   }
@@ -5833,6 +5842,7 @@ private:
     std::lock_guard<std::mutex> lock(mutex_);
     ArenaState &arena = arena_for_worker(entry.owner_worker_id);
     arena.remote_frees.push_back(entry);
+    remote_free_pending_.fetch_add(1, std::memory_order_release);
     ++stats_.remote_frees_queued;
     ++stats_.remote_queue_depth;
   }
@@ -6075,6 +6085,7 @@ private:
           pending.swap(arena.remote_frees);
           const std::uint64_t count =
               static_cast<std::uint64_t>(pending.size());
+          remote_free_pending_.fetch_sub(count, std::memory_order_acq_rel);
           stats_.remote_queue_depth -= count;
           stats_.remote_frees_drained += count;
           for (const RemoteFree &entry : pending) {
@@ -6120,6 +6131,10 @@ private:
   std::unordered_map<std::uint64_t, NativeWaitRecord> native_waits_;
   std::shared_ptr<ShapeDescriptor> dead_shape_;
   std::optional<RuntimeGcCycle> pending_gc_cycle_;
+  // Lock-free mirrors of the queue depth and pending-GC flag so per-opcode
+  // safepoints skip the heap mutex when there is nothing to do.
+  std::atomic<std::uint64_t> remote_free_pending_{0};
+  std::atomic<bool> gc_request_pending_{false};
 };
 
 RuntimeHeap::RuntimeHeap() : impl_(std::make_shared<Impl>()) {}
@@ -7623,6 +7638,63 @@ struct PendingThrow {
   Value value = Value::null();
 };
 
+// Register-keyed per-frame map for pattern state. These hold at most a
+// handful of entries at a time, so a flat vector beats unordered_map: finds
+// are short linear scans and clear() keeps capacity, so pooled frames stop
+// paying hash-node malloc/free on every pattern prologue.
+template <typename T> class FlatRegMap {
+public:
+  using Entry = std::pair<std::uint32_t, T>;
+  using iterator = typename std::vector<Entry>::iterator;
+  using const_iterator = typename std::vector<Entry>::const_iterator;
+
+  iterator begin() { return entries_.begin(); }
+  iterator end() { return entries_.end(); }
+  const_iterator begin() const { return entries_.begin(); }
+  const_iterator end() const { return entries_.end(); }
+  bool empty() const { return entries_.empty(); }
+  std::size_t size() const { return entries_.size(); }
+  void clear() { entries_.clear(); }
+
+  iterator find(std::uint32_t key) {
+    return std::find_if(entries_.begin(), entries_.end(),
+                        [key](const Entry &entry) {
+                          return entry.first == key;
+                        });
+  }
+
+  const_iterator find(std::uint32_t key) const {
+    return std::find_if(entries_.begin(), entries_.end(),
+                        [key](const Entry &entry) {
+                          return entry.first == key;
+                        });
+  }
+
+  T &operator[](std::uint32_t key) {
+    iterator found = find(key);
+    if (found != entries_.end()) {
+      return found->second;
+    }
+    entries_.emplace_back(key, T{});
+    return entries_.back().second;
+  }
+
+  std::size_t erase(std::uint32_t key) {
+    iterator found = find(key);
+    if (found == entries_.end()) {
+      return 0;
+    }
+    if (found + 1 != entries_.end()) {
+      *found = std::move(entries_.back());
+    }
+    entries_.pop_back();
+    return 1;
+  }
+
+private:
+  std::vector<Entry> entries_;
+};
+
 struct PreservedRegister {
   std::uint32_t reg = 0;
   Value value = Value::null();
@@ -7651,9 +7723,9 @@ struct Frame {
   std::optional<Value> pending_exception_on_return;
   std::optional<PendingThrow> pending_throw_on_return;
   std::vector<PreservedRegister> preserved_registers_on_return;
-  std::unordered_map<std::uint32_t, PreparedSeqState> prepared_seq_regs;
-  std::unordered_map<std::uint32_t, PreparedMapState> prepared_map_regs;
-  std::unordered_map<std::uint32_t, Value> pending_pattern_bindings;
+  FlatRegMap<PreparedSeqState> prepared_seq_regs;
+  FlatRegMap<PreparedMapState> prepared_map_regs;
+  FlatRegMap<Value> pending_pattern_bindings;
 };
 
 struct MethodTableDescriptor {
@@ -9483,7 +9555,7 @@ private:
 
   std::optional<Value> call_block_to_value(const Frame &frame,
                                            const Value &block,
-                                           const std::vector<Value> &args) {
+                                           std::initializer_list<Value> args) {
     if (block.is_null()) {
       set_fault(frame, "TypeError", "builtin collection SEND requires block");
       return std::nullopt;
@@ -9506,18 +9578,101 @@ private:
       return std::nullopt;
     }
 
-    Vm nested(module_, state_, module_id_, world_options_, capabilities_,
-              effects_, trace_recorder_);
-    nested.push_frame(*code, args, closure->captures, closure->self,
-                      Value::null(), std::nullopt);
+    BlockVmLease lease = acquire_block_vm();
+    Vm &nested = *lease.vm;
+    nested.push_frame_from_args(*code, args.begin(), args.size(),
+                                closure->captures, closure->self, Value::null(),
+                                std::nullopt);
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
       nested.step();
     }
+    merge_runtime_names_from(nested);
     if (nested.fault_.has_value()) {
       fault_ = nested.fault_;
       return std::nullopt;
     }
-    return nested.final_value_;
+    return std::move(nested.final_value_);
+  }
+
+  // Builtin blocks execute on a pooled child Vm instead of constructing a
+  // fresh Vm (and deep-copying the module) per invocation. The pool behaves
+  // as a stack so re-entrant builtin-block nesting on this Vm gets distinct
+  // children. String/symbol tables are append-only; syncing the missing
+  // suffix in both directions keeps the child tables identical to ours at
+  // every lease boundary, so runtime-interned ids stay valid across the
+  // block boundary in both directions.
+  struct BlockVmLease {
+    Vm *owner = nullptr;
+    std::unique_ptr<Vm> vm;
+    BlockVmLease() = default;
+    BlockVmLease(BlockVmLease &&other) noexcept
+        : owner(other.owner), vm(std::move(other.vm)) {
+      other.owner = nullptr;
+    }
+    BlockVmLease &operator=(const BlockVmLease &) = delete;
+    ~BlockVmLease() {
+      if (owner == nullptr || vm == nullptr) {
+        return;
+      }
+      // A task-cancellation exception can unwind through the step loop and
+      // leave frames behind; drop them so the next lease starts clean.
+      vm->frames_.clear();
+      vm->fault_ = std::nullopt;
+      vm->final_value_ = Value::null();
+      owner->block_vm_pool_.push_back(std::move(vm));
+    }
+  };
+
+  BlockVmLease acquire_block_vm() {
+    BlockVmLease lease;
+    lease.owner = this;
+    if (!block_vm_pool_.empty()) {
+      lease.vm = std::move(block_vm_pool_.back());
+      block_vm_pool_.pop_back();
+      sync_runtime_names_to(*lease.vm);
+    } else {
+      lease.vm =
+          std::make_unique<Vm>(module_, state_, module_id_, world_options_,
+                               capabilities_, effects_, trace_recorder_);
+      // Block results flow through final_value_; nobody reads the completed
+      // register snapshot, so skip the per-return register copy.
+      lease.vm->capture_completed_frames_ = false;
+    }
+    return lease;
+  }
+
+  void sync_runtime_names_to(Vm &nested) const {
+    if (nested.module_.strings.size() < module_.strings.size()) {
+      nested.module_.strings.insert(
+          nested.module_.strings.end(),
+          module_.strings.begin() +
+              static_cast<std::ptrdiff_t>(nested.module_.strings.size()),
+          module_.strings.end());
+    }
+    if (nested.module_.symbols.size() < module_.symbols.size()) {
+      nested.module_.symbols.insert(
+          nested.module_.symbols.end(),
+          module_.symbols.begin() +
+              static_cast<std::ptrdiff_t>(nested.module_.symbols.size()),
+          module_.symbols.end());
+    }
+  }
+
+  void merge_runtime_names_from(const Vm &nested) {
+    if (module_.strings.size() < nested.module_.strings.size()) {
+      module_.strings.insert(
+          module_.strings.end(),
+          nested.module_.strings.begin() +
+              static_cast<std::ptrdiff_t>(module_.strings.size()),
+          nested.module_.strings.end());
+    }
+    if (module_.symbols.size() < nested.module_.symbols.size()) {
+      module_.symbols.insert(
+          module_.symbols.end(),
+          nested.module_.symbols.begin() +
+              static_cast<std::ptrdiff_t>(module_.symbols.size()),
+          nested.module_.symbols.end());
+    }
   }
 
   bool apply_write_barrier(const Frame &frame, const Value &owner,
@@ -11271,7 +11426,7 @@ private:
     return frame;
   }
 
-  void recycle_frame(Frame frame) {
+  void recycle_frame(Frame &&frame) {
     if (frame.code == nullptr) {
       return;
     }
@@ -17045,8 +17200,9 @@ private:
       value = *frame.return_override;
     }
     const bool capture_completed_frame =
-        frames_.size() == 1U ||
-        (frame.code != nullptr && frame.code->kind == CodeKind::Module);
+        capture_completed_frames_ &&
+        (frames_.size() == 1U ||
+         (frame.code != nullptr && frame.code->kind == CodeKind::Module));
     const bool merge_registers = frame.merge_registers_to_caller;
     if (capture_completed_frame || merge_registers) {
       materialize_integer_regs(frame);
@@ -27028,6 +27184,7 @@ private:
   std::unordered_map<std::uint32_t, QuickCode> quick_codes_;
   std::unordered_map<std::uint32_t, DirectClosureKind> direct_closure_kinds_;
   std::unordered_map<std::uint32_t, std::vector<Frame>> frame_pool_;
+  std::vector<std::unique_ptr<Vm>> block_vm_pool_;
   std::vector<Frame> frames_;
   // Set when this Vm executes inside a property arm of an outer Vm (nested
   // executions inherit the non-suspendable dynamic extent).
@@ -27036,6 +27193,9 @@ private:
   std::vector<Value> last_completed_regs_;
   std::vector<std::uint8_t> last_completed_initialized_;
   Value final_value_ = Value::null();
+  // Pooled block Vms set this false: block results flow through
+  // final_value_ and nothing consumes their completed-frame snapshots.
+  bool capture_completed_frames_ = true;
   // Module numeric profile (amber.numeric-profile.v1) resolved from module
   // attrs ("amber.numeric.int"/"amber.numeric.overflow"); defaults describe
   // the default profile Int64/checked. `numeric_profile_error_` carries an
