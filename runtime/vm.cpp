@@ -7600,6 +7600,7 @@ enum class QuickOpcode : std::uint8_t {
   SendIShl,
   SendIShr,
   SendSeqIndex,
+  SendSeqIndexSet,
   SendSeqCount,
   SendSeqFirst,
 };
@@ -10559,12 +10560,17 @@ private:
       if (!quick_operand_u32(insn, 0, &a) || !quick_operand_u32(insn, 1, &b) ||
           !quick_operand_u32(insn, 2, &selector_id) ||
           !quick_operand_u32(insn, 3, &pos_count) ||
-          selector_id >= module.symbols.size() || pos_count > 1U) {
+          selector_id >= module.symbols.size() || pos_count > 2U) {
         break;
       }
 
       std::size_t operand_index = 4;
-      if (pos_count == 1U && !quick_operand_u32(insn, operand_index++, &c)) {
+      if (pos_count >= 1U && !quick_operand_u32(insn, operand_index++, &c)) {
+        break;
+      }
+      std::uint32_t second_arg_reg = 0;
+      if (pos_count == 2U &&
+          !quick_operand_u32(insn, operand_index++, &second_arg_reg)) {
         break;
       }
 
@@ -10594,10 +10600,15 @@ private:
       }
 
       const std::string &selector = module.symbols[selector_id];
-      const std::string collection_selector =
+      const std::string &collection_selector =
           canonical_collection_selector(selector);
       imm = static_cast<std::int64_t>(pos_count);
-      if (pos_count == 1U) {
+      if (pos_count == 2U) {
+        if (collection_selector == "[]=") {
+          out.quick_opcode = QuickOpcode::SendSeqIndexSet;
+          imm = static_cast<std::int64_t>(second_arg_reg);
+        }
+      } else if (pos_count == 1U) {
         if (selector == "+") {
           out.quick_opcode = QuickOpcode::SendIAdd;
           out.opcode = Opcode::IAdd;
@@ -13187,44 +13198,55 @@ private:
            }) != items.end();
   }
 
-  static std::string
+  // Returns a reference to a static canonical name (or `selector` itself)
+  // so hot send paths never allocate for alias resolution.
+  static const std::string &
   canonical_collection_selector(const std::string &selector) {
+    static const std::string kMap = "map";
+    static const std::string kFlatMap = "flat_map";
+    static const std::string kSelect = "select";
+    static const std::string kFind = "find";
+    static const std::string kReduce = "reduce";
+    static const std::string kInclude = "include?";
+    static const std::string kEach = "each";
+    static const std::string kToA = "to_a";
+    static const std::string kCount = "count";
     if (selector == "collect") {
-      return "map";
+      return kMap;
     }
     if (selector == "collect_concat") {
-      return "flat_map";
+      return kFlatMap;
     }
     if (selector == "filter" || selector == "find_all") {
-      return "select";
+      return kSelect;
     }
     if (selector == "detect") {
-      return "find";
+      return kFind;
     }
     if (selector == "inject") {
-      return "reduce";
+      return kReduce;
     }
     if (selector == "member?" || selector == "includes?" ||
         selector == "has_key?" || selector == "key?") {
-      return "include?";
+      return kInclude;
     }
     if (selector == "each_slice") {
-      return "each";
+      return kEach;
     }
     if (selector == "entries") {
-      return "to_a";
+      return kToA;
     }
     if (selector == "to_array") {
-      return "to_a";
+      return kToA;
     }
     if (selector == "length" || selector == "size") {
-      return "count";
+      return kCount;
     }
     return selector;
   }
 
   static bool collection_size_selector(const std::string &selector) {
-    const std::string canonical = canonical_collection_selector(selector);
+    const std::string &canonical = canonical_collection_selector(selector);
     return canonical == "count";
   }
 
@@ -21802,7 +21824,7 @@ private:
         set_fault(frame, "TypeError", "threaded collection is null");
         return SendStatus::Faulted;
       }
-      const std::string collection_selector =
+      const std::string &collection_selector =
           canonical_collection_selector(selector);
       if (collection_selector == "map" || collection_selector == "select" ||
           collection_selector == "reject" ||
@@ -21997,7 +22019,7 @@ private:
       return false;
     };
 
-    const std::string collection_selector =
+    const std::string &collection_selector =
         canonical_collection_selector(selector);
     auto collection_selector_in =
         [&](std::initializer_list<const char *> names) -> bool {
@@ -24208,7 +24230,7 @@ private:
                                        std::uint32_t dst,
                                        std::uint32_t recv_reg,
                                        const std::string &selector) {
-    const std::string collection_selector =
+    const std::string &collection_selector =
         canonical_collection_selector(selector);
     const bool collection_fast_selector =
         collection_selector == "[]" || collection_selector == "count" ||
@@ -24665,6 +24687,7 @@ private:
                                           std::int64_t pos_count) {
     std::int64_t integer_arg = 0;
     if (opcode == QuickOpcode::SendSeqIndex ||
+        opcode == QuickOpcode::SendSeqIndexSet ||
         (opcode == QuickOpcode::SendSeqFirst && pos_count == 1)) {
       const bool arg_fast =
           read_integer_reg_unboxed(frame, arg_reg, &integer_arg);
@@ -24674,6 +24697,39 @@ private:
       if (!arg_fast) {
         return FastSendStatus::NotHandled;
       }
+    }
+
+    if (opcode == QuickOpcode::SendSeqIndexSet) {
+      // imm carries the value register. Mirrors the generic list `[]=`
+      // handler; non-list receivers, frozen lists, and non-integer indexes
+      // fall back to the generic send for identical fault classification.
+      const Value receiver = read_reg(frame, recv_reg);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      if (!receiver.is_list()) {
+        return FastSendStatus::NotHandled;
+      }
+      const std::shared_ptr<ListValue> list = receiver.as_list();
+      if (list == nullptr || list->frozen) {
+        return FastSendStatus::NotHandled;
+      }
+      if (!ensure_lifecycle_access(frame, receiver)) {
+        return FastSendStatus::Faulted;
+      }
+      const std::optional<std::size_t> normalized = normalize_sequence_index(
+          frame, integer_arg, list->items.size(), "list");
+      if (!normalized.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      Value stored = read_reg(frame, static_cast<std::uint32_t>(pos_count));
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      list->items[*normalized] = stored;
+      return write_reg_fast_plain(frame, dst, std::move(stored))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
     }
 
     const Value receiver = read_reg(frame, recv_reg);
@@ -25389,6 +25445,7 @@ private:
         break;
       }
       case QuickOpcode::SendSeqIndex:
+      case QuickOpcode::SendSeqIndexSet:
       case QuickOpcode::SendSeqCount:
       case QuickOpcode::SendSeqFirst: {
         const FastSendStatus status =
