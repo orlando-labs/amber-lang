@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1064,8 +1065,14 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
           module.const_pool[const_id].kind;
       if (kind != amber::bytecode::ConstantKind::Null &&
           kind != amber::bytecode::ConstantKind::Bool &&
-          kind != amber::bytecode::ConstantKind::Integer) {
+          kind != amber::bytecode::ConstantKind::Integer &&
+          kind != amber::bytecode::ConstantKind::Float) {
         *reason = "non-scalar constants still use VM fallback";
+        return false;
+      }
+      if (kind == amber::bytecode::ConstantKind::Float &&
+          !std::isfinite(module.const_pool[const_id].float_value)) {
+        *reason = "non-finite float constants still use VM fallback";
         return false;
       }
       break;
@@ -1215,10 +1222,10 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
 //   - no closure creation, calls, dynamic sends, or object/class state;
 //   - every send selector is from the pure compute allow-list below.
 // The call site additionally gates at runtime: all arguments must be
-// scalars (immutable, so the value-bridge copy cannot diverge) and the
-// result must convert back to a native value; otherwise the program falls
-// back to the whole-program restart, which stays sound because these
-// functions are effect-free.
+// scalars (null/bool/Int/Float — immutable, so the value-bridge copy
+// cannot diverge) and the result must convert back to a native value;
+// otherwise the program falls back to the whole-program restart, which
+// stays sound because these functions are effect-free.
 bool native_vm_callable_pure_selector(const std::string &selector) {
   static const std::set<std::string> pure = {
       // numeric / comparison / bitwise (Int and Float share selectors)
@@ -1314,6 +1321,12 @@ native_cpp_constant_expr(const amber::bytecode::Constant &constant) {
            (constant.bool_value ? "true" : "false") + ")";
   case amber::bytecode::ConstantKind::Integer:
     return "NativeValue::integer(" + cpp_decimal_i64(constant.int_value) + ")";
+  case amber::bytecode::ConstantKind::Float: {
+    // Hexfloat round-trips the double bit-exactly through the C++ compiler.
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%a", constant.float_value);
+    return std::string("NativeValue::floating(") + buffer + ")";
+  }
   default:
     return "NativeValue::nullv()";
   }
@@ -1584,59 +1597,44 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       const std::string selector = module.symbols[symbol_id];
       if (selector == "+") {
-        write_reg_stmt(dst, "NativeValue::integer(checked_add_int64(as_int(" +
-                                read_reg_expr(recv) + "), as_int(" +
-                                read_reg_expr(arg) + ")))");
+        write_reg_stmt(dst, "numeric_add(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "-") {
-        write_reg_stmt(dst, "NativeValue::integer(checked_sub_int64(as_int(" +
-                                read_reg_expr(recv) + "), as_int(" +
-                                read_reg_expr(arg) + ")))");
+        write_reg_stmt(dst, "numeric_sub(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "*") {
-        write_reg_stmt(dst, "NativeValue::integer(checked_mul_int64(as_int(" +
-                                read_reg_expr(recv) + "), as_int(" +
-                                read_reg_expr(arg) + ")))");
+        write_reg_stmt(dst, "numeric_mul(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "/") {
-        write_reg_stmt(dst, "NativeValue::integer(checked_div_int64(as_int(" +
-                                read_reg_expr(recv) + "), as_int(" +
-                                read_reg_expr(arg) + ")))");
+        write_reg_stmt(dst, "numeric_div(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "%") {
-        out << "  if (as_int(" << read_reg_expr(arg)
-            << ") == 0) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(floor_mod_int64(as_int(" +
-                                read_reg_expr(recv) + "), as_int(" +
-                                read_reg_expr(arg) + ")))");
+        write_reg_stmt(dst, "numeric_mod(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "//") {
-        write_reg_stmt(dst, "NativeValue::integer(floor_div_int64(as_int(" +
-                                read_reg_expr(recv) + "), as_int(" +
-                                read_reg_expr(arg) + ")))");
+        write_reg_stmt(dst, "numeric_floor_div(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "<") {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(recv) + ") < as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "numeric_lt(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == ">") {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(recv) + ") > as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "numeric_gt(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "<=") {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(recv) + ") <= as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "numeric_le(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == ">=") {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(recv) + ") >= as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "numeric_ge(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "==") {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(recv) + ") == as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", false)");
       } else if (selector == "!=") {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(recv) + ") != as_int(" +
-                                read_reg_expr(arg) + "))");
+        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", true)");
       } else if (selector == "<=>") {
-        write_reg_stmt(dst, "NativeValue::integer(compare_int64(as_int(" +
-                                read_reg_expr(recv) + "), as_int(" +
-                                read_reg_expr(arg) + ")))");
+        write_reg_stmt(dst, "numeric_cmp(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "&") {
         write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
                                 read_reg_expr(recv) + "), as_int(" +
@@ -2058,6 +2056,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include \"bytecode/format.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
   out << "#include <array>\n";
+  out << "#include <cmath>\n";
   out << "#include <cstdint>\n";
   out << "#include <exception>\n";
   out << "#include <initializer_list>\n";
@@ -2078,9 +2077,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeClosure;\n";
   out << "struct NativeCell;\n\n";
   out << "struct NativeValue {\n";
-  out << "  enum class Tag { Null, Bool, Integer, List, Closure };\n";
+  out << "  enum class Tag { Null, Bool, Integer, Float, List, Closure };\n";
   out << "  Tag tag;\n";
-  out << "  union { std::int64_t scalar_value; void *heap_value; };\n";
+  out << "  union { std::int64_t scalar_value; double float_value; "
+         "void *heap_value; };\n";
   out << "  NativeValue() : tag(Tag::Null), scalar_value(0) {}\n";
   out << "  static NativeValue nullv() { return {}; }\n";
   out << "  static NativeValue boolean(bool value) { NativeValue out; out.tag "
@@ -2088,6 +2088,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Tag::Bool; out.scalar_value = value ? 1 : 0; return out; }\n";
   out << "  static NativeValue integer(std::int64_t value) { NativeValue out; "
          "out.tag = Tag::Integer; out.scalar_value = value; return out; }\n";
+  out << "  static NativeValue floating(double value) { NativeValue out; "
+         "out.tag = Tag::Float; out.float_value = value; return out; }\n";
   out << "  static NativeValue list(std::vector<NativeValue> items);\n";
   out << "  static NativeValue closure(NativeClosure *value);\n";
   out << "};\n\n";
@@ -2311,6 +2313,167 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return static_cast<std::int64_t>("
          "static_cast<std::uint64_t>(lhs) >> rhs);\n";
   out << "}\n\n";
+  // Polymorphic numeric helpers mirroring try_apply_scalar_send: Int/Int
+  // stays exact (checked per the default numeric profile), any Int/Float mix
+  // promotes to double, anything non-numeric bails to the VM. Float division
+  // and modulo by zero bail so the VM raises the language-level
+  // ZeroDivisionError.
+  out << "static bool numeric_tag(const NativeValue &value) {\n";
+  out << "  return value.tag == NativeValue::Tag::Integer || "
+         "value.tag == NativeValue::Tag::Float;\n";
+  out << "}\n\n";
+  out << "static double as_double_numeric(const NativeValue &value) {\n";
+  out << "  return value.tag == NativeValue::Tag::Integer ? "
+         "static_cast<double>(value.scalar_value) : value.float_value;\n";
+  out << "}\n\n";
+  out << "static std::int64_t compare_double_native(double lhs, double rhs) "
+         "{\n";
+  out << "  if (lhs < rhs) return -1;\n";
+  out << "  if (lhs > rhs) return 1;\n";
+  out << "  return 0;\n";
+  out << "}\n\n";
+  out << "static double floor_mod_double_native(double lhs, double rhs) {\n";
+  out << "  return lhs - std::floor(lhs / rhs) * rhs;\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_add(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(checked_add_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::floating(as_double_numeric(lhs) + "
+         "as_double_numeric(rhs));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_sub(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(checked_sub_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::floating(as_double_numeric(lhs) - "
+         "as_double_numeric(rhs));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_mul(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(checked_mul_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::floating(as_double_numeric(lhs) * "
+         "as_double_numeric(rhs));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_div(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(checked_div_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) {\n";
+  out << "    const double divisor = as_double_numeric(rhs);\n";
+  out << "    if (divisor == 0.0) throw NativeBailout();\n";
+  out << "    return NativeValue::floating(as_double_numeric(lhs) / "
+         "divisor);\n";
+  out << "  }\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_mod(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) {\n";
+  out << "    if (rhs.scalar_value == 0) throw NativeBailout();\n";
+  out << "    return NativeValue::integer(floor_mod_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  }\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) {\n";
+  out << "    const double divisor = as_double_numeric(rhs);\n";
+  out << "    if (divisor == 0.0) throw NativeBailout();\n";
+  out << "    return NativeValue::floating(floor_mod_double_native("
+         "as_double_numeric(lhs), divisor));\n";
+  out << "  }\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_floor_div(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(floor_div_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) {\n";
+  out << "    const double divisor = as_double_numeric(rhs);\n";
+  out << "    if (divisor == 0.0) throw NativeBailout();\n";
+  out << "    return NativeValue::floating(std::floor(as_double_numeric(lhs) "
+         "/ divisor));\n";
+  out << "  }\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_lt(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::boolean(lhs.scalar_value < rhs.scalar_value);\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::boolean(as_double_numeric(lhs) < "
+         "as_double_numeric(rhs));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_gt(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::boolean(lhs.scalar_value > rhs.scalar_value);\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::boolean(as_double_numeric(lhs) > "
+         "as_double_numeric(rhs));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_le(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::boolean(lhs.scalar_value <= rhs.scalar_value);\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::boolean(as_double_numeric(lhs) <= "
+         "as_double_numeric(rhs));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_ge(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::boolean(lhs.scalar_value >= rhs.scalar_value);\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::boolean(as_double_numeric(lhs) >= "
+         "as_double_numeric(rhs));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_eq(const NativeValue &lhs, "
+         "const NativeValue &rhs, bool negate) {\n";
+  out << "  bool equal;\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) equal = "
+         "lhs.scalar_value == rhs.scalar_value;\n";
+  out << "  else if (numeric_tag(lhs) && numeric_tag(rhs)) equal = "
+         "as_double_numeric(lhs) == as_double_numeric(rhs);\n";
+  out << "  else throw NativeBailout();\n";
+  out << "  return NativeValue::boolean(negate ? !equal : equal);\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_cmp(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(compare_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::integer(compare_double_native("
+         "as_double_numeric(lhs), as_double_numeric(rhs)));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
   for (std::uint32_t code_id : plan.native_code_ids) {
     out << "static NativeValue " << native_cpp_function_name(code_id)
         << "(std::initializer_list<NativeValue> args, "
@@ -2454,6 +2617,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
            "NativeValue::boolean(value.as_bool());\n";
     out << "  if (value.is_integer()) return "
            "NativeValue::integer(value.as_integer());\n";
+    out << "  if (value.is_float()) return "
+           "NativeValue::floating(value.as_float());\n";
     out << "  if (value.is_list()) {\n";
     out << "    const auto list = value.as_list();\n";
     out << "    if (list == nullptr) throw NativeBailout();\n";
@@ -2480,6 +2645,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
     out << "    case NativeValue::Tag::Integer: "
            "vm_args.push_back(amber::runtime::Value::integer("
            "arg.scalar_value)); break;\n";
+    out << "    case NativeValue::Tag::Float: "
+           "vm_args.push_back(amber::runtime::Value::floating("
+           "arg.float_value)); break;\n";
     out << "    default: throw NativeBailout();\n";
     out << "    }\n";
     out << "  }\n";
@@ -2497,6 +2665,13 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "\"true\" : \"false\";\n";
   out << "  case NativeValue::Tag::Integer: return "
          "std::to_string(value.scalar_value);\n";
+  // Mirrors value_to_debug_string: default ostream precision, so integral
+  // floats print without a decimal point.
+  out << "  case NativeValue::Tag::Float: {\n";
+  out << "    std::ostringstream text;\n";
+  out << "    text << value.float_value;\n";
+  out << "    return text.str();\n";
+  out << "  }\n";
   out << "  case NativeValue::Tag::Closure: return \"<closure>\";\n";
   out << "  case NativeValue::Tag::List: {\n";
   out << "    const auto &items = as_list(value).items;\n";

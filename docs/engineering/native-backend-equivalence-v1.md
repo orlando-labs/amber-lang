@@ -59,12 +59,12 @@ Soundness rests on three constraints, each enforced where stated:
    observe nor mutate state shared with the native lane, and module init
    need not run in the fallback world.
 2. **Bridge immutability (runtime):** all arguments must be scalars
-   (null/bool/Int); scalars are immutable, so the copy across the value
-   bridge cannot diverge. Any heap-valued argument throws `NativeBailout`
-   before the callee runs.
+   (null/bool/Int/Float); scalars are immutable, so the copy across the
+   value bridge cannot diverge. Any heap-valued argument throws
+   `NativeBailout` before the callee runs.
 3. **Restart compatibility (runtime):** faults and results that do not
-   convert back to native values (anything beyond null/bool/Int and lists
-   thereof) throw `NativeBailout`. The restart stays sound because
+   convert back to native values (anything beyond null/bool/Int/Float and
+   lists thereof) throw `NativeBailout`. The restart stays sound because
    vm-callable code is effect-free by constraint 1, and it reproduces full
    VM fault traces exactly.
 
