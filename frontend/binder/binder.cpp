@@ -1063,15 +1063,33 @@ private:
   }
 
   void visit_postfix_chain(int scope_index, const ast::Expr &expr) {
-    if (const ast::Expr *base = node_field(expr, "base")) {
+    const ast::Expr *base = node_field(expr, "base");
+    if (base != nullptr) {
       visit_expr(scope_index, *base);
     }
     const ast::ListField *tails = list_field(expr, "tails");
     if (tails == nullptr) {
       return;
     }
-    for (const std::unique_ptr<ast::Expr> &tail : tails->values) {
-      if (tail->kind == "AstTailCall" || tail->kind == "AstTailSafeCall") {
+    if (base != nullptr && base->kind == "AstName" &&
+        !tails->values.empty() &&
+        tails->values.front()->kind == "AstTailCall") {
+      const Binding *binding =
+          resolve(scope_index, string_value(*base, "name"));
+      if (binding != nullptr && binding_is_property(*binding)) {
+        diagnostic("AMB_PROP_CALLED_AS_METHOD", "error", "binder",
+                   "property `" + string_value(*base, "name") +
+                       "` is not a method; use `" +
+                       string_value(*base, "name") + "` or `" +
+                       string_value(*base, "name") +
+                       ".()` if the property value is callable",
+                   tails->values.front()->span);
+      }
+    }
+    for (std::size_t i = 0; i < tails->values.size(); ++i) {
+      const std::unique_ptr<ast::Expr> &tail = tails->values[i];
+      if (tail->kind == "AstTailCall" || tail->kind == "AstTailSafeCall" ||
+          tail->kind == "AstTailDotCall") {
         if (const ast::ListField *args = list_field(*tail, "args")) {
           for (const std::unique_ptr<ast::Expr> &arg : args->values) {
             visit_expr(scope_index, *arg);
@@ -1085,6 +1103,20 @@ private:
       } else if (tail->kind == "AstTailBlockSuffix") {
         if (const ast::Expr *block = node_field(*tail, "block")) {
           visit_expr(scope_index, *block);
+        }
+      } else if (tail->kind == "AstTailDotMember" ||
+                 tail->kind == "AstTailSafeMember") {
+        const std::string member_name = string_value(*tail, "name");
+        const bool followed_by_invocation =
+            i + 1 < tails->values.size() &&
+            (tails->values[i + 1]->kind == "AstTailCall" ||
+             tails->values[i + 1]->kind == "AstTailBlockSuffix");
+        if (!member_name.empty() && member_name.back() == '!' &&
+            !followed_by_invocation) {
+          diagnostic("W_BARE_BANG_CALL", "warning", "binder",
+                     "bare access invokes mutating-looking method `" +
+                         member_name + "`; prefer `" + member_name + "()`",
+                     tail->span);
         }
       }
     }

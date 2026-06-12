@@ -477,7 +477,18 @@ Amber фиксирует first-class callable references как часть core 
 fn(args...)
 ```
 
-Форма `fn.()` в язык не вводится и не является альтернативным spelling'ом. Точка остаётся только operator'ом member access / method send, а `fn(args...)` понижается в `HCall`.
+Дополнительно вводится chain-preserving postfix callable-call segment `.()` (RFC bare-nullary + dot-call, принят 2026-06-12):
+
+```amber
+expr.()
+expr.(arg1, arg2)
+expr.?.()
+expr.?.(arg1, arg2)
+```
+
+`expr.(args...)` наблюдаемо эквивалентен `(expr)(args...)`: сначала вычисляется `expr`, затем полученное значение вызывается через общий callable protocol (`HCall`). Это не method send: `obj.member()` остаётся explicit method send селектора `:member`, а `obj.member.()` означает member read / implicit nullary send с последующим вызовом полученного значения. Safe-вариант `expr.?.(args...)` при `expr == null` возвращает `null` без вызова. `.()` не может начинать выражение — это parser diagnostic `AMB_DOT_CALL_TARGET`. Вызов не-callable значения через `.()` даёт тот же `TypeError`, что и `fn(args...)` на не-callable.
+
+`fn(args...)` и `expr.(args...)` оба понижаются в `HCall`; `expr.call()` остаётся обычным method send селектора `:call`.
 
 Prefix `&` создаёт **callable reference object**, а не raw machine address. Пользователь не получает числовой адрес функции, FFI pointer или стабильный code pointer. Runtime вправе представлять callable reference как closure, descriptor object, send-reference, loader-backed entry или иной объект, если выполняется наблюдаемый callable contract.
 
@@ -6766,16 +6777,16 @@ A property descriptor is a named language-level member that may contain:
 1. a getter arm, exposed through ordinary access syntax;
 2. a setter arm, exposed through assignment syntax.
 
-The patch preserves the following existing design decisions:
+The patch preserves the following existing design decisions (as amended by the accepted bare-nullary + dot-call RFC, 2026-06-12):
 
-1. Ordinary callable values are invoked with `fn(args...)`.
-2. Ordinary functions and methods declared with `def` are not implicitly called by bare identifier/member access.
-3. `&target` creates an immutable callable reference object, not a raw machine address.
+1. Ordinary callable values are invoked with `fn(args...)` or with the chain-preserving dot-call `expr.(args...)`.
+2. Bare *identifiers* are ordinary binding reads and are never implicit call sites. Bare *member access* `receiver.name` resolves the member and may perform property get or an implicit zero-argument send when `name` is a syntactically nullary method (see the bare-nullary member access section).
+3. `&target` creates an immutable callable reference object, not a raw machine address, and never invokes the target.
 4. `Class(args...)` remains ordinary `HCall` / `CALL` over a callable class object and follows the constructor path.
 5. Parser output remains syntax-faithful. A property declaration must not be erased into an ordinary method declaration at AST level.
 6. HIR is the semantic-core representation and must lower property get/set operations explicitly, or into ordinary send/call semantics with preserved property markers.
 7. Deterministic diagnostics, stack traces, disassembly and golden outputs must not expose raw memory addresses.
-8. This section does not add hidden side effects to bare ordinary identifiers.
+8. This section does not add hidden side effects to bare ordinary identifiers (lexical binding reads remain value reads).
 
 Recommended insertion point: after the existing sections on functions/methods/classes and callable references, with cross-references from postfix member access, assignment semantics, HIR lowering, MOP/reflection and diagnostics.
 
@@ -6827,18 +6838,24 @@ settings.cache_dir
 clock.monotonic_time
 ```
 
-This is intentionally different from implicit nullary function calls:
+For bare *identifiers* this remains intentionally different from implicit nullary function calls:
 
 ```amber
 def f():
  42
 
-f # not f()
+f # binding read; not f()
 f() # ordinary call
 &f # callable reference
 ```
 
-Bare ordinary names remain value access, not hidden call sites.
+Bare ordinary identifiers remain value access, not hidden call sites. For *member access*, the accepted bare-nullary RFC additionally allows `receiver.name` to perform an implicit zero-argument send when `name` resolves to a syntactically nullary method, so `prop` and nullary `def` expose the same bare read surface:
+
+```amber
+collection.size # property get OR implicit nullary send
+collection.size() # explicit method send (error if `size` is a property)
+collection.size.() # call the value produced by `collection.size`
+```
 
 ---
 
@@ -6859,7 +6876,7 @@ Bare ordinary names remain value access, not hidden call sites.
 | Ordinary method | A method declared with `def`, invoked with call syntax or ordinary send syntax. |
 | Callable reference | A first-class callable object created by `&target`. |
 
-Normative distinction:
+Normative distinction (bare identifiers vs member access):
 
 ```amber
 def f():
@@ -6875,11 +6892,16 @@ f() # ordinary callable call
 g # property get; evaluates the getter
 ```
 
-For object members:
+For object members the read surface is uniform across member kinds:
 
 ```amber
-obj.g # property get if `g` is a readable property
+obj.g # property get if `g` is a readable property;
+ # implicit zero-argument send if `g` is a syntactically
+ # nullary method
 obj.g = x # property set if `g` is a writable property
+obj.g() # explicit method send; AMB_PROP_CALLED_AS_METHOD if `g`
+ # is a property
+obj.g.() # call the value produced by `obj.g`
 ```
 
 ---
@@ -7152,10 +7174,13 @@ Getter access is not a call expression and must not accept arguments:
 
 ```amber
 obj.size # property get
-obj.size() # call of property result only if `obj.size` first resolves to a callable value under ordinary expression rules; not a getter call syntax
+obj.size() # error: AMB_PROP_CALLED_AS_METHOD / TypeError when `size`
+ # is a property; explicit call punctuation is method-send
+ # syntax only
+obj.size.() # call the value produced by `obj.size` (dot-call)
 ```
 
-Implementations must not reinterpret `obj.size()` as `obj.size` getter invocation with call punctuation. The property access happens first; any following `(...)` calls the resulting value.
+Implementations must not reinterpret `obj.size()` as getter invocation with call punctuation, and must not interpret it as call-of-property-result. Explicit call punctuation on a property member is a deterministic diagnostic with a fix-it pointing to `obj.size` or `obj.size.()`. Call-of-result is spelled `obj.size.()`.
 
 ---
 
@@ -7701,7 +7726,7 @@ This section is source-compatible with existing Amber code unless that code alre
 
 `get` and `set` remain ordinary identifiers outside property arm-label position.
 
-No existing ordinary function or method becomes implicitly callable through bare access.
+Bare *identifiers* never become implicit call sites. Under the accepted bare-nullary RFC, bare *member access* `receiver.name` performs an implicit zero-argument send when `name` resolves to a syntactically nullary method; methods with any declared parameters (including defaults, rest, keyword or block parameters) are not bare-callable and diagnose `AMB_BARE_NON_NULLARY` / `ArgumentError`.
 
 Existing callable reference syntax remains unchanged:
 
@@ -7943,7 +7968,7 @@ prop f:
  get:...
 ```
 
-The extension deliberately does not make ordinary `def` callable through bare access. Property get and property set are explicit descriptor semantics, with syntax-faithful AST, deterministic binder validation, explicit HIR lowering and assignment behavior that returns the original RHS value.
+Property get and property set are explicit descriptor semantics, with syntax-faithful AST, deterministic binder validation, explicit HIR lowering and assignment behavior that returns the original RHS value. Together with the accepted bare-nullary RFC, the member read surface is uniform: `prop` and syntactically nullary `def` are read with the same bare spelling, while `prop` remains the only mechanism for assignability, validation on assignment, descriptor metadata/reflection and protocol participation (see the bare-nullary member access section).
 
 ## Attribute property sugar
 
@@ -8658,6 +8683,116 @@ This section is accepted with the following final decisions:
 10. Duplicate external member declarations are errors.
 11. Storage targets are restricted to direct instance field tokens.
 12. Computed behavior remains the responsibility of `prop`.
+
+## Bare-nullary member access and dot-call `expr.()`
+
+This section integrates the accepted RFC "Bare-call для nullary-методов и chained callable-call `expr.()`" (2026-06-12, `docs/engineering/rfc-bare-nullary-and-dotcall-v1.md`) together with its gap closures (`DESIGN-bare-nullary-gap-closures-2026-06-12.md`).
+
+### 1. Surface triad
+
+```amber
+obj.member # member read: property get OR implicit nullary method send
+obj.member() # explicit method send only
+obj.member.() # call the value produced by `obj.member`
+obj.member.call() # ordinary `:call` method send to the produced value
+```
+
+Safe variants follow the existing safe-navigation model:
+
+```amber
+obj.?.member
+obj.?.member()
+obj.member.?.()
+```
+
+`&target` never invokes the target. Bare *identifiers* (`f`, locals, import-created bindings) remain ordinary binding reads and are never implicit call sites.
+
+### 2. Member read resolution (lookup-then-kind)
+
+Resolution for `receiver.name` is a single linearized lookup; the kind of the nearest member governs behavior. Kind never reorders lookup and arms never merge across owners:
+
+1. Resolve `name` through the standard member linearization of the receiver's class — identical owner order to ordinary method send.
+2. The nearest owner declaring external member `name` fixes the member; farther owners are never consulted. Dispatch on its kind:
+ - readable property → property get (getter arm);
+ - write-only property → `AMB_PROP_MISSING_GETTER` / `WriteOnlyPropertyError`;
+ - syntactically nullary method → implicit zero-argument send;
+ - any other method → `AMB_BARE_NON_NULLARY` (static) / `ArgumentError` (dynamic);
+ - field accessor / readable binding → ordinary read.
+3. If no owner declares `name`, dynamic receivers take the ordinary zero-argument missing-member path (`method_missing(:name)`); otherwise `NoMethodError`. Statically known receivers should diagnose before runtime.
+
+A method is **syntactically nullary** when its declared signature is empty: no positional, default, rest, keyword or block parameters. Methods that merely *can* be called with zero arguments (e.g. all-defaults) are not bare-callable.
+
+Property assignment `receiver.name = value` uses the same single lookup: the nearest member must be a writable property; a read-only property diagnoses `AMB_PROP_MISSING_SETTER` / `ReadOnlyPropertyError`; assignment to a missing member is `NoMethodError` (no `name=` selector family exists, and `method_missing` does not participate in property set in v1).
+
+### 3. Explicit call on a property
+
+`obj.name(args...)` is method-send syntax only. When `name` resolves to a property, the implementation must emit `AMB_PROP_CALLED_AS_METHOD` (static) / `TypeError` (dynamic) with a fix-it pointing at `obj.name` and `obj.name.()`:
+
+```text
+TypeError: property `name` is not a method; use `name` or `name.()` if the
+property value is callable
+```
+
+Block suffix is call syntax and follows the same rule: a property member cannot take a block.
+
+### 4. Dot-call segment
+
+`expr.(args...)` ≡ `(expr)(args...)` as a chain-preserving postfix segment lowering to `HCall`. The AST preserves the distinction between method-call tails and dot-call tails (`AstTailDotCall`). `.()` cannot start an expression (`AMB_DOT_CALL_TARGET`). Calling a non-callable value raises the same `TypeError` as `fn(args...)` on a non-callable. `expr.call()` remains ordinary method send and is not special syntax.
+
+### 5. Namespace and class-side access
+
+Dotted access is member access regardless of receiver kind ("dot is a message; identifier is a value"):
+
+- `Build.version` where `version` is a syntactically nullary class-side method performs an implicit call; `Build.version()` is the explicit spelling.
+- Module-namespace access follows the same dispatch: a nullary module function invokes; a non-nullary one diagnoses `AMB_BARE_NON_NULLARY`; a value export is a plain read.
+- Consequence: `fn = Math.answer` binds the *result* of `answer`; extraction is spelled `fn = &Math.answer`.
+- Import-created local bindings (bare `c` after `import a.b.c`) are identifier reads and never invoke.
+
+### 6. Compatibility contract
+
+> The bare read form `x.name` is stable across `prop` ↔ nullary-`def` refactors. The explicit form `x.name()` is method-call syntax only and is stable only while `name` is method-shaped. Public APIs should document query members in bare form.
+
+The formatter normatively rewrites zero-argument explicit calls of `?`-suffixed predicates (`x.empty?()` → `x.empty?`). Other explicit nullary calls are left untouched: explicit parentheses remain a legitimate style for effectful operations. Bare access to a `!`-suffixed method warns (`W_BARE_BANG_CALL`); strict profiles may promote the warning to an error.
+
+### 7. Non-suspendable property arms
+
+Property getter and setter arms must not suspend. A suspension attempt (task sleep/yield/sync, task-handle wait, blocking channel send/recv, or any other scheduler yield point) inside a property arm raises `EffectViolationError` with a deterministic message:
+
+```text
+EffectViolationError: property getter `name` attempted to suspend
+(task.sleep); property arms are non-suspendable
+```
+
+Rules:
+
+1. The restriction attaches to the **declaration kind** (property arms), not access syntax: a nullary `def` invoked bare may still suspend, since `x.f` and `x.f()` must not differ in suspendability.
+2. The no-suspend region is a **dynamic extent**: it covers the arm body and everything it calls transitively, and ends when the arm's frames unwind. Exceptions propagating out of the arm are unaffected.
+3. Both arms are covered; a suspending setter would place a scheduling point inside assignment evaluation.
+4. Spawning a task from an arm is not suspension and is permitted; raising is permitted; runtime IO that suspends is forbidden by consequence.
+5. `class_prop`, module-level props, mixin props and `attr`-generated descriptors follow the same rule.
+6. There is no opt-out in v1; async properties are revisitable only alongside an explicit use-site suspension marker RFC.
+
+Consequence (with §11.5 of keyword spread): protocol-driven implicit reads never suspend, so spread/kwargs-view construction lowers to straight-line code.
+
+### 8. Protocol positions stay property-only
+
+Protocol positions (keyword spread `kwargs`, and any future protocol reads) require a **readable property** and never accept implicit nullary method sends. The human call surface is uniform; protocol participation is a declared capability. See keyword-spread §11.5 for the rationale and the required teaching hint.
+
+### 9. Diagnostics
+
+| Code | Phase | Situation |
+|---|---|---|
+| `AMB_BARE_NON_NULLARY` | runtime (static where provable) | bare member access resolves to a non-nullary method; dynamic twin `ArgumentError` |
+| `AMB_PROP_CALLED_AS_METHOD` | binder / runtime | call punctuation or block suffix applied to a property member; dynamic twin `TypeError` |
+| `AMB_DOT_CALL_TARGET` | parser | `.()` without a preceding postfix expression |
+| `AMB_PROP_SUSPEND` | runtime | suspension attempt inside a property arm; raises `EffectViolationError` |
+| `W_BARE_BANG_CALL` | binder, warning | bare access invokes a `!`-suffixed method |
+
+Runtime error classes `ReadOnlyPropertyError` and `WriteOnlyPropertyError` are registered and rescuable.
+
+### 10. Conformance anchors
+
+Conformance coverage lives in `corpus/run/bare_nullary_member`, `corpus/run/dot_call_member_result`, `corpus/run/prop_called_as_method`, `corpus/run/prop_non_suspendable` and `corpus/run/kwargs_spread_property_only`.
 
 ## Range step, materialization, negative indexing и Int#times
 
@@ -15280,9 +15415,9 @@ unless a future revision explicitly accepts arrays of pairs.
 
 Errors raised while evaluating the `kwargs` property propagate normally, but validation errors after property evaluation are attributed to the `**` spread site.
 
-##### 11.5. No implicit nullary method call
+##### 11.5. Protocol positions are property-only
 
-The protocol uses a property, not an implicit call to a method named `kwargs`.
+The protocol uses a property, not an implicit call to a method named `kwargs`. This is deliberate and survives the bare-nullary RFC: the human call surface reads `prop` and nullary `def` uniformly, but **protocol positions are capability declarations, not call sites** — participation must be declared with `prop`, never inferred from a method name. This prevents accidental protocol conformance (a class that happens to define a nullary method named `kwargs` does not silently become keyword-spreadable) and, combined with non-suspendable property arms, guarantees that protocol-driven implicit reads never suspend.
 
 If a class declares:
 
@@ -15291,14 +15426,22 @@ def kwargs():
  {mode::fast}
 ```
 
-then `fn(**obj)` does not implicitly call `obj.kwargs()` unless the language's property/method model separately defines such behavior. To participate, the class should declare:
+then `fn(**obj)` does not call `obj.kwargs()`. The diagnostic appends a teaching hint when this shape is detected:
+
+```text
+TypeError: keyword argument spread operand must expose a readable `kwargs`
+property; note: the class defines method `kwargs()`; keyword spread requires
+a readable property - declare `prop kwargs`
+```
+
+To participate, the class should declare:
 
 ```amber
 prop kwargs:
  {mode::fast}
 ```
 
-or expose an equivalent property descriptor.
+or expose an equivalent property descriptor. Future protocols must use the same "readable property" requirement so this question does not reopen per-protocol.
 
 ---
 
@@ -21839,7 +21982,9 @@ PatternList::= Pattern { "," Pattern } [ "," ]
  - safe member send (`obj.?.method`);
 - bare-call не открывается сразу после `]`, `)` или уже завершённого `BlockSuffix`;
 - bare-call не может пересекать `NEWLINE` на глубине скобок `0`;
-- если после `obj.field` нет call-tail и нет block suffix, это field access, а не вызов.
+- если после `obj.field` нет call-tail и нет block suffix, парсер выдаёт member read; семантически это property get, implicit nullary send или ordinary field read — решается binder/runtime по kind найденного member (см. раздел про bare-nullary member access), а не парсером;
+- block suffix — это call syntax: member, к которому присоединён block suffix, обязан быть method-kind; property + block suffix — diagnostic;
+- `.` непосредственно перед `(` начинает dot-call segment `expr.(args...)`, а не member access.
 
 Это даёт ожидаемое поведение:
 

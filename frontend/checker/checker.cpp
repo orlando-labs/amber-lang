@@ -1018,7 +1018,8 @@ private:
           first_member.empty()) {
         first_member = string_field(*tail, "name");
       }
-      if (tail->kind == "AstTailCall" || tail->kind == "AstTailSafeCall") {
+      if (tail->kind == "AstTailCall" || tail->kind == "AstTailSafeCall" ||
+          tail->kind == "AstTailDotCall") {
         has_call = true;
       }
     }

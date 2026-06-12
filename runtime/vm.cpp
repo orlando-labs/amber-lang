@@ -7639,6 +7639,10 @@ struct Frame {
   Value self = Value::null();
   Value block = Value::null();
   Value last_result = Value::null();
+  // Property arms are non-suspendable: while a frame marked here (or any
+  // frame above it) is live, scheduler suspension points must fault.
+  bool no_suspend_extent = false;
+  std::string no_suspend_label;
   std::optional<std::uint32_t> caller_result_reg;
   std::optional<std::uint32_t> active_call_pc;
   std::optional<Value> return_override;
@@ -8054,6 +8058,8 @@ constexpr const char *kRuntimeErrorNames[] = {
     "EffectViolationError",
     "DeterminismError",
     "ReplayDivergenceError",
+    "ReadOnlyPropertyError",
+    "WriteOnlyPropertyError",
 };
 
 constexpr std::uint16_t kRuntimeErrorCount =
@@ -11233,6 +11239,8 @@ private:
     frame.self = Value::null();
     frame.block = Value::null();
     frame.last_result = Value::null();
+    frame.no_suspend_extent = false;
+    frame.no_suspend_label.clear();
     frame.caller_result_reg.reset();
     frame.active_call_pc.reset();
     frame.return_override.reset();
@@ -11259,6 +11267,8 @@ private:
     frame.self = Value::null();
     frame.block = Value::null();
     frame.last_result = Value::null();
+    frame.no_suspend_extent = false;
+    frame.no_suspend_label.clear();
     frame.caller_result_reg.reset();
     frame.active_call_pc.reset();
     frame.return_override.reset();
@@ -12930,16 +12940,59 @@ private:
   }
 
   bool append_keyword_spread_entries(
-      const Frame &frame, const Value &value,
+      Frame &frame, const Value &value,
       std::vector<std::pair<std::uint32_t, Value>> *out) {
+    Value spread_source = value;
+    if (value.is_instance_object()) {
+      // User objects participate in keyword spread only through a readable
+      // `kwargs` property: protocol positions are capability declarations,
+      // never implicit nullary method sends.
+      const std::shared_ptr<InstanceValue> instance =
+          value.as_instance_object();
+      if (instance == nullptr) {
+        set_fault(frame, "TypeError", "instance value is null");
+        return false;
+      }
+      const bytecode::BcMethod *member = find_method_for_dispatch(
+          frame, instance->class_index, "kwargs", kMethodFlagInstance);
+      if (fault_.has_value()) {
+        return false;
+      }
+      if (member == nullptr ||
+          (member->flags & kMethodFlagPropertyGetter) == 0U) {
+        std::string message = "keyword argument spread operand must expose a "
+                              "readable `kwargs` property";
+        if (member != nullptr &&
+            (member->flags &
+             (kMethodFlagPropertyGetter | kMethodFlagPropertySetter)) == 0U &&
+            member->params.empty() && member->default_thunk_ids.empty()) {
+          message += "; note: the class defines method `kwargs()`; keyword "
+                     "spread requires a readable property - declare `prop "
+                     "kwargs`";
+        }
+        set_fault(frame, "TypeError", message);
+        return false;
+      }
+      const std::vector<Value> no_pos_args;
+      const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
+      const std::optional<Value> kwargs_value = execute_method_to_value(
+          frame, *member, no_pos_args, no_kw_args, value, Value::null(),
+          "property getter `kwargs`");
+      if (!kwargs_value.has_value()) {
+        return false;
+      }
+      spread_source = *kwargs_value;
+    }
     const std::optional<std::vector<MapEntry>> entries =
-        extract_map_entries(frame, value);
+        extract_map_entries(frame, spread_source);
     if (fault_.has_value()) {
       return false;
     }
     if (!entries.has_value()) {
       set_fault(frame, "TypeError",
-                "keyword argument spread requires Map or HashMap");
+                value.is_instance_object()
+                    ? "kwargs property returned a non keyword-spreadable value"
+                    : "keyword argument spread requires Map or HashMap");
       return false;
     }
     for (const MapEntry &entry : *entries) {
@@ -15921,6 +15974,35 @@ private:
     return true;
   }
 
+  // Non-suspendable property arms: returns the label of the innermost live
+  // property-arm frame when execution is currently inside one (dynamic
+  // extent, including frames pushed transitively and inherited nested Vms).
+  const std::string *active_no_suspend_label() const {
+    for (auto it = frames_.rbegin(); it != frames_.rend(); ++it) {
+      if (it->no_suspend_extent) {
+        return &it->no_suspend_label;
+      }
+    }
+    if (inherited_no_suspend_label_.has_value()) {
+      return &*inherited_no_suspend_label_;
+    }
+    return nullptr;
+  }
+
+  // Faults with EffectViolationError when a suspension point is reached
+  // inside a property arm. Returns true when the suspension must be blocked.
+  bool block_suspension_in_property_arm(const Frame &frame,
+                                        const char *operation) {
+    const std::string *label = active_no_suspend_label();
+    if (label == nullptr) {
+      return false;
+    }
+    set_fault(frame, "EffectViolationError",
+              *label + " attempted to suspend (" + operation +
+                  "); property arms are non-suspendable");
+    return true;
+  }
+
   NestedExecution
   execute_nested_code(std::uint32_t code_id, const std::vector<Value> &regs,
                       const std::vector<std::uint8_t> &initialized,
@@ -15934,6 +16016,9 @@ private:
 
     Vm nested(module_, state_, module_id_, world_options_, capabilities_,
               effects_, trace_recorder_);
+    if (const std::string *label = active_no_suspend_label()) {
+      nested.inherited_no_suspend_label_ = *label;
+    }
     nested.push_frame(*entry, {}, {}, self, block, std::nullopt);
     Frame &nested_frame = nested.frames_.back();
     const std::size_t copy_count =
@@ -15965,6 +16050,9 @@ private:
     NestedExecution out;
     Vm nested(module_, state_, module_id_, world_options_, capabilities_,
               effects_, trace_recorder_);
+    if (const std::string *label = active_no_suspend_label()) {
+      nested.inherited_no_suspend_label_ = *label;
+    }
     nested.frames_.push_back(std::move(frame));
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
       nested.step();
@@ -15980,7 +16068,8 @@ private:
       Frame &caller, const bytecode::BcMethod &method,
       const std::vector<Value> &pos_args,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
-      const Value &self, const Value &block) {
+      const Value &self, const Value &block,
+      const std::string &no_suspend_label = {}) {
     std::vector<bytecode::MethodParamEntry> params;
     std::vector<BoundMethodArg> slots;
     if (!shape_method_call(caller, method, pos_args, kw_args, &params,
@@ -15998,6 +16087,10 @@ private:
     initialize_frame_register_file(callee, *code);
     callee.self = self;
     callee.block = block;
+    if (!no_suspend_label.empty()) {
+      callee.no_suspend_extent = true;
+      callee.no_suspend_label = no_suspend_label;
+    }
     if (!materialize_defaults(callee, method, params, slots) ||
         !apply_auto_assigns(callee, method, *code)) {
       return std::nullopt;
@@ -16409,7 +16502,8 @@ private:
                 const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
                 Value self, Value block,
                 std::optional<std::uint32_t> caller_result_reg,
-                std::optional<Value> return_override = std::nullopt) {
+                std::optional<Value> return_override = std::nullopt,
+                const std::string &no_suspend_label = {}) {
     std::vector<bytecode::MethodParamEntry> params;
     std::vector<BoundMethodArg> slots;
     if (!shape_method_call(caller, method, pos_args, kw_args, &params,
@@ -16432,6 +16526,10 @@ private:
                caller_result_reg);
     Frame &callee = frames_.back();
     callee.return_override = std::move(return_override);
+    if (!no_suspend_label.empty()) {
+      callee.no_suspend_extent = true;
+      callee.no_suspend_label = no_suspend_label;
+    }
     if (!materialize_defaults(callee, method, params, slots)) {
       return false;
     }
@@ -21173,6 +21271,9 @@ private:
         if (!duration_from_value(frame, args[0], &duration)) {
           return SendStatus::Faulted;
         }
+        if (block_suspension_in_property_arm(frame, "task.sleep")) {
+          return SendStatus::Faulted;
+        }
         try {
           task->sleep(duration);
         } catch (const RuntimeTaskCancelled &cancelled) {
@@ -21189,6 +21290,9 @@ private:
             set_fault(frame, "TypeError",
                       "task.yield does not accept keywords");
           }
+          return SendStatus::Faulted;
+        }
+        if (block_suspension_in_property_arm(frame, "task.yield")) {
           return SendStatus::Faulted;
         }
         try {
@@ -21211,6 +21315,9 @@ private:
         std::optional<NativeBlockInvoker> invoker =
             make_native_block_invoker(frame, block, "task.sync");
         if (!invoker.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (block_suspension_in_property_arm(frame, "task.sync")) {
           return SendStatus::Faulted;
         }
         try {
@@ -21244,6 +21351,9 @@ private:
         }
         std::chrono::milliseconds timeout;
         if (!timeout_from_keywords(frame, kw_args, &timeout)) {
+          return SendStatus::Faulted;
+        }
+        if (block_suspension_in_property_arm(frame, "TaskHandle.wait")) {
           return SendStatus::Faulted;
         }
         const RuntimeTaskPublicResult waited = handle->wait(timeout);
@@ -21330,6 +21440,9 @@ private:
         if (!timeout_from_keywords(frame, kw_args, &timeout)) {
           return SendStatus::Faulted;
         }
+        if (block_suspension_in_property_arm(frame, "Channel.send")) {
+          return SendStatus::Faulted;
+        }
         const RuntimeChannelResult sent = channel->send(args[0], timeout);
         if (!sent.ok) {
           set_fault_from_channel_result(frame, sent);
@@ -21346,6 +21459,9 @@ private:
         }
         std::chrono::milliseconds timeout;
         if (!timeout_from_keywords(frame, kw_args, &timeout)) {
+          return SendStatus::Faulted;
+        }
+        if (block_suspension_in_property_arm(frame, "Channel.recv")) {
           return SendStatus::Faulted;
         }
         const RuntimeChannelResult received = channel->recv(timeout);
@@ -24871,38 +24987,61 @@ private:
       }
     }
 
-    auto invoke_property_method = [&](const bytecode::BcMethod &getter) {
-      if ((getter.flags & kMethodFlagPropertyGetter) == 0U) {
-        set_fault(frame, "NoMethodError",
-                  "bare member access requires a property getter");
-        return false;
-      }
-      return invoke_method(frame, getter, {}, {}, receiver, Value::null(), dst);
+    // Bare member access (`obj.member`) resolves the member through the
+    // single linearized lookup and dispatches on its kind: readable property
+    // -> getter; write-only property -> error; syntactically nullary method
+    // -> implicit zero-argument send; any other method -> error.
+    auto method_is_syntactically_nullary = [](const bytecode::BcMethod &m) {
+      return m.params.empty() && m.default_thunk_ids.empty();
     };
 
-    auto invoke_property_result =
-        [&](const bytecode::BcMethod &getter) -> bool {
-      const std::vector<Value> no_pos_args;
-      const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
-      const std::optional<Value> getter_value = execute_method_to_value(
-          frame, getter, no_pos_args, no_kw_args, receiver, Value::null());
-      if (!getter_value.has_value()) {
+    auto invoke_bare_member = [&](const bytecode::BcMethod &member) -> bool {
+      if ((member.flags & kMethodFlagPropertyGetter) != 0U) {
+        return invoke_method(frame, member, {}, {}, receiver, Value::null(),
+                             dst, std::nullopt,
+                             "property getter `" + *selector + "`");
+      }
+      if ((member.flags & kMethodFlagPropertySetter) != 0U) {
+        set_fault(frame, "WriteOnlyPropertyError",
+                  "cannot read write-only property `" + *selector + "`");
         return false;
       }
-      return invoke_callable_value(frame, *getter_value, args, kw_args, block,
-                                   dst);
+      if (method_is_syntactically_nullary(member)) {
+        return invoke_method(frame, member, {}, {}, receiver, Value::null(),
+                             dst);
+      }
+      set_fault(frame, "ArgumentError",
+                "method `" + *selector +
+                    "` is not bare-callable: its signature is not "
+                    "syntactically nullary; use `" +
+                    *selector + "(...)`");
+      return false;
+    };
+
+    auto fault_property_called_as_method = [&]() -> bool {
+      set_fault(frame, "TypeError",
+                "property `" + *selector + "` is not a method; use `" +
+                    *selector + "` or `" + *selector +
+                    ".()` if the property value is callable");
+      return false;
     };
 
     auto invoke_property_setter =
         [&](const bytecode::BcMethod &setter) -> bool {
+      std::string property_name = *selector;
+      if (!property_name.empty() && property_name.back() == '=') {
+        property_name.pop_back();
+      }
       if ((setter.flags & kMethodFlagPropertySetter) == 0U) {
-        set_fault(frame, "NoMethodError",
-                  "assignment requires a property setter");
+        set_fault(frame, "ReadOnlyPropertyError",
+                  "cannot assign to read-only property `" + property_name +
+                      "`");
         return false;
       }
       const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
       const std::optional<Value> ignored = execute_method_to_value(
-          frame, setter, args, no_kw_args, receiver, Value::null());
+          frame, setter, args, no_kw_args, receiver, Value::null(),
+          "property setter `" + property_name + "`");
       if (!ignored.has_value()) {
         return false;
       }
@@ -24943,10 +25082,10 @@ private:
           return invoke_property_setter(*cached);
         }
         if (property_access) {
-          return invoke_property_method(*cached);
+          return invoke_bare_member(*cached);
         }
         if ((cached->flags & kMethodFlagPropertyGetter) != 0U) {
-          return invoke_property_result(*cached);
+          return fault_property_called_as_method();
         }
         return invoke_method(frame, *cached, args, kw_args, receiver, block,
                              dst);
@@ -24960,16 +25099,49 @@ private:
     }
     if (method == nullptr) {
       if (property_assignment) {
+        std::string property_name = *selector;
+        if (!property_name.empty() && property_name.back() == '=') {
+          property_name.pop_back();
+        }
+        const bytecode::BcMethod *readable = find_method_for_dispatch(
+            frame, class_index, property_name, dispatch_flags);
+        if (fault_.has_value()) {
+          return false;
+        }
+        if (readable != nullptr &&
+            (readable->flags & kMethodFlagPropertyGetter) != 0U) {
+          set_fault(frame, "ReadOnlyPropertyError",
+                    "cannot assign to read-only property `" + property_name +
+                        "`");
+          return false;
+        }
+        if (readable != nullptr) {
+          set_fault(frame, "NoMethodError",
+                    "member `" + property_name +
+                        "` is not assignable; only writable properties "
+                        "accept assignment");
+          return false;
+        }
         set_fault(frame, "NoMethodError",
-                  "property setter is not implemented in current runtime "
-                  "baseline");
+                  "undefined property `" + property_name +
+                      "` in assignment target");
         return false;
       }
       if (property_access) {
-        set_fault(frame, "NoMethodError",
-                  "property is not implemented in current runtime baseline");
-        return false;
+        const bytecode::BcMethod *setter_only = find_method_for_dispatch(
+            frame, class_index, *selector + "=", dispatch_flags);
+        if (fault_.has_value()) {
+          return false;
+        }
+        if (setter_only != nullptr &&
+            (setter_only->flags & kMethodFlagPropertySetter) != 0U) {
+          set_fault(frame, "WriteOnlyPropertyError",
+                    "cannot read write-only property `" + *selector + "`");
+          return false;
+        }
       }
+      // Bare member access on a dynamic receiver falls through to the
+      // ordinary zero-argument missing-member path (`method_missing`).
       if (try_invoke_method_missing(frame, class_index, dispatch_flags,
                                     *selector, selector_value, args, kw_args,
                                     receiver, block, dst)) {
@@ -24993,18 +25165,21 @@ private:
     }
     if (property_access) {
       if (site_id.has_value() && selector_symbol_id_for_cache.has_value() &&
-          (method->flags & kMethodFlagPropertyGetter) != 0U) {
+          ((method->flags & kMethodFlagPropertyGetter) != 0U ||
+           ((method->flags &
+             (kMethodFlagPropertyGetter | kMethodFlagPropertySetter)) == 0U &&
+            method_is_syntactically_nullary(*method)))) {
         update_call_cache(frame, *site_id, class_index, dispatch_flags,
                           *selector_symbol_id_for_cache, 0, {}, Value::null(),
                           *method);
       }
-      return invoke_property_method(*method);
+      return invoke_bare_member(*method);
     }
     if ((method->flags & kMethodFlagPropertyGetter) != 0U) {
-      return invoke_property_result(*method);
+      return fault_property_called_as_method();
     }
     if ((method->flags & kMethodFlagPropertySetter) != 0U) {
-      set_fault(frame, "NoMethodError",
+      set_fault(frame, "TypeError",
                 "property setter requires assignment syntax");
       return false;
     }
@@ -26791,6 +26966,9 @@ private:
   std::unordered_map<std::uint32_t, DirectClosureKind> direct_closure_kinds_;
   std::unordered_map<std::uint32_t, std::vector<Frame>> frame_pool_;
   std::vector<Frame> frames_;
+  // Set when this Vm executes inside a property arm of an outer Vm (nested
+  // executions inherit the non-suspendable dynamic extent).
+  std::optional<std::string> inherited_no_suspend_label_;
   std::optional<Fault> fault_;
   std::vector<Value> last_completed_regs_;
   std::vector<std::uint8_t> last_completed_initialized_;

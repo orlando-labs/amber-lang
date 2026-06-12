@@ -3046,6 +3046,16 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
     expr->string_field("token", token.lexeme);
     return expr;
   }
+  if ((token.kind == lexer::TokenKind::Dot ||
+       token.kind == lexer::TokenKind::SafeDot) &&
+      check(lexer::TokenKind::LParen)) {
+    error_code(token, "AMB_DOT_CALL_TARGET",
+               "`.()` must follow an expression; it cannot start an "
+               "expression");
+    auto expr = ast::make_expr("AstError", token.span);
+    expr->string_field("token", token.lexeme);
+    return expr;
+  }
 
   error(token, "expected expression");
   auto expr = ast::make_expr("AstError", token.span);
@@ -3494,6 +3504,20 @@ std::unique_ptr<ast::Expr>
 Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
   if (check(lexer::TokenKind::Dot) || check(lexer::TokenKind::ChainDot)) {
     const lexer::Token dot = advance();
+    if (match(lexer::TokenKind::LParen)) {
+      std::vector<std::unique_ptr<ast::Expr>> args =
+          parse_call_arg_list(lexer::TokenKind::RParen, stop_mode);
+      const lexer::Token close = previous();
+      auto tail = ast::make_expr("AstTailDotCall",
+                                 ast::join_spans(dot.span, close.span));
+      tail->string_field("call_style", "paren");
+      tail->bool_field("chain_boundary",
+                       dot.kind == lexer::TokenKind::ChainDot);
+      tail->list_field("args", std::move(args));
+      auto chain = ensure_postfix_chain(std::move(expr));
+      append_postfix_tail(*chain, std::move(tail));
+      return chain;
+    }
     const lexer::Token name = consume_identifier_like(
         "expected method or field name");
     auto tail = ast::make_expr("AstTailDotMember",

@@ -266,6 +266,36 @@ void test_bare_call() {
          "bare arg parses as expression");
 }
 
+void test_dot_call_segment() {
+  std::unique_ptr<Expr> expr = parse_ok("factory.provider.(1, 2)\n");
+  expect(expr->kind == "AstPostfixChain", "dot-call postfix chain");
+  const amber::ast::ListField &tails = list_field(*expr, "tails");
+  expect(tails.values.size() == 2, "dot-call tail count");
+  expect(tails.values[0]->kind == "AstTailDotMember", "member tail first");
+  expect(string_field(*tails.values[0], "name") == "provider",
+         "member tail name");
+  expect(tails.values[1]->kind == "AstTailDotCall", "dot-call tail kind");
+  expect(list_field(*tails.values[1], "args").values.size() == 2,
+         "dot-call argument count");
+
+  std::unique_ptr<Expr> zero = parse_ok("fn.()\n");
+  const amber::ast::ListField &zero_tails = list_field(*zero, "tails");
+  expect(zero_tails.values.size() == 1, "zero-arg dot-call tail count");
+  expect(zero_tails.values[0]->kind == "AstTailDotCall",
+         "zero-arg dot-call tail kind");
+  expect(list_field(*zero_tails.values[0], "args").values.empty(),
+         "zero-arg dot-call has no args");
+
+  std::unique_ptr<Expr> safe = parse_ok("fn.?.(1)\n");
+  const amber::ast::ListField &safe_tails = list_field(*safe, "tails");
+  expect(safe_tails.values[0]->kind == "AstTailSafeCall",
+         "safe dot-call tail kind");
+
+  amber::parser::ParseResult orphan = parse_raw(".()\n");
+  expect(has_diagnostic(orphan, "AMB_DOT_CALL_TARGET"),
+         "dot-call without target diagnostic");
+}
+
 void test_safe_nav_and_index() {
   std::unique_ptr<Expr> expr = parse_ok("obj.?.items[0].?.name\n");
   expect(expr->kind == "AstPostfixChain", "safe nav postfix chain");
@@ -1224,6 +1254,7 @@ int main() {
   test_new_binary_operators();
   test_comparison_chains();
   test_bare_call();
+  test_dot_call_segment();
   test_safe_nav_and_index();
   test_optional_bracket_access();
   test_inline_block_chain_boundary();

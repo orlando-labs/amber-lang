@@ -2155,15 +2155,161 @@ void test_execute_emitted_properties() {
          "read-write attr should use explicit storage and return rhs");
 }
 
-void test_bare_member_def_is_not_implicit_call() {
-  const amber::bytecode::EmitResult emit_result = emit_ok("class Box:\n"
-                                                          "  def value(): 1\n"
-                                                          "Box().value\n");
+void test_bare_nullary_member_implicit_call() {
+  // RFC bare-nullary: `obj.member` performs an implicit zero-argument send
+  // when `member` resolves to a syntactically nullary method.
+  amber::bytecode::EmitResult emit_result = emit_ok("class Box:\n"
+                                                    "  def value(): 1\n"
+                                                    "Box().value\n");
+  amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "bare nullary member access execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 1,
+         "bare access should implicitly call syntactically nullary def");
+
+  emit_result = emit_ok("class Box:\n"
+                        "  def value(): 1\n"
+                        "Box().value() + Box().value\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "explicit and bare nullary call execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 2,
+         "explicit `value()` and bare `value` should both invoke nullary def");
+
+  emit_result = emit_ok("class Build:\n"
+                        "  class_method def version(): 20\n"
+                        "Build.version\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "bare class-side nullary access execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 20,
+         "bare class-side access should implicitly call nullary class method");
+}
+
+void test_bare_non_nullary_member_rejected() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("class Box:\n"
+              "  def format(mode = 1): mode\n"
+              "Box().format\n");
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       emit_result.module, emit_result.module.init.entry_code_id);
   expect(!exec.ok() && exec.fault.has_value() &&
-             exec.fault->error_name == "NoMethodError",
-         "bare ordinary method access should not implicitly call def");
+             exec.fault->error_name == "ArgumentError",
+         "bare access to non-nullary method should raise ArgumentError");
+}
+
+void test_property_called_as_method_rejected() {
+  const amber::bytecode::EmitResult emit_result = emit_ok("class Box:\n"
+                                                          "  prop value: 7\n"
+                                                          "Box().value()\n");
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "TypeError",
+         "explicit call punctuation on a property should raise TypeError");
+}
+
+void test_dot_call_invokes_member_result() {
+  // `obj.member.()` reads/implicitly-sends the member, then calls the
+  // resulting callable value through the generic callable protocol.
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("class Adder:\n"
+              "  def call(x): x + 1\n"
+              "class Factory:\n"
+              "  prop provider: Adder()\n"
+              "Factory().provider.(41)\n");
+  amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "dot-call on property value execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "`.()` should call the callable returned by a property");
+
+  emit_result = emit_ok("class Answer:\n"
+                        "  def call(): 43\n"
+                        "class Factory:\n"
+                        "  def provider(): Answer()\n"
+                        "Factory().provider.()\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "dot-call on nullary def result execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 43,
+         "`.()` should call the callable returned by implicit nullary send");
+
+  emit_result = emit_ok("x = 10\n"
+                        "x.()\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "TypeError",
+         "`.()` on a non-callable value should raise TypeError");
+}
+
+void test_property_access_errors() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("class User:\n"
+              "  prop password:\n"
+              "    set(value): @password_hash = value\n"
+              "user = User()\n"
+              "user.password\n");
+  amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "WriteOnlyPropertyError",
+         "read from write-only property should raise WriteOnlyPropertyError");
+
+  emit_result = emit_ok("class Box:\n"
+                        "  prop id: 5\n"
+                        "box = Box()\n"
+                        "box.id = 10\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "ReadOnlyPropertyError",
+         "assignment to read-only property should raise "
+         "ReadOnlyPropertyError");
+}
+
+void test_property_arm_is_non_suspendable() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("class Clock:\n"
+              "  prop lazy_time:\n"
+              "    task.sleep 0.01\n"
+              "    42\n"
+              "Clock().lazy_time\n");
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "EffectViolationError",
+         "suspension inside property getter should raise "
+         "EffectViolationError");
+}
+
+void test_kwargs_spread_requires_property() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("class Sink:\n"
+              "  class_method def show(mode: 0): mode\n"
+              "class Options:\n"
+              "  prop kwargs: {mode: 5}\n"
+              "Sink.show(**Options())\n");
+  amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "kwargs property spread execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 5,
+         "object with readable `kwargs` property should spread keywords");
+
+  emit_result = emit_ok("class Sink:\n"
+                        "  class_method def show(mode: 0): mode\n"
+                        "class Options:\n"
+                        "  def kwargs(): {mode: 5}\n"
+                        "Sink.show(**Options())\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(!exec.ok() && exec.fault.has_value() &&
+             exec.fault->error_name == "TypeError" &&
+             exec.fault->message.find("declare `prop kwargs`") !=
+                 std::string::npos,
+         "nullary def kwargs() must not participate in keyword spread and "
+         "should hint at `prop kwargs`");
 }
 
 void test_manual_dynamic_send() {
@@ -8479,7 +8625,13 @@ int main() {
   test_execute_emitted_keyword_method();
   test_execute_emitted_block_send();
   test_execute_emitted_properties();
-  test_bare_member_def_is_not_implicit_call();
+  test_bare_nullary_member_implicit_call();
+  test_bare_non_nullary_member_rejected();
+  test_property_called_as_method_rejected();
+  test_dot_call_invokes_member_result();
+  test_property_access_errors();
+  test_property_arm_is_non_suspendable();
+  test_kwargs_spread_requires_property();
   test_runtime_duplicate_keyword_values_are_read_before_duplicate_check();
   test_runtime_keyword_shape_cache_canonicalizes_keyword_order();
   test_runtime_call_cache_distinguishes_block_presence();

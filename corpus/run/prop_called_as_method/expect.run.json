@@ -1,0 +1,7 @@
+{
+  "schema": "amber.run.v1",
+  "entry": "probe",
+  "status": "fault",
+  "error_name": "TypeError",
+  "message": "property `value` is not a method; use `value` or `value.()` if the property value is callable"
+}

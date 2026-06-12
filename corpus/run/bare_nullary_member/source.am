@@ -1,0 +1,15 @@
+package conformance.run
+
+class Collection:
+  def init(@count): pass
+
+  def size():
+    @count
+
+class Build:
+  class_method def version():
+    20
+
+def probe():
+  items = Collection(40)
+  items.size + items.size() + Build.version + Build.version()

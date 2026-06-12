@@ -2290,7 +2290,8 @@ private:
         ++i;
         continue;
       }
-      if (tail.kind == "AstTailCall" || tail.kind == "AstTailSafeCall") {
+      if (tail.kind == "AstTailCall" || tail.kind == "AstTailSafeCall" ||
+          tail.kind == "AstTailDotCall") {
         const bool safe = tail.kind == "AstTailSafeCall";
         std::vector<std::unique_ptr<Node>> pos_args;
         std::vector<std::unique_ptr<Node>> kw_args;

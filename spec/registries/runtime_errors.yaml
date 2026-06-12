@@ -47,3 +47,5 @@ errors:
   - EffectViolationError
   - DeterminismError
   - ReplayDivergenceError
+  - ReadOnlyPropertyError
+  - WriteOnlyPropertyError
