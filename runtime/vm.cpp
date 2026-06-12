@@ -12168,6 +12168,13 @@ private:
         ++frame.pc;
         return true;
       }
+      // GAP: unlike the register-operand deopt above (which rebuilds a full
+      // synthetic Send), the constant-operand deopt stops at the scalar
+      // chain, so an instance receiver with a user-defined operator method
+      // faults here instead of dispatching. Unreachable while the emitter
+      // only specializes locals whose assignments are all integer-shaped;
+      // it must be fixed (route through full send dispatch) before the
+      // emitter may speculate parameters as integer candidates (§5.8).
       set_fault(frame, "NoMethodError",
                 "selector is not implemented in current runtime baseline");
       return false;

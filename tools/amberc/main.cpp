@@ -1718,51 +1718,38 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 1, &lhs);
       operand_u32_value(instruction, 2, &rhs);
       if (instruction.opcode == Opcode::IAdd) {
-        write_reg_stmt(dst, "NativeValue::integer(checked_add_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_reg_stmt(dst, "numeric_add(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::ISub) {
-        write_reg_stmt(dst, "NativeValue::integer(checked_sub_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_reg_stmt(dst, "numeric_sub(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::IMul) {
-        write_reg_stmt(dst, "NativeValue::integer(checked_mul_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_reg_stmt(dst, "numeric_mul(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::IDiv) {
-        write_reg_stmt(dst, "NativeValue::integer(checked_div_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_reg_stmt(dst, "numeric_div(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::IMod) {
-        out << "  if (as_int(" << read_reg_expr(rhs)
-            << ") == 0) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(floor_mod_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_reg_stmt(dst, "numeric_mod(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::IFloorDiv) {
-        write_reg_stmt(dst, "NativeValue::integer(floor_div_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_reg_stmt(dst, "numeric_floor_div(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::ILe) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") <= as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "numeric_le(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::IGe) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") >= as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "numeric_ge(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::IEq) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") == as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ", false)");
       } else if (instruction.opcode == Opcode::INe) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") != as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ", true)");
       } else if (instruction.opcode == Opcode::ICmp) {
-        write_reg_stmt(dst, "NativeValue::integer(compare_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_reg_stmt(dst, "numeric_cmp(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else if (instruction.opcode == Opcode::IBitAnd) {
         write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
                                 read_reg_expr(lhs) + "), as_int(" +
@@ -1790,13 +1777,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 read_reg_expr(lhs) + "), as_int(" +
                                 read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::ILt) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") < as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "numeric_lt(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       } else {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") > as_int(" +
-                                read_reg_expr(rhs) + "))");
+        write_reg_stmt(dst, "numeric_gt(" + read_reg_expr(lhs) + ", " +
+                                read_reg_expr(rhs) + ")");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -1827,59 +1812,37 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 2, &const_id);
       const std::int64_t rhs = module.const_pool[const_id].int_value;
       if (instruction.opcode == Opcode::IAddK) {
-        write_reg_stmt(dst, "NativeValue::integer(checked_add_int64(as_int(" +
-                                read_reg_expr(lhs) + "), " +
-                                cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_add(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::ISubK) {
-        write_reg_stmt(dst, "NativeValue::integer(checked_sub_int64(as_int(" +
-                                read_reg_expr(lhs) + "), " +
-                                cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_sub(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IMulK) {
-        write_reg_stmt(dst, "NativeValue::integer(checked_mul_int64(as_int(" +
-                                read_reg_expr(lhs) + "), " +
-                                cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_mul(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IDivK) {
         if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
           write_reg_stmt(dst,
-                         "NativeValue::integer(checked_div_int64(as_int(" +
-                             read_reg_expr(lhs) + "), " + cpp_decimal_i64(rhs) +
-                             "))");
+                         "numeric_div(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
         }
       } else if (instruction.opcode == Opcode::IModK) {
         if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
           write_reg_stmt(dst,
-                         "NativeValue::integer(floor_mod_int64(as_int(" +
-                             read_reg_expr(lhs) + "), " + cpp_decimal_i64(rhs) +
-                             "))");
+                         "numeric_mod(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
         }
       } else if (instruction.opcode == Opcode::IFloorDivK) {
-        write_reg_stmt(dst, "NativeValue::integer(floor_div_int64(as_int(" +
-                                read_reg_expr(lhs) + "), " +
-                                cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_floor_div(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::ILeK) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") <= " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "numeric_le(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IGeK) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") >= " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "numeric_ge(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IEqK) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") == " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "), false)");
       } else if (instruction.opcode == Opcode::INeK) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") != " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "), true)");
       } else if (instruction.opcode == Opcode::ICmpK) {
-        write_reg_stmt(dst, "NativeValue::integer(compare_int64(as_int(" +
-                                read_reg_expr(lhs) + "), " +
-                                cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_cmp(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IBitAndK) {
         write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
                                 read_reg_expr(lhs) + "), " +
@@ -1910,13 +1873,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                   cpp_decimal_i64(rhs) + "))");
         }
       } else if (instruction.opcode == Opcode::ILtK) {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") < " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "numeric_lt(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       } else {
-        write_reg_stmt(dst, "NativeValue::boolean(as_int(" +
-                                read_reg_expr(lhs) + ") > " +
-                                cpp_decimal_i64(rhs) + ")");
+        write_reg_stmt(dst, "numeric_gt(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
