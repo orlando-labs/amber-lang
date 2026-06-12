@@ -408,5 +408,25 @@ block micro): interpreter dispatch in `step()`, the integer-sidecar
 read/write helpers, and `Frame` move/destroy traffic in the call path. The
 first two are the Phase 4 value-representation work; the frame moves need a
 `finish_return` restructure that did not pay for its risk in this pass.
-Quickening `LoadIvar`/`StoreIvar` (research plan §5.4) remains open and
-needs an ivar-heavy workload added here first to be measurable.
+
+Step 4 — ivar sites (research plan §5.4), same-day follow-up. An
+ivar-heavy micro (300k method calls, 8 ivar accesses each: a `Counter`
+class whose `tick(i)` mutates `@a`/`@b`/`@total`) measured 0.397s best.
+Profiling showed the cost was strings, not slots: every `LoadIvar`/
+`StoreIvar` copied the ivar name out of the symbol table
+(`optional<string>` per access), `StoreIvar` probed the inline cache and
+then discarded the hit (`(void)cached_slot`) before re-resolving the slot
+by name three times, and `try_apply_scalar_send` evaluated its
+sequence/numeric selector-set memberships (~70 string compares)
+unconditionally for every send — including plain user method calls.
+`LoadIvar`/`StoreIvar` are now quickened with cache-hit fast paths
+(pre-decoded operands, no name copy, store uses the cached slot and keeps
+the legacy string-keyed `ivars` mirror in sync because GC tracing and
+legacy lookups read it); watched objects, lifecycle faults, and cache
+misses fall back to the generic handlers. The selector-set tests are gated
+by receiver kind. Ivar micro: 0.397s -> 0.286s (-28%); the three polyglot
+workloads and the block micro are unchanged (within noise). Remaining ivar
+cost is the per-call method-send path (`call_caches` probe + generic
+operand decode) and the global `ivar_caches` hash probe per access —
+inline ICs in the quickened stream would be the next step but need
+mutable per-site state, which the shared QuickCode does not have today.
