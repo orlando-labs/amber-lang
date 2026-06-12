@@ -7618,6 +7618,8 @@ enum class QuickOpcode : std::uint8_t {
   SendSeqIndexSet,
   SendSeqCount,
   SendSeqFirst,
+  LoadIvar,
+  StoreIvar,
 };
 
 struct QuickInsn {
@@ -10673,6 +10675,19 @@ private:
         }
       }
       break;
+    case Opcode::LoadIvar:
+    case Opcode::StoreIvar: {
+      std::uint32_t site_id = 0;
+      if (quick_operand_u32(insn, 0, &a) && quick_operand_u32(insn, 1, &b) &&
+          quick_operand_u32(insn, 2, &c) &&
+          quick_operand_u32(insn, 3, &site_id)) {
+        out.quick_opcode = insn.opcode == Opcode::LoadIvar
+                               ? QuickOpcode::LoadIvar
+                               : QuickOpcode::StoreIvar;
+        imm = static_cast<std::int64_t>(site_id);
+      }
+      break;
+    }
     case Opcode::Jump:
       if (quick_operand_u32(insn, 0, &a)) {
         out.quick_opcode = QuickOpcode::Jump;
@@ -22481,7 +22496,14 @@ private:
 
     const bool receiver_is_range = value_is_range_instance(receiver);
     const bool receiver_is_lazy_seq = value_is_lazy_seq_instance(receiver);
+    // The selector-set tests below are only consulted behind these receiver
+    // gates; skipping them otherwise keeps user method calls (instance
+    // receivers) from paying ~70 string compares per send.
+    const bool receiver_is_sequence_like =
+        receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
+        receiver_is_range || receiver_is_lazy_seq;
     const bool sequence_set_operation_selector =
+        receiver_is_sequence_like &&
         collection_selector_in({"contains?",
                                 "include?",
                                 "union",
@@ -22505,19 +22527,22 @@ private:
                                 ">=",
                                 ">"});
     const bool sequence_extra_operation_selector =
+        receiver_is_sequence_like &&
         collection_selector_in({"+", "*", "concat", "take_while", "reverse",
                                 "sort", "uniq", "each_pair", "each_cons"});
     const bool sequence_collection_selector =
-        collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
-                                "deconstruct", "first",  "count", "to_a",
-                                "lazy",        "each",   "map",   "flat_map",
-                                "select",      "reject", "find",  "group_by",
-                                "any?",        "all?",   "none?", "reduce"}) ||
+        (receiver_is_sequence_like &&
+         collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
+                                 "deconstruct", "first",  "count", "to_a",
+                                 "lazy",        "each",   "map",   "flat_map",
+                                 "select",      "reject", "find",  "group_by",
+                                 "any?",        "all?",   "none?", "reduce"})) ||
         sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
         sequence_collection_selector || selector == "===";
     const bool lazy_seq_collection_selector = sequence_collection_selector;
     const bool numeric_selector =
+        (receiver.is_integer() || receiver.is_float()) &&
         selector_in({"+", "-",  "*",  "/",  "%",  "//",  ">",
                      "<", ">=", "<=", "==", "!=", "<=>", "&",
                      "|", "^",  "<<", ">>", "**", "u+",  "u-"});
@@ -24941,6 +24966,68 @@ private:
     }
   }
 
+  // Cache-hit fast paths for ivar access. Anything off the happy path —
+  // non-instance receiver, watched object, lifecycle fault, cache miss or
+  // stale shape — falls back to the generic opcode handler, which owns the
+  // fault classification, watch events, and cache refill.
+  FastSendStatus step_quick_load_ivar(Frame &frame, const QuickInsn &quick) {
+    const Value receiver = read_reg(frame, quick.b);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    if (!receiver.is_instance_object()) {
+      return FastSendStatus::NotHandled;
+    }
+    const std::shared_ptr<InstanceValue> instance =
+        receiver.as_instance_object();
+    if (instance == nullptr || instance->watch_state != nullptr ||
+        lifecycle_access_error_name(instance->header).has_value()) {
+      return FastSendStatus::NotHandled;
+    }
+    const std::optional<std::uint32_t> slot = probe_ivar_cache(
+        frame, static_cast<std::uint32_t>(quick.imm), *instance, quick.c);
+    if (!slot.has_value()) {
+      return FastSendStatus::NotHandled;
+    }
+    return write_reg_fast_plain(frame, quick.a, instance->ivar_storage[*slot])
+               ? FastSendStatus::Matched
+               : FastSendStatus::Faulted;
+  }
+
+  FastSendStatus step_quick_store_ivar(Frame &frame, const QuickInsn &quick) {
+    const Value receiver = read_reg(frame, quick.a);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    if (!receiver.is_instance_object()) {
+      return FastSendStatus::NotHandled;
+    }
+    const std::shared_ptr<InstanceValue> instance =
+        receiver.as_instance_object();
+    if (instance == nullptr || instance->watch_state != nullptr ||
+        lifecycle_access_error_name(instance->header).has_value()) {
+      return FastSendStatus::NotHandled;
+    }
+    const std::optional<std::uint32_t> slot = probe_ivar_cache(
+        frame, static_cast<std::uint32_t>(quick.imm), *instance, quick.b);
+    if (!slot.has_value() || quick.b >= module_.symbols.size()) {
+      return FastSendStatus::NotHandled;
+    }
+    Value value = read_reg(frame, quick.c);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    if (!apply_write_barrier(frame, Value::instance(instance), value)) {
+      return FastSendStatus::Faulted;
+    }
+    instance->ivar_storage[*slot] = value;
+    // The string-keyed map mirrors slot storage; GC tracing and legacy
+    // lookups read it, so it must stay in sync.
+    instance->ivars[module_.symbols[quick.b]] = std::move(value);
+    instance->ivar_shape_version = instance->header.shape->shape_version;
+    return FastSendStatus::Matched;
+  }
+
   bool step_send(Frame &frame, const Instruction &insn, bool dynamic_selector,
                  bool expanded = false) {
     std::uint32_t dst = 0;
@@ -25591,6 +25678,21 @@ private:
       case QuickOpcode::SendIShr: {
         const FastSendStatus status = step_quick_integer_send(
             frame, quick->quick_opcode, quick->a, quick->b, quick->c);
+        if (status == FastSendStatus::Faulted) {
+          return;
+        }
+        if (status == FastSendStatus::Matched) {
+          ++frame.pc;
+          return;
+        }
+        break;
+      }
+      case QuickOpcode::LoadIvar:
+      case QuickOpcode::StoreIvar: {
+        const FastSendStatus status =
+            quick->quick_opcode == QuickOpcode::LoadIvar
+                ? step_quick_load_ivar(frame, *quick)
+                : step_quick_store_ivar(frame, *quick);
         if (status == FastSendStatus::Faulted) {
           return;
         }
