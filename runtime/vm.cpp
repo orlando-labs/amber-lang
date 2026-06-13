@@ -229,7 +229,7 @@ std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
   }
 
   if (value.is_closure()) {
-    const std::shared_ptr<ClosureValue> closure = value.as_closure();
+    const IntrusivePtr<ClosureValue> closure = value.as_closure();
     if (closure == nullptr) {
       return RuntimeSyncBoundaryError{"TypeError", "closure value is null"};
     }
@@ -255,7 +255,7 @@ std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
   }
 
   if (value.is_list()) {
-    const std::shared_ptr<ListValue> list = value.as_list();
+    const IntrusivePtr<ListValue> list = value.as_list();
     if (list == nullptr) {
       return RuntimeSyncBoundaryError{"TypeError", "list value is null"};
     }
@@ -273,7 +273,7 @@ std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
   }
 
   if (value.is_tuple()) {
-    const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+    const IntrusivePtr<TupleValue> tuple = value.as_tuple();
     if (tuple == nullptr) {
       return RuntimeSyncBoundaryError{"TypeError", "tuple value is null"};
     }
@@ -288,7 +288,7 @@ std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
   }
 
   if (value.is_set()) {
-    const std::shared_ptr<SetValue> set = value.as_set();
+    const IntrusivePtr<SetValue> set = value.as_set();
     if (set == nullptr) {
       return RuntimeSyncBoundaryError{"TypeError", "set value is null"};
     }
@@ -306,7 +306,7 @@ std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
   }
 
   if (value.is_map()) {
-    const std::shared_ptr<MapValue> map = value.as_map();
+    const IntrusivePtr<MapValue> map = value.as_map();
     if (map == nullptr) {
       return RuntimeSyncBoundaryError{"TypeError", "map value is null"};
     }
@@ -328,7 +328,7 @@ std::optional<RuntimeSyncBoundaryError> runtime_value_shareability_error_impl(
   }
 
   if (value.is_instance_object()) {
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     if (instance == nullptr) {
       return RuntimeSyncBoundaryError{"TypeError", "instance value is null"};
     }
@@ -389,7 +389,7 @@ void runtime_append_child_values(const Value &value,
     return;
   }
   if (value.is_closure()) {
-    const std::shared_ptr<ClosureValue> closure = value.as_closure();
+    const IntrusivePtr<ClosureValue> closure = value.as_closure();
     if (closure == nullptr) {
       return;
     }
@@ -401,14 +401,14 @@ void runtime_append_child_values(const Value &value,
     return;
   }
   if (value.is_list()) {
-    const std::shared_ptr<ListValue> list = value.as_list();
+    const IntrusivePtr<ListValue> list = value.as_list();
     if (list != nullptr) {
       children->insert(children->end(), list->items.begin(), list->items.end());
     }
     return;
   }
   if (value.is_tuple()) {
-    const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+    const IntrusivePtr<TupleValue> tuple = value.as_tuple();
     if (tuple != nullptr) {
       children->insert(children->end(), tuple->items.begin(),
                        tuple->items.end());
@@ -416,14 +416,14 @@ void runtime_append_child_values(const Value &value,
     return;
   }
   if (value.is_set()) {
-    const std::shared_ptr<SetValue> set = value.as_set();
+    const IntrusivePtr<SetValue> set = value.as_set();
     if (set != nullptr) {
       children->insert(children->end(), set->items.begin(), set->items.end());
     }
     return;
   }
   if (value.is_map()) {
-    const std::shared_ptr<MapValue> map = value.as_map();
+    const IntrusivePtr<MapValue> map = value.as_map();
     if (map != nullptr) {
       for (const MapEntry &entry : map->entries) {
         children->push_back(entry.key);
@@ -433,7 +433,7 @@ void runtime_append_child_values(const Value &value,
     return;
   }
   if (value.is_instance_object()) {
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     if (instance == nullptr) {
       return;
     }
@@ -550,7 +550,7 @@ normalize_collection_key_impl(const Value &value, const char *context,
 
     std::vector<Value> items;
     if (value.is_list()) {
-      const std::shared_ptr<ListValue> list = value.as_list();
+      const IntrusivePtr<ListValue> list = value.as_list();
       if (list == nullptr) {
         *error = collection_key_type_error(std::string(context) +
                                            " list key is null");
@@ -566,7 +566,7 @@ normalize_collection_key_impl(const Value &value, const char *context,
         items.push_back(*normalized);
       }
     } else {
-      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = value.as_tuple();
       if (tuple == nullptr) {
         *error = collection_key_type_error(std::string(context) +
                                            " tuple key is null");
@@ -4674,7 +4674,7 @@ public:
         });
         return result;
       }
-      const std::shared_ptr<ListValue> list = value.as_list();
+      const IntrusivePtr<ListValue> list = value.as_list();
       result.values.insert(result.values.end(), list->items.begin(),
                            list->items.end());
     }
@@ -5037,7 +5037,7 @@ public:
   ~Impl() { drain_all_remote_frees(); }
 
   template <typename T, typename Init>
-  std::shared_ptr<T> allocate(HeapObjectKind kind, Init init) {
+  IntrusivePtr<T> allocate(HeapObjectKind kind, Init init) {
     auto *raw = new T();
     const std::uint64_t worker_id = current_runtime_worker_id();
     const std::size_t allocation_size = sizeof(T);
@@ -5048,19 +5048,28 @@ public:
     raw->header.arena_worker_id = worker_id;
     raw->header.allocation_size = allocation_size;
     raw->header.generation = ObjectGeneration::Young;
+    // Keepalive to this heap: locates it on the drop path and keeps it alive as
+    // long as any object references it (replaces the old deleter's Impl capture).
+    raw->header.heap = shared_from_this();
+    // The returned handle owns this initial reference (adopted below).
+    raw->header.ref_count.store(1, std::memory_order_relaxed);
     init(*raw);
 
-    std::shared_ptr<Impl> impl = shared_from_this();
-    std::shared_ptr<T> handle(
-        raw, [impl, worker_id, kind, allocation_id](T *ptr) {
-          impl->release({ptr, destroy<T>, worker_id, kind, allocation_id});
-        });
     record_allocation(worker_id, kind, allocation_size, allocation_id, raw);
-    return handle;
+    return IntrusivePtr<T>(raw, typename IntrusivePtr<T>::Adopt{});
   }
 
-  template <typename T> std::shared_ptr<T> allocate(HeapObjectKind kind) {
+  template <typename T> IntrusivePtr<T> allocate(HeapObjectKind kind) {
     return allocate<T>(kind, [](T &) {});
+  }
+
+  // Drop-to-zero path for IntrusivePtr (RESEARCH §7.2): identical effect to the
+  // old shared_ptr deleter -- free on the owning strand, queue a cross-strand
+  // free otherwise. Public so RuntimeHeap::drop_object can reach it.
+  void release_intrusive(void *ptr, void (*deleter)(void *),
+                         const ObjHeader &header) {
+    release({ptr, deleter, header.arena_worker_id, header.kind,
+             header.allocation_id});
   }
 
   std::uint64_t drain_remote_frees(std::uint64_t worker_id) {
@@ -5580,7 +5589,7 @@ public:
     view.read_only = token.permissions == RuntimePinPermission::ReadOnly;
     view.active = true;
     if (pin->value.is_list()) {
-      const std::shared_ptr<ListValue> list = pin->value.as_list();
+      const IntrusivePtr<ListValue> list = pin->value.as_list();
       if (list == nullptr ||
           lifecycle_access_error_name(list->header).has_value()) {
         out.ok = false;
@@ -5591,7 +5600,7 @@ public:
       view.data = list->items.empty() ? nullptr : list->items.data();
       view.size = list->items.size();
     } else if (pin->value.is_tuple()) {
-      const std::shared_ptr<TupleValue> tuple = pin->value.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = pin->value.as_tuple();
       if (tuple == nullptr ||
           lifecycle_access_error_name(tuple->header).has_value()) {
         out.ok = false;
@@ -6145,7 +6154,7 @@ RuntimeHeap::RuntimeHeap() : impl_(std::make_shared<Impl>()) {}
 
 RuntimeHeap::~RuntimeHeap() = default;
 
-std::shared_ptr<InstanceValue>
+IntrusivePtr<InstanceValue>
 RuntimeHeap::make_instance_value(std::uint32_t class_index) {
   return impl_->allocate<InstanceValue>(
       HeapObjectKind::Instance, [class_index](InstanceValue &value) {
@@ -6154,7 +6163,7 @@ RuntimeHeap::make_instance_value(std::uint32_t class_index) {
       });
 }
 
-std::shared_ptr<ClosureValue> RuntimeHeap::make_closure_value() {
+IntrusivePtr<ClosureValue> RuntimeHeap::make_closure_value() {
   return impl_->allocate<ClosureValue>(HeapObjectKind::Closure);
 }
 
@@ -6326,6 +6335,68 @@ RuntimeHeap::finish_native_wait(RuntimeNativeWaitHandle *handle) {
 
 RuntimeHeapStats RuntimeHeap::stats() const { return impl_->stats(); }
 
+// --- Intrusive refcount drop path (RESEARCH §7.2) ---------------------------
+// drop_object is a RuntimeHeap member so it may name the private Impl; it casts
+// header.heap back and runs the same free/queue path as the old deleter.
+void RuntimeHeap::drop_object(void *obj, void (*deleter)(void *),
+                              const ObjHeader &header) noexcept {
+  auto *impl = static_cast<RuntimeHeap::Impl *>(header.heap.get());
+  impl->release_intrusive(obj, deleter, header);
+}
+
+namespace {
+template <class T> void heap_object_deleter(void *ptr) noexcept {
+  delete static_cast<T *>(ptr);
+}
+} // namespace
+
+template <class T> void runtime_heap_add_ref(T *obj) noexcept {
+  obj->header.ref_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+template <class T> void runtime_heap_release(T *obj) noexcept {
+  if (obj->header.ref_count.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    if (obj->header.heap == nullptr) {
+      // Unmanaged object (make_intrusive): no RuntimeHeap, just delete it.
+      delete obj;
+      return;
+    }
+    // Hold a strong ref to the heap across the free so that, if this is the last
+    // object, the heap's destructor runs here -- outside any Impl method (whose
+    // mutex the free path locks) -- rather than mid-release. Mirrors how the old
+    // deleter's captured shared_ptr<Impl> outlived the release() call.
+    std::shared_ptr<void> keepalive = obj->header.heap;
+    RuntimeHeap::drop_object(obj, &heap_object_deleter<T>, obj->header);
+  }
+}
+
+template <class T> IntrusivePtr<T> make_intrusive() {
+  T *obj = new T();
+  obj->header.ref_count.store(1, std::memory_order_relaxed);
+  return IntrusivePtr<T>(obj, typename IntrusivePtr<T>::Adopt{});
+}
+
+// IntrusivePtr<T> is only ever instantiated for the six ObjHeader-bearing kinds;
+// these explicit instantiations satisfy the out-of-line declarations in vm.h.
+template void runtime_heap_add_ref<ClosureValue>(ClosureValue *) noexcept;
+template void runtime_heap_add_ref<InstanceValue>(InstanceValue *) noexcept;
+template void runtime_heap_add_ref<ListValue>(ListValue *) noexcept;
+template void runtime_heap_add_ref<TupleValue>(TupleValue *) noexcept;
+template void runtime_heap_add_ref<SetValue>(SetValue *) noexcept;
+template void runtime_heap_add_ref<MapValue>(MapValue *) noexcept;
+template void runtime_heap_release<ClosureValue>(ClosureValue *) noexcept;
+template void runtime_heap_release<InstanceValue>(InstanceValue *) noexcept;
+template void runtime_heap_release<ListValue>(ListValue *) noexcept;
+template void runtime_heap_release<TupleValue>(TupleValue *) noexcept;
+template void runtime_heap_release<SetValue>(SetValue *) noexcept;
+template void runtime_heap_release<MapValue>(MapValue *) noexcept;
+template IntrusivePtr<ClosureValue> make_intrusive<ClosureValue>();
+template IntrusivePtr<InstanceValue> make_intrusive<InstanceValue>();
+template IntrusivePtr<ListValue> make_intrusive<ListValue>();
+template IntrusivePtr<TupleValue> make_intrusive<TupleValue>();
+template IntrusivePtr<SetValue> make_intrusive<SetValue>();
+template IntrusivePtr<MapValue> make_intrusive<MapValue>();
+
 RuntimePinScope::RuntimePinScope(RuntimeHeap &heap, const Value &value,
                                  RuntimePinViewKind view_kind,
                                  RuntimePinPermission permissions)
@@ -6405,11 +6476,11 @@ Value Value::class_object(std::uint32_t class_index) {
   return {ClassObjectValue{class_index}};
 }
 
-Value Value::closure(std::shared_ptr<ClosureValue> value) {
+Value Value::closure(IntrusivePtr<ClosureValue> value) {
   return {std::move(value)};
 }
 
-Value Value::instance(std::shared_ptr<InstanceValue> value) {
+Value Value::instance(IntrusivePtr<InstanceValue> value) {
   return {std::move(value)};
 }
 
@@ -6511,27 +6582,27 @@ bool Value::is_class_object() const {
 }
 
 bool Value::is_closure() const {
-  return std::holds_alternative<std::shared_ptr<ClosureValue>>(payload);
+  return std::holds_alternative<IntrusivePtr<ClosureValue>>(payload);
 }
 
 bool Value::is_instance_object() const {
-  return std::holds_alternative<std::shared_ptr<InstanceValue>>(payload);
+  return std::holds_alternative<IntrusivePtr<InstanceValue>>(payload);
 }
 
 bool Value::is_list() const {
-  return std::holds_alternative<std::shared_ptr<ListValue>>(payload);
+  return std::holds_alternative<IntrusivePtr<ListValue>>(payload);
 }
 
 bool Value::is_tuple() const {
-  return std::holds_alternative<std::shared_ptr<TupleValue>>(payload);
+  return std::holds_alternative<IntrusivePtr<TupleValue>>(payload);
 }
 
 bool Value::is_set() const {
-  return std::holds_alternative<std::shared_ptr<SetValue>>(payload);
+  return std::holds_alternative<IntrusivePtr<SetValue>>(payload);
 }
 
 bool Value::is_map() const {
-  return std::holds_alternative<std::shared_ptr<MapValue>>(payload);
+  return std::holds_alternative<IntrusivePtr<MapValue>>(payload);
 }
 
 bool Value::is_native_type() const {
@@ -6623,28 +6694,28 @@ ClassObjectValue Value::as_class_object() const {
   return std::get<ClassObjectValue>(payload);
 }
 
-std::shared_ptr<ClosureValue> Value::as_closure() const {
-  return std::get<std::shared_ptr<ClosureValue>>(payload);
+IntrusivePtr<ClosureValue> Value::as_closure() const {
+  return std::get<IntrusivePtr<ClosureValue>>(payload);
 }
 
-std::shared_ptr<InstanceValue> Value::as_instance_object() const {
-  return std::get<std::shared_ptr<InstanceValue>>(payload);
+IntrusivePtr<InstanceValue> Value::as_instance_object() const {
+  return std::get<IntrusivePtr<InstanceValue>>(payload);
 }
 
-std::shared_ptr<ListValue> Value::as_list() const {
-  return std::get<std::shared_ptr<ListValue>>(payload);
+IntrusivePtr<ListValue> Value::as_list() const {
+  return std::get<IntrusivePtr<ListValue>>(payload);
 }
 
-std::shared_ptr<TupleValue> Value::as_tuple() const {
-  return std::get<std::shared_ptr<TupleValue>>(payload);
+IntrusivePtr<TupleValue> Value::as_tuple() const {
+  return std::get<IntrusivePtr<TupleValue>>(payload);
 }
 
-std::shared_ptr<SetValue> Value::as_set() const {
-  return std::get<std::shared_ptr<SetValue>>(payload);
+IntrusivePtr<SetValue> Value::as_set() const {
+  return std::get<IntrusivePtr<SetValue>>(payload);
 }
 
-std::shared_ptr<MapValue> Value::as_map() const {
-  return std::get<std::shared_ptr<MapValue>>(payload);
+IntrusivePtr<MapValue> Value::as_map() const {
+  return std::get<IntrusivePtr<MapValue>>(payload);
 }
 
 NativeTypeValue Value::as_native_type() const {
@@ -6768,7 +6839,7 @@ constexpr const char *kNativeRangeMarker = "__amber_range";
 constexpr std::int64_t kPatternFailModeSoft = 0;
 constexpr std::int64_t kPatternFailModeMatchError = 1;
 
-bool instance_is_native_range(const std::shared_ptr<InstanceValue> &instance) {
+bool instance_is_native_range(const IntrusivePtr<InstanceValue> &instance) {
   if (instance == nullptr ||
       instance->class_index != kNativeSyntheticClassIndex) {
     return false;
@@ -7208,7 +7279,7 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     return out.str();
   }
   if (value.is_closure()) {
-    const std::shared_ptr<ClosureValue> closure = value.as_closure();
+    const IntrusivePtr<ClosureValue> closure = value.as_closure();
     if (closure == nullptr) {
       return "<closure null>";
     }
@@ -7218,7 +7289,7 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
                : "<" + lifecycle + " closure>";
   }
   if (value.is_instance_object()) {
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     std::ostringstream out;
     out << "<instance";
     if (instance == nullptr) {
@@ -7246,7 +7317,7 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     return out.str();
   }
   if (value.is_list()) {
-    const std::shared_ptr<ListValue> list = value.as_list();
+    const IntrusivePtr<ListValue> list = value.as_list();
     if (list == nullptr) {
       return "[<null-list>]";
     }
@@ -7264,7 +7335,7 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     return "[" + compact_join_values(context, list->items, mode, depth) + "]";
   }
   if (value.is_tuple()) {
-    const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+    const IntrusivePtr<TupleValue> tuple = value.as_tuple();
     if (tuple == nullptr) {
       return "(<null-tuple>)";
     }
@@ -7282,7 +7353,7 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     return "(" + compact_join_values(context, tuple->items, mode, depth) + ")";
   }
   if (value.is_set()) {
-    const std::shared_ptr<SetValue> set = value.as_set();
+    const IntrusivePtr<SetValue> set = value.as_set();
     if (set == nullptr) {
       return "{<null-set>}";
     }
@@ -7307,7 +7378,7 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     return "{" + body + "}";
   }
   if (value.is_map()) {
-    const std::shared_ptr<MapValue> map = value.as_map();
+    const IntrusivePtr<MapValue> map = value.as_map();
     if (map == nullptr) {
       return "{<null-map>}";
     }
@@ -7385,27 +7456,27 @@ bool value_has_heap_payload_tag(const Value &value) {
 
 const ObjHeader *heap_header_from_value(const Value &value) {
   if (value.is_closure()) {
-    const std::shared_ptr<ClosureValue> object = value.as_closure();
+    const IntrusivePtr<ClosureValue> object = value.as_closure();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_instance_object()) {
-    const std::shared_ptr<InstanceValue> object = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> object = value.as_instance_object();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_list()) {
-    const std::shared_ptr<ListValue> object = value.as_list();
+    const IntrusivePtr<ListValue> object = value.as_list();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_tuple()) {
-    const std::shared_ptr<TupleValue> object = value.as_tuple();
+    const IntrusivePtr<TupleValue> object = value.as_tuple();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_set()) {
-    const std::shared_ptr<SetValue> object = value.as_set();
+    const IntrusivePtr<SetValue> object = value.as_set();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_map()) {
-    const std::shared_ptr<MapValue> object = value.as_map();
+    const IntrusivePtr<MapValue> object = value.as_map();
     return object == nullptr ? nullptr : &object->header;
   }
   return nullptr;
@@ -7413,27 +7484,27 @@ const ObjHeader *heap_header_from_value(const Value &value) {
 
 ObjHeader *mutable_heap_header_from_value(const Value &value) {
   if (value.is_closure()) {
-    const std::shared_ptr<ClosureValue> object = value.as_closure();
+    const IntrusivePtr<ClosureValue> object = value.as_closure();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_instance_object()) {
-    const std::shared_ptr<InstanceValue> object = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> object = value.as_instance_object();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_list()) {
-    const std::shared_ptr<ListValue> object = value.as_list();
+    const IntrusivePtr<ListValue> object = value.as_list();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_tuple()) {
-    const std::shared_ptr<TupleValue> object = value.as_tuple();
+    const IntrusivePtr<TupleValue> object = value.as_tuple();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_set()) {
-    const std::shared_ptr<SetValue> object = value.as_set();
+    const IntrusivePtr<SetValue> object = value.as_set();
     return object == nullptr ? nullptr : &object->header;
   }
   if (value.is_map()) {
-    const std::shared_ptr<MapValue> object = value.as_map();
+    const IntrusivePtr<MapValue> object = value.as_map();
     return object == nullptr ? nullptr : &object->header;
   }
   return nullptr;
@@ -8878,13 +8949,13 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return lhs.as_watch_handle() == rhs.as_watch_handle();
   }
   if (lhs.is_instance_object()) {
-    const std::shared_ptr<InstanceValue> left = lhs.as_instance_object();
-    const std::shared_ptr<InstanceValue> right = rhs.as_instance_object();
+    const IntrusivePtr<InstanceValue> left = lhs.as_instance_object();
+    const IntrusivePtr<InstanceValue> right = rhs.as_instance_object();
     if (left == nullptr || right == nullptr) {
       return left == right;
     }
     if (instance_is_native_range(left) && instance_is_native_range(right)) {
-      auto ivar_or_null = [](const std::shared_ptr<InstanceValue> &instance,
+      auto ivar_or_null = [](const IntrusivePtr<InstanceValue> &instance,
                              const std::string &name) {
         const auto found = instance->ivars.find(name);
         return found == instance->ivars.end() ? Value::null() : found->second;
@@ -8901,8 +8972,8 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return left == right;
   }
   if (lhs.is_list()) {
-    const std::shared_ptr<ListValue> left = lhs.as_list();
-    const std::shared_ptr<ListValue> right = rhs.as_list();
+    const IntrusivePtr<ListValue> left = lhs.as_list();
+    const IntrusivePtr<ListValue> right = rhs.as_list();
     if (left == nullptr || right == nullptr) {
       return left == right;
     }
@@ -8917,8 +8988,8 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return true;
   }
   if (lhs.is_tuple()) {
-    const std::shared_ptr<TupleValue> left = lhs.as_tuple();
-    const std::shared_ptr<TupleValue> right = rhs.as_tuple();
+    const IntrusivePtr<TupleValue> left = lhs.as_tuple();
+    const IntrusivePtr<TupleValue> right = rhs.as_tuple();
     if (left == nullptr || right == nullptr) {
       return left == right;
     }
@@ -8933,8 +9004,8 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return true;
   }
   if (lhs.is_set()) {
-    const std::shared_ptr<SetValue> left = lhs.as_set();
-    const std::shared_ptr<SetValue> right = rhs.as_set();
+    const IntrusivePtr<SetValue> left = lhs.as_set();
+    const IntrusivePtr<SetValue> right = rhs.as_set();
     if (left == nullptr || right == nullptr) {
       return left == right;
     }
@@ -8958,8 +9029,8 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return true;
   }
   if (lhs.is_map()) {
-    const std::shared_ptr<MapValue> left = lhs.as_map();
-    const std::shared_ptr<MapValue> right = rhs.as_map();
+    const IntrusivePtr<MapValue> left = lhs.as_map();
+    const IntrusivePtr<MapValue> right = rhs.as_map();
     if (left == nullptr || right == nullptr) {
       return left == right;
     }
@@ -9202,7 +9273,7 @@ private:
       if (!value.is_closure()) {
         continue;
       }
-      const std::shared_ptr<ClosureValue> closure = value.as_closure();
+      const IntrusivePtr<ClosureValue> closure = value.as_closure();
       if (closure != nullptr && closure->code_id == code_id) {
         return DirectEntryClosure{closure->captures, closure->self};
       }
@@ -9343,7 +9414,7 @@ private:
     if (!value.is_instance_object()) {
       return true;
     }
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     if (instance == nullptr ||
         instance->class_index >= module_.classes.size()) {
       return true;
@@ -9429,7 +9500,7 @@ private:
 
   void release_payload_for_dealloc(const Value &value) {
     if (value.is_instance_object()) {
-      const std::shared_ptr<InstanceValue> instance =
+      const IntrusivePtr<InstanceValue> instance =
           value.as_instance_object();
       if (instance == nullptr) {
         return;
@@ -9442,7 +9513,7 @@ private:
       return;
     }
     if (value.is_list()) {
-      const std::shared_ptr<ListValue> list = value.as_list();
+      const IntrusivePtr<ListValue> list = value.as_list();
       if (list != nullptr) {
         list->items.clear();
         list->items.shrink_to_fit();
@@ -9452,7 +9523,7 @@ private:
       return;
     }
     if (value.is_tuple()) {
-      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = value.as_tuple();
       if (tuple != nullptr) {
         tuple->items.clear();
         tuple->items.shrink_to_fit();
@@ -9461,7 +9532,7 @@ private:
       return;
     }
     if (value.is_set()) {
-      const std::shared_ptr<SetValue> set = value.as_set();
+      const IntrusivePtr<SetValue> set = value.as_set();
       if (set != nullptr) {
         set->items.clear();
         set->items.shrink_to_fit();
@@ -9471,7 +9542,7 @@ private:
       return;
     }
     if (value.is_map()) {
-      const std::shared_ptr<MapValue> map = value.as_map();
+      const IntrusivePtr<MapValue> map = value.as_map();
       if (map != nullptr) {
         map->entries.clear();
         map->entries.shrink_to_fit();
@@ -9481,7 +9552,7 @@ private:
       return;
     }
     if (value.is_closure()) {
-      const std::shared_ptr<ClosureValue> closure = value.as_closure();
+      const IntrusivePtr<ClosureValue> closure = value.as_closure();
       if (closure != nullptr) {
         closure->captures.clear();
         closure->captures.shrink_to_fit();
@@ -9555,11 +9626,11 @@ private:
     return state_->heap.make_symbol_map_value(std::move(entries), frozen);
   }
 
-  std::shared_ptr<ClosureValue> make_closure_value() {
+  IntrusivePtr<ClosureValue> make_closure_value() {
     return state_->heap.make_closure_value();
   }
 
-  std::shared_ptr<InstanceValue>
+  IntrusivePtr<InstanceValue>
   make_instance_value(std::uint32_t class_index) {
     return state_->heap.make_instance_value(class_index);
   }
@@ -9578,7 +9649,7 @@ private:
     if (!ensure_lifecycle_access(frame, block)) {
       return std::nullopt;
     }
-    const std::shared_ptr<ClosureValue> closure = block.as_closure();
+    const IntrusivePtr<ClosureValue> closure = block.as_closure();
     if (closure == nullptr) {
       set_fault(frame, "TypeError", "closure value is null");
       return std::nullopt;
@@ -11112,7 +11183,7 @@ private:
     if (!ensure_lifecycle_access(frame, value)) {
       return false;
     }
-    const std::shared_ptr<ClosureValue> closure = value.as_closure();
+    const IntrusivePtr<ClosureValue> closure = value.as_closure();
     if (closure == nullptr) {
       return false;
     }
@@ -11277,7 +11348,7 @@ private:
       const BcCode *mix_code = nullptr;
       const Value mix_capture = unwrap_watch_value_for_read(captures[0]);
       if (mix_capture.is_closure()) {
-        const std::shared_ptr<ClosureValue> mix_closure =
+        const IntrusivePtr<ClosureValue> mix_closure =
             mix_capture.as_closure();
         if (mix_closure != nullptr) {
           mix_code = find_code(module_, mix_closure->code_id);
@@ -11718,7 +11789,7 @@ private:
     if (!ensure_lifecycle_access(frame, callee)) {
       return FastCallStatus::Faulted;
     }
-    const std::shared_ptr<ClosureValue> closure = callee.as_closure();
+    const IntrusivePtr<ClosureValue> closure = callee.as_closure();
     if (closure == nullptr) {
       set_fault(frame, "TypeError", "closure value is null");
       return FastCallStatus::Faulted;
@@ -12768,7 +12839,7 @@ private:
     state_->record_dependency(std::move(dependency));
   }
 
-  Value record_watch_ivar_read(const std::shared_ptr<InstanceValue> &instance,
+  Value record_watch_ivar_read(const IntrusivePtr<InstanceValue> &instance,
                                const std::string &field_name,
                                Value current_value) {
     if (instance == nullptr || instance->watch_state == nullptr ||
@@ -12839,7 +12910,7 @@ private:
   }
 
   std::uint64_t
-  object_watch_id(const std::shared_ptr<InstanceValue> &instance) const {
+  object_watch_id(const IntrusivePtr<InstanceValue> &instance) const {
     if (instance == nullptr) {
       return 0;
     }
@@ -12851,7 +12922,7 @@ private:
   }
 
   std::shared_ptr<RuntimeWatchObjectState>
-  ensure_watch_object_state(const std::shared_ptr<InstanceValue> &instance) {
+  ensure_watch_object_state(const IntrusivePtr<InstanceValue> &instance) {
     if (instance == nullptr) {
       return nullptr;
     }
@@ -12863,7 +12934,7 @@ private:
   }
 
   Value
-  instance_ivar_value_or_null(const std::shared_ptr<InstanceValue> &instance,
+  instance_ivar_value_or_null(const IntrusivePtr<InstanceValue> &instance,
                               const std::string &name) const {
     if (instance == nullptr) {
       return Value::null();
@@ -12880,7 +12951,7 @@ private:
     return legacy == instance->ivars.end() ? Value::null() : legacy->second;
   }
 
-  void record_watch_ivar_write(const std::shared_ptr<InstanceValue> &instance,
+  void record_watch_ivar_write(const IntrusivePtr<InstanceValue> &instance,
                                const std::string &field_name, Value old_value,
                                Value new_value) {
     if (instance == nullptr || instance->watch_state == nullptr ||
@@ -13000,7 +13071,7 @@ private:
   }
 
   std::shared_ptr<RuntimeWatchHandle>
-  watch_ivar(Frame &frame, const std::shared_ptr<InstanceValue> &instance,
+  watch_ivar(Frame &frame, const IntrusivePtr<InstanceValue> &instance,
              const std::string &field_name) {
     if (instance == nullptr) {
       set_fault(frame, "TypeError", "instance receiver is null");
@@ -13047,7 +13118,7 @@ private:
   extract_sequence_items(const Frame &frame, const Value &value,
                          bool *out_source_was_tuple) {
     if (value.is_list()) {
-      const std::shared_ptr<ListValue> list = value.as_list();
+      const IntrusivePtr<ListValue> list = value.as_list();
       if (list == nullptr) {
         set_fault(frame, "TypeError", "list value is null");
         return std::nullopt;
@@ -13059,7 +13130,7 @@ private:
       return list->items;
     }
     if (value.is_tuple()) {
-      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = value.as_tuple();
       if (tuple == nullptr) {
         set_fault(frame, "TypeError", "tuple value is null");
         return std::nullopt;
@@ -13071,7 +13142,7 @@ private:
       return tuple->items;
     }
     if (value.is_set()) {
-      const std::shared_ptr<SetValue> set = value.as_set();
+      const IntrusivePtr<SetValue> set = value.as_set();
       if (set == nullptr) {
         set_fault(frame, "TypeError", "set value is null");
         return std::nullopt;
@@ -13179,7 +13250,7 @@ private:
       // User objects participate in keyword spread only through a readable
       // `kwargs` property: protocol positions are capability declarations,
       // never implicit nullary method sends.
-      const std::shared_ptr<InstanceValue> instance =
+      const IntrusivePtr<InstanceValue> instance =
           value.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance value is null");
@@ -13243,7 +13314,7 @@ private:
   const std::vector<Value> *sequence_items_view(const Frame &frame,
                                                 const Value &value) {
     if (value.is_list()) {
-      const std::shared_ptr<ListValue> list = value.as_list();
+      const IntrusivePtr<ListValue> list = value.as_list();
       if (list == nullptr) {
         set_fault(frame, "TypeError", "list value is null");
         return nullptr;
@@ -13254,7 +13325,7 @@ private:
       return &list->items;
     }
     if (value.is_tuple()) {
-      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = value.as_tuple();
       if (tuple == nullptr) {
         set_fault(frame, "TypeError", "tuple value is null");
         return nullptr;
@@ -13265,7 +13336,7 @@ private:
       return &tuple->items;
     }
     if (value.is_set()) {
-      const std::shared_ptr<SetValue> set = value.as_set();
+      const IntrusivePtr<SetValue> set = value.as_set();
       if (set == nullptr) {
         set_fault(frame, "TypeError", "set value is null");
         return nullptr;
@@ -13283,7 +13354,7 @@ private:
     if (!value.is_map()) {
       return std::nullopt;
     }
-    const std::shared_ptr<MapValue> map = value.as_map();
+    const IntrusivePtr<MapValue> map = value.as_map();
     if (map == nullptr) {
       set_fault(frame, "TypeError", "map value is null");
       return std::nullopt;
@@ -13360,7 +13431,7 @@ private:
 
     std::vector<Value> items;
     if (result.is_tuple()) {
-      const std::shared_ptr<TupleValue> tuple = result.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = result.as_tuple();
       if (tuple == nullptr) {
         set_fault(frame, "TypeError",
                   "Map#transform block returned null tuple");
@@ -13368,7 +13439,7 @@ private:
       }
       items = tuple->items;
     } else if (result.is_list()) {
-      const std::shared_ptr<ListValue> list = result.as_list();
+      const IntrusivePtr<ListValue> list = result.as_list();
       if (list == nullptr) {
         set_fault(frame, "TypeError", "Map#transform block returned null list");
         return std::nullopt;
@@ -14537,7 +14608,7 @@ private:
     if (!value.is_instance_object()) {
       return false;
     }
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     if (instance == nullptr) {
       return false;
     }
@@ -14630,7 +14701,7 @@ private:
 
   std::optional<Value>
   load_instance_ivar_or_null(const Frame &frame,
-                             const std::shared_ptr<InstanceValue> &instance,
+                             const IntrusivePtr<InstanceValue> &instance,
                              const std::string &name) {
     const std::optional<std::uint32_t> slot =
         ensure_instance_ivar_slot(frame, instance, name);
@@ -14728,7 +14799,7 @@ private:
     if (!value.is_instance_object()) {
       return std::nullopt;
     }
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     if (instance == nullptr) {
       set_fault(frame, "TypeError", "Range value is null");
       return std::nullopt;
@@ -14913,7 +14984,7 @@ private:
   extract_spread_sequence_items(const Frame &frame, const Value &value,
                                 SpreadSequenceTarget target) {
     if (value.is_list()) {
-      const std::shared_ptr<ListValue> list = value.as_list();
+      const IntrusivePtr<ListValue> list = value.as_list();
       if (list == nullptr) {
         set_fault(frame, "TypeError", "list value is null");
         return std::nullopt;
@@ -14924,7 +14995,7 @@ private:
       return list->items;
     }
     if (value.is_tuple()) {
-      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = value.as_tuple();
       if (tuple == nullptr) {
         set_fault(frame, "TypeError", "tuple value is null");
         return std::nullopt;
@@ -14935,7 +15006,7 @@ private:
       return tuple->items;
     }
     if (target == SpreadSequenceTarget::SetLiteral && value.is_set()) {
-      const std::shared_ptr<SetValue> set = value.as_set();
+      const IntrusivePtr<SetValue> set = value.as_set();
       if (set == nullptr) {
         set_fault(frame, "TypeError", "set value is null");
         return std::nullopt;
@@ -15015,7 +15086,7 @@ private:
     if (!value.is_instance_object()) {
       return false;
     }
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     if (instance == nullptr) {
       return false;
     }
@@ -15053,7 +15124,7 @@ private:
 
   Value make_lazy_seq_value(const Value &source,
                             const std::vector<LazySeqOp> &ops) {
-    std::shared_ptr<InstanceValue> instance =
+    IntrusivePtr<InstanceValue> instance =
         make_instance_value(kNativeSyntheticClassIndex);
     instance->ivars["__amber_lazy_seq"] = Value::boolean(true);
     instance->ivars["__amber_lazy_source"] = source;
@@ -15069,7 +15140,7 @@ private:
     if (!ensure_lifecycle_access(frame, value)) {
       return std::nullopt;
     }
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     const auto source_it = instance->ivars.find("__amber_lazy_source");
     const auto ops_it = instance->ivars.find("__amber_lazy_ops");
     if (source_it == instance->ivars.end() || ops_it == instance->ivars.end()) {
@@ -15080,7 +15151,7 @@ private:
       set_fault(frame, "VMError", "LazySeq ops must be a list");
       return std::nullopt;
     }
-    const std::shared_ptr<ListValue> encoded_ops = ops_it->second.as_list();
+    const IntrusivePtr<ListValue> encoded_ops = ops_it->second.as_list();
     if (encoded_ops == nullptr) {
       set_fault(frame, "TypeError", "LazySeq ops list is null");
       return std::nullopt;
@@ -15097,7 +15168,7 @@ private:
         set_fault(frame, "VMError", "LazySeq op must be a tuple");
         return std::nullopt;
       }
-      const std::shared_ptr<TupleValue> tuple = encoded.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = encoded.as_tuple();
       if (tuple == nullptr || tuple->items.size() != 2U ||
           !tuple->items[0].is_integer()) {
         set_fault(frame, "VMError", "LazySeq op tuple is invalid");
@@ -15772,14 +15843,14 @@ private:
         return conversion_ok(make_list_value(*items));
       }
       if (value.is_tuple()) {
-        const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+        const IntrusivePtr<TupleValue> tuple = value.as_tuple();
         if (tuple == nullptr) {
           return conversion_error("TypeError", "tuple value is null");
         }
         return conversion_ok(make_list_value(tuple->items));
       }
       if (value.is_set()) {
-        const std::shared_ptr<SetValue> set = value.as_set();
+        const IntrusivePtr<SetValue> set = value.as_set();
         if (set == nullptr) {
           return conversion_error("TypeError", "set value is null");
         }
@@ -15792,14 +15863,14 @@ private:
         return conversion_ok(value);
       }
       if (value.is_list()) {
-        const std::shared_ptr<ListValue> list = value.as_list();
+        const IntrusivePtr<ListValue> list = value.as_list();
         if (list == nullptr) {
           return conversion_error("TypeError", "list value is null");
         }
         return conversion_ok(make_tuple_value(list->items));
       }
       if (value.is_set()) {
-        const std::shared_ptr<SetValue> set = value.as_set();
+        const IntrusivePtr<SetValue> set = value.as_set();
         if (set == nullptr) {
           return conversion_error("TypeError", "set value is null");
         }
@@ -15812,14 +15883,14 @@ private:
         return conversion_ok(value);
       }
       if (value.is_list()) {
-        const std::shared_ptr<ListValue> list = value.as_list();
+        const IntrusivePtr<ListValue> list = value.as_list();
         if (list == nullptr) {
           return conversion_error("TypeError", "list value is null");
         }
         return conversion_ok(make_set_value(list->items));
       }
       if (value.is_tuple()) {
-        const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+        const IntrusivePtr<TupleValue> tuple = value.as_tuple();
         if (tuple == nullptr) {
           return conversion_error("TypeError", "tuple value is null");
         }
@@ -15833,13 +15904,13 @@ private:
       }
       std::vector<Value> items;
       if (value.is_list()) {
-        const std::shared_ptr<ListValue> list = value.as_list();
+        const IntrusivePtr<ListValue> list = value.as_list();
         if (list == nullptr) {
           return conversion_error("TypeError", "list value is null");
         }
         items = list->items;
       } else if (value.is_tuple()) {
-        const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+        const IntrusivePtr<TupleValue> tuple = value.as_tuple();
         if (tuple == nullptr) {
           return conversion_error("TypeError", "tuple value is null");
         }
@@ -15852,13 +15923,13 @@ private:
       for (const Value &item : items) {
         std::vector<Value> pair;
         if (item.is_tuple()) {
-          const std::shared_ptr<TupleValue> tuple = item.as_tuple();
+          const IntrusivePtr<TupleValue> tuple = item.as_tuple();
           if (tuple == nullptr) {
             return conversion_error("TypeError", "map pair tuple is null");
           }
           pair = tuple->items;
         } else if (item.is_list()) {
-          const std::shared_ptr<ListValue> list = item.as_list();
+          const IntrusivePtr<ListValue> list = item.as_list();
           if (list == nullptr) {
             return conversion_error("TypeError", "map pair list is null");
           }
@@ -15933,7 +16004,7 @@ private:
       }
     }
     if (exception.is_instance_object()) {
-      const std::shared_ptr<InstanceValue> instance =
+      const IntrusivePtr<InstanceValue> instance =
           exception.as_instance_object();
       if (instance != nullptr) {
         const std::optional<std::string> name =
@@ -16112,7 +16183,7 @@ private:
   }
 
   bool expect_instance_receiver(const Frame &frame, const Value &receiver,
-                                std::shared_ptr<InstanceValue> *out) {
+                                IntrusivePtr<InstanceValue> *out) {
     if (!receiver.is_instance_object()) {
       set_fault(frame, "TypeError",
                 "ivar access expects instance receiver in current runtime");
@@ -16130,7 +16201,7 @@ private:
   }
 
   bool ensure_instance_layout(const Frame &frame,
-                              const std::shared_ptr<InstanceValue> &instance) {
+                              const IntrusivePtr<InstanceValue> &instance) {
     if (instance == nullptr) {
       set_fault(frame, "TypeError", "instance receiver is null");
       return false;
@@ -16176,7 +16247,7 @@ private:
   }
 
   bool store_instance_ivar_slow(const Frame &frame,
-                                const std::shared_ptr<InstanceValue> &instance,
+                                const IntrusivePtr<InstanceValue> &instance,
                                 const std::string &name, Value value) {
     if (instance == nullptr) {
       set_fault(frame, "TypeError", "instance receiver is null");
@@ -16231,7 +16302,7 @@ private:
 
   std::optional<std::uint32_t>
   ensure_instance_ivar_slot(const Frame &frame,
-                            const std::shared_ptr<InstanceValue> &instance,
+                            const IntrusivePtr<InstanceValue> &instance,
                             const std::string &name) {
     if (!ensure_instance_layout(frame, instance)) {
       return std::nullopt;
@@ -16258,7 +16329,7 @@ private:
   }
 
   bool store_instance_ivar(const Frame &frame,
-                           const std::shared_ptr<InstanceValue> &instance,
+                           const IntrusivePtr<InstanceValue> &instance,
                            const std::string &name, Value value,
                            std::uint32_t symbol_id, std::uint32_t site_id) {
     if (!ensure_instance_layout(frame, instance)) {
@@ -16291,7 +16362,7 @@ private:
       return true;
     }
     if (owner.is_instance_object()) {
-      const std::shared_ptr<InstanceValue> instance =
+      const IntrusivePtr<InstanceValue> instance =
           owner.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance owner is null");
@@ -16354,7 +16425,7 @@ private:
         if (!ensure_lifecycle_access(frame, value)) {
           return false;
         }
-        const std::shared_ptr<InstanceValue> instance =
+        const IntrusivePtr<InstanceValue> instance =
             value.as_instance_object();
         if (instance == nullptr) {
           set_fault(frame, "TypeError", "instance matcher value is null");
@@ -16442,7 +16513,7 @@ private:
     if (method.auto_assign_desc.empty()) {
       return true;
     }
-    std::shared_ptr<InstanceValue> instance;
+    IntrusivePtr<InstanceValue> instance;
     bool have_instance = false;
     for (const bytecode::AutoAssignEntry &entry : method.auto_assign_desc) {
       const std::optional<std::uint32_t> slot =
@@ -16854,7 +16925,7 @@ private:
     std::uint32_t class_index = 0;
     std::uint32_t dispatch_flags = 0;
     if (receiver.is_instance_object()) {
-      const std::shared_ptr<InstanceValue> instance =
+      const IntrusivePtr<InstanceValue> instance =
           receiver.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance receiver is null");
@@ -16979,7 +17050,7 @@ private:
       if (!ensure_lifecycle_access(frame, callee)) {
         return false;
       }
-      const std::shared_ptr<ClosureValue> closure = callee.as_closure();
+      const IntrusivePtr<ClosureValue> closure = callee.as_closure();
       if (closure == nullptr) {
         set_fault(frame, "TypeError", "closure value is null");
         return false;
@@ -17053,7 +17124,7 @@ private:
     }
 
     if (callee.is_instance_object()) {
-      const std::shared_ptr<InstanceValue> instance =
+      const IntrusivePtr<InstanceValue> instance =
           callee.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance callee is null");
@@ -17524,7 +17595,7 @@ private:
     if (!exception.is_instance_object()) {
       return;
     }
-    const std::shared_ptr<InstanceValue> instance =
+    const IntrusivePtr<InstanceValue> instance =
         exception.as_instance_object();
     if (instance == nullptr) {
       return;
@@ -17533,7 +17604,7 @@ private:
     std::vector<Value> suppressed_values;
     const auto existing = instance->ivars.find("suppressed_exceptions");
     if (existing != instance->ivars.end() && existing->second.is_list()) {
-      const std::shared_ptr<ListValue> list = existing->second.as_list();
+      const IntrusivePtr<ListValue> list = existing->second.as_list();
       if (list != nullptr) {
         suppressed_values = list->items;
       }
@@ -17961,7 +18032,7 @@ private:
     if (!ensure_lifecycle_access(frame, block)) {
       return std::nullopt;
     }
-    const std::shared_ptr<ClosureValue> closure = block.as_closure();
+    const IntrusivePtr<ClosureValue> closure = block.as_closure();
     if (closure == nullptr) {
       set_fault(frame, "TypeError", "closure value is null");
       return std::nullopt;
@@ -18115,21 +18186,21 @@ private:
   native_sequence_items_or_throw(const Value &value,
                                  const std::string &context) {
     if (value.is_list()) {
-      const std::shared_ptr<ListValue> list = value.as_list();
+      const IntrusivePtr<ListValue> list = value.as_list();
       if (list == nullptr) {
         throw RuntimeTaskFailure("TypeError", context + " list value is null");
       }
       return list->items;
     }
     if (value.is_tuple()) {
-      const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+      const IntrusivePtr<TupleValue> tuple = value.as_tuple();
       if (tuple == nullptr) {
         throw RuntimeTaskFailure("TypeError", context + " tuple value is null");
       }
       return tuple->items;
     }
     if (value.is_set()) {
-      const std::shared_ptr<SetValue> set = value.as_set();
+      const IntrusivePtr<SetValue> set = value.as_set();
       if (set == nullptr) {
         throw RuntimeTaskFailure("TypeError", context + " set value is null");
       }
@@ -24239,7 +24310,7 @@ private:
           !require_integer_arg(0, &index)) {
         return SendStatus::Faulted;
       }
-      const std::shared_ptr<ListValue> list = receiver.as_list();
+      const IntrusivePtr<ListValue> list = receiver.as_list();
       if (list == nullptr) {
         set_fault(frame, "TypeError", "list value is null");
         return SendStatus::Faulted;
@@ -24267,7 +24338,7 @@ private:
       if (!require_arity(2) || !require_no_block()) {
         return SendStatus::Faulted;
       }
-      const std::shared_ptr<MapValue> map = receiver.as_map();
+      const IntrusivePtr<MapValue> map = receiver.as_map();
       if (map == nullptr) {
         set_fault(frame, "TypeError", "map value is null");
         return SendStatus::Faulted;
@@ -26708,7 +26779,7 @@ private:
       if (!receiver.is_list()) {
         return FastSendStatus::NotHandled;
       }
-      const std::shared_ptr<ListValue> list = receiver.as_list();
+      const IntrusivePtr<ListValue> list = receiver.as_list();
       if (list == nullptr || list->frozen) {
         return FastSendStatus::NotHandled;
       }
@@ -26795,7 +26866,7 @@ private:
     if (!receiver.is_instance_object()) {
       return FastSendStatus::NotHandled;
     }
-    const std::shared_ptr<InstanceValue> instance =
+    const IntrusivePtr<InstanceValue> instance =
         receiver.as_instance_object();
     if (instance == nullptr || instance->watch_state != nullptr ||
         lifecycle_access_error_name(instance->header).has_value()) {
@@ -26819,7 +26890,7 @@ private:
     if (!receiver.is_instance_object()) {
       return FastSendStatus::NotHandled;
     }
-    const std::shared_ptr<InstanceValue> instance =
+    const IntrusivePtr<InstanceValue> instance =
         receiver.as_instance_object();
     if (instance == nullptr || instance->watch_state != nullptr ||
         lifecycle_access_error_name(instance->header).has_value()) {
@@ -27177,7 +27248,7 @@ private:
     std::uint32_t class_index = 0;
     std::uint32_t dispatch_flags = 0;
     if (receiver.is_instance_object()) {
-      const std::shared_ptr<InstanceValue> instance =
+      const IntrusivePtr<InstanceValue> instance =
           receiver.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance receiver is null");
@@ -27938,7 +28009,7 @@ private:
         return;
       }
       if (value.is_list()) {
-        const std::shared_ptr<ListValue> list = value.as_list();
+        const IntrusivePtr<ListValue> list = value.as_list();
         if (list == nullptr) {
           set_fault(frame, "TypeError", "list value is null");
           return;
@@ -27950,7 +28021,7 @@ private:
           return;
         }
       } else if (value.is_map()) {
-        const std::shared_ptr<MapValue> map = value.as_map();
+        const IntrusivePtr<MapValue> map = value.as_map();
         if (map == nullptr) {
           set_fault(frame, "TypeError", "map value is null");
           return;
@@ -27962,7 +28033,7 @@ private:
           return;
         }
       } else if (value.is_set()) {
-        const std::shared_ptr<SetValue> set = value.as_set();
+        const IntrusivePtr<SetValue> set = value.as_set();
         if (set == nullptr) {
           set_fault(frame, "TypeError", "set value is null");
           return;
@@ -28014,7 +28085,7 @@ private:
       if (fault_.has_value()) {
         return;
       }
-      std::shared_ptr<InstanceValue> instance;
+      IntrusivePtr<InstanceValue> instance;
       if (!expect_instance_receiver(frame, receiver, &instance)) {
         return;
       }
@@ -28094,7 +28165,7 @@ private:
       if (fault_.has_value()) {
         return;
       }
-      std::shared_ptr<InstanceValue> instance;
+      IntrusivePtr<InstanceValue> instance;
       if (!expect_instance_receiver(frame, receiver, &instance)) {
         return;
       }
@@ -28304,7 +28375,7 @@ private:
       if (fault_.has_value()) {
         return;
       }
-      std::shared_ptr<InstanceValue> instance;
+      IntrusivePtr<InstanceValue> instance;
       if (!expect_instance_receiver(frame, receiver, &instance)) {
         return;
       }
@@ -28431,7 +28502,7 @@ private:
         if (!ensure_lifecycle_access(frame, packet.callee)) {
           return;
         }
-        const std::shared_ptr<ClosureValue> closure =
+        const IntrusivePtr<ClosureValue> closure =
             packet.callee.as_closure();
         if (closure == nullptr) {
           set_fault(frame, "TypeError", "closure value is null");
@@ -28567,7 +28638,7 @@ private:
       }
 
       if (packet.callee.is_instance_object()) {
-        const std::shared_ptr<InstanceValue> instance =
+        const IntrusivePtr<InstanceValue> instance =
             packet.callee.as_instance_object();
         if (instance == nullptr) {
           set_fault(frame, "TypeError", "instance callee is null");
@@ -31429,7 +31500,7 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
     return out.str();
   }
   if (value.is_closure()) {
-    const std::shared_ptr<ClosureValue> closure = value.as_closure();
+    const IntrusivePtr<ClosureValue> closure = value.as_closure();
     std::ostringstream out;
     if (closure == nullptr) {
       out << "<closure null>";
@@ -31444,7 +31515,7 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
     return out.str();
   }
   if (value.is_instance_object()) {
-    const std::shared_ptr<InstanceValue> instance = value.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
     std::ostringstream out;
     out << "<instance";
     if (instance == nullptr) {
@@ -31474,7 +31545,7 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
     return out.str();
   }
   if (value.is_list()) {
-    const std::shared_ptr<ListValue> list = value.as_list();
+    const IntrusivePtr<ListValue> list = value.as_list();
     if (list == nullptr) {
       return "[<null-list>]";
     }
@@ -31495,7 +31566,7 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
     return out.str();
   }
   if (value.is_tuple()) {
-    const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+    const IntrusivePtr<TupleValue> tuple = value.as_tuple();
     if (tuple == nullptr) {
       return "(<null-tuple>)";
     }
@@ -31516,7 +31587,7 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
     return out.str();
   }
   if (value.is_set()) {
-    const std::shared_ptr<SetValue> set = value.as_set();
+    const IntrusivePtr<SetValue> set = value.as_set();
     if (set == nullptr) {
       return "{<null-set>}";
     }
@@ -31543,7 +31614,7 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
     return out.str();
   }
   if (value.is_map()) {
-    const std::shared_ptr<MapValue> map = value.as_map();
+    const IntrusivePtr<MapValue> map = value.as_map();
     if (map == nullptr) {
       return "{<null-map>}";
     }

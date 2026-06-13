@@ -602,3 +602,45 @@ run_script fixture                    0                         0
 
 Turns "the table leaks" into a number, closes RESEARCH §9's tracking for the
 string table, and gives a before/after handle for the eventual Layer-2b fix.
+
+## §7.2 intrusive refcount in ObjHeader (2026-06-13)
+
+RESEARCH §7.2: every heap object paid a second malloc beyond its shell, because
+`allocate<T>` wrapped it in `std::shared_ptr<T>(raw, deleter)` whose fat deleter
+(captures `{shared_ptr<Impl>, worker, kind, allocation_id}`) forced a separate
+~80 B control-block allocation. Moved the strong count into the `ObjHeader`
+(which exists on every object already) and switched the six ObjHeader-bearing
+kinds (Closure/Instance/List/Tuple/Set/Map) from `shared_ptr<T>` to an
+`IntrusivePtr<T>`. Design notes in `DESIGN-intrusive-refcount-2026-06-13.md`.
+
+- `IntrusivePtr<T>` is a single 8-byte pointer. All element-touching logic
+  (`runtime_heap_add_ref`/`runtime_heap_release`) is out-of-line — declared in
+  vm.h, defined + explicitly instantiated for the six kinds in vm.cpp — so it
+  works with incomplete element types at the ~270 `.as_X()` consumer sites, just
+  like `shared_ptr`. The count is atomic; drop-to-zero reuses `Impl::release`
+  unchanged (same physical-free / cross-strand-queue path).
+- The header keeps a type-erased `shared_ptr<void> heap` keepalive set in
+  `allocate`. It both locates the heap on the drop path and guarantees the heap
+  outlives its objects — the lifetime contract the old deleter's `shared_ptr<Impl>`
+  capture provided. (First cut used a raw `Impl*` and crashed at teardown with
+  `mutex lock failed` when an object outlived the heap; the keepalive, released
+  in `runtime_heap_release` *outside* any Impl method, fixes it.)
+- White-box tests that built objects via `make_shared` now use `make_intrusive`
+  (unmanaged: `ref_count=1`, `heap=null`, plain-deleted on drop).
+
+Malloc-count A/B (jemalloc cumulative `nrequests`, churn.am, 2,400,009 VM
+objects, same machine):
+
+```text
+                       nrequests       per object
+pre-§7.2 (shared_ptr)   16,521,121         6.88
+post-§7.2 (intrusive)   14,201,092         5.92     -2,320,029  (~ -1 / object)
+```
+
+Exactly one fewer malloc per heap object — the control block is gone. ObjHeader
+grows 24 B (atomic + keepalive) but a ~80 B per-object allocation disappears, so
+each object is net smaller and costs one fewer malloc. `sizeof(Value)` is still
+24 B: the variant still holds `shared_ptr` for ~18 non-ObjHeader types (BigInt,
+error instances, the Runtime* objects), so the doc's 24→16 shrink needs that
+tail converted too — deferred to a follow-up phase. Full `make test` green
+(all unit suites + ambertest 81/0).
