@@ -866,7 +866,9 @@ std::size_t peak_rss_bytes() {
 // allocator, process RSS, VM-tracked live/shell bytes, and the fragmentation
 // ratio (RSS / live heap bytes). Written to stderr so it never pollutes the
 // program's stdout value.
-void maybe_dump_heap_stats(const amber::runtime::RuntimeWorld &world) {
+void maybe_dump_heap_stats(const amber::runtime::RuntimeWorld &world,
+                           const amber::bytecode::BcModule &module,
+                           const amber::runtime::ExecutionResult *result) {
   const char *flag = std::getenv("AMBER_HEAP_STATS");
   if (flag == nullptr || flag[0] == '\0' || flag[0] == '0') {
     return;
@@ -874,6 +876,21 @@ void maybe_dump_heap_stats(const amber::runtime::RuntimeWorld &world) {
   const amber::runtime::RuntimeHeapStats stats = world.heap_stats();
   const std::size_t rss = current_rss_bytes();
   const std::size_t peak_rss = peak_rss_bytes();
+  // Runtime string-table growth (the unbounded retention no allocator fixes --
+  // RESEARCH §3.3/§7.1, DESIGN-string-table-lifecycle Option D). result holds
+  // the full table only when it grew; the slots past the module's compile-time
+  // count are the runtime-interned strings, which are never reclaimed today.
+  std::size_t runtime_string_count = 0;
+  std::size_t runtime_string_bytes = 0;
+  if (result != nullptr &&
+      result->runtime_strings.size() > module.strings.size()) {
+    for (std::size_t i = module.strings.size();
+         i < result->runtime_strings.size(); ++i) {
+      runtime_string_bytes += result->runtime_strings[i].size();
+    }
+    runtime_string_count =
+        result->runtime_strings.size() - module.strings.size();
+  }
   const double frag_live =
       stats.live_object_bytes > 0
           ? static_cast<double>(rss) /
@@ -890,7 +907,8 @@ void maybe_dump_heap_stats(const amber::runtime::RuntimeWorld &world) {
       "live_object_bytes=%llu "
       "tracked_object_bytes=%llu live_objects=%llu allocations=%llu "
       "local_frees=%llu remote_frees_queued=%llu remote_queue_depth=%llu "
-      "gc_cycles=%llu gc_reclaimed_objects=%llu frag_ratio_live=%.2f "
+      "gc_cycles=%llu gc_reclaimed_objects=%llu runtime_string_count=%llu "
+      "runtime_string_bytes=%llu frag_ratio_live=%.2f "
       "frag_ratio_tracked=%.2f\n",
       AMBER_ALLOCATOR, rss, peak_rss,
       static_cast<unsigned long long>(stats.live_object_bytes),
@@ -901,7 +919,9 @@ void maybe_dump_heap_stats(const amber::runtime::RuntimeWorld &world) {
       static_cast<unsigned long long>(stats.remote_frees_queued),
       static_cast<unsigned long long>(stats.remote_queue_depth),
       static_cast<unsigned long long>(stats.gc_cycles),
-      static_cast<unsigned long long>(stats.gc_reclaimed_objects), frag_live,
+      static_cast<unsigned long long>(stats.gc_reclaimed_objects),
+      static_cast<unsigned long long>(runtime_string_count),
+      static_cast<unsigned long long>(runtime_string_bytes), frag_live,
       frag_tracked);
 }
 
@@ -913,7 +933,7 @@ execute_runnable_module(const amber::bytecode::BcModule &module,
   if (mode != EntryExecutionMode::MainOnly && module.init.has_entry_code_id) {
     init_result = world.execute(module.init.entry_code_id);
     if (!init_result.ok()) {
-      maybe_dump_heap_stats(world);
+      maybe_dump_heap_stats(world, module, &init_result);
       return init_result;
     }
   }
@@ -923,7 +943,7 @@ execute_runnable_module(const amber::bytecode::BcModule &module,
     const amber::bytecode::BcMethod *main_method =
         zero_arg_method_by_name(module, "main");
     if (main_method == nullptr) {
-      maybe_dump_heap_stats(world);
+      maybe_dump_heap_stats(world, module, nullptr);
       return {amber::runtime::Value::null(),
               amber::runtime::Fault{
                   "EntryError",
@@ -931,11 +951,11 @@ execute_runnable_module(const amber::bytecode::BcModule &module,
     }
     const amber::runtime::ExecutionResult result =
         world.execute(main_method->entry_code_id);
-    maybe_dump_heap_stats(world);
+    maybe_dump_heap_stats(world, module, &result);
     return result;
   }
 
-  maybe_dump_heap_stats(world);
+  maybe_dump_heap_stats(world, module, &init_result);
   return init_result;
 }
 
