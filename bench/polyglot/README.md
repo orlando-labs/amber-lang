@@ -430,3 +430,55 @@ cost is the per-call method-send path (`call_caches` probe + generic
 operand decode) and the global `ivar_caches` hash probe per access —
 inline ICs in the quickened stream would be the next step but need
 mutable per-site state, which the shared QuickCode does not have today.
+
+## §5.8 emitter parameter int-speculation: attempted, reverted (2026-06-13)
+
+Tried marking `param`/`block_param`/`implicit_block_param` slots as
+speculative integer candidates in `analyze_integer_locals`
+(`bytecode/emitter.cpp`), so parameter arithmetic emits `I*`/`I*K` opcodes
+instead of generic `SEND`. The speculation is sound — every integer opcode
+deopts to the full send path when an operand is not an `Int` at runtime, so
+it only chooses opcodes, never semantics — and it required first fixing the
+`I*K` constant-operand deopt to rebuild a full synthetic `Send` like the
+register-operand deopt already does.
+
+Same-day same-machine A/B, best of 8 after 2 warmups (Darwin arm64):
+
+```text
+workload            no-spec   with-spec   delta
+---------------------------------------------------------
+arithmetic           0.1529     0.1467     -4%   (noise band)
+calls-collections    0.0109     0.0403    +270%  REGRESSION
+sha-digest           0.0705     0.0691     ~0
+params (micro)       0.0964     0.0891     -8%   (real, modest)
+blocks (micro)       0.4993     0.4832     -3%
+```
+
+Reverted: a 3.7x regression on a shipped benchmark is not worth an 8% win on
+an integer-parameter-leaf micro.
+
+Root cause — `classify_direct_closure` (`runtime/vm.cpp`) holds hand-written
+recognizers (`SequenceIndex`/`LaneIndex`/`WrapSubtract`/`MixLinearWrap`/
+`ScoreRow`) that match the **exact `SEND`-shaped bytecode** of this
+benchmark's leaf functions (`pick`/`lane_index`/`wrap`/`mix`/`score_row`)
+and evaluate them inline with no frame push. Speculation rewrites those
+`SEND`s to `IDIV`/`IMUL`/`ISUB`/`IGT`/`IADD(K)`, so 3 of the 5 recognizers
+(`LaneIndex`, `WrapSubtract`, `MixLinearWrap`) stop matching and those
+functions fall back to full frame pushes — the regression is call overhead,
+not the integer ops. (`SequenceIndex`/`pick` and `ScoreRow` still match: `[]`
+stays `SEND` and `score_row`'s arithmetic is on non-candidate locals.)
+
+To unblock, in order:
+1. Land the `I*K` constant-operand deopt fix (route through a full synthetic
+   `Send` via a scratch register, matching the register-operand deopt). Today
+   that path is unreachable — only proven-integer locals get `I*K` and their
+   operands are always `Int` — so it cannot be landed or tested on its own;
+   it must land with the speculation that makes it reachable.
+2. Make the recognizers opcode-agnostic. A binary-op "view" that
+   canonicalizes both a 1-arg binary `SEND` and the `I*`/`I*K` forms to
+   `(selector, dst, lhs, rhs[, const])` lets `LaneIndex`/`WrapSubtract` match
+   either shape unchanged (same instruction count, reg-reg ops). `MixLinearWrap`
+   genuinely restructures (`LoadK`+`SEND` collapses to `IADDK`/`IMULK`, fewer
+   instructions) and needs a second matcher.
+   Better still: retire these benchmark-specific recognizers in favor of a
+   general frameless-leaf-call path that consumes specialized bytecode.
