@@ -1,0 +1,82 @@
+package bench.heap.churn
+
+export main
+
+# Heap-churn benchmark for the fragmentation/RSS work (RESEARCH §9 "Bench
+# scenario"). It deliberately drives the two distinct retention mechanisms the
+# research separates:
+#
+#   1. churn_graphs -- a high allocation rate of small, MIXED-SIZE object graphs
+#      (instances, two list sizes, a map, a set, a tuple) with MIXED LIFETIMES:
+#      a fixed-capacity ring keeps ~RING_CAP graphs live while every other graph
+#      dies almost immediately. This is the textbook external-fragmentation
+#      generator (§3.1) and the part an allocator swap is meant to help.
+#
+#   2. churn_strings -- produces many DISTINCT interned strings. The runtime
+#      string table is immortal and unbounded (§3.3/§7.1), so this grows RSS in
+#      a way NO allocator swap can fix; it is the control that proves the point.
+#
+# Run with AMBER_HEAP_STATS=1 to get the RSS / live-bytes / fragmentation line.
+# Counts are scaled for the reference interpreter (a few seconds); the string
+# loop is kept modest because intern is an O(n) scan, i.e. O(n^2) overall.
+#
+# RING_CAP is deliberately large: the allocator-addressable symptom only appears
+# when a big set of mixed-size objects is live SIMULTANEOUSLY and then dies,
+# leaving the allocator holding pages. A small ring would free promptly and hide
+# the difference. The ring fills, reaches a steady-state live heap, and is freed
+# when churn_graphs returns -- so peak_rss captures the high-water and end rss
+# captures how much each allocator hands back to the OS.
+
+def graph_iters():
+  200000
+
+def ring_cap():
+  40000
+
+def string_rounds():
+  8000
+
+class Node:
+  def init(@id, @meta, @items):
+    pass
+  def weight():
+    @id + @items.count()
+
+# Allocate a mixed-size object graph. The returned Node retains `medium`, `meta`
+# and (through meta) `small`; the set and tuple temporaries are unreferenced and
+# die as soon as this frame returns.
+def build_graph(seed):
+  small = [seed, seed + 1]
+  medium = [
+    seed, seed + 1, seed + 2, seed + 3,
+    seed + 4, seed + 5, seed + 6, seed + 7,
+  ]
+  meta = {(seed % 97): small, "n": seed % 13, (seed % 4): seed % 5}
+  marks = {seed % 7, seed % 11, seed % 13, "tag"}
+  pair = (seed, marks, medium.count())
+  Node(seed % 100003, meta, medium)
+
+def churn_graphs(iters, cap):
+  ring = Array.filled(cap, 0)
+  checksum = 0
+  iters.times |i|:
+    node = build_graph(i)
+    ring[i % cap] = node
+    checksum = (checksum + node.weight()) % 2147483647
+  checksum
+
+def churn_strings(rounds):
+  total = 0
+  rounds.times |i|:
+    s = "node-" + i.to_str() + ":" + (i * 7 % 100000).to_str()
+    label = "#{i % 256}-#{(i * 3) % 256}"
+    if s != "sentinel" and label != "x":
+      total = (total + 1) % 2147483647
+  total
+
+def main():
+  g = churn_graphs(graph_iters(), ring_cap())
+  s = churn_strings(string_rounds())
+  (g + s) % 2147483647
+
+main()

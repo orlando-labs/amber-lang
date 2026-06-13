@@ -5720,11 +5720,15 @@ public:
     out.young_objects = 0;
     out.mature_objects = 0;
     out.shared_objects = 0;
+    out.live_object_bytes = 0;
+    out.tracked_object_bytes = 0;
     for (const auto &[allocation_id, record] : objects_) {
       (void)allocation_id;
+      out.tracked_object_bytes += record.allocation_size;
       if (!record.logical_live) {
         continue;
       }
+      out.live_object_bytes += record.allocation_size;
       const ObjHeader *header = header_for_record(record);
       if (header == nullptr) {
         continue;

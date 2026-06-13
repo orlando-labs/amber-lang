@@ -482,3 +482,71 @@ To unblock, in order:
    instructions) and needs a second matcher.
    Better still: retire these benchmark-specific recognizers in favor of a
    general frameless-leaf-call path that consumes specialized bytecode.
+
+## §6.1 heap allocator flag + fragmentation measurement (2026-06-13)
+
+Layer-1 of `RESEARCH-heap-fragmentation-allocators-2026-06-12.md` §10 ("Now
+(days)"): make the allocator swappable, instrument RSS vs. live bytes, add a
+churn benchmark, and run the §9 measurement. Layers 2–3 (string-table
+lifecycle, intrusive refcounts, slab pools, moving young gen) are unchanged and
+remain the larger follow-on phases.
+
+Landed:
+- **`MALLOC=system|mimalloc|jemalloc` Makefile flag.** Sets the `AMBER_ALLOCATOR`
+  macro; for mimalloc/jemalloc it discovers the Homebrew prefix and, on macOS,
+  `-Wl,-force_load`s the static archive so the malloc-zone override actually
+  wins (plain `-l` does not interpose on Darwin). Default `system` build and
+  flags are unchanged.
+- **`RuntimeHeapStats.live_object_bytes` / `tracked_object_bytes`**, summed over
+  `objects_` in `stats()` (allocation_size was already recorded per object).
+  Shell bytes only — a cheap proxy, not a payload-exact live total.
+- **`AMBER_HEAP_STATS=1` dump** in the runner: one stderr line with allocator,
+  current + peak RSS (mach `task_info` / `getrusage`), live/tracked bytes, and
+  the RSS / live-bytes ratio. Off by default; never touches stdout.
+- **`bench/heap/churn.am`**: a large (RING_CAP=40000) simultaneous live set of
+  mixed-size graphs with mixed lifetimes, plus a distinct-interned-string loop.
+  A small ring frees too promptly to show anything; the large ring builds a
+  real fragmented heap then drops it.
+
+Same-machine sweep, churn.am, Darwin arm64 (mimalloc 3.3.2, jemalloc 5.3.0):
+
+```text
+allocator   config                          peak RSS   end RSS   returned
+-----------------------------------------------------------------------------
+system      macOS libmalloc                  ~97 MB     ~97 MB    ~0%
+mimalloc    default / PURGE_DELAY=0          106 MB     106 MB    ~0%  (see note)
+jemalloc    default                           95 MB      27 MB    ~72%
+jemalloc    dirty/muzzy_decay_ms:0            95 MB    10.8 MB    ~89%  (≈baseline)
+```
+
+Output value `1411573421` is identical under all three — correctness preserved.
+
+Findings:
+1. **Peak RSS is allocator-independent (~95–106 MB).** It is set by the VM's
+   4-malloc-per-object pattern over a large simultaneous live set; no allocator
+   lowers it. Only §7 structural fixes (intrusive refcounts, slabs) cut peak.
+2. **Page return is the allocator-sensitive symptom, and jemalloc wins on
+   macOS**: 95 MB → 10.8 MB with aggressive decay. mimalloc's reclaim is real
+   but uses `madvise(MADV_FREE)`, which marks pages reclaimable-under-pressure
+   without dropping `resident_size` on Darwin — so its win is invisible to RSS
+   here (it would show on Linux / via `vmmap` dirty-vs-clean). This is the doc's
+   "macOS is second-tier, measure with vmmap" caveat (§4, §9) made concrete, and
+   it nuances the "mimalloc default" pick: on macOS the *measurable* RSS win is
+   jemalloc+decay; the mimalloc-vs-jemalloc default should be settled on Linux.
+3. **Live heap is < 0.5 MB at a ~95 MB peak.** `live_object_bytes` ≈ 1.2 KB and
+   jemalloc's at-exit `Allocated` is 474 KB; `gc_cycles=0` (refcounting freed
+   all 2.4M objects promptly, GC never ran). RSS is overhead + page retention,
+   not live data — exactly the doc's §3 thesis. The RSS/live-bytes ratio at
+   end-of-run is therefore dominated by fixed baseline; **peak + post-churn end
+   RSS across flavors, and jemalloc `stats_print`, are the informative numbers.**
+4. **4-malloc/object spot-check (§9):** jemalloc cumulative `nrequests` =
+   16,521,121 for the churn vs 642 for a trivial program ≈ 6.9 malloc calls per
+   VM heap object. That is *above* the documented 4 (the remainder is per-iter
+   interpreter temporaries + the string loop), consistent with — and a lower
+   bound on — the 4-shell-allocations claim. Exact isolation needs a counter
+   inside `allocate<T>`; deferred.
+
+Net: the swap is worth keeping as a flag (jemalloc+decay is a real, free RSS win
+on this workload), but it treats the symptom — peak is unchanged and the live
+set is tiny, so the §7.1 string-table lifecycle and §7.2 intrusive-refcount work
+remain the higher-impact levers. Run the sweep with `bench/heap/README.md`.
