@@ -644,3 +644,33 @@ each object is net smaller and costs one fewer malloc. `sizeof(Value)` is still
 error instances, the Runtime* objects), so the doc's 24→16 shrink needs that
 tail converted too — deferred to a follow-up phase. Full `make test` green
 (all unit suites + ambertest 81/0).
+
+### Value 24→16 tail conversion: investigated, deferred (2026-06-13)
+
+Attempted next; backed out without committing. Converting the ~15 non-ObjHeader
+`shared_ptr` tail alternatives to 8-byte intrusive pointers (the only way to drop
+the variant's largest member to 8 B) hits a wall at `shared_ptr<RuntimeIoValue>`:
+`RuntimeIoValue` is an abstract polymorphic base (5 derived kinds, ~77 shared_ptr
+uses, 33 Value entry points) owned entirely by the io subsystem, which does not
+even include vm.h. One unconverted alternative keeps `Value` at 24, so it is
+all-or-nothing. Paths: box each alternative behind an 8-byte RcPtr<TailBox<T>>
+(contained, but +1 alloc per tail value); full intrusive incl. an io-subsystem
+rewrite (large/risky); or defer. Deferred by decision in favor of a smaller,
+safer win; the RcPtr/RefCounted machinery was drafted and reverted.
+
+## §7.5 pressure-driven remote-free drains (2026-06-13)
+
+Cross-strand frees are deferred to the owning worker's `remote_frees` queue and
+only physically reclaimed when that worker drains — which previously happened
+only at four fixed interpreter points and at heap teardown, so an
+actively-allocating strand's dead objects could pile up between drains. Added a
+drain under the worker's own allocation pressure: `allocate` calls
+`maybe_drain_on_pressure`, which every `kRemoteDrainAllocInterval` (256)
+allocations drains the current worker's queue. `drain_remote_frees` already has a
+lock-free `remote_free_pending_` early-out, so for single-strand workloads (no
+cross-strand frees) this is a thread-local increment plus an atomic load every
+256 allocations — churn.am time and value are unchanged (`remote_frees_queued=0`
+there, so the path is a no-op). Correct-by-construction (it only drains more
+often; nesting is safe — `RuntimeWorkerScope` is thread-local save/restore);
+validated by the full suite including the cross-strand `stdlib_task_tests`. A
+dedicated concurrent bench to quantify the queue-depth reduction is a follow-up.

@@ -5036,6 +5036,9 @@ public:
 
   ~Impl() { drain_all_remote_frees(); }
 
+  // Allocations between pressure-driven remote-free drains (RESEARCH §7.5).
+  static constexpr std::uint64_t kRemoteDrainAllocInterval = 256;
+
   template <typename T, typename Init>
   IntrusivePtr<T> allocate(HeapObjectKind kind, Init init) {
     auto *raw = new T();
@@ -5056,11 +5059,28 @@ public:
     init(*raw);
 
     record_allocation(worker_id, kind, allocation_size, allocation_id, raw);
-    return IntrusivePtr<T>(raw, typename IntrusivePtr<T>::Adopt{});
+    IntrusivePtr<T> handle(raw, typename IntrusivePtr<T>::Adopt{});
+    maybe_drain_on_pressure(worker_id);
+    return handle;
   }
 
   template <typename T> IntrusivePtr<T> allocate(HeapObjectKind kind) {
     return allocate<T>(kind, [](T &) {});
+  }
+
+  // RESEARCH §7.5: drain this worker's queued cross-strand frees under its own
+  // allocation pressure (every N allocations), in addition to the fixed
+  // interpreter drain points, so dead objects owned by an actively-allocating
+  // strand are reclaimed promptly instead of riding out the gaps between those
+  // points. drain_remote_frees has a lock-free remote_free_pending_ early-out,
+  // so this is ~free when nothing is queued (the common single-strand case).
+  void maybe_drain_on_pressure(std::uint64_t worker_id) {
+    static thread_local std::uint64_t allocations_since_drain = 0;
+    if (++allocations_since_drain < kRemoteDrainAllocInterval) {
+      return;
+    }
+    allocations_since_drain = 0;
+    drain_remote_frees(worker_id);
   }
 
   // Drop-to-zero path for IntrusivePtr (RESEARCH §7.2): identical effect to the
