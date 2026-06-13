@@ -644,6 +644,14 @@ struct RuntimeArenaStats {
 struct RuntimeHeapStats {
   std::uint64_t allocations = 0;
   std::uint64_t live_objects = 0;
+  // Sum of object-shell allocation_size over records still tracked in objects_.
+  // tracked_object_bytes counts every malloc-live shell (including GC-reclaimed
+  // shells whose payloads are cleared but whose memory a stale shared_ptr still
+  // holds); live_object_bytes counts only logically-live shells. Neither counts
+  // interior payloads (item vectors, strings) -- they are a cheap proxy for the
+  // §9 fragmentation ratio (RSS / live heap bytes), not an exact live-byte total.
+  std::uint64_t live_object_bytes = 0;
+  std::uint64_t tracked_object_bytes = 0;
   std::uint64_t local_frees = 0;
   std::uint64_t remote_frees_queued = 0;
   std::uint64_t remote_frees_drained = 0;

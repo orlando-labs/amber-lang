@@ -10,6 +10,67 @@ CPPFLAGS += -I.
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Wpedantic -O2 -g
 LDFLAGS ?=
 
+# --- Allocator selection -----------------------------------------------------
+# MALLOC selects the C/C++ allocator the binaries link against (RESEARCH heap
+# fragmentation, §10 step 1). Flavors:
+#   system   (default) -- platform malloc, no extra dependency
+#   mimalloc            -- recommended; best macOS story, aggressive page return
+#   jemalloc           -- Linux deploys + diagnosis (stats_print, heap profiling)
+# Install via `brew install mimalloc` / `brew install jemalloc`, or point
+# MIMALLOC_PREFIX / JEMALLOC_PREFIX at an existing install.
+#
+# Page return is a *runtime* knob, not a build flag -- set it when you run:
+#   mimalloc: MIMALLOC_PURGE_DELAY=0            (decommit dirty pages immediately)
+#   jemalloc: MALLOC_CONF=background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0
+# Use AMBER_HEAP_STATS=1 on a run to print the §9 RSS / live-bytes line.
+MALLOC ?= system
+UNAME_S := $(shell uname -s)
+
+ifeq ($(MALLOC),system)
+CPPFLAGS += -DAMBER_ALLOCATOR=\"system\"
+else ifeq ($(MALLOC),mimalloc)
+CPPFLAGS += -DAMBER_ALLOCATOR=\"mimalloc\"
+MIMALLOC_PREFIX ?= $(shell brew --prefix mimalloc 2>/dev/null)
+ifeq ($(strip $(MIMALLOC_PREFIX)),)
+$(error MALLOC=mimalloc but mimalloc was not found; run `brew install mimalloc` or set MIMALLOC_PREFIX)
+endif
+CPPFLAGS += -I$(MIMALLOC_PREFIX)/include
+MIMALLOC_STATIC := $(firstword $(wildcard $(MIMALLOC_PREFIX)/lib/libmimalloc.a))
+ifeq ($(UNAME_S),Darwin)
+# Force-load the static archive so mimalloc's malloc-zone override wins over the
+# system allocator; fall back to dynamic linking if no static archive is present.
+ifeq ($(strip $(MIMALLOC_STATIC)),)
+LDFLAGS += -L$(MIMALLOC_PREFIX)/lib -lmimalloc
+else
+LDFLAGS += -Wl,-force_load,$(MIMALLOC_STATIC)
+endif
+else
+LDFLAGS += -L$(MIMALLOC_PREFIX)/lib -Wl,-rpath,$(MIMALLOC_PREFIX)/lib -lmimalloc
+endif
+else ifeq ($(MALLOC),jemalloc)
+CPPFLAGS += -DAMBER_ALLOCATOR=\"jemalloc\"
+JEMALLOC_PREFIX ?= $(shell brew --prefix jemalloc 2>/dev/null)
+ifeq ($(strip $(JEMALLOC_PREFIX)),)
+$(error MALLOC=jemalloc but jemalloc was not found; run `brew install jemalloc` or set JEMALLOC_PREFIX)
+endif
+CPPFLAGS += -I$(JEMALLOC_PREFIX)/include
+JEMALLOC_STATIC := $(firstword $(wildcard $(JEMALLOC_PREFIX)/lib/libjemalloc.a))
+ifeq ($(UNAME_S),Darwin)
+# jemalloc registers its malloc zone from a static-archive constructor; force-load
+# it so the override takes effect (macOS jemalloc is second-tier -- see RESEARCH §4).
+ifeq ($(strip $(JEMALLOC_STATIC)),)
+LDFLAGS += -L$(JEMALLOC_PREFIX)/lib -ljemalloc
+else
+LDFLAGS += -Wl,-force_load,$(JEMALLOC_STATIC)
+endif
+else
+LDFLAGS += -L$(JEMALLOC_PREFIX)/lib -Wl,-rpath,$(JEMALLOC_PREFIX)/lib -ljemalloc
+endif
+else
+$(error Unknown MALLOC='$(MALLOC)'; use system, mimalloc, or jemalloc)
+endif
+# -----------------------------------------------------------------------------
+
 LEXER_SRCS := frontend/lexer/lexer.cpp frontend/lexer/token.cpp
 AST_SRCS := frontend/ast/expr.cpp
 PARSER_SRCS := frontend/parser/parser.cpp

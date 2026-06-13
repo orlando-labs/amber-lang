@@ -37,6 +37,17 @@
 #include <string>
 #include <vector>
 
+#include <sys/resource.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
+// Identifies the allocator this binary was linked against. The Makefile MALLOC=
+// flag defines this; default to the system allocator when built without it.
+#ifndef AMBER_ALLOCATOR
+#define AMBER_ALLOCATOR "system"
+#endif
+
 namespace {
 
 std::string read_file(const std::string &path) {
@@ -810,6 +821,90 @@ RunnableModuleArtifact compile_source_to_runnable_module(
   return artifact;
 }
 
+// Current resident set size of this process in bytes, or 0 if unavailable.
+std::size_t current_rss_bytes() {
+#if defined(__APPLE__)
+  mach_task_basic_info info;
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+    return static_cast<std::size_t>(info.resident_size);
+  }
+  return 0;
+#elif defined(__linux__)
+  std::ifstream statm("/proc/self/statm");
+  std::size_t pages_total = 0;
+  std::size_t pages_resident = 0;
+  if (statm >> pages_total >> pages_resident) {
+    return pages_resident * static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+  }
+  return 0;
+#else
+  return 0;
+#endif
+}
+
+// Peak resident set size of this process in bytes, or 0 if unavailable. This is
+// the kernel's high-water mark, so it captures the churn peak regardless of when
+// objects were freed -- the most comparable number across allocator flavors.
+std::size_t peak_rss_bytes() {
+  struct rusage usage;
+  if (getrusage(RUSAGE_SELF, &usage) != 0) {
+    return 0;
+  }
+#if defined(__APPLE__)
+  // Darwin reports ru_maxrss in bytes.
+  return static_cast<std::size_t>(usage.ru_maxrss);
+#else
+  // Linux and the BSDs report ru_maxrss in kilobytes.
+  return static_cast<std::size_t>(usage.ru_maxrss) * 1024u;
+#endif
+}
+
+// When AMBER_HEAP_STATS is set to a non-empty, non-"0" value, print a single
+// machine-parseable line of heap accounting (§9 measurement plan): the linked
+// allocator, process RSS, VM-tracked live/shell bytes, and the fragmentation
+// ratio (RSS / live heap bytes). Written to stderr so it never pollutes the
+// program's stdout value.
+void maybe_dump_heap_stats(const amber::runtime::RuntimeWorld &world) {
+  const char *flag = std::getenv("AMBER_HEAP_STATS");
+  if (flag == nullptr || flag[0] == '\0' || flag[0] == '0') {
+    return;
+  }
+  const amber::runtime::RuntimeHeapStats stats = world.heap_stats();
+  const std::size_t rss = current_rss_bytes();
+  const std::size_t peak_rss = peak_rss_bytes();
+  const double frag_live =
+      stats.live_object_bytes > 0
+          ? static_cast<double>(rss) /
+                static_cast<double>(stats.live_object_bytes)
+          : 0.0;
+  const double frag_tracked =
+      stats.tracked_object_bytes > 0
+          ? static_cast<double>(rss) /
+                static_cast<double>(stats.tracked_object_bytes)
+          : 0.0;
+  std::fprintf(
+      stderr,
+      "[amber-heap] allocator=%s rss_bytes=%zu peak_rss_bytes=%zu "
+      "live_object_bytes=%llu "
+      "tracked_object_bytes=%llu live_objects=%llu allocations=%llu "
+      "local_frees=%llu remote_frees_queued=%llu remote_queue_depth=%llu "
+      "gc_cycles=%llu gc_reclaimed_objects=%llu frag_ratio_live=%.2f "
+      "frag_ratio_tracked=%.2f\n",
+      AMBER_ALLOCATOR, rss, peak_rss,
+      static_cast<unsigned long long>(stats.live_object_bytes),
+      static_cast<unsigned long long>(stats.tracked_object_bytes),
+      static_cast<unsigned long long>(stats.live_objects),
+      static_cast<unsigned long long>(stats.allocations),
+      static_cast<unsigned long long>(stats.local_frees),
+      static_cast<unsigned long long>(stats.remote_frees_queued),
+      static_cast<unsigned long long>(stats.remote_queue_depth),
+      static_cast<unsigned long long>(stats.gc_cycles),
+      static_cast<unsigned long long>(stats.gc_reclaimed_objects), frag_live,
+      frag_tracked);
+}
+
 amber::runtime::ExecutionResult
 execute_runnable_module(const amber::bytecode::BcModule &module,
                         EntryExecutionMode mode) {
@@ -818,6 +913,7 @@ execute_runnable_module(const amber::bytecode::BcModule &module,
   if (mode != EntryExecutionMode::MainOnly && module.init.has_entry_code_id) {
     init_result = world.execute(module.init.entry_code_id);
     if (!init_result.ok()) {
+      maybe_dump_heap_stats(world);
       return init_result;
     }
   }
@@ -827,14 +923,19 @@ execute_runnable_module(const amber::bytecode::BcModule &module,
     const amber::bytecode::BcMethod *main_method =
         zero_arg_method_by_name(module, "main");
     if (main_method == nullptr) {
+      maybe_dump_heap_stats(world);
       return {amber::runtime::Value::null(),
               amber::runtime::Fault{
                   "EntryError",
                   "entry mode requires a zero-argument main() method", 0, 0}};
     }
-    return world.execute(main_method->entry_code_id);
+    const amber::runtime::ExecutionResult result =
+        world.execute(main_method->entry_code_id);
+    maybe_dump_heap_stats(world);
+    return result;
   }
 
+  maybe_dump_heap_stats(world);
   return init_result;
 }
 
