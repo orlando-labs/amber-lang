@@ -550,3 +550,35 @@ Net: the swap is worth keeping as a flag (jemalloc+decay is a real, free RSS win
 on this workload), but it treats the symptom — peak is unchanged and the live
 set is tiny, so the §7.1 string-table lifecycle and §7.2 intrusive-refcount work
 remain the higher-impact levers. Run the sweep with `bench/heap/README.md`.
+
+## §6.2 Layer-2a: O(1) string/symbol interning (2026-06-13)
+
+First half of RESEARCH §7.1: the `intern_runtime_string` /
+`intern_runtime_symbol` *time* blowup. Both did a linear scan of the whole
+table per intern (`runtime/vm.cpp`), so string/symbol-heavy interpretation was
+O(n²) — and `symbol_id_for_text` is also on the per-send selector-cache path
+(`try_apply_scalar_send`), so every method send paid an O(symbols) scan.
+
+Replaced the scans with incremental hash indices (`string_index_` /
+`symbol_index_`, `text → id`) on `Vm`. The tables only ever grow (never
+clear/shrink) and are occasionally appended to outside intern (nested-module
+splicing, `vm.cpp:9669`/`9676`), so the index is folded lazily against a
+watermark (`fold_string_index`/`fold_symbol_index`): a steady-state intern is a
+single `find`; folding is O(new slots) and runs only after an external append.
+`emplace` keeps the first id for a text, so ids and dedup semantics are byte-for-
+byte unchanged (corpus + vm_tests green, churn value identical).
+
+A/B on a distinct-string micro-bench (`bench/heap/intern_scaling.am`, 30 000
+rounds ≈ 90 000 distinct strings), same machine:
+
+```text
+build                       time (30k rounds)
+old (linear intern scan)        17.2 s
+new (hash index)                 0.13 s     ~125× faster
+```
+
+This fixes the *quadratic time*; it does **not** bound table growth — the table
+is still immortal (every distinct string is a permanent slot). Bounding the
+*space* is Layer-2b, designed separately in
+`DESIGN-string-table-lifecycle-2026-06-13.md` (it needs a Value-representation
+change or GC-integrated string liveness, both larger and riskier than this).
