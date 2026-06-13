@@ -15397,21 +15397,44 @@ private:
     return module_.strings[string_id];
   }
 
-  std::uint32_t intern_runtime_string(const std::string &text) {
-    for (std::uint32_t i = 0; i < module_.strings.size(); ++i) {
-      if (module_.strings[i] == text) {
-        return i;
-      }
+  // Fold any string-table slots that were appended outside intern (e.g.
+  // nested-module splicing) into the hash index. The table only grows, so a
+  // folded-count watermark suffices; emplace keeps the first id for a given
+  // text, matching the old linear scan's "return first match" semantics.
+  void fold_string_index() {
+    for (std::size_t i = string_index_folded_; i < module_.strings.size();
+         ++i) {
+      string_index_.emplace(module_.strings[i], static_cast<std::uint32_t>(i));
     }
+    string_index_folded_ = module_.strings.size();
+  }
+
+  std::uint32_t intern_runtime_string(const std::string &text) {
+    fold_string_index();
+    const auto existing = string_index_.find(text);
+    if (existing != string_index_.end()) {
+      return existing->second;
+    }
+    const std::uint32_t id = static_cast<std::uint32_t>(module_.strings.size());
     module_.strings.push_back(text);
-    return static_cast<std::uint32_t>(module_.strings.size() - 1U);
+    string_index_.emplace(text, id);
+    string_index_folded_ = module_.strings.size();
+    return id;
+  }
+
+  void fold_symbol_index() {
+    for (std::size_t i = symbol_index_folded_; i < module_.symbols.size();
+         ++i) {
+      symbol_index_.emplace(module_.symbols[i], static_cast<std::uint32_t>(i));
+    }
+    symbol_index_folded_ = module_.symbols.size();
   }
 
   std::optional<std::uint32_t> symbol_id_for_text(const std::string &text) {
-    for (std::uint32_t i = 0; i < module_.symbols.size(); ++i) {
-      if (module_.symbols[i] == text) {
-        return i;
-      }
+    fold_symbol_index();
+    const auto existing = symbol_index_.find(text);
+    if (existing != symbol_index_.end()) {
+      return existing->second;
     }
     return std::nullopt;
   }
@@ -15421,8 +15444,11 @@ private:
             symbol_id_for_text(text)) {
       return *existing;
     }
+    const std::uint32_t id = static_cast<std::uint32_t>(module_.symbols.size());
     module_.symbols.push_back(text);
-    return static_cast<std::uint32_t>(module_.symbols.size() - 1U);
+    symbol_index_.emplace(text, id);
+    symbol_index_folded_ = module_.symbols.size();
+    return id;
   }
 
   struct ConversionResult {
@@ -29119,6 +29145,15 @@ private:
   BcModule module_;
   std::size_t initial_string_count_ = 0;
   std::size_t initial_symbol_count_ = 0;
+  // O(1) interning indices over module_.strings / module_.symbols, folded
+  // lazily (see fold_string_index/fold_symbol_index) so they stay consistent
+  // when the tables are appended to outside intern. Replaces the former O(n)
+  // linear intern scans -- string-heavy code was O(n^2). Does not yet bound
+  // table growth (Layer-2b); ids and dedup semantics are unchanged.
+  std::unordered_map<std::string, std::uint32_t> string_index_;
+  std::size_t string_index_folded_ = 0;
+  std::unordered_map<std::string, std::uint32_t> symbol_index_;
+  std::size_t symbol_index_folded_ = 0;
   std::shared_ptr<RuntimeState> state_;
   std::string module_id_;
   const RuntimeWorldOptions *world_options_ = nullptr;
