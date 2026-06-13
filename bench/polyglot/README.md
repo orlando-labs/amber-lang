@@ -582,3 +582,23 @@ is still immortal (every distinct string is a permanent slot). Bounding the
 *space* is Layer-2b, designed separately in
 `DESIGN-string-table-lifecycle-2026-06-13.md` (it needs a Value-representation
 change or GC-integrated string liveness, both larger and riskier than this).
+
+## §6.3 Layer-2b Option D: make string-table growth observable (2026-06-13)
+
+The space fix (DESIGN-string-table-lifecycle §4 Options A/B) is gated on the
+§7.2 intrusive-refcount work and is not attempted yet. Its cheap, safe "now"
+step (Option D) is landed: `AMBER_HEAP_STATS` now also reports
+`runtime_string_count` / `runtime_string_bytes` — the slots interned past the
+module's compile-time string count, i.e. the unbounded region. Computed
+runner-side from `ExecutionResult.runtime_strings` (`tools/amberc/main.cpp`); no
+VM API or `RuntimeHeapStats` change, stderr-only, off by default.
+
+```text
+workload                 runtime_string_count   runtime_string_bytes
+intern_scaling (30k)            149 897                 1 267 804
+churn.am                         39 369                   334 456
+run_script fixture                    0                         0
+```
+
+Turns "the table leaks" into a number, closes RESEARCH §9's tracking for the
+string table, and gives a before/after handle for the eventual Layer-2b fix.
