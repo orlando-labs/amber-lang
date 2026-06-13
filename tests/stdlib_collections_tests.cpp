@@ -146,7 +146,7 @@ amber::bytecode::BcCode make_unary_send_code(std::uint32_t code_id,
 amber::runtime::Value
 make_closure_value(std::uint32_t code_id,
                    std::vector<amber::runtime::Value> captures = {}) {
-  auto closure = std::make_shared<amber::runtime::ClosureValue>();
+  auto closure = amber::runtime::make_intrusive<amber::runtime::ClosureValue>();
   closure->header.kind = amber::runtime::HeapObjectKind::Closure;
   closure->code_id = code_id;
   closure->captures = std::move(captures);
@@ -207,7 +207,7 @@ void expect_integer_list(const amber::runtime::Value &value,
                          const std::vector<std::int64_t> &expected,
                          const std::string &message) {
   expect(value.is_list(), message + " should be a list");
-  const std::shared_ptr<amber::runtime::ListValue> list = value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = value.as_list();
   expect(list != nullptr, message + " list payload");
   expect(list->items.size() == expected.size(), message + " list size");
   for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -220,7 +220,7 @@ void expect_set_integer_items(const amber::runtime::Value &value,
                               const std::vector<std::int64_t> &expected,
                               const std::string &message) {
   expect(value.is_set(), message + " should be a set");
-  const std::shared_ptr<amber::runtime::SetValue> set = value.as_set();
+  const amber::runtime::IntrusivePtr<amber::runtime::SetValue> set = value.as_set();
   expect(set != nullptr, message + " set payload");
   expect(set->items.size() == expected.size(), message + " set size");
   for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -234,7 +234,7 @@ void expect_nested_integer_lists(
     const std::vector<std::vector<std::int64_t>> &expected,
     const std::string &message) {
   expect(value.is_list(), message + " should be a list");
-  const std::shared_ptr<amber::runtime::ListValue> outer = value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> outer = value.as_list();
   expect(outer != nullptr, message + " outer payload");
   expect(outer->items.size() == expected.size(), message + " outer size");
   for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -248,7 +248,7 @@ void expect_symbol_list(const amber::bytecode::BcModule &module,
                         const std::vector<std::string> &expected,
                         const std::string &message) {
   expect(value.is_list(), message + " should be a list");
-  const std::shared_ptr<amber::runtime::ListValue> list = value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = value.as_list();
   expect(list != nullptr, message + " list payload");
   expect(list->items.size() == expected.size(), message + " list size");
   for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -264,13 +264,13 @@ void expect_entry_list(
     const std::vector<std::pair<std::string, std::int64_t>> &expected,
     const std::string &message) {
   expect(value.is_list(), message + " should be a list");
-  const std::shared_ptr<amber::runtime::ListValue> list = value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = value.as_list();
   expect(list != nullptr, message + " list payload");
   expect(list->items.size() == expected.size(), message + " list size");
   for (std::size_t i = 0; i < expected.size(); ++i) {
     expect(list->items[i].is_tuple(),
            message + " entry " + std::to_string(i) + " should be tuple");
-    const std::shared_ptr<amber::runtime::TupleValue> tuple =
+    const amber::runtime::IntrusivePtr<amber::runtime::TupleValue> tuple =
         list->items[i].as_tuple();
     expect(tuple != nullptr && tuple->items.size() == 2,
            message + " entry " + std::to_string(i) + " shape");
@@ -289,7 +289,7 @@ void expect_symbol_map_entries(
     const std::vector<std::pair<std::string, std::int64_t>> &expected,
     const std::string &message) {
   expect(value.is_map(), message + " should be a map");
-  const std::shared_ptr<amber::runtime::MapValue> map = value.as_map();
+  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> map = value.as_map();
   expect(map != nullptr, message + " map payload");
   expect(map->entries.size() == expected.size(), message + " map size");
   for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -668,7 +668,7 @@ void assert_sequence_protocol_for(const amber::bytecode::BcModule &module,
   result = amber::runtime::execute_code(module, 16, {source, low_high_key});
   expect_ok(result, label + " group_by");
   expect(result.value.is_map(), label + " group_by should return map");
-  const std::shared_ptr<amber::runtime::MapValue> groups =
+  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> groups =
       result.value.as_map();
   expect(groups != nullptr && groups->entries.size() == 2,
          label + " group_by shape");

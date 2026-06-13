@@ -1399,7 +1399,7 @@ void test_std017_source_level_task_sync_stack_compiles_and_runs() {
 
   expect(exec.ok(), "source-level task/sync stack should execute");
   expect(exec.value.is_list(), "source-level task/sync result should be list");
-  const std::shared_ptr<amber::runtime::ListValue> values =
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> values =
       exec.value.as_list();
   expect(values != nullptr && values->items.size() == 4,
          "source-level task/sync result shape");
@@ -1424,7 +1424,7 @@ void test_std017_source_level_flow_and_threaded_collection_compile_and_run() {
 
   expect(exec.ok(), "source-level flow/threaded stack should execute");
   expect(exec.value.is_list(), "source-level flow result should be list");
-  const std::shared_ptr<amber::runtime::ListValue> values =
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> values =
       exec.value.as_list();
   expect(values != nullptr && values->items.size() == 6,
          "source-level flow result shape");

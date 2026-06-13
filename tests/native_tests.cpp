@@ -419,7 +419,7 @@ void test_native_trampoline_safepoint_preserves_heap_argument_root() {
   amber::runtime::ExecutionResult made = world.execute(2);
   expect(made.ok() && made.value.is_list(),
          "trampoline root probe should allocate a world list");
-  const std::shared_ptr<amber::runtime::ListValue> list = made.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = made.value.as_list();
 
   expect(world.freeze_world().ok(), "trampoline root world should freeze");
   const amber::native::NativeModule bound =

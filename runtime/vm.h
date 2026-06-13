@@ -4,6 +4,7 @@
 #include "package/package.h"
 #include "profile/capabilities.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -27,6 +28,103 @@ struct TupleValue;
 struct SetValue;
 struct MapValue;
 struct MapEntry;
+
+// Intrusive strong-reference smart pointer for the six ObjHeader-bearing heap
+// kinds (RESEARCH §7.2). The count lives in the object's ObjHeader, so this is
+// a single 8-byte pointer with no separate control block. All element-touching
+// logic is out-of-line in vm.cpp (declared here, explicitly instantiated there)
+// so IntrusivePtr<T> works with an incomplete T at the many include sites, just
+// like std::shared_ptr does.
+template <class T> void runtime_heap_add_ref(T *obj) noexcept;
+template <class T> void runtime_heap_release(T *obj) noexcept;
+
+template <class T> class IntrusivePtr {
+public:
+  struct Adopt {};
+
+  IntrusivePtr() noexcept = default;
+  IntrusivePtr(std::nullptr_t) noexcept {}
+  // Take ownership of an existing +1 reference without adding another.
+  IntrusivePtr(T *ptr, Adopt) noexcept : ptr_(ptr) {}
+  IntrusivePtr(const IntrusivePtr &other) noexcept : ptr_(other.ptr_) {
+    if (ptr_ != nullptr) {
+      runtime_heap_add_ref(ptr_);
+    }
+  }
+  IntrusivePtr(IntrusivePtr &&other) noexcept : ptr_(other.ptr_) {
+    other.ptr_ = nullptr;
+  }
+  IntrusivePtr &operator=(const IntrusivePtr &other) noexcept {
+    if (other.ptr_ != nullptr) {
+      runtime_heap_add_ref(other.ptr_);
+    }
+    if (ptr_ != nullptr) {
+      runtime_heap_release(ptr_);
+    }
+    ptr_ = other.ptr_;
+    return *this;
+  }
+  IntrusivePtr &operator=(IntrusivePtr &&other) noexcept {
+    if (this != &other) {
+      if (ptr_ != nullptr) {
+        runtime_heap_release(ptr_);
+      }
+      ptr_ = other.ptr_;
+      other.ptr_ = nullptr;
+    }
+    return *this;
+  }
+  IntrusivePtr &operator=(std::nullptr_t) noexcept {
+    reset();
+    return *this;
+  }
+  ~IntrusivePtr() {
+    if (ptr_ != nullptr) {
+      runtime_heap_release(ptr_);
+    }
+  }
+
+  void reset() noexcept {
+    if (ptr_ != nullptr) {
+      runtime_heap_release(ptr_);
+      ptr_ = nullptr;
+    }
+  }
+  T *get() const noexcept { return ptr_; }
+  T *operator->() const noexcept { return ptr_; }
+  T &operator*() const noexcept { return *ptr_; }
+  explicit operator bool() const noexcept { return ptr_ != nullptr; }
+
+  friend bool operator==(const IntrusivePtr &a, const IntrusivePtr &b) noexcept {
+    return a.ptr_ == b.ptr_;
+  }
+  friend bool operator!=(const IntrusivePtr &a, const IntrusivePtr &b) noexcept {
+    return a.ptr_ != b.ptr_;
+  }
+  friend bool operator==(const IntrusivePtr &a, std::nullptr_t) noexcept {
+    return a.ptr_ == nullptr;
+  }
+  friend bool operator!=(const IntrusivePtr &a, std::nullptr_t) noexcept {
+    return a.ptr_ != nullptr;
+  }
+  friend bool operator==(std::nullptr_t, const IntrusivePtr &a) noexcept {
+    return a.ptr_ == nullptr;
+  }
+  friend bool operator!=(std::nullptr_t, const IntrusivePtr &a) noexcept {
+    return a.ptr_ != nullptr;
+  }
+
+private:
+  T *ptr_ = nullptr;
+};
+
+// Construct a standalone, heap-unregistered ObjHeader object (ref_count = 1,
+// heap = null) wrapped in an IntrusivePtr. For white-box tests that build heap
+// objects directly; on drop such an object is plain-deleted (no RuntimeHeap
+// bookkeeping), matching how a bare `new`/`make_shared` object behaved before.
+// Declared here, defined + explicitly instantiated for the six kinds in vm.cpp.
+template <class T> IntrusivePtr<T> make_intrusive();
+
 class RuntimeAtomic;
 class RuntimeBarrier;
 class RuntimeChannel;
@@ -93,6 +191,16 @@ struct ObjHeader {
   std::uint64_t gc_mark_epoch = 0;
   std::uint32_t pin_count = 0;
   std::uint64_t pin_epoch = 0;
+  // Intrusive strong refcount (RESEARCH §7.2): replaces the per-object
+  // shared_ptr control block. Managed by IntrusivePtr via runtime_heap_add_ref
+  // / runtime_heap_release. An atomic makes ObjHeader non-copyable, which is
+  // intended -- these objects are only ever referenced through pointers.
+  std::atomic<std::uint32_t> ref_count{0};
+  // Type-erased keepalive for the owning RuntimeHeap::Impl (Impl is private to
+  // vm.cpp, hence shared_ptr<void>). It locates the heap on the drop path
+  // (RuntimeHeap::drop_object) and guarantees the heap outlives its objects --
+  // the same lifetime contract the old shared_ptr deleter's Impl capture gave.
+  std::shared_ptr<void> heap;
 };
 
 struct SymbolValue {
@@ -203,10 +311,10 @@ std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
 struct Value {
   using Payload = std::variant<
       std::monostate, bool, std::int64_t, double, SymbolValue, StringValue,
-      ClassObjectValue, std::shared_ptr<ClosureValue>,
-      std::shared_ptr<InstanceValue>, std::shared_ptr<ListValue>,
-      std::shared_ptr<TupleValue>, std::shared_ptr<SetValue>,
-      std::shared_ptr<MapValue>, NativeTypeValue, NativeFunctionValue,
+      ClassObjectValue, IntrusivePtr<ClosureValue>,
+      IntrusivePtr<InstanceValue>, IntrusivePtr<ListValue>,
+      IntrusivePtr<TupleValue>, IntrusivePtr<SetValue>,
+      IntrusivePtr<MapValue>, NativeTypeValue, NativeFunctionValue,
       NativeErrorClassValue, std::shared_ptr<ErrorInstanceValue>,
       std::shared_ptr<BigIntValue>,
       std::shared_ptr<RuntimeTaskModule>, std::shared_ptr<RuntimeTaskHandle>,
@@ -227,8 +335,8 @@ struct Value {
   static Value symbol(std::uint32_t symbol_id);
   static Value string(std::uint32_t string_id);
   static Value class_object(std::uint32_t class_index);
-  static Value closure(std::shared_ptr<ClosureValue> value);
-  static Value instance(std::shared_ptr<InstanceValue> value);
+  static Value closure(IntrusivePtr<ClosureValue> value);
+  static Value instance(IntrusivePtr<InstanceValue> value);
   static Value native_type(RuntimeNativeTypeKind kind);
   static Value native_function(RuntimeNativeFunctionKind kind);
   static Value native_error_class(std::uint16_t error_id);
@@ -287,12 +395,12 @@ struct Value {
   SymbolValue as_symbol() const;
   StringValue as_string() const;
   ClassObjectValue as_class_object() const;
-  std::shared_ptr<ClosureValue> as_closure() const;
-  std::shared_ptr<InstanceValue> as_instance_object() const;
-  std::shared_ptr<ListValue> as_list() const;
-  std::shared_ptr<TupleValue> as_tuple() const;
-  std::shared_ptr<SetValue> as_set() const;
-  std::shared_ptr<MapValue> as_map() const;
+  IntrusivePtr<ClosureValue> as_closure() const;
+  IntrusivePtr<InstanceValue> as_instance_object() const;
+  IntrusivePtr<ListValue> as_list() const;
+  IntrusivePtr<TupleValue> as_tuple() const;
+  IntrusivePtr<SetValue> as_set() const;
+  IntrusivePtr<MapValue> as_map() const;
   NativeTypeValue as_native_type() const;
   NativeFunctionValue as_native_function() const;
   NativeErrorClassValue as_native_error_class() const;
@@ -1558,9 +1666,9 @@ public:
   RuntimeHeap();
   ~RuntimeHeap();
 
-  std::shared_ptr<InstanceValue>
+  IntrusivePtr<InstanceValue>
   make_instance_value(std::uint32_t class_index = 0);
-  std::shared_ptr<ClosureValue> make_closure_value();
+  IntrusivePtr<ClosureValue> make_closure_value();
   Value make_list_value(std::vector<Value> items, bool frozen = false);
   Value make_tuple_value(std::vector<Value> items);
   Value make_set_value(std::vector<Value> items, bool frozen = false);
@@ -1594,6 +1702,13 @@ public:
   poll_native_wait(const RuntimeNativeWaitHandle &handle) const;
   RuntimeNativeWaitResult finish_native_wait(RuntimeNativeWaitHandle *handle);
   RuntimeHeapStats stats() const;
+
+  // Internal: free an ObjHeader-bearing object whose intrusive refcount hit
+  // zero (RESEARCH §7.2). Public only so the out-of-line runtime_heap_release
+  // template can reach it; it casts header.heap back to the private Impl and
+  // runs the same physical-free / cross-strand-queue path as the old deleter.
+  static void drop_object(void *obj, void (*deleter)(void *),
+                          const ObjHeader &header) noexcept;
 
 private:
   class Impl;
