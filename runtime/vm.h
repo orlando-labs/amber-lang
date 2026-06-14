@@ -149,7 +149,7 @@ struct NativeTypeValue {
   RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
 };
 
-enum class RuntimeNativeFunctionKind { Print, P, Pp };
+enum class RuntimeNativeFunctionKind { Print, P, Pp, Desc };
 
 struct NativeFunctionValue {
   RuntimeNativeFunctionKind kind = RuntimeNativeFunctionKind::Print;

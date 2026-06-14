@@ -6858,6 +6858,8 @@ const char *native_function_name(RuntimeNativeFunctionKind kind) {
     return "p";
   case RuntimeNativeFunctionKind::Pp:
     return "pp";
+  case RuntimeNativeFunctionKind::Desc:
+    return "desc";
   }
   return "native_function";
 }
@@ -12464,6 +12466,9 @@ private:
     if (path == "pp") {
       return Value::native_function(RuntimeNativeFunctionKind::Pp);
     }
+    if (path == "desc") {
+      return Value::native_function(RuntimeNativeFunctionKind::Desc);
+    }
     if (path == "Kernel") {
       return Value::native_type(RuntimeNativeTypeKind::Kernel);
     }
@@ -13706,9 +13711,38 @@ private:
     return combinations;
   }
 
+  bool is_desc_wrapper(const Value &value) {
+    if (!value.is_tuple()) {
+      return false;
+    }
+    const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+    if (tuple == nullptr || tuple->items.size() != 2U) {
+      return false;
+    }
+    const Value &marker = tuple->items[0];
+    return marker.is_native_function() &&
+           marker.as_native_function().kind == RuntimeNativeFunctionKind::Desc;
+  }
+
   std::optional<int> compare_values_for_sort(const Frame &frame,
                                              const Value &left,
                                              const Value &right) {
+    // RFC §7.2 desc() wrapper: invert the comparison for a descending key.
+    const bool left_desc = is_desc_wrapper(left);
+    const bool right_desc = is_desc_wrapper(right);
+    if (left_desc || right_desc) {
+      if (!left_desc || !right_desc) {
+        set_fault(frame, "TypeError",
+                  "cannot compare a desc() key with a non-desc key");
+        return std::nullopt;
+      }
+      const std::optional<int> cmp = compare_values_for_sort(
+          frame, left.as_tuple()->items[1], right.as_tuple()->items[1]);
+      if (!cmp.has_value()) {
+        return std::nullopt;
+      }
+      return -*cmp;
+    }
     if (left.is_integer() && right.is_integer()) {
       const std::int64_t lhs = left.as_integer();
       const std::int64_t rhs = right.as_integer();
@@ -18143,6 +18177,26 @@ private:
       const Frame &frame, RuntimeNativeFunctionKind kind,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (kind == RuntimeNativeFunctionKind::Desc) {
+      // RFC §7.2: desc(x) tags a sort key for descending order. The marker is
+      // a 2-tuple (desc-native-fn, x); compare_values_for_sort recognises it
+      // and inverts the comparison for that key component.
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError", "desc does not accept a block");
+        return SendStatus::Faulted;
+      }
+      if (!kw_args.empty()) {
+        set_fault(frame, "TypeError", "desc does not accept keyword arguments");
+        return SendStatus::Faulted;
+      }
+      if (args.size() != 1U) {
+        set_fault(frame, "TypeError", "desc expects one argument");
+        return SendStatus::Faulted;
+      }
+      *out = make_tuple_value(
+          {Value::native_function(RuntimeNativeFunctionKind::Desc), args[0]});
+      return SendStatus::Matched;
+    }
     if (!block.is_null()) {
       set_fault(frame, "TypeError", "output helper does not accept block");
       return SendStatus::Faulted;
