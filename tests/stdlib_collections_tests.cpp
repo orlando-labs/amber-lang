@@ -312,7 +312,7 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   for (const std::string &symbol :
        {"each", "map", "flat_map", "select", "reject", "reduce", "find", "any?",
         "all?", "none?", "first", "count", "to_a", "to_array", "lazy",
-        "group_by", "+", ">",
+        "group", "+", ">",
         "contains?", "include?", "===", "empty?", "[]", "Range", "low",
         "high", "collect", "collect_concat", "filter", "find_all", "detect",
         "inject", "member?", "length", "size", "entries", "times"}) {
@@ -356,7 +356,7 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   module.code_objects.push_back(
       make_send_code(14, symbol_id_or_die(module, "to_a"), false));
   module.code_objects.push_back(
-      make_send_code(16, symbol_id_or_die(module, "group_by"), true));
+      make_send_code(16, symbol_id_or_die(module, "group"), true));
   module.code_objects.push_back(
       make_send_code(17, symbol_id_or_die(module, "any?"), false));
   module.code_objects.push_back(

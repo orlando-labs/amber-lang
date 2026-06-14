@@ -23520,7 +23520,7 @@ private:
          collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
                                  "deconstruct", "first",  "count", "to_a",
                                  "lazy",        "each",   "map",   "flat_map",
-                                 "select",      "reject", "find",  "group_by",
+                                 "select",      "reject", "find",  "group",
                                  "any?",        "all?",   "none?", "reduce"})) ||
         sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
@@ -23905,7 +23905,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (collection_selector == "group_by") {
+      if (collection_selector == "group") {
         if (!require_arity(0) ||
             !require_lazy_seq_finite_source(frame, *state, "group all items")) {
           return SendStatus::Faulted;
@@ -24510,7 +24510,7 @@ private:
             collection_selector == "reject" ||
             collection_selector == "flat_map" ||
             collection_selector == "find" ||
-            collection_selector == "group_by") {
+            collection_selector == "group") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
@@ -24576,7 +24576,7 @@ private:
             *out = Value::null();
             return SendStatus::Matched;
           }
-          if (collection_selector == "group_by") {
+          if (collection_selector == "group") {
             std::vector<std::pair<Value, std::vector<Value>>> groups;
             for (const Value &item : items) {
               const std::optional<Value> key =
@@ -26552,6 +26552,7 @@ private:
             {"reverse", "reversed for a copy, or reverse! to mutate in place"},
             {"sort_by", "sorted with a key block, e.g. xs.sorted: _1.field"},
             {"uniq_by", "uniq with a key block, e.g. xs.uniq: _1.field"},
+            {"group_by", "group with a key block, e.g. xs.group: _1.field"},
         };
         const auto hint = kHints.find(*selector);
         if (hint != kHints.end()) {

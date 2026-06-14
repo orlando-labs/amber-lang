@@ -4065,7 +4065,7 @@ void test_runtime_sequence_collections_contract() {
 
   BcModule module;
   module.symbols = {"lazy",     "map",      "select", "reduce", "+",     ">",
-                    "flat_map", "group_by", "count",  "find",   "first", "to_a",
+                    "flat_map", "group", "count",  "find",   "first", "to_a",
                     "any?",     "all?",     "none?",  "low",    "high"};
 
   Constant one;
@@ -4114,7 +4114,7 @@ void test_runtime_sequence_collections_contract() {
   group_by.kind = CodeKind::Method;
   group_by.reg_count = 3;
   group_by.instructions.push_back(
-      send_instr(2, 0, symbol_id_or_die(module, "group_by"), {}, 1));
+      send_instr(2, 0, symbol_id_or_die(module, "group"), {}, 1));
   group_by.instructions.push_back({Opcode::Return, {{2, false}}});
 
   BcCode count_find;
