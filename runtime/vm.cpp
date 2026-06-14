@@ -22577,6 +22577,237 @@ private:
     return SendStatus::NotHandled;
   }
 
+  // RFC §8.2 in-place Map mutators (`!` methods). Mutate map->entries through
+  // the receiver's shared_ptr; a frozen map raises FrozenError. Mutators
+  // return self; the extractors (delete!/shift!) return the removed
+  // value/entry (or null). Keyword args are rejected by the outer guard.
+  SendStatus apply_map_mutation(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    (void)kw_args;
+    const std::shared_ptr<MapValue> map = receiver.as_map();
+    if (map == nullptr) {
+      set_fault(frame, "TypeError", "map value is null");
+      return SendStatus::Faulted;
+    }
+    if (map->frozen) {
+      set_fault(frame, "FrozenError", "cannot modify frozen map");
+      return SendStatus::Faulted;
+    }
+    auto reject_block = [&]() -> bool {
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError", selector + " does not accept a block");
+        return false;
+      }
+      return true;
+    };
+    auto require_args = [&](std::size_t expected) -> bool {
+      if (args.size() != expected) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return false;
+      }
+      return true;
+    };
+    auto require_block = [&]() -> bool {
+      if (block.is_null()) {
+        set_fault(frame, "TypeError", selector + " requires a block");
+        return false;
+      }
+      return true;
+    };
+
+    if (selector == "store!") {
+      if (!reject_block() || !require_args(2)) {
+        return SendStatus::Faulted;
+      }
+      CollectionKeyError error;
+      std::optional<Value> key = normalize_map_key(args[0], &error);
+      if (!key.has_value()) {
+        set_fault(frame, error.error_name, error.message);
+        return SendStatus::Faulted;
+      }
+      upsert_normalized_map_entry(&map->entries,
+                                  MapEntry{std::move(*key), args[1]});
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "delete!") {
+      if (!reject_block() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      CollectionKeyError error;
+      std::optional<Value> key = normalize_map_key(args[0], &error);
+      if (!key.has_value()) {
+        set_fault(frame, error.error_name, error.message);
+        return SendStatus::Faulted;
+      }
+      Value removed = Value::null();
+      std::vector<MapEntry> kept;
+      kept.reserve(map->entries.size());
+      for (const MapEntry &entry : map->entries) {
+        if (collection_keys_equal(entry.key, *key)) {
+          removed = entry.value;
+        } else {
+          kept.push_back(entry);
+        }
+      }
+      map->entries = std::move(kept);
+      *out = removed;
+      return SendStatus::Matched;
+    }
+    if (selector == "shift!") {
+      if (!reject_block() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      if (map->entries.empty()) {
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      const MapEntry first = map->entries.front();
+      map->entries.erase(map->entries.begin());
+      *out = make_tuple_value({first.key, first.value});
+      return SendStatus::Matched;
+    }
+    if (selector == "clear!") {
+      if (!reject_block() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      map->entries.clear();
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "replace!") {
+      if (!reject_block() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::vector<MapEntry>> other =
+          extract_map_entries(frame, args[0]);
+      if (fault_.has_value()) {
+        return SendStatus::Faulted;
+      }
+      if (!other.has_value()) {
+        set_fault(frame, "TypeError", "replace! expects a map");
+        return SendStatus::Faulted;
+      }
+      map->entries = *other;
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "compact!") {
+      if (!reject_block() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      std::vector<MapEntry> kept;
+      kept.reserve(map->entries.size());
+      for (const MapEntry &entry : map->entries) {
+        if (!entry.value.is_null()) {
+          kept.push_back(entry);
+        }
+      }
+      map->entries = std::move(kept);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "merge!" || selector == "update!") {
+      if (!require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      const std::vector<MapEntry> snapshot = map->entries;
+      const std::optional<Value> merged =
+          merge_map_entries(frame, receiver, snapshot, args[0], block);
+      if (!merged.has_value()) {
+        return SendStatus::Faulted;
+      }
+      const std::shared_ptr<MapValue> merged_map = merged->as_map();
+      if (merged_map == nullptr) {
+        set_fault(frame, "TypeError", "merge! result is not a map");
+        return SendStatus::Faulted;
+      }
+      map->entries = merged_map->entries;
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "select!" || selector == "keep_if!" ||
+        selector == "reject!" || selector == "delete_if!") {
+      if (!require_args(0) || !require_block()) {
+        return SendStatus::Faulted;
+      }
+      const bool keep_when_truthy =
+          selector == "select!" || selector == "keep_if!";
+      const std::vector<MapEntry> snapshot = map->entries;
+      std::vector<MapEntry> kept;
+      kept.reserve(snapshot.size());
+      for (const MapEntry &entry : snapshot) {
+        const std::optional<Value> predicate =
+            call_block_to_value(frame, block, {entry.key, entry.value});
+        if (!predicate.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return SendStatus::Faulted;
+        }
+        if (is_truthy(*predicate) == keep_when_truthy) {
+          kept.push_back(entry);
+        }
+      }
+      map->entries = std::move(kept);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "transform_keys!") {
+      if (!require_args(0) || !require_block()) {
+        return SendStatus::Faulted;
+      }
+      const std::vector<MapEntry> snapshot = map->entries;
+      std::vector<MapEntry> result;
+      for (const MapEntry &entry : snapshot) {
+        const std::optional<Value> new_key =
+            call_block_to_value(frame, block, {entry.key, entry.value});
+        if (!new_key.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return SendStatus::Faulted;
+        }
+        CollectionKeyError error;
+        std::optional<Value> key = normalize_map_key(*new_key, &error);
+        if (!key.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return SendStatus::Faulted;
+        }
+        upsert_map_entry(&result, MapEntry{std::move(*key), entry.value});
+      }
+      map->entries = std::move(result);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "transform_values!") {
+      if (!require_args(0) || !require_block()) {
+        return SendStatus::Faulted;
+      }
+      const std::vector<MapEntry> snapshot = map->entries;
+      std::vector<MapEntry> result;
+      result.reserve(snapshot.size());
+      for (const MapEntry &entry : snapshot) {
+        const std::optional<Value> new_value =
+            call_block_to_value(frame, block, {entry.value, entry.key});
+        if (!new_value.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return SendStatus::Faulted;
+        }
+        result.push_back({entry.key, *new_value});
+      }
+      map->entries = std::move(result);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+
+    return SendStatus::NotHandled;
+  }
+
   SendStatus try_apply_scalar_send(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
@@ -23015,12 +23246,18 @@ private:
                                 "delete!", "delete_if!", "keep_if!", "select!",
                                 "reject!", "map!", "sort!", "uniq!", "reverse!",
                                 "clear!", "replace!"});
+    const bool map_mutation_selector =
+        receiver.is_map() &&
+        collection_selector_in({"store!", "delete!", "delete_if!", "keep_if!",
+                                "select!", "reject!", "merge!", "update!",
+                                "transform_keys!", "transform_values!",
+                                "compact!", "clear!", "replace!", "shift!"});
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          sequence_collection_selector) ||
         (receiver.is_list() && collection_selector == "[]=") ||
-        list_mutation_selector ||
+        list_mutation_selector || map_mutation_selector ||
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() && collection_selector_in({"empty?",
@@ -23045,6 +23282,12 @@ private:
                                                       "include?",
                                                       "value?",
                                                       "has_value?",
+                                                      "with",
+                                                      "without",
+                                                      "except",
+                                                      "slice",
+                                                      "compact",
+                                                      "transform_keys",
                                                       "+",
                                                       "|"})) ||
         ((receiver.is_integer() || receiver.is_float()) && numeric_selector) ||
@@ -23102,6 +23345,11 @@ private:
       list->items[*normalized] = args[1];
       *out = args[1];
       return SendStatus::Matched;
+    }
+
+    if (map_mutation_selector) {
+      return apply_map_mutation(frame, receiver, collection_selector, args,
+                                block, kw_args, out);
     }
 
     if (receiver.is_map() && collection_selector == "[]=") {
@@ -24452,6 +24700,131 @@ private:
             return SendStatus::Faulted;
           }
           *out = *merged;
+          return SendStatus::Matched;
+        }
+        // RFC §8.2 pure Map copy-edit verbs (return a new map).
+        if (collection_selector == "with") {
+          if (!require_arity(2) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          CollectionKeyError error;
+          std::optional<Value> key = normalize_map_key(args[0], &error);
+          if (!key.has_value()) {
+            set_fault(frame, error.error_name, error.message);
+            return SendStatus::Faulted;
+          }
+          std::vector<MapEntry> result = *extracted;
+          upsert_normalized_map_entry(&result,
+                                      MapEntry{std::move(*key), args[1]});
+          *out = make_symbol_map_value(std::move(result));
+          return SendStatus::Matched;
+        }
+        if (collection_selector == "without" ||
+            collection_selector == "except") {
+          if (!require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (args.empty() ||
+              (collection_selector == "without" && args.size() != 1U)) {
+            set_fault(frame, "TypeError", "wrong builtin SEND arity");
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> remove_keys;
+          remove_keys.reserve(args.size());
+          for (const Value &arg : args) {
+            CollectionKeyError error;
+            std::optional<Value> key = normalize_map_key(arg, &error);
+            if (!key.has_value()) {
+              set_fault(frame, error.error_name, error.message);
+              return SendStatus::Faulted;
+            }
+            remove_keys.push_back(*key);
+          }
+          std::vector<MapEntry> result;
+          result.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            bool drop = false;
+            for (const Value &key : remove_keys) {
+              if (collection_keys_equal(entry.key, key)) {
+                drop = true;
+                break;
+              }
+            }
+            if (!drop) {
+              result.push_back(entry);
+            }
+          }
+          *out = make_symbol_map_value(std::move(result));
+          return SendStatus::Matched;
+        }
+        if (collection_selector == "slice") {
+          if (!require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> wanted;
+          wanted.reserve(args.size());
+          for (const Value &arg : args) {
+            CollectionKeyError error;
+            std::optional<Value> key = normalize_map_key(arg, &error);
+            if (!key.has_value()) {
+              set_fault(frame, error.error_name, error.message);
+              return SendStatus::Faulted;
+            }
+            wanted.push_back(*key);
+          }
+          std::vector<MapEntry> result;
+          for (const MapEntry &entry : *extracted) {
+            for (const Value &key : wanted) {
+              if (collection_keys_equal(entry.key, key)) {
+                result.push_back(entry);
+                break;
+              }
+            }
+          }
+          *out = make_symbol_map_value(std::move(result));
+          return SendStatus::Matched;
+        }
+        if (collection_selector == "compact") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<MapEntry> result;
+          result.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            if (!entry.value.is_null()) {
+              result.push_back(entry);
+            }
+          }
+          *out = make_symbol_map_value(std::move(result));
+          return SendStatus::Matched;
+        }
+        if (collection_selector == "transform_keys") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          if (block.is_null()) {
+            set_fault(frame, "TypeError", "transform_keys requires a block");
+            return SendStatus::Faulted;
+          }
+          std::vector<MapEntry> result;
+          for (const MapEntry &entry : *extracted) {
+            const std::optional<Value> new_key =
+                call_block_to_value(frame, block, {entry.key, entry.value});
+            if (!new_key.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!require_receiver_live_after_block()) {
+              return SendStatus::Faulted;
+            }
+            CollectionKeyError error;
+            std::optional<Value> key = normalize_map_key(*new_key, &error);
+            if (!key.has_value()) {
+              set_fault(frame, error.error_name, error.message);
+              return SendStatus::Faulted;
+            }
+            upsert_map_entry(&result, MapEntry{std::move(*key), entry.value});
+          }
+          *out = make_symbol_map_value(std::move(result));
           return SendStatus::Matched;
         }
       }
