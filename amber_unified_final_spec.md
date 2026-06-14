@@ -524,6 +524,8 @@ m(user, arg1, arg2)
 
 Если нужен bound instance callable, v1 использует обычный closure/block-level adapter, а не новый surface spelling. Более явные формы вроде `obj.&method` могут быть добавлены отдельным будущим RFC, но не являются частью.
 
+Отдельный смысл `&` в **argument position**: trailing `&name` в списке аргументов вызова — это **block-pass**, направляющий callable из локала `name` в block channel вызываемого (см. §12.7.4.1), а не позиционное reference-значение. В v1 block-pass принимает только bare local name; `&NS.fn` / `&Class#m` как trailing block-pass зарезервированы (сначала свяжите reference в локал). Это единственное место, где `&` в argument position означает block channel, а не «создать callable reference».
+
 ### 4.7. Spread arguments `*` и `**`
 
 В call argument lists принимают positional и keyword spread:
@@ -8786,6 +8788,9 @@ Protocol positions (keyword spread `kwargs`, and any future protocol reads) requ
 | `AMB_PROP_CALLED_AS_METHOD` | binder / runtime | call punctuation or block suffix applied to a property member; dynamic twin `TypeError` |
 | `AMB_DOT_CALL_TARGET` | parser | `.()` without a preceding postfix expression |
 | `AMB_PROP_SUSPEND` | runtime | suspension attempt inside a property arm; raises `EffectViolationError` |
+| `AMB_BLOCK_PARAM_NOT_LAST` | parser | a `&name` block parameter is not the final parameter, or more than one is declared |
+| `AMB_BLOCK_PARAM_PATTERN` | parser | `&` applied to a pattern rather than a single name |
+| `AMB_BLOCK_PASS_TARGET` | parser / binder | a trailing `&name` block-pass is not last, or its target is not a bound callable |
 | `W_BARE_BANG_CALL` | binder, warning | bare access invokes a `!`-suffixed method |
 
 Runtime error classes `ReadOnlyPropertyError` and `WriteOnlyPropertyError` are registered and rescuable.
@@ -22048,7 +22053,7 @@ PATTERN = expr
 Для параметров и return-boundaries здесь используется тот же `TypeTerm`, который уже нормативно зафиксирован в §12.2; отдельной parser-local type grammar в этой части не вводится. Surface grammar сигнатур v1:
 
 ```ebnf
-ParamListDef::= [ Param { "," Param } [ "," ] ]
+ParamListDef::= [ Param { "," Param } ] [ "," BlockParam ] [ "," ]
 
 Param::= PosParam
  | KwParam
@@ -22071,6 +22076,9 @@ KwParam::= LocalName ":"
  | AutoName "as" TypeTerm ":"
  | AutoName "as" TypeTerm ":" Expr
 
+BlockParam::= "&" LocalName [ "as" TypeTerm ]
+ | "&" AutoName [ "as" TypeTerm ]
+
 AutoName::= "@" Name
  | "@@" Name
 
@@ -22084,7 +22092,9 @@ TypeTerm::= <тот же rule-set, что и в §12.2; локальных от�
 - `def f(@x, x):...` — compile-time error, потому что локальное имя параметра дублируется;
 - rich multi-clause `def` обязаны иметь одну и ту же base signature в AST-эквивалентной форме;
 - rest-pos / rest-kw параметры не входят в surface grammar v1; соответствующие enum-values AST считаются зарезервированными для будущего format bump и не могут появляться в `amber.ast.v1`;
-- `include`-операнды не могут ссылаться на имена, вводимые тем же syntactic class/mixin body.
+- `include`-операнды не могут ссылаться на имена, вводимые тем же syntactic class/mixin body;
+- `BlockParam` (`&name`, опционально `&@field` для capture) — это **block parameter**, связывающий block channel вызова (см. §12.7.4). Он не позиционный и не keyword; в сигнатуре допускается **не более одного** block parameter и только **последним**. Block parameter не несёт default value в v1 и не является pattern — это всегда одиночное имя. Нарушения: block parameter не последним или более одного — `AMB_BLOCK_PARAM_NOT_LAST`; `&(...)` вместо имени — `AMB_BLOCK_PARAM_PATTERN`. Block parameter не участвует в multi-clause dispatch (часть shared base signature); он не появляется в many-def sugar (§10.4 — только позиционные), который остаётся positional-only;
+- метод с block parameter **не** является syntactically nullary и не bare-callable (см. §8723).
 
 ### 15.8. Surface grammar package/import/export/mixin/include/extend v1
 
@@ -22761,6 +22771,7 @@ tests/
 - named `mixin` и `include` с linearized lookup order;
 - open class и open mixin через повторные `class Name:...` / `mixin Name:...`-формы;
 - `define_method(Target,:name) |...|:...`, где `Target` может быть классом или mixin'ом;
+- block parameters: `def f(xs, &blk):` с инвокацией `blk(...)` / `blk.(...)`, optional `blk == null`, forwarding `g(&blk)`, capture `&@field`, и block parameter в clause-style `def`;
 - reflective `send(receiver, selector,...)` с literal и dynamic selector;
 - `method_missing` fallback;
 - freeze transition и запрет world mutation после неё;
@@ -22777,6 +22788,7 @@ tests/
 - `&foo()`, `&(foo + bar)`, `&obj.method` как invalid callable reference targets в v1;
 - `&User#missing` без resolvable instance-side method target, если это статически очевидно;
 - вызов `&User#method` без receiver или с receiver, не удовлетворяющим `User === receiver`, -> `TypeError`;
+- block parameter не последним или более одного -> `AMB_BLOCK_PARAM_NOT_LAST`; `&(a, b)` block parameter -> `AMB_BLOCK_PARAM_PATTERN`; block-pass не последним аргументом или с non-local target -> `AMB_BLOCK_PASS_TARGET`; bare member с block parameter трактуемый как nullary -> `AMB_BARE_NON_NULLARY`;
 - дубликаты имён в паттерне;
 - разные наборы биндингов в OR-pattern;
 - `**rest` вне конца map-pattern;
@@ -22874,7 +22886,7 @@ AstExprStmt(expr)
 ```text
 AstSignature(params[])
 AstParam(
- kind, # positional / keyword
+ kind, # positional / keyword / block
  external_name?,
  local_name,
  default_expr?,
@@ -28928,7 +28940,54 @@ A block suffix compiles to a closure object stored in `block_reg` of the `CallPa
 
 A method that consumes a block receives it through the frame's hidden `block_slot`. Standard library methods such as `map`, `select`, `reduce` invoke the block through `CALL_BLOCK` or ordinary `CALL` on the block object.
 
-Block parameter pattern matching happens at block frame entry. A mismatch raises `MatchError`.
+Block parameter pattern matching happens at block frame entry on the **block-literal** side (the `|...|` parameter list at the call site). A mismatch raises `MatchError`. This is distinct from the **block parameter** of a `def` described below, which binds the channel itself.
+
+##### 12.7.4.1. Block parameters (`&name`) — declaration, invocation, forwarding
+
+A user-defined method may name the incoming block channel with a trailing `&name` block parameter (grammar §15.7). This surfaces the otherwise-hidden `block_slot` as an ordinary local; user methods are no longer restricted to the builtin block consumers.
+
+```amber
+def each(xs, &blk):
+  i = 0
+  n = xs.length
+  while i < n:
+    blk(xs[i])      # invoke the block: ordinary CALL on the block value
+    i = i + 1
+  xs
+```
+
+Normative rules:
+
+- **Binding.** On entry the block parameter local is bound to the caller's block (the value in `block_slot`), or to `null` when the caller passed no block. There is no separate "block given" predicate: absence is observed as `name == null`. A `LoadBlock` prologue instruction performs this binding, so it holds uniformly across every call path (fast positional dispatch, shaped dispatch, clause dispatch).
+- **Invocation.** A bound block is an ordinary callable value, invoked with the canonical callable-call forms of §4.6: `name(args...)` and `name.(args...)` (both lower to `HCall` / `CALL`), and the safe form `name.?.(args...)` no-ops to `null` when the block is `null`. A **bare** `name` is a read of the callable, not a call. There is no `yield` keyword.
+- **Optionality / required.** A bare `&blk` is optional. A non-null typed `&blk as Fn[...]` (the typed-profile callable type, Effects Profile §4.2) is required; a missing block then fails the existing arity/shape check as `ArgumentError` ("invalid block argument shape"). Calling a `null` block via `blk(x)` raises the ordinary non-callable `TypeError`.
+- **Forwarding (block-pass).** A trailing call argument written `&name` routes the local's callable into the callee's `block_reg` instead of compiling a block-suffix closure:
+
+  ```amber
+  def relay(xs, &blk):
+    xs.each(&blk)      # forward the block into each's block channel
+  ```
+
+  In v1 the block-pass operand is a bare local name only; `&NS.fn` / `&Class#m` as a trailing block-pass is reserved (bind to a local first). A block-pass that is not the final argument, or whose target is not a callable, diagnoses `AMB_BLOCK_PASS_TARGET`.
+- **Capture (`&@field`).** A `&@field` block parameter stores the incoming block into the named instance/class field via the ordinary auto-assign commit step (after clause selection), in addition to binding the local:
+
+  ```amber
+  class Adder:
+    def init(&@op):
+      pass
+    def apply(x):
+      @op(x)
+  ```
+- **Effects.** The block parameter's `Fn[... !{E}]` type (Effects Profile §4.2) carries the block's effect row; a method that invokes its block is effect-polymorphic in `E`, and the block's effects enter only at the invocation site.
+
+##### 12.7.4.2. ABI and lowering
+
+The ABI is unchanged: the block already travels in `block_reg` / `block_slot`. A block parameter only *names* that slot. The bytecode form adds:
+
+- `LoadBlock dst` — load the frame's block channel into register `dst`; emitted in the method prologue to bind a block parameter, and analogous to `LoadSelf`.
+- a per-parameter `block` flag in the method parameter table, so shaped dispatch neither consumes a positional argument for the block parameter nor reports it as a missing required parameter.
+
+`name(args...)` lowers to an ordinary `CALL` on the block value (it is already a closure), and `other(&name)` lowers by moving the local into the callee's `block_reg`. The block parameter does not participate in clause-dispatch subject selection (it is excluded from the positional-subject count); it is part of the shared base signature and is bound identically in every clause.
 
 #### 12.7.5. Default thunks and type hooks
 
