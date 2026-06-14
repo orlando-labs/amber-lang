@@ -14001,7 +14001,20 @@ private:
           result.push_back(item);
         }
       }
-      return make_list_value(std::move(result));
+      // Type-preserving: Set#deleted returns a Set, Array#deleted a list.
+      return materialize_set_like_result(receiver, std::move(result));
+    }
+
+    // RFC §8.3 Set#added (pure add): returns a new set with the element, or a
+    // new list for non-set receivers. Element uniqueness is preserved.
+    if (selector == "added") {
+      if (args.size() != 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::vector<Value> result = items;
+      append_unique_value(&result, args[0]);
+      return materialize_set_like_result(receiver, std::move(result));
     }
 
     if (selector == "init") {
@@ -22808,6 +22821,188 @@ private:
     return SendStatus::NotHandled;
   }
 
+  // RFC §8.3 in-place Set mutators (`!` methods). Mutate set->items through
+  // the receiver's shared_ptr (aliases observe the change); a frozen set
+  // raises FrozenError. All return self; add!/merge! preserve uniqueness.
+  // Keyword args are rejected by the outer guard.
+  SendStatus apply_set_mutation(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    (void)kw_args;
+    const std::shared_ptr<SetValue> set = receiver.as_set();
+    if (set == nullptr) {
+      set_fault(frame, "TypeError", "set value is null");
+      return SendStatus::Faulted;
+    }
+    if (set->frozen) {
+      set_fault(frame, "FrozenError", "cannot modify frozen set");
+      return SendStatus::Faulted;
+    }
+    auto reject_block = [&]() -> bool {
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError", selector + " does not accept a block");
+        return false;
+      }
+      return true;
+    };
+    auto require_args = [&](std::size_t expected) -> bool {
+      if (args.size() != expected) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return false;
+      }
+      return true;
+    };
+    auto require_block = [&]() -> bool {
+      if (block.is_null()) {
+        set_fault(frame, "TypeError", selector + " requires a block");
+        return false;
+      }
+      return true;
+    };
+    auto add_normalized = [&](const Value &value) -> bool {
+      CollectionKeyError error;
+      std::optional<Value> element = normalize_set_element(value, &error);
+      if (!element.has_value()) {
+        set_fault(frame, error.error_name, error.message);
+        return false;
+      }
+      append_unique_value(&set->items, *element);
+      return true;
+    };
+
+    if (selector == "add!") {
+      if (!reject_block() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      if (!add_normalized(args[0])) {
+        return SendStatus::Faulted;
+      }
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "delete!") {
+      if (!reject_block() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      std::vector<Value> kept;
+      kept.reserve(set->items.size());
+      for (const Value &item : set->items) {
+        if (!collection_keys_equal(item, args[0])) {
+          kept.push_back(item);
+        }
+      }
+      set->items = std::move(kept);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "merge!") {
+      if (!reject_block() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::vector<Value>> other =
+          sequence_argument_items(frame, args[0], selector);
+      if (!other.has_value()) {
+        return SendStatus::Faulted;
+      }
+      for (const Value &item : *other) {
+        if (!add_normalized(item)) {
+          return SendStatus::Faulted;
+        }
+      }
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "subtract!") {
+      if (!reject_block() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::vector<Value>> other =
+          sequence_argument_items(frame, args[0], selector);
+      if (!other.has_value()) {
+        return SendStatus::Faulted;
+      }
+      std::vector<Value> kept;
+      kept.reserve(set->items.size());
+      for (const Value &item : set->items) {
+        bool drop = false;
+        for (const Value &removed : *other) {
+          if (collection_keys_equal(item, removed)) {
+            drop = true;
+            break;
+          }
+        }
+        if (!drop) {
+          kept.push_back(item);
+        }
+      }
+      set->items = std::move(kept);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "clear!") {
+      if (!reject_block() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      set->items.clear();
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "replace!") {
+      if (!reject_block() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::vector<Value>> other =
+          sequence_argument_items(frame, args[0], selector);
+      if (!other.has_value()) {
+        return SendStatus::Faulted;
+      }
+      std::vector<Value> rebuilt;
+      rebuilt.reserve(other->size());
+      for (const Value &item : *other) {
+        CollectionKeyError error;
+        std::optional<Value> element = normalize_set_element(item, &error);
+        if (!element.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return SendStatus::Faulted;
+        }
+        append_unique_value(&rebuilt, *element);
+      }
+      set->items = std::move(rebuilt);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "select!" || selector == "keep_if!" ||
+        selector == "reject!" || selector == "delete_if!") {
+      if (!require_args(0) || !require_block()) {
+        return SendStatus::Faulted;
+      }
+      const bool keep_when_truthy =
+          selector == "select!" || selector == "keep_if!";
+      const std::vector<Value> snapshot = set->items;
+      std::vector<Value> kept;
+      kept.reserve(snapshot.size());
+      for (const Value &item : snapshot) {
+        const std::optional<Value> predicate =
+            call_block_to_value(frame, block, {item});
+        if (!predicate.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return SendStatus::Faulted;
+        }
+        if (is_truthy(*predicate) == keep_when_truthy) {
+          kept.push_back(item);
+        }
+      }
+      set->items = std::move(kept);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+
+    return SendStatus::NotHandled;
+  }
+
   SendStatus try_apply_scalar_send(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
@@ -23219,8 +23414,8 @@ private:
         receiver_is_sequence_like &&
         collection_selector_in({"+", "*", "concat", "take_while", "reversed",
                                 "sorted", "uniq", "each_pair", "each_cons",
-                                "appended", "inserted", "deleted", "init",
-                                "tail"});
+                                "appended", "inserted", "deleted", "added",
+                                "init", "tail"});
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
          collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
@@ -23252,12 +23447,18 @@ private:
                                 "select!", "reject!", "merge!", "update!",
                                 "transform_keys!", "transform_values!",
                                 "compact!", "clear!", "replace!", "shift!"});
+    const bool set_mutation_selector =
+        receiver.is_set() &&
+        collection_selector_in({"add!", "delete!", "merge!", "subtract!",
+                                "delete_if!", "keep_if!", "select!", "reject!",
+                                "clear!", "replace!"});
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          sequence_collection_selector) ||
         (receiver.is_list() && collection_selector == "[]=") ||
         list_mutation_selector || map_mutation_selector ||
+        set_mutation_selector ||
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() && collection_selector_in({"empty?",
@@ -23320,6 +23521,11 @@ private:
     if (list_mutation_selector) {
       return apply_list_mutation(frame, receiver, collection_selector, args,
                                  block, kw_args, out);
+    }
+
+    if (set_mutation_selector) {
+      return apply_set_mutation(frame, receiver, collection_selector, args,
+                                block, kw_args, out);
     }
 
     if (receiver.is_list() && collection_selector == "[]=") {
