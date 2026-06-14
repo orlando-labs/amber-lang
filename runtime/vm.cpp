@@ -13800,20 +13800,67 @@ private:
     return sorted;
   }
 
+  // Stable sort by an arity-1 key block (RFC §7.2). Keys are computed once
+  // per element (Schwartzian transform) so the block runs O(n) times, then a
+  // stable insertion sort orders the elements by comparing the cached keys.
+  std::optional<std::vector<Value>>
+  sorted_items_by_key(const Frame &frame, const Value &receiver,
+                      const std::vector<Value> &items, const Value &key_block) {
+    std::vector<Value> keys;
+    keys.reserve(items.size());
+    for (const Value &item : items) {
+      const std::optional<Value> key =
+          call_block_to_value(frame, key_block, {item});
+      if (!key.has_value()) {
+        return std::nullopt;
+      }
+      if (!ensure_lifecycle_access(frame, receiver)) {
+        return std::nullopt;
+      }
+      keys.push_back(*key);
+    }
+    std::vector<std::size_t> order(items.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+      order[i] = i;
+    }
+    for (std::size_t i = 1; i < order.size(); ++i) {
+      std::size_t j = i;
+      while (j > 0) {
+        const std::optional<int> cmp = compare_values_for_sort(
+            frame, keys[order[j]], keys[order[j - 1U]]);
+        if (!cmp.has_value()) {
+          return std::nullopt;
+        }
+        if (*cmp >= 0) {
+          break;  // stable: equal keys preserve input order
+        }
+        std::swap(order[j], order[j - 1U]);
+        --j;
+      }
+    }
+    std::vector<Value> sorted;
+    sorted.reserve(items.size());
+    for (std::size_t idx : order) {
+      sorted.push_back(items[idx]);
+    }
+    return sorted;
+  }
+
   std::optional<Value> apply_sequence_set_operation(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &items, const std::vector<Value> &args,
       const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
-    const bool block_allowed = selector == "take_while" || selector == "sort" ||
-                               selector == "uniq" || selector == "each_pair" ||
-                               selector == "each_cons" || selector == "each";
+    const bool block_allowed =
+        selector == "take_while" || selector == "sorted" ||
+        selector == "uniq" || selector == "each_pair" ||
+        selector == "each_cons" || selector == "each";
     if (!block.is_null() && !block_allowed) {
       set_fault(frame, "TypeError",
                 "collection operation does not accept block arguments");
       return std::nullopt;
     }
-    const bool keywords_allowed = selector == "each";
+    const bool keywords_allowed = selector == "each" || selector == "sorted";
     if (!kw_args.empty() && !keywords_allowed) {
       set_fault(frame, "TypeError",
                 "collection operation does not accept keyword arguments");
@@ -13859,7 +13906,7 @@ private:
       return make_list_value(std::move(repeated));
     }
 
-    if (selector == "reverse") {
+    if (selector == "reversed") {
       if (!args.empty()) {
         set_fault(frame, "TypeError", "wrong builtin SEND arity");
         return std::nullopt;
@@ -13891,15 +13938,49 @@ private:
       return make_list_value(std::move(taken));
     }
 
-    if (selector == "sort") {
+    if (selector == "sorted") {
       if (!args.empty()) {
         set_fault(frame, "TypeError", "wrong builtin SEND arity");
         return std::nullopt;
       }
-      const std::optional<std::vector<Value>> sorted =
-          sorted_sequence_items(frame, receiver, items, block);
+      // RFC §7.2: optional arity-1 key block; `reverse:` flips the result;
+      // `using:` is the explicit comparator escape hatch (a value, not a
+      // block). A key block and `using:` are mutually exclusive.
+      Value using_comparator = Value::null();
+      bool reverse_result = false;
+      for (const auto &[keyword_id, keyword_value] : kw_args) {
+        const std::string keyword = keyword_id < module_.symbols.size()
+                                        ? module_.symbols[keyword_id]
+                                        : std::string();
+        if (keyword == "reverse") {
+          reverse_result = is_truthy(keyword_value);
+        } else if (keyword == "using") {
+          using_comparator = keyword_value;
+        } else {
+          set_fault(frame, "ArgumentError",
+                    "sorted accepts only `reverse:` and `using:` keywords");
+          return std::nullopt;
+        }
+      }
+      if (!using_comparator.is_null() && !block.is_null()) {
+        set_fault(frame, "ArgumentError",
+                  "sorted accepts a key block or `using:`, not both");
+        return std::nullopt;
+      }
+      std::optional<std::vector<Value>> sorted;
+      if (!using_comparator.is_null()) {
+        sorted =
+            sorted_sequence_items(frame, receiver, items, using_comparator);
+      } else if (!block.is_null()) {
+        sorted = sorted_items_by_key(frame, receiver, items, block);
+      } else {
+        sorted = sorted_sequence_items(frame, receiver, items, Value::null());
+      }
       if (!sorted.has_value()) {
         return std::nullopt;
+      }
+      if (reverse_result) {
+        std::reverse(sorted->begin(), sorted->end());
       }
       return make_list_value(*sorted);
     }
@@ -22535,8 +22616,8 @@ private:
                                 ">"});
     const bool sequence_extra_operation_selector =
         receiver_is_sequence_like &&
-        collection_selector_in({"+", "*", "concat", "take_while", "reverse",
-                                "sort", "uniq", "each_pair", "each_cons"});
+        collection_selector_in({"+", "*", "concat", "take_while", "reversed",
+                                "sorted", "uniq", "each_pair", "each_cons"});
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
          collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
@@ -22589,7 +22670,7 @@ private:
         ((receiver.is_integer() || receiver.is_float()) && numeric_selector) ||
         integer_times_selector;
     const bool keyword_compatible_builtin_selector =
-        collection_selector == "each" &&
+        (collection_selector == "each" || collection_selector == "sorted") &&
         (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
          receiver_is_range || receiver_is_lazy_seq);
     if (!kw_args.empty() && builtin_selector &&

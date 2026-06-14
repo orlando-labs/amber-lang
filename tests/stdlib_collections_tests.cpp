@@ -181,6 +181,10 @@ amber::runtime::Value make_range_value(
 
 void expect_ok(const amber::runtime::ExecutionResult &result,
                const std::string &message) {
+  if (!result.ok() && result.fault.has_value()) {
+    std::cerr << "[fault] " << message << ": " << result.fault->error_name
+              << " / " << result.fault->message << "\n";
+  }
   expect(result.ok(), message + " should succeed");
 }
 
@@ -988,13 +992,15 @@ amber::bytecode::BcModule make_std005_collection_ops_module() {
         "symmetric_difference", "subset?", "proper_subset?", "superset?",
         "proper_superset?", "disjoint?", "contains?", "include?",
         "permutation", "combination", "merge", "&", "|", "+", "-", "^", "*",
-        "<=", "<", ">=", ">", "concat", "take_while", "reverse", "sort",
+        "<=", "<", ">=", ">", "concat", "take_while", "reversed", "sorted",
+        "reverse", "using",
         "uniq", "each", "each_pair", "each_cons", "each_slice", "step",
         "alpha", "beta", "gamma"}) {
     ensure_symbol_id(&module, symbol);
   }
   const std::uint32_t two = append_integer_const(&module, 2);
   const std::uint32_t four = append_integer_const(&module, 4);
+  const std::uint32_t ten = append_integer_const(&module, 10);
 
   module.code_objects.push_back(
       make_unary_send_code(1, symbol_id_or_die(module, "union")));
@@ -1062,11 +1068,11 @@ amber::bytecode::BcModule make_std005_collection_ops_module() {
   module.code_objects.push_back(
       make_send_code(28, symbol_id_or_die(module, "take_while"), true));
   module.code_objects.push_back(
-      make_send_code(29, symbol_id_or_die(module, "reverse"), false));
+      make_send_code(29, symbol_id_or_die(module, "reversed"), false));
   module.code_objects.push_back(
-      make_send_code(30, symbol_id_or_die(module, "sort"), false));
+      make_send_code(30, symbol_id_or_die(module, "sorted"), false));
   module.code_objects.push_back(
-      make_send_code(31, symbol_id_or_die(module, "sort"), true));
+      make_send_code(31, symbol_id_or_die(module, "sorted"), true));
   module.code_objects.push_back(
       make_send_code(32, symbol_id_or_die(module, "uniq"), false));
   module.code_objects.push_back(
@@ -1134,6 +1140,42 @@ amber::bytecode::BcModule make_std005_collection_ops_module() {
       send_instr(2, 0, symbol_id_or_die(module, "<"), {1}));
   less_than_four.instructions.push_back({Opcode::Return, {{2, false}}});
   module.code_objects.push_back(less_than_four);
+
+  // sorted(reverse: true) — natural sort then flipped.
+  BcCode sorted_reverse_kw;
+  sorted_reverse_kw.code_id = 40;
+  sorted_reverse_kw.kind = CodeKind::Method;
+  sorted_reverse_kw.reg_count = 3;
+  sorted_reverse_kw.instructions.push_back(
+      {Opcode::LoadBool, {{1, false}, {1, false}}});
+  sorted_reverse_kw.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "sorted"), {}, -1,
+                 {{symbol_id_or_die(module, "reverse"), 1}}));
+  sorted_reverse_kw.instructions.push_back({Opcode::Return, {{2, false}}});
+  module.code_objects.push_back(sorted_reverse_kw);
+
+  // sorted(using: comparator) — explicit comparator escape hatch (a value).
+  BcCode sorted_using_kw;
+  sorted_using_kw.code_id = 41;
+  sorted_using_kw.kind = CodeKind::Method;
+  sorted_using_kw.reg_count = 3;
+  sorted_using_kw.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "sorted"), {}, -1,
+                 {{symbol_id_or_die(module, "using"), 1}}));
+  sorted_using_kw.instructions.push_back({Opcode::Return, {{2, false}}});
+  module.code_objects.push_back(sorted_using_kw);
+
+  // Arity-1 key block: key = 10 - item (reg0 holds the single element arg).
+  BcCode key_ten_minus;
+  key_ten_minus.code_id = 104;
+  key_ten_minus.kind = CodeKind::Block;
+  key_ten_minus.reg_count = 3;
+  key_ten_minus.instructions.push_back(
+      {Opcode::LoadK, {{1, false}, {ten, false}}});
+  key_ten_minus.instructions.push_back(
+      send_instr(2, 1, symbol_id_or_die(module, "-"), {0}));
+  key_ten_minus.instructions.push_back({Opcode::Return, {{2, false}}});
+  module.code_objects.push_back(key_ten_minus);
 
   return module;
 }
@@ -1295,19 +1337,32 @@ void test_std005_collection_operations() {
   expect_integer_list(result.value, {1, 2, 3}, "Array#take_while");
 
   result = amber::runtime::execute_code(module, 29, {ordered});
-  expect_ok(result, "Array#reverse");
-  expect_integer_list(result.value, {3, 2, 1}, "Array#reverse");
+  expect_ok(result, "Array#reversed");
+  expect_integer_list(result.value, {3, 2, 1}, "Array#reversed");
 
   const amber::runtime::Value unsorted =
       amber::runtime::make_list_value({integer(3), integer(1), integer(2)});
   result = amber::runtime::execute_code(module, 30, {unsorted});
-  expect_ok(result, "Array#sort");
-  expect_integer_list(result.value, {1, 2, 3}, "Array#sort");
+  expect_ok(result, "Array#sorted");
+  expect_integer_list(result.value, {1, 2, 3}, "Array#sorted");
 
+  // RFC §7.2: the block is an arity-1 key extractor (key = 10 - x), so
+  // ascending key order produces descending value order.
   result = amber::runtime::execute_code(module, 31,
+                                        {unsorted, make_closure_value(104)});
+  expect_ok(result, "Array#sorted key block");
+  expect_integer_list(result.value, {3, 2, 1}, "Array#sorted key block");
+
+  // reverse: keyword flips the natural ascending order.
+  result = amber::runtime::execute_code(module, 40, {unsorted});
+  expect_ok(result, "Array#sorted reverse:");
+  expect_integer_list(result.value, {3, 2, 1}, "Array#sorted reverse:");
+
+  // using: is the explicit comparator escape hatch (a value, not a block).
+  result = amber::runtime::execute_code(module, 41,
                                         {unsorted, make_closure_value(101)});
-  expect_ok(result, "Array#sort block");
-  expect_integer_list(result.value, {3, 2, 1}, "Array#sort block");
+  expect_ok(result, "Array#sorted using:");
+  expect_integer_list(result.value, {3, 2, 1}, "Array#sorted using:");
 
   const amber::runtime::Value duplicates = amber::runtime::make_list_value(
       {integer(1), integer(2), integer(1), integer(3), integer(2)});
