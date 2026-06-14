@@ -13846,6 +13846,51 @@ private:
     return sorted;
   }
 
+  // Shared by `sorted` (pure) and `sort!` (in place): resolves the RFC §7.2
+  // options — arity-1 key block, `reverse:` flag, and the `using:` comparator
+  // escape hatch (a value, not a block) — into the final ordered vector.
+  std::optional<std::vector<Value>>
+  sorted_result(const Frame &frame, const Value &receiver,
+                const std::vector<Value> &items, const Value &block,
+                const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
+    Value using_comparator = Value::null();
+    bool reverse_result = false;
+    for (const auto &[keyword_id, keyword_value] : kw_args) {
+      const std::string keyword = keyword_id < module_.symbols.size()
+                                      ? module_.symbols[keyword_id]
+                                      : std::string();
+      if (keyword == "reverse") {
+        reverse_result = is_truthy(keyword_value);
+      } else if (keyword == "using") {
+        using_comparator = keyword_value;
+      } else {
+        set_fault(frame, "ArgumentError",
+                  "sorted accepts only `reverse:` and `using:` keywords");
+        return std::nullopt;
+      }
+    }
+    if (!using_comparator.is_null() && !block.is_null()) {
+      set_fault(frame, "ArgumentError",
+                "sorted accepts a key block or `using:`, not both");
+      return std::nullopt;
+    }
+    std::optional<std::vector<Value>> sorted;
+    if (!using_comparator.is_null()) {
+      sorted = sorted_sequence_items(frame, receiver, items, using_comparator);
+    } else if (!block.is_null()) {
+      sorted = sorted_items_by_key(frame, receiver, items, block);
+    } else {
+      sorted = sorted_sequence_items(frame, receiver, items, Value::null());
+    }
+    if (!sorted.has_value()) {
+      return std::nullopt;
+    }
+    if (reverse_result) {
+      std::reverse(sorted->begin(), sorted->end());
+    }
+    return sorted;
+  }
+
   std::optional<Value> apply_sequence_set_operation(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &items, const std::vector<Value> &args,
@@ -13943,44 +13988,10 @@ private:
         set_fault(frame, "TypeError", "wrong builtin SEND arity");
         return std::nullopt;
       }
-      // RFC §7.2: optional arity-1 key block; `reverse:` flips the result;
-      // `using:` is the explicit comparator escape hatch (a value, not a
-      // block). A key block and `using:` are mutually exclusive.
-      Value using_comparator = Value::null();
-      bool reverse_result = false;
-      for (const auto &[keyword_id, keyword_value] : kw_args) {
-        const std::string keyword = keyword_id < module_.symbols.size()
-                                        ? module_.symbols[keyword_id]
-                                        : std::string();
-        if (keyword == "reverse") {
-          reverse_result = is_truthy(keyword_value);
-        } else if (keyword == "using") {
-          using_comparator = keyword_value;
-        } else {
-          set_fault(frame, "ArgumentError",
-                    "sorted accepts only `reverse:` and `using:` keywords");
-          return std::nullopt;
-        }
-      }
-      if (!using_comparator.is_null() && !block.is_null()) {
-        set_fault(frame, "ArgumentError",
-                  "sorted accepts a key block or `using:`, not both");
-        return std::nullopt;
-      }
-      std::optional<std::vector<Value>> sorted;
-      if (!using_comparator.is_null()) {
-        sorted =
-            sorted_sequence_items(frame, receiver, items, using_comparator);
-      } else if (!block.is_null()) {
-        sorted = sorted_items_by_key(frame, receiver, items, block);
-      } else {
-        sorted = sorted_sequence_items(frame, receiver, items, Value::null());
-      }
+      const std::optional<std::vector<Value>> sorted =
+          sorted_result(frame, receiver, items, block, kw_args);
       if (!sorted.has_value()) {
         return std::nullopt;
-      }
-      if (reverse_result) {
-        std::reverse(sorted->begin(), sorted->end());
       }
       return make_list_value(*sorted);
     }
@@ -22207,6 +22218,299 @@ private:
     return SendStatus::NotHandled;
   }
 
+  // RFC §8.1 in-place Array mutators (`!` methods). Each mutates list->items
+  // through the receiver's shared_ptr, so aliases observe the change; a frozen
+  // list raises FrozenError. Return rules (RFC §10): mutators return self; the
+  // extracting mutators (pop!/shift!/delete_at!/delete!) return the removed
+  // value (or null) — never nil-on-no-change for the self-returning forms.
+  SendStatus apply_list_mutation(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    const std::shared_ptr<ListValue> list = receiver.as_list();
+    if (list == nullptr) {
+      set_fault(frame, "TypeError", "list value is null");
+      return SendStatus::Faulted;
+    }
+    if (list->frozen) {
+      set_fault(frame, "FrozenError", "cannot modify frozen list");
+      return SendStatus::Faulted;
+    }
+    auto reject_block = [&]() -> bool {
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError", selector + " does not accept a block");
+        return false;
+      }
+      return true;
+    };
+    auto reject_keywords = [&]() -> bool {
+      if (!kw_args.empty()) {
+        set_fault(frame, "TypeError",
+                  selector + " does not accept keyword arguments");
+        return false;
+      }
+      return true;
+    };
+    auto require_args = [&](std::size_t expected) -> bool {
+      if (args.size() != expected) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return false;
+      }
+      return true;
+    };
+    auto require_block = [&]() -> bool {
+      if (block.is_null()) {
+        set_fault(frame, "TypeError", selector + " requires a block");
+        return false;
+      }
+      return true;
+    };
+
+    // --- append / prepend (return self) ---
+    if (selector == "push!" || selector == "append!") {
+      if (!reject_block() || !reject_keywords()) {
+        return SendStatus::Faulted;
+      }
+      if (args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return SendStatus::Faulted;
+      }
+      for (const Value &value : args) {
+        list->items.push_back(value);
+      }
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "unshift!" || selector == "prepend!") {
+      if (!reject_block() || !reject_keywords()) {
+        return SendStatus::Faulted;
+      }
+      if (args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return SendStatus::Faulted;
+      }
+      list->items.insert(list->items.begin(), args.begin(), args.end());
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "insert!") {
+      if (!reject_block() || !reject_keywords()) {
+        return SendStatus::Faulted;
+      }
+      if (args.size() < 2U || !args[0].is_integer()) {
+        set_fault(frame, "TypeError",
+                  "insert! expects an integer index and at least one value");
+        return SendStatus::Faulted;
+      }
+      const std::int64_t raw = args[0].as_integer();
+      const std::int64_t size_i64 =
+          static_cast<std::int64_t>(list->items.size());
+      const std::int64_t normalized = raw < 0 ? size_i64 + raw + 1 : raw;
+      if (normalized < 0 || normalized > size_i64) {
+        set_fault(frame, "IndexError", "insert! index is out of bounds");
+        return SendStatus::Faulted;
+      }
+      list->items.insert(list->items.begin() + normalized, args.begin() + 1,
+                         args.end());
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+
+    // --- extracting mutators (return the removed value, or null) ---
+    if (selector == "pop!") {
+      if (!reject_block() || !reject_keywords() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      if (list->items.empty()) {
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      *out = list->items.back();
+      list->items.pop_back();
+      return SendStatus::Matched;
+    }
+    if (selector == "shift!") {
+      if (!reject_block() || !reject_keywords() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      if (list->items.empty()) {
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      *out = list->items.front();
+      list->items.erase(list->items.begin());
+      return SendStatus::Matched;
+    }
+    if (selector == "delete_at!") {
+      if (!reject_block() || !reject_keywords() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      if (!args[0].is_integer()) {
+        set_fault(frame, "TypeError", "delete_at! expects an integer index");
+        return SendStatus::Faulted;
+      }
+      const std::int64_t raw = args[0].as_integer();
+      const std::int64_t size_i64 =
+          static_cast<std::int64_t>(list->items.size());
+      const std::int64_t normalized = raw < 0 ? size_i64 + raw : raw;
+      if (normalized < 0 || normalized >= size_i64) {
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      *out = list->items[static_cast<std::size_t>(normalized)];
+      list->items.erase(list->items.begin() + normalized);
+      return SendStatus::Matched;
+    }
+    if (selector == "delete!") {
+      if (!reject_block() || !reject_keywords() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      bool removed = false;
+      std::vector<Value> kept;
+      kept.reserve(list->items.size());
+      for (const Value &item : list->items) {
+        if (collection_keys_equal(item, args[0])) {
+          removed = true;
+        } else {
+          kept.push_back(item);
+        }
+      }
+      list->items = std::move(kept);
+      *out = removed ? args[0] : Value::null();
+      return SendStatus::Matched;
+    }
+
+    // --- whole-list resets (return self) ---
+    if (selector == "clear!") {
+      if (!reject_block() || !reject_keywords() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      list->items.clear();
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "replace!") {
+      if (!reject_block() || !reject_keywords() || !require_args(1)) {
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::vector<Value>> replacement =
+          sequence_argument_items(frame, args[0], selector);
+      if (!replacement.has_value()) {
+        return SendStatus::Faulted;
+      }
+      list->items = *replacement;
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "reverse!") {
+      if (!reject_block() || !reject_keywords() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      std::reverse(list->items.begin(), list->items.end());
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+
+    // --- whole-list transforms: compute from a snapshot, then assign back so
+    // a reentrant block cannot invalidate the vector we are iterating. ---
+    if (selector == "sort!") {
+      if (!require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      const std::vector<Value> snapshot = list->items;
+      const std::optional<std::vector<Value>> sorted =
+          sorted_result(frame, receiver, snapshot, block, kw_args);
+      if (!sorted.has_value()) {
+        return SendStatus::Faulted;
+      }
+      list->items = *sorted;
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "map!") {
+      if (!reject_keywords() || !require_args(0) || !require_block()) {
+        return SendStatus::Faulted;
+      }
+      const std::vector<Value> snapshot = list->items;
+      std::vector<Value> mapped;
+      mapped.reserve(snapshot.size());
+      for (const Value &item : snapshot) {
+        const std::optional<Value> value =
+            call_block_to_value(frame, block, {item});
+        if (!value.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return SendStatus::Faulted;
+        }
+        mapped.push_back(*value);
+      }
+      list->items = std::move(mapped);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "uniq!") {
+      if (!reject_keywords() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      const std::vector<Value> snapshot = list->items;
+      std::vector<Value> unique;
+      std::vector<Value> keys;
+      unique.reserve(snapshot.size());
+      keys.reserve(snapshot.size());
+      for (const Value &item : snapshot) {
+        Value key = item;
+        if (!block.is_null()) {
+          const std::optional<Value> value =
+              call_block_to_value(frame, block, {item});
+          if (!value.has_value()) {
+            return SendStatus::Faulted;
+          }
+          if (!ensure_lifecycle_access(frame, receiver)) {
+            return SendStatus::Faulted;
+          }
+          key = *value;
+        }
+        if (!sequence_contains_value(keys, key)) {
+          keys.push_back(key);
+          unique.push_back(item);
+        }
+      }
+      list->items = std::move(unique);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "select!" || selector == "keep_if!" ||
+        selector == "reject!" || selector == "delete_if!") {
+      if (!reject_keywords() || !require_args(0) || !require_block()) {
+        return SendStatus::Faulted;
+      }
+      const bool keep_when_truthy =
+          selector == "select!" || selector == "keep_if!";
+      const std::vector<Value> snapshot = list->items;
+      std::vector<Value> kept;
+      kept.reserve(snapshot.size());
+      for (const Value &item : snapshot) {
+        const std::optional<Value> predicate =
+            call_block_to_value(frame, block, {item});
+        if (!predicate.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return SendStatus::Faulted;
+        }
+        if (is_truthy(*predicate) == keep_when_truthy) {
+          kept.push_back(item);
+        }
+      }
+      list->items = std::move(kept);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+
+    return SendStatus::NotHandled;
+  }
+
   SendStatus try_apply_scalar_send(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
@@ -22636,11 +22940,19 @@ private:
                      "|", "^",  "<<", ">>", "**", "u+",  "u-"});
     const bool integer_times_selector =
         receiver.is_integer() && selector == "times";
+    const bool list_mutation_selector =
+        receiver.is_list() &&
+        collection_selector_in({"push!", "append!", "unshift!", "prepend!",
+                                "insert!", "pop!", "shift!", "delete_at!",
+                                "delete!", "delete_if!", "keep_if!", "select!",
+                                "reject!", "map!", "sort!", "uniq!", "reverse!",
+                                "clear!", "replace!"});
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          sequence_collection_selector) ||
         (receiver.is_list() && collection_selector == "[]=") ||
+        list_mutation_selector ||
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() && collection_selector_in({"empty?",
@@ -22670,9 +22982,10 @@ private:
         ((receiver.is_integer() || receiver.is_float()) && numeric_selector) ||
         integer_times_selector;
     const bool keyword_compatible_builtin_selector =
-        (collection_selector == "each" || collection_selector == "sorted") &&
-        (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
-         receiver_is_range || receiver_is_lazy_seq);
+        ((collection_selector == "each" || collection_selector == "sorted" ||
+          collection_selector == "sort!") &&
+         (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
+          receiver_is_range || receiver_is_lazy_seq));
     if (!kw_args.empty() && builtin_selector &&
         !keyword_compatible_builtin_selector) {
       set_fault(frame, "TypeError",
@@ -22691,6 +23004,11 @@ private:
       const bool equal = value_equals(receiver, args[0]);
       *out = Value::boolean(selector == "!=" ? !equal : equal);
       return SendStatus::Matched;
+    }
+
+    if (list_mutation_selector) {
+      return apply_list_mutation(frame, receiver, collection_selector, args,
+                                 block, kw_args, out);
     }
 
     if (receiver.is_list() && collection_selector == "[]=") {
