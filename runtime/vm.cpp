@@ -13750,8 +13750,53 @@ private:
       const std::string &rhs = module_.symbols[rhs_id];
       return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
     }
+    if (left.is_list() && right.is_list()) {
+      const std::shared_ptr<ListValue> lhs = left.as_list();
+      const std::shared_ptr<ListValue> rhs = right.as_list();
+      if (lhs == nullptr || rhs == nullptr) {
+        set_fault(frame, "VMError", "sort list ref is invalid");
+        return std::nullopt;
+      }
+      return compare_sequences_for_sort(frame, lhs->items, rhs->items);
+    }
+    if (left.is_tuple() && right.is_tuple()) {
+      const std::shared_ptr<TupleValue> lhs = left.as_tuple();
+      const std::shared_ptr<TupleValue> rhs = right.as_tuple();
+      if (lhs == nullptr || rhs == nullptr) {
+        set_fault(frame, "VMError", "sort tuple ref is invalid");
+        return std::nullopt;
+      }
+      return compare_sequences_for_sort(frame, lhs->items, rhs->items);
+    }
     set_fault(frame, "TypeError", "sort values are not comparable");
     return std::nullopt;
+  }
+
+  // Lexicographic comparison of sequence keys, enabling multi-key sorts like
+  // `sorted: [_1.a, _1.b]` (RFC §7.2). Recurses through compare_values_for_sort
+  // so nested tuples/lists compare element-by-element; a shorter prefix sorts
+  // before its extension.
+  std::optional<int>
+  compare_sequences_for_sort(const Frame &frame, const std::vector<Value> &left,
+                             const std::vector<Value> &right) {
+    const std::size_t shared = std::min(left.size(), right.size());
+    for (std::size_t i = 0; i < shared; ++i) {
+      const std::optional<int> cmp =
+          compare_values_for_sort(frame, left[i], right[i]);
+      if (!cmp.has_value()) {
+        return std::nullopt;
+      }
+      if (*cmp != 0) {
+        return *cmp;
+      }
+    }
+    if (left.size() < right.size()) {
+      return -1;
+    }
+    if (left.size() > right.size()) {
+      return 1;
+    }
+    return 0;
   }
 
   std::optional<int> compare_values_for_sort(const Frame &frame,
