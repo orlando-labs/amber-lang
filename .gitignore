@@ -2,3 +2,8 @@ build/
 *.o
 *.dSYM/
 .DS_Store
+
+# editors/vscode extension build artifacts
+editors/vscode/node_modules/
+editors/vscode/out/
+*.vsix

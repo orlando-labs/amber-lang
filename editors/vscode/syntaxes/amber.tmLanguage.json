@@ -1,0 +1,174 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Amber",
+  "scopeName": "source.amber",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#constants" },
+    { "include": "#definition-function" },
+    { "include": "#definition-class" },
+    { "include": "#keyword-control" },
+    { "include": "#keyword-declaration" },
+    { "include": "#keyword-exception" },
+    { "include": "#keyword-operator-word" },
+    { "include": "#variables" },
+    { "include": "#types" },
+    { "include": "#function-call" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.amber",
+          "begin": "#",
+          "end": "$",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.amber" }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        { "include": "#string-double" },
+        { "include": "#string-single" }
+      ]
+    },
+    "string-double": {
+      "name": "string.quoted.double.amber",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.amber" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.amber" }
+      },
+      "patterns": [
+        { "include": "#string-escape-double" },
+        { "include": "#interpolation" }
+      ]
+    },
+    "string-single": {
+      "name": "string.quoted.single.amber",
+      "begin": "'",
+      "end": "'",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.amber" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.amber" }
+      },
+      "patterns": [
+        { "include": "#string-escape-single" }
+      ]
+    },
+    "string-escape-double": {
+      "name": "constant.character.escape.amber",
+      "match": "\\\\(?:[nrt\\\\\"#]|u\\{[0-9A-Fa-f]{1,6}\\})"
+    },
+    "string-escape-single": {
+      "name": "constant.character.escape.amber",
+      "match": "\\\\(?:[nrt\\\\\"#']|u\\{[0-9A-Fa-f]{1,6}\\})"
+    },
+    "interpolation": {
+      "name": "meta.interpolation.amber",
+      "begin": "#\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.template-expression.begin.amber" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.template-expression.end.amber" }
+      },
+      "patterns": [
+        { "include": "$self" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.amber",
+          "match": "(?<![\\p{L}\\p{N}_])0[xX][0-9a-fA-F][0-9a-fA-F_]*"
+        },
+        {
+          "name": "constant.numeric.binary.amber",
+          "match": "(?<![\\p{L}\\p{N}_])0[bB][01][01_]*"
+        },
+        {
+          "name": "constant.numeric.octal.amber",
+          "match": "(?<![\\p{L}\\p{N}_])0[oO][0-7][0-7_]*"
+        },
+        {
+          "name": "constant.numeric.float.amber",
+          "match": "(?<![\\p{L}\\p{N}_])[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?"
+        }
+      ]
+    },
+    "constants": {
+      "name": "constant.language.amber",
+      "match": "(?<![\\p{L}\\p{N}_])(?:true|false|null)(?![\\p{L}\\p{N}_])"
+    },
+    "definition-function": {
+      "match": "(?<![\\p{L}\\p{N}_])(def)\\s+([\\p{L}_][\\p{L}\\p{N}_]*[?!]?)",
+      "captures": {
+        "1": { "name": "storage.type.function.amber" },
+        "2": { "name": "entity.name.function.amber" }
+      }
+    },
+    "definition-class": {
+      "match": "(?<![\\p{L}\\p{N}_])(class|mixin)\\s+([\\p{L}_][\\p{L}\\p{N}_]*)(?:\\s*(<)\\s*([\\p{L}_][\\p{L}\\p{N}_]*))?",
+      "captures": {
+        "1": { "name": "storage.type.class.amber" },
+        "2": { "name": "entity.name.type.amber" },
+        "3": { "name": "keyword.operator.inheritance.amber" },
+        "4": { "name": "entity.other.inherited-class.amber" }
+      }
+    },
+    "keyword-control": {
+      "name": "keyword.control.amber",
+      "match": "(?<![\\p{L}\\p{N}_])(?:case!|if|elif|elsif|else|unless|while|until|loop|break|case|when|do|return|pass|noop)(?![\\p{L}\\p{N}_])"
+    },
+    "keyword-declaration": {
+      "name": "keyword.declaration.amber",
+      "match": "(?<![\\p{L}\\p{N}_])(?:class_method|class_prop|def|class|mixin|prop|attr|package|import|include|from|export|extend)(?![\\p{L}\\p{N}_])"
+    },
+    "keyword-exception": {
+      "name": "keyword.control.exception.amber",
+      "match": "(?<![\\p{L}\\p{N}_])(?:try|catch|rescue|ensure|raise|throw)(?![\\p{L}\\p{N}_])"
+    },
+    "keyword-operator-word": {
+      "name": "keyword.operator.word.amber",
+      "match": "(?<![\\p{L}\\p{N}_])(?:and|or|not|in)(?![\\p{L}\\p{N}_])"
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.class.amber",
+          "match": "@@[\\p{L}_][\\p{L}\\p{N}_]*"
+        },
+        {
+          "name": "variable.other.member.amber",
+          "match": "@[\\p{L}_][\\p{L}\\p{N}_]*"
+        }
+      ]
+    },
+    "types": {
+      "name": "entity.name.type.amber",
+      "match": "(?<![\\p{L}\\p{N}_])\\p{Lu}[\\p{L}\\p{N}_]*"
+    },
+    "function-call": {
+      "match": "([\\p{L}_][\\p{L}\\p{N}_]*[?!]?)(?=\\s*\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.amber" }
+      }
+    },
+    "operators": {
+      "name": "keyword.operator.amber",
+      "match": "\\.\\.\\.?|==|!=|<=|>=|=>|->|\\|>|&&|\\|\\||[-+*/%<>=!&|^~]"
+    }
+  }
+}

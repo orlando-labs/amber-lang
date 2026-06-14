@@ -1,0 +1,162 @@
+{
+  "name": "amber-lang",
+  "displayName": "Amber",
+  "description": "Syntax highlighting and run/build tasks for the Amber programming language.",
+  "version": "0.1.0",
+  "publisher": "amber-lang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/orlando-labs/amber-lang.git"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "amber",
+    "amberc"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:amber"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "amber",
+        "aliases": [
+          "Amber",
+          "amber"
+        ],
+        "extensions": [
+          ".am"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "amber",
+        "scopeName": "source.amber",
+        "path": "./syntaxes/amber.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "amber.runFile",
+        "title": "Amber: Run File",
+        "category": "Amber"
+      },
+      {
+        "command": "amber.buildFile",
+        "title": "Amber: Build File",
+        "category": "Amber"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "amber.runFile",
+          "when": "resourceLangId == amber",
+          "group": "navigation@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "amber.runFile",
+          "when": "resourceLangId == amber",
+          "group": "amber@1"
+        },
+        {
+          "command": "amber.buildFile",
+          "when": "resourceLangId == amber",
+          "group": "amber@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "amber.runFile",
+          "when": "resourceLangId == amber"
+        },
+        {
+          "command": "amber.buildFile",
+          "when": "resourceLangId == amber"
+        }
+      ]
+    },
+    "taskDefinitions": [
+      {
+        "type": "amber",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": [
+              "run",
+              "build"
+            ],
+            "description": "Which amberc action to perform for this task."
+          },
+          "file": {
+            "type": "string",
+            "description": "Path to the .am file. Defaults to the active editor's file."
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Extra arguments passed to amberc."
+          }
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Amber",
+      "properties": {
+        "amber.compilerPath": {
+          "type": "string",
+          "default": "amberc",
+          "description": "Path to the amberc executable. If not absolute and not found on PATH, the extension falls back to '<workspace>/build/amberc'."
+        },
+        "amber.build.target": {
+          "type": "string",
+          "enum": [
+            "native",
+            "native-debug",
+            "bytecode-wrapper"
+          ],
+          "default": "native",
+          "description": "Target passed to 'amberc build --target'."
+        },
+        "amber.build.outDir": {
+          "type": "string",
+          "default": "build",
+          "description": "Directory (relative to the workspace folder, or absolute) where build artifacts are written."
+        },
+        "amber.run.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments appended when running a file with 'amberc <file>'."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}
