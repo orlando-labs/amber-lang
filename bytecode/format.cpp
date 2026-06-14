@@ -1554,6 +1554,9 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x1D:
     opcode = Opcode::WatchIvar;
     return true;
+  case 0x1E:
+    opcode = Opcode::LoadBlock;
+    return true;
   case 0x20:
     opcode = Opcode::Send;
     return true;
@@ -3388,6 +3391,7 @@ InstructionFlow verify_instruction_flow(
   }
   case Opcode::LoadNull:
   case Opcode::LoadSelf:
+  case Opcode::LoadBlock:
   case Opcode::GetLast: {
     if (operand_count_is(instruction, 1, errors)) {
       add_register_write(code, instruction, 0, flow, errors);
@@ -5195,6 +5199,8 @@ std::string opcode_name(Opcode opcode) {
     return "MOVE";
   case Opcode::LoadSelf:
     return "LOADSELF";
+  case Opcode::LoadBlock:
+    return "LOADBLOCK";
   case Opcode::GetLast:
     return "GETLAST";
   case Opcode::SetLast:

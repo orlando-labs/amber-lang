@@ -1223,6 +1223,8 @@ private:
           entry.flags = 0;
           if (string_field(*param, "kind") == "keyword") {
             entry.flags |= kMethodParamFlagKeyword;
+          } else if (string_field(*param, "kind") == "block") {
+            entry.flags |= kMethodParamFlagBlock;
           }
           if (!bool_field(*param, "has_default")) {
             method.params.push_back(entry);
@@ -1374,6 +1376,30 @@ CodeEmitter::CodeEmitter(Emitter *owner, const hir::Procedure *procedure,
 }
 
 BcCode CodeEmitter::emit() {
+  // RFC block-parameters §5: bind a `&name` block parameter from the frame's
+  // block channel before the body runs, so every call path binds it uniformly.
+  if (procedure_ != nullptr && procedure_->signature != nullptr) {
+    if (const ast::ListField *params =
+            list_field(*procedure_->signature, "params")) {
+      std::string block_local;
+      for (const std::unique_ptr<ast::Expr> &param : params->values) {
+        if (string_field(*param, "kind") == "block") {
+          block_local = string_field(*param, "local_name");
+          break;
+        }
+      }
+      if (!block_local.empty()) {
+        for (const hir::ProcedureLocal &local : procedure_->locals) {
+          if (local.name == block_local && local.role == "param") {
+            emit_instruction(Opcode::LoadBlock,
+                             {{parse_slot(local.slot, 'l'), false}},
+                             procedure_->span);
+            break;
+          }
+        }
+      }
+    }
+  }
   compile_param_pattern_prologues();
   const ast::Expr *body =
       body_override_ != nullptr ? body_override_ : procedure_->body.get();
@@ -1612,7 +1638,8 @@ std::uint32_t CodeEmitter::compile_clause_subject(const ast::Expr &clause) {
   if (subject_kind == "single_positional") {
     if (params != nullptr) {
       for (const std::unique_ptr<ast::Expr> &param : params->values) {
-        if (string_field(*param, "kind") == "keyword") {
+        if (string_field(*param, "kind") == "keyword" ||
+            string_field(*param, "kind") == "block") {
           continue;
         }
         const std::optional<std::uint32_t> slot =
@@ -1664,7 +1691,8 @@ std::uint32_t CodeEmitter::compile_clause_subject(const ast::Expr &clause) {
   std::vector<std::uint32_t> positional_slots;
   if (params != nullptr) {
     for (const std::unique_ptr<ast::Expr> &param : params->values) {
-      if (string_field(*param, "kind") == "keyword") {
+      if (string_field(*param, "kind") == "keyword" ||
+          string_field(*param, "kind") == "block") {
         continue;
       }
       const std::optional<std::uint32_t> slot =

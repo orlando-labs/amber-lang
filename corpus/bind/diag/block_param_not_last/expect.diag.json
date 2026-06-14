@@ -1,0 +1,6 @@
+{
+  "format": "amber.diag.v1",
+  "diagnostics": [
+    {"code":"AMB_BLOCK_PARAM_NOT_LAST","severity":"error","phase":"parser","message":"a block parameter must be the last parameter, and at most one is allowed","primary_span":{"file":"corpus/bind/diag/block_param_not_last/source.am","start":{"line":1,"col":9,"offset":8},"end":{"line":1,"col":13,"offset":12}},"related":[],"notes":[]}
+  ]
+}

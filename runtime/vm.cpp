@@ -7546,6 +7546,7 @@ enum class QuickOpcode : std::uint8_t {
   LoadBool,
   Move,
   LoadSelf,
+  LoadBlock,
   GetLast,
   SetLast,
   LoadUpval,
@@ -9995,6 +9996,7 @@ private:
     case Opcode::LoadNull:
     case Opcode::LoadBool:
     case Opcode::LoadSelf:
+    case Opcode::LoadBlock:
     case Opcode::GetLast:
     case Opcode::LoadUpval:
     case Opcode::LookupConst:
@@ -10257,6 +10259,7 @@ private:
     case Opcode::LoadBool:
     case Opcode::Move:
     case Opcode::LoadSelf:
+    case Opcode::LoadBlock:
     case Opcode::GetLast:
     case Opcode::MakeList:
     case Opcode::MakeListSpread:
@@ -10503,6 +10506,11 @@ private:
     case Opcode::LoadSelf:
       if (quick_operand_u32(insn, 0, &a)) {
         out.quick_opcode = QuickOpcode::LoadSelf;
+      }
+      break;
+    case Opcode::LoadBlock:
+      if (quick_operand_u32(insn, 0, &a)) {
+        out.quick_opcode = QuickOpcode::LoadBlock;
       }
       break;
     case Opcode::GetLast:
@@ -16327,7 +16335,10 @@ private:
     std::size_t positional_cursor = 0;
     for (std::size_t i = 0; i < out_params->size(); ++i) {
       const bytecode::MethodParamEntry &entry = (*out_params)[i];
-      if ((entry.flags & bytecode::kMethodParamFlagKeyword) != 0U) {
+      if ((entry.flags & (bytecode::kMethodParamFlagKeyword |
+                          bytecode::kMethodParamFlagBlock)) != 0U) {
+        // Block parameters are bound from the frame's block channel, not from
+        // positional arguments (RFC block-parameters §5).
         continue;
       }
       if (positional_cursor < pos_args.size()) {
@@ -16367,6 +16378,11 @@ private:
       if ((*out_slots)[i].present) {
         continue;
       }
+      // A block parameter is optional: it binds to the incoming block or null
+      // (RFC block-parameters §5.1), so a missing block is never a fault.
+      if (((*out_params)[i].flags & bytecode::kMethodParamFlagBlock) != 0U) {
+        continue;
+      }
       if (((*out_params)[i].flags & bytecode::kMethodParamFlagHasDefault) ==
           0U) {
         set_fault(frame, "TypeError", "missing required parameter");
@@ -16394,6 +16410,23 @@ private:
         sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(slot),
                                     frame.regs[slot]);
       }
+    }
+    // RFC block-parameters §5: bind any `&name` block parameter from the
+    // frame's block channel here too (not only via the prologue's LoadBlock),
+    // so it is in place before auto-assign capture (`&@field`) and for the
+    // clause-dispatch path that snapshots the base registers.
+    for (std::size_t slot = 0;
+         slot < params.size() && slot < frame.regs.size(); ++slot) {
+      if ((params[slot].flags & bytecode::kMethodParamFlagBlock) == 0U) {
+        continue;
+      }
+      frame.regs[slot] = frame.block;
+      if (frame.initialized.size() < frame.regs.size()) {
+        frame.initialized.resize(frame.regs.size(), 0U);
+      }
+      frame.initialized[slot] = 1U;
+      sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(slot),
+                                  frame.regs[slot]);
     }
 
     std::size_t thunk_index = 0;
@@ -26752,6 +26785,12 @@ private:
         }
         ++frame.pc;
         return;
+      case QuickOpcode::LoadBlock:
+        if (!write_reg(frame, quick->a, frame.block)) {
+          return;
+        }
+        ++frame.pc;
+        return;
       case QuickOpcode::GetLast:
         if (!write_reg(frame, quick->a, frame.last_result)) {
           return;
@@ -27314,6 +27353,15 @@ private:
       std::uint32_t dst = 0;
       if (!operand_u32(frame, insn, 0, &dst) ||
           !write_reg(frame, dst, frame.self)) {
+        return;
+      }
+      ++frame.pc;
+      return;
+    }
+    case Opcode::LoadBlock: {
+      std::uint32_t dst = 0;
+      if (!operand_u32(frame, insn, 0, &dst) ||
+          !write_reg(frame, dst, frame.block)) {
         return;
       }
       ++frame.pc;

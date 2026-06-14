@@ -1,0 +1,22 @@
+package conformance.run
+
+class Adder:
+  def init(&@op):
+    pass
+  def apply(x):
+    @op(x)
+
+def relay(xs, &blk):
+  out = []
+  xs.each |x|:
+    out.push!(blk(x))
+  out
+
+def pick(n, &blk):
+  when 0: blk(100)
+  else: blk(n)
+
+def probe():
+  a = Adder() |v|: v + 1
+  r = relay([1, 2]) |x|: x * 10
+  "#{a.apply(41)}:#{r[0]}:#{r[1]}:#{pick(0) |x|: x}:#{pick(5) |x|: x}"

@@ -1499,6 +1499,11 @@ CallBindResult bind_call_shape(const Signature &signature,
         slot.argument_span = args[static_cast<std::size_t>(found->second)].span;
         consumed_keywords.insert(param.external_name);
       }
+    } else if (param.kind == "block") {
+      // RFC block-parameters §5: a block parameter is supplied through the
+      // call's block channel, not a positional/keyword argument, and is
+      // optional, so it never consumes a positional slot nor is "missing".
+      slot.source_kind = "block";
     } else if (positional_cursor < positional_indices.size()) {
       const int arg_index = positional_indices[positional_cursor++];
       slot.source_kind = "positional";

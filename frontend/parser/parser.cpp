@@ -1721,6 +1721,20 @@ std::unique_ptr<ast::Expr> Parser::parse_signature() {
   }
   const lexer::Token close =
       consume(lexer::TokenKind::RParen, "expected ')' after parameters");
+  // RFC block-parameters §4.2: at most one block parameter, and it must be the
+  // final parameter. Any block parameter that is not the last element is
+  // flagged — this catches both "not last" and "more than one" (an earlier
+  // duplicate is necessarily not last).
+  for (std::size_t i = 0; i < params.size(); ++i) {
+    if (string_value(*params[i], "param_kind") == "block" &&
+        i + 1 != params.size()) {
+      diagnostics_.push_back(lexer::Diagnostic{
+          "AMB_BLOCK_PARAM_NOT_LAST", "error", "parser",
+          "a block parameter must be the last parameter, and at most one is "
+          "allowed",
+          params[i]->span});
+    }
+  }
   auto signature =
       ast::make_expr("AstSignature", ast::join_spans(start.span, close.span));
   signature->list_field("params", std::move(params));
@@ -1729,15 +1743,24 @@ std::unique_ptr<ast::Expr> Parser::parse_signature() {
 
 std::unique_ptr<ast::Expr> Parser::parse_param() {
   const lexer::Token start = current();
+  // RFC block-parameters §4.1: a trailing `&name` (or `&@field`) block
+  // parameter binds the frame's block channel. `&` is the callable-channel
+  // sigil already established for callable references (§4.6).
+  const bool is_block = match(lexer::TokenKind::Ampersand);
   std::string auto_assign_kind = "none";
   if (match(lexer::TokenKind::At)) {
     auto_assign_kind = "@";
   } else if (match(lexer::TokenKind::AtAt)) {
     auto_assign_kind = "@@";
   }
+  // §4.2: a block parameter is always a single name, never a pattern.
+  if (is_block && !check(lexer::TokenKind::Identifier)) {
+    error_code(current(), "AMB_BLOCK_PARAM_PATTERN",
+               "a block parameter must be a single name, not a pattern");
+  }
   const lexer::Token name =
       consume(lexer::TokenKind::Identifier, "expected parameter name");
-  std::string kind = "positional";
+  std::string kind = is_block ? "block" : "positional";
   std::string type_expr;
   std::unique_ptr<ast::Expr> default_expr;
 
@@ -1745,12 +1768,15 @@ std::unique_ptr<ast::Expr> Parser::parse_param() {
     type_expr = parse_type_term_text_until_param_boundary();
   }
 
-  if (match(lexer::TokenKind::Colon)) {
+  // Block parameters take neither a keyword `:` nor a default `=` in v1
+  // (default deferred per RFC §10.1); leaving them unconsumed lets the
+  // signature's `)` expectation flag a malformed `&blk: …` / `&blk = …`.
+  if (!is_block && match(lexer::TokenKind::Colon)) {
     kind = "keyword";
     if (!check(lexer::TokenKind::Comma) && !check(lexer::TokenKind::RParen)) {
       default_expr = parse_expression(1, StopMode::Normal);
     }
-  } else if (match(lexer::TokenKind::Equal)) {
+  } else if (!is_block && match(lexer::TokenKind::Equal)) {
     default_expr = parse_expression(1, StopMode::Normal);
   }
 
@@ -2083,6 +2109,15 @@ bool Parser::is_simple_many_def_header() const {
   }
   if (!found_close) {
     return false;
+  }
+  // A `&` block-parameter sigil only appears in an ordinary signature, never in
+  // the many-def pattern sugar (§10.4 is positional-only). Its presence forces
+  // normal signature parsing so block params bind and `&(pattern)` reaches the
+  // precise AMB_BLOCK_PARAM_PATTERN diagnostic (RFC block-parameters).
+  for (std::size_t i = current_ + 1; i < close_index; ++i) {
+    if (tokens_[i].kind == lexer::TokenKind::Ampersand) {
+      return false;
+    }
   }
   if (close_index + 1 < tokens_.size() &&
       tokens_[close_index + 1].kind == lexer::TokenKind::KeywordIf) {
@@ -3685,6 +3720,32 @@ Parser::parse_paren_args(StopMode stop_mode) {
 }
 
 std::unique_ptr<ast::Expr> Parser::parse_call_arg(StopMode stop_mode) {
+  // RFC block-parameters §6: a trailing `&name` argument routes the local's
+  // callable into the callee's block channel. `&local` is not otherwise a
+  // legal expression (§4.6 restricts prefix `&` to static reference targets),
+  // so this is a conflict-free slot. v1 accepts only a bare local name.
+  if (check(lexer::TokenKind::Ampersand)) {
+    if (peek(1).kind == lexer::TokenKind::Identifier &&
+        (peek(2).kind == lexer::TokenKind::Comma ||
+         peek(2).kind == lexer::TokenKind::RParen)) {
+      const lexer::Token amp = advance();
+      const lexer::Token name = advance();
+      auto value = ast::make_expr("AstName", name.span);
+      value->string_field("name", name.lexeme);
+      auto arg = ast::make_expr("AstBlockPass",
+                                ast::join_spans(amp.span, name.span));
+      arg->string_field("name", name.lexeme);
+      arg->node_field("value", std::move(value));
+      return arg;
+    }
+    const lexer::Token amp = advance();
+    error_code(amp, "AMB_BLOCK_PASS_TARGET",
+               "v1 block-pass accepts only a bare local name (`&name`); bind a "
+               "callable reference first");
+    auto expr = ast::make_expr("AstError", amp.span);
+    expr->string_field("token", amp.lexeme);
+    return expr;
+  }
   if (is_keyword_spread_start(current(), peek())) {
     const lexer::Token spread = advance();
     std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
@@ -3728,8 +3789,16 @@ Parser::parse_call_arg_list(lexer::TokenKind closing_kind,
 
   bool saw_keyword = false;
   bool saw_keyword_spread = false;
+  bool saw_block_pass = false;
   while (!check(closing_kind) && !at_end()) {
+    if (saw_block_pass) {
+      error_code(current(), "AMB_BLOCK_PASS_TARGET",
+                 "a `&name` block-pass argument must be the last argument");
+    }
     std::unique_ptr<ast::Expr> arg = parse_call_arg(stop_mode);
+    if (arg != nullptr && arg->kind == "AstBlockPass") {
+      saw_block_pass = true;
+    }
     const bool positional =
         arg != nullptr &&
         (arg->kind != "AstKeywordArg" && arg->kind != "AstKeywordSpreadArg");

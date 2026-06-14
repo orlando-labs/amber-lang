@@ -93,6 +93,9 @@ enum class Opcode : std::uint8_t {
   WatchLocal = 0x1B,
   WatchUpval = 0x1C,
   WatchIvar = 0x1D,
+  // RFC block-parameters: load the frame's block channel into a register,
+  // binding a `&name` block parameter in the method prologue.
+  LoadBlock = 0x1E,
   Send = 0x20,
   SendDyn = 0x21,
   Call = 0x22,
@@ -284,6 +287,9 @@ struct AutoAssignEntry {
 
 inline constexpr std::uint32_t kMethodParamFlagKeyword = 0x1U;
 inline constexpr std::uint32_t kMethodParamFlagHasDefault = 0x2U;
+// RFC block-parameters: a `&name` parameter bound from the frame's block
+// channel rather than a positional/keyword argument.
+inline constexpr std::uint32_t kMethodParamFlagBlock = 0x4U;
 
 struct MethodParamEntry {
   std::uint32_t external_name_sym_id = 0;

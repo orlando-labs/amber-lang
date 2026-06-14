@@ -1132,9 +1132,18 @@ private:
       return "positional_tuple";
     }
 
-    if (signature != nullptr && signature->params.size() == 1 &&
-        signature->params[0].kind == "positional") {
-      return "single_positional";
+    // RFC block-parameters §4.2: a block parameter does not participate in
+    // clause dispatch, so it is excluded from the positional-subject count.
+    if (signature != nullptr) {
+      std::size_t positional_count = 0;
+      for (const binder::ParamDescriptor &param : signature->params) {
+        if (param.kind == "positional") {
+          ++positional_count;
+        }
+      }
+      if (positional_count == 1) {
+        return "single_positional";
+      }
     }
     return "positional_tuple";
   }
@@ -2250,7 +2259,7 @@ private:
         bool has_block_suffix = false;
         if (i + 1 < tail_count &&
             tails->values[i + 1]->kind == "AstTailCall") {
-          collect_call_args(*tails->values[i + 1], &pos_args, &kw_args);
+          collect_call_args(*tails->values[i + 1], &pos_args, &kw_args, &block);
           has_explicit_call = true;
           ++i;
         }
@@ -2296,7 +2305,7 @@ private:
         std::vector<std::unique_ptr<Node>> pos_args;
         std::vector<std::unique_ptr<Node>> kw_args;
         std::unique_ptr<Node> block;
-        collect_call_args(tail, &pos_args, &kw_args);
+        collect_call_args(tail, &pos_args, &kw_args, &block);
         if (i + 1 < tail_count &&
             tails->values[i + 1]->kind == "AstTailBlockSuffix") {
           block = lower_block_suffix(*tails->values[i + 1]);
@@ -2475,14 +2484,23 @@ private:
 
   void collect_call_args(const ast::Expr &tail,
                          std::vector<std::unique_ptr<Node>> *pos_args,
-                         std::vector<std::unique_ptr<Node>> *kw_args) {
+                         std::vector<std::unique_ptr<Node>> *kw_args,
+                         std::unique_ptr<Node> *block_pass = nullptr) {
     const ast::ListField *args = list_field(tail, "args");
     if (args == nullptr) {
       return;
     }
     for (const std::unique_ptr<ast::Expr> &arg : args->values) {
-      if (arg->kind == "AstKeywordArg" ||
-          arg->kind == "AstKeywordSpreadArg") {
+      if (arg->kind == "AstBlockPass") {
+        // RFC block-parameters §6: route a trailing `&name` into the call's
+        // block channel. The referenced local already holds a callable.
+        if (block_pass != nullptr) {
+          if (const ast::Expr *value = node_field(*arg, "value")) {
+            *block_pass = lower_expr(*value);
+          }
+        }
+      } else if (arg->kind == "AstKeywordArg" ||
+                 arg->kind == "AstKeywordSpreadArg") {
         kw_args->push_back(lower_expr(*arg));
       } else {
         pos_args->push_back(lower_expr(*arg));
