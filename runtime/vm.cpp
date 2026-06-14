@@ -26524,8 +26524,43 @@ private:
       class_index = receiver.as_class_object().class_index;
       dispatch_flags = kMethodFlagClass;
     } else {
-      set_fault(frame, "NoMethodError",
-                "selector is not implemented in current runtime baseline");
+      std::string message =
+          "selector is not implemented in current runtime baseline";
+      // RFC §11: when a bare collection method is used where the bang or the
+      // pure copy-edit form is intended, point the caller at the right name.
+      if (receiver.is_list() || receiver.is_map() || receiver.is_set()) {
+        static const std::unordered_map<std::string, std::string> kHints = {
+            {"push", "push! to mutate in place, or appended for a copy"},
+            {"append", "append!/push! to mutate, or appended for a copy"},
+            {"pop", "pop!"},
+            {"shift", "shift!"},
+            {"unshift", "unshift! to mutate, or prepended for a copy"},
+            {"prepend", "prepend!/unshift! to mutate, or prepended for a copy"},
+            {"insert", "insert! to mutate, or inserted for a copy"},
+            {"delete", "delete! to mutate, or deleted for a copy"},
+            {"delete_at", "delete_at! to mutate"},
+            {"delete_if", "delete_if! to mutate"},
+            {"keep_if", "keep_if! to mutate"},
+            {"clear", "clear! to mutate"},
+            {"replace", "replace! to mutate"},
+            {"store", "store! to mutate, or with for a copy"},
+            {"put", "store! to mutate, or with for a copy"},
+            {"add", "add! to mutate, or added for a copy"},
+            {"subtract", "subtract! to mutate"},
+            {"update", "update!/merge! to mutate, or merge for a copy"},
+            {"sort", "sorted for a copy, or sort! to mutate in place"},
+            {"reverse", "reversed for a copy, or reverse! to mutate in place"},
+            {"sort_by", "sorted with a key block, e.g. xs.sorted: _1.field"},
+            {"uniq_by", "uniq with a key block, e.g. xs.uniq: _1.field"},
+        };
+        const auto hint = kHints.find(*selector);
+        if (hint != kHints.end()) {
+          message = "`" + *selector +
+                    "` is not a collection method; use " + hint->second +
+                    ". Amber marks receiver mutation with `!`";
+        }
+      }
+      set_fault(frame, "NoMethodError", message);
       return false;
     }
 

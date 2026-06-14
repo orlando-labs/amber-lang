@@ -1,0 +1,7 @@
+{
+  "schema": "amber.run.v1",
+  "entry": "probe",
+  "status": "fault",
+  "error_name": "NoMethodError",
+  "message": "`sort` is not a collection method; use sorted for a copy, or sort! to mutate in place. Amber marks receiver mutation with `!`"
+}

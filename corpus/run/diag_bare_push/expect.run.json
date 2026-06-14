@@ -1,0 +1,7 @@
+{
+  "schema": "amber.run.v1",
+  "entry": "probe",
+  "status": "fault",
+  "error_name": "NoMethodError",
+  "message": "`push` is not a collection method; use push! to mutate in place, or appended for a copy. Amber marks receiver mutation with `!`"
+}
