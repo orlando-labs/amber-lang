@@ -13960,6 +13960,72 @@ private:
       return make_list_value(std::move(reversed));
     }
 
+    // RFC §7.1 curated pure copy-edit verbs: return a new list, never mutate.
+    if (selector == "appended") {
+      if (args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::vector<Value> result = items;
+      result.insert(result.end(), args.begin(), args.end());
+      return make_list_value(std::move(result));
+    }
+
+    if (selector == "inserted") {
+      if (args.size() < 2U || !args[0].is_integer()) {
+        set_fault(frame, "TypeError",
+                  "inserted expects an integer index and at least one value");
+        return std::nullopt;
+      }
+      const std::int64_t raw = args[0].as_integer();
+      const std::int64_t size_i64 = static_cast<std::int64_t>(items.size());
+      const std::int64_t normalized = raw < 0 ? size_i64 + raw + 1 : raw;
+      if (normalized < 0 || normalized > size_i64) {
+        set_fault(frame, "IndexError", "inserted index is out of bounds");
+        return std::nullopt;
+      }
+      std::vector<Value> result = items;
+      result.insert(result.begin() + normalized, args.begin() + 1, args.end());
+      return make_list_value(std::move(result));
+    }
+
+    if (selector == "deleted") {
+      if (args.size() != 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::vector<Value> result;
+      result.reserve(items.size());
+      for (const Value &item : items) {
+        if (!collection_keys_equal(item, args[0])) {
+          result.push_back(item);
+        }
+      }
+      return make_list_value(std::move(result));
+    }
+
+    if (selector == "init") {
+      if (!args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      if (items.empty()) {
+        return make_list_value(std::vector<Value>{});
+      }
+      return make_list_value(std::vector<Value>(items.begin(), items.end() - 1));
+    }
+
+    if (selector == "tail") {
+      if (!args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      if (items.empty()) {
+        return make_list_value(std::vector<Value>{});
+      }
+      return make_list_value(std::vector<Value>(items.begin() + 1, items.end()));
+    }
+
     if (selector == "take_while") {
       if (!args.empty() || block.is_null()) {
         set_fault(frame, "TypeError", "take_while requires block");
@@ -22921,7 +22987,9 @@ private:
     const bool sequence_extra_operation_selector =
         receiver_is_sequence_like &&
         collection_selector_in({"+", "*", "concat", "take_while", "reversed",
-                                "sorted", "uniq", "each_pair", "each_cons"});
+                                "sorted", "uniq", "each_pair", "each_cons",
+                                "appended", "inserted", "deleted", "init",
+                                "tail"});
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
          collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
