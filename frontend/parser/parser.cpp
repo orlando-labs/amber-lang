@@ -2988,6 +2988,14 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
     expr->string_field("name", token.lexeme);
     return expr;
   }
+  if (token.kind == lexer::TokenKind::Pipe) {
+    // Standalone lambda literal: `|params|: body` (or `||: body`) in expression
+    // position. A leading `|` cannot be infix bitwise-or, so this is
+    // unambiguous. Reuses the block parser; lowers to a closure (HClosure)
+    // exactly like a call-site block, producing a first-class callable value.
+    --current_;
+    return parse_block_suffix(stop_mode);
+  }
   if (token.kind == lexer::TokenKind::KeywordIf) {
     --current_;
     return parse_if_expr(stop_mode);
