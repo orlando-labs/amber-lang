@@ -6792,6 +6792,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "ThreadedCollection";
   case RuntimeNativeTypeKind::Kernel:
     return "Kernel";
+  case RuntimeNativeTypeKind::Math:
+    return "Math";
   case RuntimeNativeTypeKind::Io:
     return "io";
   case RuntimeNativeTypeKind::TextBuffer:
@@ -12496,6 +12498,9 @@ private:
     if (path == "Kernel") {
       return Value::native_type(RuntimeNativeTypeKind::Kernel);
     }
+    if (path == "Math") {
+      return Value::native_type(RuntimeNativeTypeKind::Math);
+    }
     if (path == "io") {
       return Value::native_type(RuntimeNativeTypeKind::Io);
     }
@@ -14002,6 +14007,7 @@ private:
     const bool block_allowed =
         selector == "take_while" || selector == "drop_while" ||
         selector == "find_index" || selector == "sorted" ||
+        selector == "min" || selector == "max" || selector == "minmax" ||
         selector == "uniq" || selector == "each_pair" ||
         selector == "each_cons" || selector == "each";
     if (!block.is_null() && !block_allowed) {
@@ -14242,6 +14248,61 @@ private:
       }
       return make_list_value(
           std::vector<Value>(items.begin() + i, items.end()));
+    }
+
+    if (selector == "min" || selector == "max" || selector == "minmax") {
+      // One-pass extremum finder. An optional arity-1 key block selects the
+      // comparison key per element (RFC §7.2 sort-key convention); the element
+      // itself is returned. Ordering matches `sorted` (compare_values_for_sort).
+      // Empty collection yields null. `minmax` returns [min, max] in one pass.
+      if (items.empty()) {
+        return Value::null();
+      }
+      std::vector<Value> keys;
+      if (!block.is_null()) {
+        keys.reserve(items.size());
+        for (const Value &item : items) {
+          const std::optional<Value> key =
+              call_block_to_value(frame, block, {item});
+          if (!key.has_value()) {
+            return std::nullopt;
+          }
+          if (!ensure_lifecycle_access(frame, receiver)) {
+            return std::nullopt;
+          }
+          keys.push_back(*key);
+        }
+      }
+      const auto key_at = [&](std::size_t i) -> const Value & {
+        return block.is_null() ? items[i] : keys[i];
+      };
+      std::size_t min_i = 0;
+      std::size_t max_i = 0;
+      for (std::size_t i = 1; i < items.size(); ++i) {
+        const std::optional<int> to_min =
+            compare_values_for_sort(frame, key_at(i), key_at(min_i));
+        if (!to_min.has_value()) {
+          return std::nullopt;
+        }
+        if (*to_min < 0) {
+          min_i = i;
+        }
+        const std::optional<int> to_max =
+            compare_values_for_sort(frame, key_at(i), key_at(max_i));
+        if (!to_max.has_value()) {
+          return std::nullopt;
+        }
+        if (*to_max > 0) {
+          max_i = i;
+        }
+      }
+      if (selector == "min") {
+        return items[min_i];
+      }
+      if (selector == "max") {
+        return items[max_i];
+      }
+      return make_list_value(std::vector<Value>{items[min_i], items[max_i]});
     }
 
     if (selector == "sorted") {
@@ -18734,6 +18795,152 @@ private:
         *out = string_value_from_text(runtime_stringify_value(
             args[0], stringify_mode, &module_, nullptr, nullptr, options));
         return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Math) {
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError",
+                    "Math methods do not accept keyword arguments");
+          return SendStatus::Faulted;
+        }
+        if (selector == "PI") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::floating(3.141592653589793238462643383279502884);
+          return SendStatus::Matched;
+        }
+        if (selector == "E") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::floating(2.718281828459045235360287471352662498);
+          return SendStatus::Matched;
+        }
+        const auto math_arg = [&](std::size_t i, double *d) -> bool {
+          if (!args[i].is_integer() && !args[i].is_float()) {
+            set_fault(frame, "TypeError",
+                      "Math." + selector + " expects a number");
+            return false;
+          }
+          *d = numeric_value_as_double(args[i]);
+          return true;
+        };
+        // `abs` and `min`/`max` preserve the argument's Int/Float type; `sign`
+        // yields an Int. Everything else returns a Float.
+        if (selector == "abs") {
+          if (!require_arity(1)) {
+            return SendStatus::Faulted;
+          }
+          if (args[0].is_integer()) {
+            const std::int64_t v = args[0].as_integer();
+            *out = Value::integer(v < 0 ? -v : v);
+            return SendStatus::Matched;
+          }
+          double d = 0.0;
+          if (!math_arg(0, &d)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::floating(std::fabs(d));
+          return SendStatus::Matched;
+        }
+        if (selector == "sign") {
+          if (!require_arity(1)) {
+            return SendStatus::Faulted;
+          }
+          double d = 0.0;
+          if (!math_arg(0, &d)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(d > 0.0 ? 1 : (d < 0.0 ? -1 : 0));
+          return SendStatus::Matched;
+        }
+        if (selector == "min" || selector == "max") {
+          if (!require_arity(2)) {
+            return SendStatus::Faulted;
+          }
+          double a = 0.0;
+          double b = 0.0;
+          if (!math_arg(0, &a) || !math_arg(1, &b)) {
+            return SendStatus::Faulted;
+          }
+          const bool pick_first = selector == "min" ? (a <= b) : (a >= b);
+          *out = pick_first ? args[0] : args[1];
+          return SendStatus::Matched;
+        }
+        if (selector == "pow" || selector == "hypot" || selector == "atan2") {
+          if (!require_arity(2)) {
+            return SendStatus::Faulted;
+          }
+          double a = 0.0;
+          double b = 0.0;
+          if (!math_arg(0, &a) || !math_arg(1, &b)) {
+            return SendStatus::Faulted;
+          }
+          double r = 0.0;
+          if (selector == "pow") {
+            r = std::pow(a, b);
+          } else if (selector == "hypot") {
+            r = std::hypot(a, b);
+          } else {
+            r = std::atan2(a, b);
+          }
+          *out = Value::floating(r);
+          return SendStatus::Matched;
+        }
+        if (selector == "sqrt" || selector == "cbrt" || selector == "exp" ||
+            selector == "log" || selector == "log2" || selector == "log10" ||
+            selector == "sin" || selector == "cos" || selector == "tan" ||
+            selector == "asin" || selector == "acos" || selector == "atan" ||
+            selector == "floor" || selector == "ceil" || selector == "round" ||
+            selector == "trunc") {
+          if (!require_arity(1)) {
+            return SendStatus::Faulted;
+          }
+          double d = 0.0;
+          if (!math_arg(0, &d)) {
+            return SendStatus::Faulted;
+          }
+          double r = 0.0;
+          if (selector == "sqrt") {
+            r = std::sqrt(d);
+          } else if (selector == "cbrt") {
+            r = std::cbrt(d);
+          } else if (selector == "exp") {
+            r = std::exp(d);
+          } else if (selector == "log") {
+            r = std::log(d);
+          } else if (selector == "log2") {
+            r = std::log2(d);
+          } else if (selector == "log10") {
+            r = std::log10(d);
+          } else if (selector == "sin") {
+            r = std::sin(d);
+          } else if (selector == "cos") {
+            r = std::cos(d);
+          } else if (selector == "tan") {
+            r = std::tan(d);
+          } else if (selector == "asin") {
+            r = std::asin(d);
+          } else if (selector == "acos") {
+            r = std::acos(d);
+          } else if (selector == "atan") {
+            r = std::atan(d);
+          } else if (selector == "floor") {
+            r = std::floor(d);
+          } else if (selector == "ceil") {
+            r = std::ceil(d);
+          } else if (selector == "round") {
+            r = std::round(d);
+          } else {
+            r = std::trunc(d);
+          }
+          *out = Value::floating(r);
+          return SendStatus::Matched;
+        }
+        return SendStatus::NotHandled;
       }
       if (kind == RuntimeNativeTypeKind::Kernel) {
         if (selector == "print") {
@@ -23651,7 +23858,7 @@ private:
                                 "sorted", "uniq", "each_pair", "each_cons",
                                 "appended", "inserted", "deleted", "added",
                                 "init", "tail", "take", "drop", "find_index",
-                                "drop_while"});
+                                "drop_while", "min", "max", "minmax"});
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
          collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",

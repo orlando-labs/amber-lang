@@ -116,6 +116,7 @@ enum class RuntimeNativeTypeKind {
   Flow,
   ThreadedCollection,
   Kernel,
+  Math,
   Io,
   TextBuffer,
   Logger,
