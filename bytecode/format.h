@@ -96,6 +96,9 @@ enum class Opcode : std::uint8_t {
   // RFC block-parameters: load the frame's block channel into a register,
   // binding a `&name` block parameter in the method prologue.
   LoadBlock = 0x1E,
+  // Prologue guard for a typed (required, non-null) `&blk as Fn[...]` block
+  // parameter: raises ArgumentError if the frame's block channel is null.
+  RequireBlock = 0x1F,
   Send = 0x20,
   SendDyn = 0x21,
   Call = 0x22,

@@ -10116,6 +10116,7 @@ private:
     case Opcode::WatchUpval:
     case Opcode::CloseUpvalues:
     case Opcode::Jump:
+    case Opcode::RequireBlock:
     case Opcode::Safepoint:
     case Opcode::PCommit:
     case Opcode::PFail:
@@ -10461,6 +10462,7 @@ private:
     case Opcode::Return:
     case Opcode::Raise:
     case Opcode::Throw:
+    case Opcode::RequireBlock:
     case Opcode::Safepoint:
     case Opcode::PCheckEq:
     case Opcode::PCheckPin:
@@ -29221,6 +29223,15 @@ private:
       return;
     }
     case Opcode::CloseUpvalues:
+      ++frame.pc;
+      return;
+    case Opcode::RequireBlock:
+      if (frame.block.is_null()) {
+        raise_runtime_error(frame, "ArgumentError",
+                            "invalid block argument shape: a required block "
+                            "was not given");
+        return;
+      }
       ++frame.pc;
       return;
     case Opcode::Safepoint:

@@ -1383,9 +1383,13 @@ BcCode CodeEmitter::emit() {
     if (const ast::ListField *params =
             list_field(*procedure_->signature, "params")) {
       std::string block_local;
+      bool block_required = false;
       for (const std::unique_ptr<ast::Expr> &param : params->values) {
         if (string_field(*param, "kind") == "block") {
           block_local = string_field(*param, "local_name");
+          // A typed `&blk as Fn[...]` block parameter is required (non-null);
+          // a bare `&blk` is optional (RFC block-parameters §5.1).
+          block_required = !string_field(*param, "type_expr").empty();
           break;
         }
       }
@@ -1395,6 +1399,9 @@ BcCode CodeEmitter::emit() {
             emit_instruction(Opcode::LoadBlock,
                              {{parse_slot(local.slot, 'l'), false}},
                              procedure_->span);
+            if (block_required) {
+              emit_instruction(Opcode::RequireBlock, {}, procedure_->span);
+            }
             break;
           }
         }

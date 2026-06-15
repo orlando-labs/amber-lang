@@ -1557,6 +1557,9 @@ bool decode_opcode(std::uint8_t raw, Opcode &opcode) {
   case 0x1E:
     opcode = Opcode::LoadBlock;
     return true;
+  case 0x1F:
+    opcode = Opcode::RequireBlock;
+    return true;
   case 0x20:
     opcode = Opcode::Send;
     return true;
@@ -4074,6 +4077,7 @@ InstructionFlow verify_instruction_flow(
     }
     break;
   }
+  case Opcode::RequireBlock:
   case Opcode::Safepoint: {
     operand_count_is(instruction, 0, errors);
     break;
@@ -5353,6 +5357,8 @@ std::string opcode_name(Opcode opcode) {
     return "RETURN";
   case Opcode::Raise:
     return "RAISE";
+  case Opcode::RequireBlock:
+    return "REQUIREBLOCK";
   case Opcode::Safepoint:
     return "SAFEPOINT";
   case Opcode::Throw:
