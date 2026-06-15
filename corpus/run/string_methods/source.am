@@ -1,0 +1,15 @@
+package conformance.run
+
+# String stdlib methods. length/size and reverse are codepoint-correct (UTF-8);
+# split/replace/contains?/starts_with?/ends_with? operate on byte sequences;
+# upcase/downcase are ASCII in v1; trim strips ASCII whitespace. (Type
+# conversions like .str / .to_str / .int are separate computed-property/method
+# aliases handled elsewhere — see amber_v20_2 type-conversion patch.)
+def probe():
+  s = "Hello, World"
+  up = s.upcase()
+  rev = "abcd".reverse()
+  parts = "a,b,c".split(",")
+  rep = "axbxc".replace("x", "-")
+  tr = "  hi  ".trim()
+  "#{s.length()}:#{up}:#{rev}:#{parts[1]}:#{rep}:#{tr}:#{s.contains?("World")}:#{s.ends_with?("ld")}:#{"héllo".length()}"

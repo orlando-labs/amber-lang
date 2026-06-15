@@ -1,0 +1,6 @@
+{
+  "schema": "amber.run.v1",
+  "entry": "probe",
+  "status": "ok",
+  "value": "\"12:HELLO, WORLD:dcba:b:a-b-c:hi:true:true:5\""
+}

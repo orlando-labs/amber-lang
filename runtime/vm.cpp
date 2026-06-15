@@ -23820,6 +23820,238 @@ private:
       return SendStatus::Matched;
     }
 
+    if (receiver.is_string()) {
+      const std::optional<std::string> self_opt =
+          string_text_from_id(receiver.as_string().string_id);
+      if (self_opt.has_value()) {
+        const std::string &self = *self_opt;
+        // length/size/chars/reverse are codepoint-correct (UTF-8); split,
+        // replace, contains?/starts_with?/ends_with? operate on byte sequences
+        // (UTF-8-safe for valid-UTF-8 needles); upcase/downcase are ASCII-only
+        // in v1; trim strips ASCII whitespace.
+        const auto next_cp = [&](std::size_t i) -> std::size_t {
+          std::size_t j = i + 1;
+          while (j < self.size() &&
+                 (static_cast<unsigned char>(self[j]) & 0xC0U) == 0x80U) {
+            ++j;
+          }
+          return j;
+        };
+        const auto arg_str = [&](std::size_t i, std::string *dst) -> bool {
+          if (i >= args.size() || !args[i].is_string()) {
+            set_fault(frame, "TypeError",
+                      "String#" + selector + " expects a Str argument");
+            return false;
+          }
+          const std::optional<std::string> t =
+              string_text_from_id(args[i].as_string().string_id);
+          if (!t.has_value()) {
+            set_fault(frame, "VMError", "string ref is invalid");
+            return false;
+          }
+          *dst = *t;
+          return true;
+        };
+
+        if (selector == "length" || selector == "size") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::int64_t n = 0;
+          for (const char c : self) {
+            if ((static_cast<unsigned char>(c) & 0xC0U) != 0x80U) {
+              ++n;
+            }
+          }
+          *out = Value::integer(n);
+          return SendStatus::Matched;
+        }
+        if (selector == "bytesize") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(static_cast<std::int64_t>(self.size()));
+          return SendStatus::Matched;
+        }
+        if (selector == "empty?") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(self.empty());
+          return SendStatus::Matched;
+        }
+        if (selector == "upcase" || selector == "downcase") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const bool up = selector == "upcase";
+          std::string r = self;
+          for (char &c : r) {
+            const unsigned char uc = static_cast<unsigned char>(c);
+            if (up && uc >= 'a' && uc <= 'z') {
+              c = static_cast<char>(uc - 32U);
+            } else if (!up && uc >= 'A' && uc <= 'Z') {
+              c = static_cast<char>(uc + 32U);
+            }
+          }
+          *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        if (selector == "reverse") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<std::string> cps;
+          for (std::size_t i = 0; i < self.size();) {
+            const std::size_t j = next_cp(i);
+            cps.push_back(self.substr(i, j - i));
+            i = j;
+          }
+          std::string r;
+          r.reserve(self.size());
+          for (auto it = cps.rbegin(); it != cps.rend(); ++it) {
+            r += *it;
+          }
+          *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        if (selector == "chars") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> cps;
+          for (std::size_t i = 0; i < self.size();) {
+            const std::size_t j = next_cp(i);
+            cps.push_back(
+                Value::string(intern_runtime_string(self.substr(i, j - i))));
+            i = j;
+          }
+          *out = make_list_value(std::move(cps));
+          return SendStatus::Matched;
+        }
+        if (selector == "trim" || selector == "strip") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const auto is_ws = [](unsigned char c) {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+                   c == '\f' || c == '\v';
+          };
+          std::size_t a = 0;
+          std::size_t b = self.size();
+          while (a < b && is_ws(static_cast<unsigned char>(self[a]))) {
+            ++a;
+          }
+          while (b > a && is_ws(static_cast<unsigned char>(self[b - 1]))) {
+            --b;
+          }
+          *out = Value::string(intern_runtime_string(self.substr(a, b - a)));
+          return SendStatus::Matched;
+        }
+        if (selector == "contains?" || selector == "includes?") {
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::string needle;
+          if (!arg_str(0, &needle)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(self.find(needle) != std::string::npos);
+          return SendStatus::Matched;
+        }
+        if (selector == "starts_with?") {
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::string prefix;
+          if (!arg_str(0, &prefix)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(self.size() >= prefix.size() &&
+                                self.compare(0, prefix.size(), prefix) == 0);
+          return SendStatus::Matched;
+        }
+        if (selector == "ends_with?") {
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::string suffix;
+          if (!arg_str(0, &suffix)) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(
+              self.size() >= suffix.size() &&
+              self.compare(self.size() - suffix.size(), suffix.size(),
+                           suffix) == 0);
+          return SendStatus::Matched;
+        }
+        if (selector == "split") {
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::string sep;
+          if (!arg_str(0, &sep)) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> parts;
+          if (sep.empty()) {
+            for (std::size_t i = 0; i < self.size();) {
+              const std::size_t j = next_cp(i);
+              parts.push_back(
+                  Value::string(intern_runtime_string(self.substr(i, j - i))));
+              i = j;
+            }
+          } else {
+            std::size_t start = 0;
+            while (true) {
+              const std::size_t pos = self.find(sep, start);
+              if (pos == std::string::npos) {
+                parts.push_back(
+                    Value::string(intern_runtime_string(self.substr(start))));
+                break;
+              }
+              parts.push_back(Value::string(
+                  intern_runtime_string(self.substr(start, pos - start))));
+              start = pos + sep.size();
+            }
+          }
+          *out = make_list_value(std::move(parts));
+          return SendStatus::Matched;
+        }
+        if (selector == "replace") {
+          if (!require_arity(2) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::string from;
+          std::string to;
+          if (!arg_str(0, &from) || !arg_str(1, &to)) {
+            return SendStatus::Faulted;
+          }
+          if (from.empty()) {
+            *out = Value::string(intern_runtime_string(self));
+            return SendStatus::Matched;
+          }
+          std::string r;
+          std::size_t start = 0;
+          while (true) {
+            const std::size_t pos = self.find(from, start);
+            if (pos == std::string::npos) {
+              r += self.substr(start);
+              break;
+            }
+            r += self.substr(start, pos - start);
+            r += to;
+            start = pos + from.size();
+          }
+          *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        // Note: `to_int` / `to_str` are handled by the scalar-conversion path
+        // earlier in dispatch, so they are intentionally not duplicated here.
+      }
+      // Unknown string selector falls through to the generic dispatch.
+    }
+
     const bool receiver_is_range = value_is_range_instance(receiver);
     const bool receiver_is_lazy_seq = value_is_lazy_seq_instance(receiver);
     // The selector-set tests below are only consulted behind these receiver
