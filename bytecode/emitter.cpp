@@ -435,6 +435,7 @@ public:
 private:
   struct LoopContext {
     std::vector<std::size_t> break_jump_indices;
+    std::vector<std::size_t> continue_jump_indices;
     std::optional<std::uint32_t> result_reg;
   };
 
@@ -3786,6 +3787,9 @@ void CodeEmitter::compile_loop_for_effect(const ast::Expr &expr) {
     for (std::size_t patch : loops_.back().break_jump_indices) {
       patch_operand(patch, 0, exit_pc, false);
     }
+    for (std::size_t patch : loops_.back().continue_jump_indices) {
+      patch_operand(patch, 0, header_pc, false);
+    }
     loops_.pop_back();
   } else if (kind == "loop") {
     loops_.push_back(LoopContext{});
@@ -3795,10 +3799,14 @@ void CodeEmitter::compile_loop_for_effect(const ast::Expr &expr) {
     for (std::size_t patch : loops_.back().break_jump_indices) {
       patch_operand(patch, 0, exit_pc, false);
     }
+    for (std::size_t patch : loops_.back().continue_jump_indices) {
+      patch_operand(patch, 0, header_pc, false);
+    }
     loops_.pop_back();
   } else if (kind == "do_while") {
     loops_.push_back(LoopContext{});
     compile_seq(*body, false);
+    const std::uint32_t continue_pc = current_pc();
     if (cond == nullptr) {
       diag(expr.span, "BC2001", "do_while loop is missing cond");
     } else {
@@ -3809,6 +3817,9 @@ void CodeEmitter::compile_loop_for_effect(const ast::Expr &expr) {
     const std::uint32_t exit_pc = current_pc();
     for (std::size_t patch : loops_.back().break_jump_indices) {
       patch_operand(patch, 0, exit_pc, false);
+    }
+    for (std::size_t patch : loops_.back().continue_jump_indices) {
+      patch_operand(patch, 0, continue_pc, false);
     }
     loops_.pop_back();
   } else {
@@ -3852,6 +3863,9 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
     for (std::size_t patch : loops_.back().break_jump_indices) {
       patch_operand(patch, 0, exit_pc, false);
     }
+    for (std::size_t patch : loops_.back().continue_jump_indices) {
+      patch_operand(patch, 0, header_pc, false);
+    }
     loops_.pop_back();
   } else if (kind == "loop") {
     LoopContext context;
@@ -3864,6 +3878,9 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
     for (std::size_t patch : loops_.back().break_jump_indices) {
       patch_operand(patch, 0, exit_pc, false);
     }
+    for (std::size_t patch : loops_.back().continue_jump_indices) {
+      patch_operand(patch, 0, header_pc, false);
+    }
     loops_.pop_back();
   } else if (kind == "do_while") {
     LoopContext context;
@@ -3871,6 +3888,7 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
     loops_.push_back(context);
     compile_seq(*body);
     emit_value_to_reg(dst, last_value_reg_, body->span);
+    const std::uint32_t continue_pc = current_pc();
     if (cond == nullptr) {
       diag(expr.span, "BC2001", "do_while loop is missing cond");
     } else {
@@ -3881,6 +3899,9 @@ std::uint32_t CodeEmitter::compile_loop(const ast::Expr &expr) {
     const std::uint32_t exit_pc = current_pc();
     for (std::size_t patch : loops_.back().break_jump_indices) {
       patch_operand(patch, 0, exit_pc, false);
+    }
+    for (std::size_t patch : loops_.back().continue_jump_indices) {
+      patch_operand(patch, 0, continue_pc, false);
     }
     loops_.pop_back();
   } else {
@@ -4346,7 +4367,15 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   }
   if (expr.kind == "HBreak") {
     if (loops_.empty()) {
-      diag(expr.span, "BC2001", "break outside loop in bytecode emitter");
+      if (code_.kind == CodeKind::Block) {
+        diag(expr.span, "BC2001",
+             "`break` is not allowed in an iterator block; use a short-circuit "
+             "combinator (find / any? / take_while / take / .lazy...first) or a "
+             "`while`/`loop` for imperative iteration. (`next` is allowed and "
+             "finishes the current block invocation.)");
+      } else {
+        diag(expr.span, "BC2001", "break outside loop in bytecode emitter");
+      }
       return alloc_temp();
     }
     if (const ast::Expr *value = node_field(expr, "value")) {
@@ -4357,6 +4386,38 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
     }
     loops_.back().break_jump_indices.push_back(
         emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));
+    return alloc_temp();
+  }
+  if (expr.kind == "HNext") {
+    const ast::Expr *value = node_field(expr, "value");
+    if (!loops_.empty()) {
+      // Inside a native loop: continue to the loop's continuation point. The
+      // value is meaningless here (loops do not collect); an explicit one is
+      // still evaluated for side effects, but the synthesized `$_` default is
+      // not, keeping the continue path lean.
+      if (value != nullptr && value->kind != "HLastGet") {
+        compile_expr(*value);
+      }
+      loops_.back().continue_jump_indices.push_back(
+          emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));
+      return alloc_temp();
+    }
+    if (code_.kind == CodeKind::Block) {
+      // Inside an iterator block (or lambda): finish this block invocation
+      // early, yielding the given value (or `$_` when bare). Reuses the
+      // block-local return path so map/select/etc. observe it as the result.
+      const std::uint32_t value_reg =
+          value != nullptr ? compile_expr(*value) : alloc_temp();
+      if (!return_value_reg_.has_value()) {
+        return_value_reg_ = alloc_temp();
+      }
+      emit_value_to_reg(*return_value_reg_, value_reg, expr.span);
+      return_jump_indices_.push_back(
+          emit_instruction(Opcode::Jump, {{-1, true}}, expr.span));
+      return alloc_temp();
+    }
+    diag(expr.span, "BC2001",
+         "next is only valid inside a loop or an iterator block");
     return alloc_temp();
   }
   if (expr.kind == "HReturn") {

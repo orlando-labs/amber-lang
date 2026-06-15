@@ -102,6 +102,7 @@ tokens:
     - KEYWORD_WHILE
   contextual_keywords:
     - as
+    - next
     - pattern
     - with
   contextual_markers:

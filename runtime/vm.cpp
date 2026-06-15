@@ -9592,6 +9592,20 @@ private:
       nested.step();
     }
     merge_runtime_names_from(nested);
+    // throw/catch and raise/rescue are dynamically scoped through blocks: an
+    // exception or throw that escapes the block's child Vm must re-enter the
+    // *parent's* handler machinery, not collapse into a terminal fault here.
+    // (Names are already merged above, so the escaped Values are valid in us.)
+    if (nested.escaped_throw_.has_value()) {
+      const PendingThrow escaped = *nested.escaped_throw_;
+      throw_value(frame, escaped.tag, escaped.value);
+      return std::nullopt;
+    }
+    if (nested.escaped_exception_.has_value()) {
+      const Value escaped = *nested.escaped_exception_;
+      raise_value(frame, escaped);
+      return std::nullopt;
+    }
     if (nested.fault_.has_value()) {
       fault_ = nested.fault_;
       return std::nullopt;
@@ -9623,6 +9637,8 @@ private:
       // leave frames behind; drop them so the next lease starts clean.
       vm->frames_.clear();
       vm->fault_ = std::nullopt;
+      vm->escaped_exception_ = std::nullopt;
+      vm->escaped_throw_ = std::nullopt;
       vm->final_value_ = Value::null();
       owner->block_vm_pool_.push_back(std::move(vm));
     }
@@ -13984,7 +14000,8 @@ private:
       const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
     const bool block_allowed =
-        selector == "take_while" || selector == "sorted" ||
+        selector == "take_while" || selector == "drop_while" ||
+        selector == "find_index" || selector == "sorted" ||
         selector == "uniq" || selector == "each_pair" ||
         selector == "each_cons" || selector == "each";
     if (!block.is_null() && !block_allowed) {
@@ -14147,6 +14164,84 @@ private:
         taken.push_back(item);
       }
       return make_list_value(std::move(taken));
+    }
+
+    // Chain-first short-circuit combinators (counterparts to take_while; the
+    // value-extraction case stays `find`/`first` rather than `break`).
+    if (selector == "take") {
+      if (args.size() != 1U || !args[0].is_integer()) {
+        set_fault(frame, "TypeError", "take expects an integer count");
+        return std::nullopt;
+      }
+      const std::int64_t n = args[0].as_integer();
+      if (n < 0) {
+        set_fault(frame, "ArgumentError", "take count must be non-negative");
+        return std::nullopt;
+      }
+      const std::size_t k =
+          std::min(static_cast<std::size_t>(n), items.size());
+      return make_list_value(
+          std::vector<Value>(items.begin(), items.begin() + k));
+    }
+
+    if (selector == "drop") {
+      if (args.size() != 1U || !args[0].is_integer()) {
+        set_fault(frame, "TypeError", "drop expects an integer count");
+        return std::nullopt;
+      }
+      const std::int64_t n = args[0].as_integer();
+      if (n < 0) {
+        set_fault(frame, "ArgumentError", "drop count must be non-negative");
+        return std::nullopt;
+      }
+      const std::size_t k =
+          std::min(static_cast<std::size_t>(n), items.size());
+      return make_list_value(
+          std::vector<Value>(items.begin() + k, items.end()));
+    }
+
+    if (selector == "find_index") {
+      if (!args.empty() || block.is_null()) {
+        set_fault(frame, "TypeError", "find_index requires block");
+        return std::nullopt;
+      }
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        const std::optional<Value> predicate =
+            call_block_to_value(frame, block, {items[i]});
+        if (!predicate.has_value()) {
+          return std::nullopt;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return std::nullopt;
+        }
+        if (is_truthy(*predicate)) {
+          return Value::integer(static_cast<std::int64_t>(i));
+        }
+      }
+      return Value::null();
+    }
+
+    if (selector == "drop_while") {
+      if (!args.empty() || block.is_null()) {
+        set_fault(frame, "TypeError", "drop_while requires block");
+        return std::nullopt;
+      }
+      std::size_t i = 0;
+      for (; i < items.size(); ++i) {
+        const std::optional<Value> predicate =
+            call_block_to_value(frame, block, {items[i]});
+        if (!predicate.has_value()) {
+          return std::nullopt;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return std::nullopt;
+        }
+        if (!is_truthy(*predicate)) {
+          break;
+        }
+      }
+      return make_list_value(
+          std::vector<Value>(items.begin() + i, items.end()));
     }
 
     if (selector == "sorted") {
@@ -17537,6 +17632,7 @@ private:
     }
     if (frames_.empty()) {
       if (pending_exception.has_value()) {
+        escaped_exception_ = *pending_exception;
         const std::string error_name = exception_error_name(*pending_exception);
         fault_ =
             make_fault(completed_frame, error_name,
@@ -17547,6 +17643,7 @@ private:
                                  value_to_debug_string(*pending_exception,
                                                        &module_));
       } else if (pending_throw.has_value()) {
+        escaped_throw_ = *pending_throw;
         fault_ =
             make_fault(completed_frame, "UncaughtThrowError",
                        "uncaught throw " +
@@ -17593,6 +17690,9 @@ private:
     std::size_t target_index = 0;
     const bytecode::HandlerEntry *handler = nullptr;
     if (!find_unwind_target(UnwindReason::Exception, &target_index, &handler)) {
+      // No rescue in this Vm: remember the structured exception so a block's
+      // child Vm can re-raise it into the parent (call_block_to_value).
+      escaped_exception_ = active_exception;
       const std::string error_name = exception_error_name(active_exception);
       const std::string message =
           active_exception.is_error_instance() &&
@@ -17655,6 +17755,9 @@ private:
       std::size_t target_index = 0;
       const bytecode::HandlerEntry *handler = nullptr;
       if (!find_unwind_target(UnwindReason::Throw, &target_index, &handler)) {
+        // No catch in this Vm: remember the structured throw so a block's child
+        // Vm can re-throw it into the parent (call_block_to_value).
+        escaped_throw_ = active_throw;
         const Frame &fault_frame =
             frames_.empty() ? throwing_frame : frames_.back();
         fault_ =
@@ -23547,7 +23650,8 @@ private:
         collection_selector_in({"+", "*", "concat", "take_while", "reversed",
                                 "sorted", "uniq", "each_pair", "each_cons",
                                 "appended", "inserted", "deleted", "added",
-                                "init", "tail"});
+                                "init", "tail", "take", "drop", "find_index",
+                                "drop_while"});
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
          collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
@@ -23846,6 +23950,65 @@ private:
           return SendStatus::Faulted;
         }
         *out = make_list_value(*items);
+        return SendStatus::Matched;
+      }
+
+      // Lazy short-circuit forms: `take(n)` pulls only n elements (so it bounds
+      // an infinite source), `find_index` stops at the first match. drop/
+      // drop_while are inherently unbounded on an infinite source and fall
+      // through to the materialize path (raising InfiniteCollectionError there).
+      if (collection_selector == "take") {
+        std::int64_t count = 0;
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &count)) {
+          return SendStatus::Faulted;
+        }
+        if (count < 0) {
+          set_fault(frame, "ArgumentError", "take count must be non-negative");
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::vector<Value>> items =
+            materialize_lazy_seq_items(frame, *state, receiver,
+                                       static_cast<std::size_t>(count));
+        if (!items.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(*items);
+        return SendStatus::Matched;
+      }
+
+      if (collection_selector == "find_index") {
+        if (!args.empty() || block.is_null()) {
+          set_fault(frame, "TypeError", "find_index requires block");
+          return SendStatus::Faulted;
+        }
+        std::int64_t seen = 0;
+        bool found_value = false;
+        std::int64_t found_index = 0;
+        const LazySeqVisitStatus status = visit_lazy_seq(
+            frame, *state, receiver,
+            [&](const Value &item) -> LazySeqVisitStatus {
+              const std::optional<Value> predicate =
+                  call_block_to_value(frame, block, {item});
+              if (!predicate.has_value()) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (!ensure_lifecycle_access(frame, receiver) ||
+                  !ensure_lifecycle_access(frame, state->source)) {
+                return LazySeqVisitStatus::Faulted;
+              }
+              if (is_truthy(*predicate)) {
+                found_value = true;
+                found_index = seen;
+                return LazySeqVisitStatus::Stop;
+              }
+              ++seen;
+              return LazySeqVisitStatus::Continue;
+            });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        *out = found_value ? Value::integer(found_index) : Value::null();
         return SendStatus::Matched;
       }
 
@@ -28528,6 +28691,13 @@ private:
   // executions inherit the non-suspendable dynamic extent).
   std::optional<std::string> inherited_no_suspend_label_;
   std::optional<Fault> fault_;
+  // Control flow that unwound out of every frame of this Vm with no in-Vm
+  // handler. Block bodies run on a pooled child Vm (see call_block_to_value);
+  // these let an exception/throw that escapes the block re-propagate into the
+  // *parent's* rescue/catch machinery instead of being flattened into a
+  // terminal fault. Cleared at each block-Vm lease boundary.
+  std::optional<Value> escaped_exception_;
+  std::optional<PendingThrow> escaped_throw_;
   std::vector<Value> last_completed_regs_;
   std::vector<std::uint8_t> last_completed_initialized_;
   Value final_value_ = Value::null();

@@ -1915,6 +1915,17 @@ private:
       }
       return node;
     }
+    if (expr.kind == "AstNext") {
+      auto node = make_node("HNext", expr.span);
+      if (const ast::Expr *value = node_field(expr, "value")) {
+        node->node_field("value", lower_expr(*value));
+      } else {
+        // Bare `next` finishes the iteration with the current `$_`, mirroring
+        // the implicit body-result rule (and bare `return`).
+        node->node_field("value", make_node("HLastGet", expr.span));
+      }
+      return node;
+    }
     if (expr.kind == "AstReturn") {
       auto node = make_node("HReturn", expr.span);
       if (const ast::Expr *value = node_field(expr, "value")) {

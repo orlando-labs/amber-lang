@@ -815,6 +815,35 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     return parse_numeric_directive();
   }
 
+  // `next` is a contextual loop/block control keyword. At statement-leading
+  // position it is the next-iteration statement when it stands alone (followed
+  // by a statement terminator) or is immediately followed by a value expression
+  // (`next 42`, `next x`, `next @f`). It stays an ordinary identifier when
+  // followed by a postfix/assignment/infix continuation (`.`, `(`, `[`, `=`,
+  // operators, `:`), so `.next`, `def next`, `next = …`, `next[i]`, `next(x)`,
+  // and `:next` keep working. (`next (expr)`, `next [..]`, `next -1` therefore
+  // read as identifier forms; bind the value first to yield those.)
+  if (current().kind == lexer::TokenKind::Identifier &&
+      current().lexeme == "next") {
+    const lexer::TokenKind after = peek(1).kind;
+    const bool bare = after == lexer::TokenKind::Newline ||
+                      after == lexer::TokenKind::Dedent ||
+                      after == lexer::TokenKind::Eof;
+    const bool valued = after == lexer::TokenKind::Integer ||
+                        after == lexer::TokenKind::Float ||
+                        after == lexer::TokenKind::String ||
+                        after == lexer::TokenKind::Identifier ||
+                        after == lexer::TokenKind::At ||
+                        after == lexer::TokenKind::AtAt ||
+                        after == lexer::TokenKind::LastValue ||
+                        after == lexer::TokenKind::KeywordTrue ||
+                        after == lexer::TokenKind::KeywordFalse ||
+                        after == lexer::TokenKind::KeywordNull;
+    if (bare || valued) {
+      return parse_next_expr();
+    }
+  }
+
   switch (current().kind) {
   case lexer::TokenKind::KeywordPackage:
     return parse_package_decl();
@@ -2359,6 +2388,21 @@ std::unique_ptr<ast::Expr> Parser::parse_break_expr() {
     value = parse_expression(1, StopMode::Normal);
   }
   auto node = ast::make_expr("AstBreak",
+                             value ? ast::join_spans(start.span, value->span)
+                                   : start.span);
+  if (value) {
+    node->node_field("value", std::move(value));
+  }
+  return node;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_next_expr() {
+  const lexer::Token start = advance();
+  std::unique_ptr<ast::Expr> value;
+  if (!is_stop_token(StopMode::Normal)) {
+    value = parse_expression(1, StopMode::Normal);
+  }
+  auto node = ast::make_expr("AstNext",
                              value ? ast::join_spans(start.span, value->span)
                                    : start.span);
   if (value) {

@@ -256,6 +256,16 @@ LexResult Lexer::lex() {
         error(start, "unexpected '$'; only '$_' is reserved in Amber v1");
       }
       break;
+    case ';':
+      // `;` is an explicit statement separator, lexed as a same-line newline so
+      // every existing newline-terminated statement rule applies unchanged. It
+      // exists for ad-hoc one-liners (e.g. `iamber --eval 'a = 1; print(a)'`);
+      // it is highly discouraged in normal code, where line breaks are the
+      // idiomatic separator. It carries no indentation effect (Indent/Dedent are
+      // computed only at physical line starts).
+      advance();
+      emit(TokenKind::Newline, start, ";");
+      break;
     default:
       advance();
       error(start, std::string("unexpected character '") + c + "'");

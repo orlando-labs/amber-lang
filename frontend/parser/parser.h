@@ -116,6 +116,7 @@ private:
   std::unique_ptr<ast::Expr> parse_do_while_expr();
   std::unique_ptr<ast::Expr> parse_numeric_directive();
   std::unique_ptr<ast::Expr> parse_break_expr();
+  std::unique_ptr<ast::Expr> parse_next_expr();
   std::unique_ptr<ast::Expr> parse_return_expr();
   std::unique_ptr<ast::Expr> parse_throw_expr();
   std::unique_ptr<ast::Expr> parse_catch_expr();
