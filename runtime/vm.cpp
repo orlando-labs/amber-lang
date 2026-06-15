@@ -13839,7 +13839,7 @@ private:
     if (!value.is_tuple()) {
       return false;
     }
-    const std::shared_ptr<TupleValue> tuple = value.as_tuple();
+    const IntrusivePtr<TupleValue> tuple = value.as_tuple();
     if (tuple == nullptr || tuple->items.size() != 2U) {
       return false;
     }
@@ -13909,8 +13909,8 @@ private:
       return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
     }
     if (left.is_list() && right.is_list()) {
-      const std::shared_ptr<ListValue> lhs = left.as_list();
-      const std::shared_ptr<ListValue> rhs = right.as_list();
+      const IntrusivePtr<ListValue> lhs = left.as_list();
+      const IntrusivePtr<ListValue> rhs = right.as_list();
       if (lhs == nullptr || rhs == nullptr) {
         set_fault(frame, "VMError", "sort list ref is invalid");
         return std::nullopt;
@@ -13918,8 +13918,8 @@ private:
       return compare_sequences_for_sort(frame, lhs->items, rhs->items);
     }
     if (left.is_tuple() && right.is_tuple()) {
-      const std::shared_ptr<TupleValue> lhs = left.as_tuple();
-      const std::shared_ptr<TupleValue> rhs = right.as_tuple();
+      const IntrusivePtr<TupleValue> lhs = left.as_tuple();
+      const IntrusivePtr<TupleValue> rhs = right.as_tuple();
       if (lhs == nullptr || rhs == nullptr) {
         set_fault(frame, "VMError", "sort tuple ref is invalid");
         return std::nullopt;
@@ -22869,7 +22869,7 @@ private:
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
-    const std::shared_ptr<ListValue> list = receiver.as_list();
+    const IntrusivePtr<ListValue> list = receiver.as_list();
     if (list == nullptr) {
       set_fault(frame, "TypeError", "list value is null");
       return SendStatus::Faulted;
@@ -23162,7 +23162,7 @@ private:
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
     (void)kw_args;
-    const std::shared_ptr<MapValue> map = receiver.as_map();
+    const IntrusivePtr<MapValue> map = receiver.as_map();
     if (map == nullptr) {
       set_fault(frame, "TypeError", "map value is null");
       return SendStatus::Faulted;
@@ -23295,7 +23295,7 @@ private:
       if (!merged.has_value()) {
         return SendStatus::Faulted;
       }
-      const std::shared_ptr<MapValue> merged_map = merged->as_map();
+      const IntrusivePtr<MapValue> merged_map = merged->as_map();
       if (merged_map == nullptr) {
         set_fault(frame, "TypeError", "merge! result is not a map");
         return SendStatus::Faulted;
@@ -23393,7 +23393,7 @@ private:
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
     (void)kw_args;
-    const std::shared_ptr<SetValue> set = receiver.as_set();
+    const IntrusivePtr<SetValue> set = receiver.as_set();
     if (set == nullptr) {
       set_fault(frame, "TypeError", "set value is null");
       return SendStatus::Faulted;
