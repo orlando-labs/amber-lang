@@ -1,0 +1,6 @@
+{
+  "schema": "amber.run.v1",
+  "entry": "probe",
+  "status": "ok",
+  "value": "\"[6, 5]|0|6|lang|a/b/c|true:true|3\""
+}

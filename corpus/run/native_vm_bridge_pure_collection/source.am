@@ -1,0 +1,20 @@
+package conformance.run
+
+# Pins the widened per-function VM bridge (amber.native-backend-equivalence.v1
+# step 2). `probe` is captureless, block-free, call-free and performs no IO, so
+# it is statically vm-callable; it builds values only with *pure* copy-edit
+# collection verbs (appended/inserted/deleted/sorted/reversed/take/drop/min/max
+# /join) and *pure* string transforms (upcase/downcase/trim/split/replace/
+# starts_with?/ends_with?), and returns a string. Because every argument is a
+# scalar (none here) and the result is convertible, the native lane runs it
+# through the embedded-VM scalar bridge instead of the whole-program restart.
+# The mutating `!` verbs remain ineligible and are intentionally not used.
+def probe():
+  built = [4, 2, 5, 1, 3].appended(6).inserted(0, 0).deleted(2)
+  ranked = built.sorted().reversed()
+  top = ranked.take(2)
+  rest = ranked.drop(2)
+  label = "  Amber,Lang,VM  ".trim().downcase().split(",")
+  rep = "a.b.c".replace(".", "/")
+  flags = "#{label[0].starts_with?("am")}:#{rep.ends_with?("c")}"
+  "#{top}|#{rest.min()}|#{built.max()}|#{label[1]}|#{rep}|#{flags}|#{label.count()}"

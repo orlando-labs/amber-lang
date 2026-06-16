@@ -1356,27 +1356,122 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
 // otherwise the program falls back to the whole-program restart, which
 // stays sound because these functions are effect-free.
 bool native_vm_callable_pure_selector(const std::string &selector) {
+  // Every selector here must be observably effect-free: it may allocate and
+  // read locally but must not mutate state shared with the native lane or
+  // perform IO. Soundness does not actually require it to be non-mutating
+  // (a bridged function can only reach scalars and values it constructed
+  // itself -- never shared state -- and emits no output before it can bail),
+  // but we keep the list to side-effect-free *value transforms* so it mirrors
+  // the runtime's own pure/`!`-mutator split (vm.cpp RFC §7.1/§8.x) and the
+  // "pure compute" framing of amber.native-backend-equivalence.v1. The
+  // mutating `!`-suffixed verbs are deliberately excluded.
   static const std::set<std::string> pure = {
       // numeric / comparison / bitwise (Int and Float share selectors)
       "+", "-", "*", "/", "%", "//", "<", ">", "<=", ">=", "==", "!=",
       "<=>", "&", "|", "^", "<<", ">>", "**", "u+", "u-", "abs",
       // conversions and formatting (allocate locally, no effects)
       "to_str", "to_int", "to_float", "inspect", "cast", "cast?", "to_type",
-      // local collection/string reads and writes
+      // local collection/string reads
       "[]", "[]=", "[]?", "count", "length", "size", "first", "empty?",
       "has_index?", "include?", "includes?", "contains?", "member?",
       "keys", "values", "entries", "to_a", "to_array", "deconstruct",
-      "deconstruct_keys", "reverse", "sort", "uniq", "concat",
+      "deconstruct_keys",
+      // pure (copy-edit) collection verbs: each returns a new value and never
+      // mutates the receiver (vm.cpp RFC §7.1 + the sequence "extra" verbs).
+      "reverse", "reversed", "sort", "sorted", "uniq", "concat", "compact",
+      "appended", "inserted", "deleted", "added", "init", "tail",
+      "take", "drop", "with", "without", "slice", "join",
+      "min", "max", "minmax",
+      // pure Map copy verbs (each returns a new map; the `!` forms mutate).
+      "except", "merge", "invert",
+      // pure Set algebra (each returns a new set; predicates return Bool).
+      "union", "intersection", "difference", "symmetric_difference",
+      "subset?", "superset?", "proper_subset?", "proper_superset?",
+      "disjoint?",
+      // pure higher-order enumerables: each consumes a block but never mutates
+      // the receiver (the in-place forms are the `!` mutators). Admitting them
+      // is only useful together with MakeClosure/block-send support below, and
+      // is sound only because the block body is itself proven bridge-pure.
+      "map", "flat_map", "select", "filter", "reject", "find", "detect",
+      "find_index", "each", "each_pair", "each_cons", "reduce", "fold",
+      "inject", "group", "take_while", "drop_while", "any?", "all?", "none?",
+      "transform_keys", "transform_values", "partition", "count_by",
+      // pure Math-prelude / numeric methods. `Math` resolves to a built-in
+      // value independent of module init, so it is reachable in the embedded
+      // bridge world, and these run the same libm as every other lane (so the
+      // result is bit-identical). `log` is intentionally EXCLUDED: it is
+      // overloaded as the effectful `io.Logger#log`; likewise we never admit
+      // info/warn/error/debug/write/puts/print.
+      "sqrt", "cbrt", "pow", "exp", "hypot", "floor", "ceil", "round", "trunc",
+      "sign", "sin", "cos", "tan", "asin", "acos", "atan", "log2", "log10",
+      // pure string transforms (Str is immutable; these allocate new strings)
+      "upcase", "downcase", "trim", "strip", "split", "replace",
+      "starts_with?", "ends_with?", "chars",
   };
   return pure.find(selector) != pure.end();
 }
 
-bool native_cpp_code_vm_callable(const amber::bytecode::BcModule &module,
-                                 const amber::bytecode::BcCode &code,
-                                 std::string *reason) {
-  if (!code.capture_layout.empty()) {
+// In-place (`!`-suffixed) collection mutators are *also* bridge-eligible, even
+// though they are not pure. Soundness here does not come from purity but from
+// reachability: a vm-callable function takes only scalar arguments (runtime
+// gate) and has no captures, upvalues, ivars/cvars, closures, or `Call`s
+// (static gates), so every heap value it touches is one it constructed itself
+// inside the embedded fallback world. Mutating such a value is invisible to
+// the native lane (separate heaps, no aliasing) and is discarded after the
+// call, and the function still emits no observable output before it can bail.
+// Re-running the whole program on bailout therefore stays byte-identical.
+// The block-taking mutators (`delete_if!`, `select!`, `map!`, `transform_*!`,
+// …) are admitted too: a block-bearing send is now allowed when its block body
+// is proven bridge-pure (see `native_vm_callable_code_body`), and the same
+// reachability argument applies -- the receiver is still a locally-constructed
+// value and the pure block produces no effect, so the in-place mutation stays
+// invisible to the native lane.
+bool native_vm_callable_local_mutator_selector(const std::string &selector) {
+  static const std::set<std::string> mutators = {
+      // Array (vm.cpp RFC §8.1)
+      "push!", "append!", "unshift!", "prepend!", "insert!", "pop!", "shift!",
+      "delete_at!", "delete!", "sort!", "uniq!", "reverse!", "clear!",
+      "replace!",
+      // Map (vm.cpp RFC §8.2)
+      "store!", "merge!", "update!", "compact!",
+      // Set (vm.cpp RFC §8.3)
+      "add!", "subtract!",
+      // Block-taking in-place mutators (sound once the block body is proven
+      // bridge-pure): shared by Array/Map/Set.
+      "delete_if!", "keep_if!", "select!", "reject!", "map!",
+      "transform_keys!", "transform_values!",
+  };
+  return mutators.find(selector) != mutators.end();
+}
+
+const amber::bytecode::BcCode *
+native_code_by_id(const amber::bytecode::BcModule &module,
+                  std::uint32_t code_id) {
+  for (const amber::bytecode::BcCode &code : module.code_objects) {
+    if (code.code_id == code_id) {
+      return &code;
+    }
+  }
+  return nullptr;
+}
+
+// Recursive bridge-eligibility check shared by the entry function and the block
+// bodies it constructs. `allow_captures` is false for the bridged entry (whose
+// captures would reach module-level sibling closures, unavailable in the
+// init-less fallback world) and true for block bodies, whose captures are
+// always enclosing locals of the entry frame -- local to the embedded
+// execution, never shared state, because the entry itself has no captures.
+bool native_vm_callable_code_body(const amber::bytecode::BcModule &module,
+                                  const amber::bytecode::BcCode &code,
+                                  bool allow_captures,
+                                  std::set<std::uint32_t> &visiting,
+                                  std::string *reason) {
+  if (!allow_captures && !code.capture_layout.empty()) {
     *reason = "captures reach shared state";
     return false;
+  }
+  if (!visiting.insert(code.code_id).second) {
+    return true; // already proven / on the current recursion path
   }
   for (const amber::bytecode::Instruction &instruction : code.instructions) {
     using amber::bytecode::Opcode;
@@ -1389,13 +1484,34 @@ bool native_cpp_code_vm_callable(const amber::bytecode::BcModule &module,
     case Opcode::SendDynSpread:
       *reason = "dynamic selector is not statically pure";
       return false;
-    case Opcode::MakeClosure:
-      *reason = "closures escape the value bridge";
-      return false;
+    case Opcode::MakeClosure: {
+      // A constructed closure can only be consumed by a pure block-send below
+      // (Call is rejected, and a returned/escaped closure bails at result
+      // conversion), so the bridge stays sound as long as the block body is
+      // itself bridge-pure. Verify it recursively, allowing its captures.
+      std::uint32_t code_id = 0;
+      if (!operand_u32_value(instruction, 1, &code_id)) {
+        *reason = "invalid MAKE_CLOSURE operand";
+        return false;
+      }
+      const amber::bytecode::BcCode *block = native_code_by_id(module, code_id);
+      if (block == nullptr ||
+          !native_vm_callable_code_body(module, *block, true, visiting,
+                                        reason)) {
+        if (block == nullptr) {
+          *reason = "block body is not in the module";
+        }
+        return false;
+      }
+      break;
+    }
     case Opcode::LoadUpval:
     case Opcode::StoreUpval:
-      *reason = "upvalues reach shared state";
-      return false;
+      if (!allow_captures) {
+        *reason = "upvalues reach shared state";
+        return false;
+      }
+      break;
     case Opcode::LoadIvar:
     case Opcode::StoreIvar:
     case Opcode::LoadCvar:
@@ -1412,23 +1528,24 @@ bool native_cpp_code_vm_callable(const amber::bytecode::BcModule &module,
         *reason = "invalid SEND operand";
         return false;
       }
-      if (!native_vm_callable_pure_selector(module.symbols[symbol_id])) {
-        *reason = "selector `" + module.symbols[symbol_id] +
-                  "` is not in the pure allow-list";
+      const std::string &selector = module.symbols[symbol_id];
+      if (!native_vm_callable_pure_selector(selector) &&
+          !native_vm_callable_local_mutator_selector(selector)) {
+        *reason = "selector `" + selector +
+                  "` is not in the bridge allow-list";
         return false;
       }
+      // Keyword arguments still bail, but a trailing block operand is now
+      // allowed: the block was constructed by a MakeClosure already verified
+      // bridge-pure above, and the receiver selector is on the pure/mutator
+      // allow-list (the higher-order enumerables never mutate the receiver).
       const std::size_t per_arg =
           instruction.opcode == Opcode::SendSpread ? 2U : 1U;
       const std::size_t kw_index = 4U + pos_count * per_arg;
       std::uint32_t kw_count = 0;
       if (!operand_u32_value(instruction, kw_index, &kw_count) ||
-          kw_count != 0U ||
-          !operand_is_no_block(instruction,
-                               kw_index + 1U +
-                                   (instruction.opcode == Opcode::SendSpread
-                                        ? kw_count * 3U
-                                        : kw_count * 2U))) {
-        *reason = "keyword/block sends are not statically pure";
+          kw_count != 0U) {
+        *reason = "keyword sends are not statically pure";
         return false;
       }
       break;
@@ -1438,6 +1555,14 @@ bool native_cpp_code_vm_callable(const amber::bytecode::BcModule &module,
     }
   }
   return true;
+}
+
+bool native_cpp_code_vm_callable(const amber::bytecode::BcModule &module,
+                                 const amber::bytecode::BcCode &code,
+                                 std::string *reason) {
+  std::set<std::uint32_t> visiting;
+  return native_vm_callable_code_body(module, code, /*allow_captures=*/false,
+                                      visiting, reason);
 }
 
 std::string

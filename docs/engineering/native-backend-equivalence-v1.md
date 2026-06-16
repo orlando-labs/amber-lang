@@ -53,24 +53,82 @@ value bridge.
 
 Soundness rests on three constraints, each enforced where stated:
 
-1. **State isolation (static):** vm-callable code has no captures, no
-   closure creation, no `Call`/dynamic sends, no ivar/cvar access, and only
-   selectors from a pure compute allow-list. It can therefore neither
-   observe nor mutate state shared with the native lane, and module init
-   need not run in the fallback world.
+1. **State isolation (static):** vm-callable code has no captures *at the
+   entry*, no `Call`/dynamic sends, and no ivar/cvar access, and every send
+   selector is on the bridge allow-list. It can therefore neither observe nor
+   mutate state shared with the native lane, and module init need not run in
+   the fallback world. The check (`native_vm_callable_code_body` in
+   `tools/amberc/main.cpp`) is recursive over the block bodies the entry
+   constructs (see the block-support bullet). Two selector families are
+   admitted:
+   - `native_vm_callable_pure_selector` — effect-free value transforms:
+     numeric/comparison/bitwise operators, local conversions and reads, the
+     **pure copy-edit collection verbs** (`appended`/`inserted`/`deleted`/
+     `init`/`tail`/`take`/`drop`/`sorted`/`reversed`/`min`/`max`/`join`, which
+     return new values per vm.cpp RFC §7.1), the **pure Set algebra**
+     (`union`/`intersection`/`difference`/`symmetric_difference`/`subset?`/…),
+     the **pure string transforms** (`upcase`/`downcase`/`trim`/`split`/
+     `replace`/`starts_with?`/`ends_with?`/`chars` — `Str` is immutable), and
+     the **pure `Math`-prelude / numeric methods** (`sqrt`/`pow`/`hypot`/
+     `floor`/`ceil`/`round`/`sin`/`cos`/`log2`/… — `Math` resolves to a
+     built-in value without module init, and these run the same libm as every
+     other lane, so the result is bit-identical). `log` is intentionally
+     excluded because it is overloaded as the effectful `io.Logger#log`;
+     `info`/`warn`/`error`/`debug`/`write`/`puts`/`print` are likewise never
+     admitted.
+   - `native_vm_callable_local_mutator_selector` — the block-free in-place
+     `!`-mutators (`push!`/`insert!`/`sort!`/`reverse!`/`store!`/`merge!`/
+     `add!`/…). These are *not* pure, but they are still sound here by
+     **reachability**: a vm-callable function takes only scalar arguments
+     (constraint 2) and has no captures/upvalues/ivars/closures/`Call`s, so
+     every heap value it touches is one it constructed itself in the embedded
+     fallback world. Mutating it is invisible to the native lane (separate
+     heaps, no aliasing) and discarded after the call, and the function still
+     emits no observable output before it can bail.
+
+   **Blocks / higher-order enumerables.** A function may construct block
+   closures (`MakeClosure`) and pass them to the pure higher-order enumerables
+   (`map`/`flat_map`/`select`/`reject`/`find`/`reduce`/`group`/`take_while`/
+   `drop_while`/`any?`/`all?`/`none?` and `sorted`/`min`/`max` with a key
+   block). This is sound because (a) each block body is verified bridge-pure by
+   the same recursive check — effect-free, no `Call`/dyn-send/ivar — and (b) a
+   block body's captures are always enclosing locals of the entry frame (the
+   entry itself has no captures, so every capture transitively bottoms out at
+   an entry local), which live entirely inside the embedded execution. A
+   constructed closure can only be consumed by such a block-send: `Call` is
+   rejected, and a closure that escapes via the return value bails at result
+   conversion (closures are non-convertible). Keyword-argument sends still
+   bail. This admits the block-taking mutators too (`delete_if!`, `map!`, …),
+   which remain sound by the same reachability argument as the block-free
+   mutators.
+
+   The boundary only constrains the bridged function's *parameters* and
+   *return value* (next two constraints); its body runs in the real embedded
+   VM, so any value it constructs, transforms, or locally mutates is already
+   exact — widening these lists only changes which functions skip the
+   whole-program restart, never the computed result.
 2. **Bridge immutability (runtime):** all arguments must be scalars
    (null/bool/Int/Float); scalars are immutable, so the copy across the
    value bridge cannot diverge. Any heap-valued argument throws
    `NativeBailout` before the callee runs.
 3. **Restart compatibility (runtime):** faults and results that do not
-   convert back to native values (anything beyond null/bool/Int/Float and
-   lists thereof) throw `NativeBailout`. The restart stays sound because
-   vm-callable code is effect-free by constraint 1, and it reproduces full
-   VM fault traces exactly.
+   convert back to native values throw `NativeBailout`. Convertible results
+   are null/bool/Int/Float, strings (re-interned into the native string table
+   by content), and lists nesting any of those; maps, sets, closures, and
+   other heap kinds bail. The restart stays sound because vm-callable code
+   produces no observable effect before it bails (constraint 1), and it
+   reproduces full VM fault traces exactly.
 
 `vm_fallback_code_count` in the build JSON reports how many code objects
-took this path; `corpus/run/native_vm_fallback_scalar_bridge` pins the
-behavior (a float-internal helper called from a native loop).
+took this path. Pinned by `corpus/run/native_vm_fallback_scalar_bridge` (a
+float-internal helper called from a native loop),
+`corpus/run/native_vm_bridge_pure_collection` (pure copy-edit array verbs +
+string transforms), and `corpus/run/native_vm_bridge_local_mutation`
+(in-place `!`-mutators on local arrays + Set algebra), and
+`corpus/run/native_vm_bridge_block_higher_order` (block closures passed to
+`map`/`select`/`reduce`/`sorted`-with-key, capturing an enclosing local), and
+`corpus/run/native_vm_bridge_map_block_mutators` (block-taking in-place Map
+mutators `select!`/`transform_values!` + pure `merge`/`except`).
 
 Lifting the effect-free restriction for vm-callable functions requires
 proving result convertibility statically (so the restart recovery is never

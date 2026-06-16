@@ -1,0 +1,23 @@
+package conformance.run
+
+# Pins the local-mutator + Set-algebra arm of the per-function VM bridge
+# (amber.native-backend-equivalence.v1 step 2). `probe` is captureless,
+# block-free, call-free and performs no IO, so it is vm-callable. It mutates
+# only arrays it built itself (push!/insert!/sort!/reverse! -- vm.cpp RFC §8.1)
+# and uses pure Set algebra (union/intersection/difference), then returns a
+# string. In-place mutation is sound because the bridge can only reach
+# locally-constructed heap values (scalar params, no captures/ivars/Call): the
+# mutation is invisible to the native lane and discarded after the call, so the
+# whole-program restart on any non-convertible bailout stays byte-identical.
+def probe():
+  xs = [3, 1, 2]
+  xs.push!(5)
+  xs.insert!(0, 9)
+  xs.sort!()
+  xs.reverse!()
+  a = Set{1, 2, 3}
+  b = Set{2, 3, 4}
+  unioned = a.union(b)
+  common = a.intersection(b)
+  only_a = a.difference(b)
+  "#{xs}|#{xs.first()}|#{unioned.count()}|#{common.count()}|#{only_a.count()}|#{a.subset?(unioned)}"

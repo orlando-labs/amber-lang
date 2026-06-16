@@ -1,0 +1,15 @@
+package conformance.run
+
+# Pins block-taking in-place mutators + pure Map verbs in the per-function VM
+# bridge (amber.native-backend-equivalence.v1 step 2). `probe` builds a local
+# map, mutates it with block-taking `!` verbs (`select!`/`transform_values!`)
+# whose block bodies are proven bridge-pure, derives new maps with pure copy
+# verbs (`merge`/`except`), and returns a scalar string. Every heap value is
+# locally constructed, so the in-place mutation is invisible to the native lane
+# (sound by reachability), and the block bodies are effect-free.
+def probe():
+  m = {"a": 1, "b": 2, "c": 3, "d": 4}
+  m.select! |k, v|: v % 2 == 0
+  m.transform_values! |v, k|: v * 10
+  extra = m.merge({"x": 99}).except("b")
+  "#{m["b"]}:#{m["d"]}:#{m.keys().count()}:#{extra["x"]}:#{extra.keys().count()}"

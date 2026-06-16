@@ -1,0 +1,17 @@
+package conformance.run
+
+# Pins block support in the per-function VM bridge
+# (amber.native-backend-equivalence.v1 step 2). `probe` is captureless and
+# call-free; it builds block closures locally and passes them only to pure
+# higher-order enumerables (map/select/reduce, plus `sorted` with a key block).
+# Each block body is itself proven bridge-pure -- effect-free and capturing only
+# enclosing locals (`factor`) -- so the whole function executes through the
+# embedded-VM bridge rather than the whole-program native restart. The result
+# is a scalar string, which converts back across the value bridge.
+def probe():
+  factor = 10
+  scaled = [1, 2, 3, 4].map |x|: x * factor
+  evens = scaled.select |x|: x % 20 == 0
+  total = scaled.reduce(0) |a, b|: a + b
+  ranked = [3, 1, 2].sorted: 0 - _1
+  "#{scaled}:#{evens}:#{total}:#{ranked}"
