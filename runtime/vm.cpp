@@ -1,6 +1,7 @@
 #include "runtime/vm.h"
 #include "runtime/context.h"
 #include "runtime/io.h"
+#include "runtime/stdlib_registry.h"
 
 #include <algorithm>
 #include <atomic>
@@ -9367,7 +9368,8 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   return false;
 }
 
-enum class SendStatus { Matched, NotHandled, Faulted };
+// SendStatus is defined in runtime/stdlib_registry.h so stdlib handler
+// translation units share the dispatch contract.
 
 enum class FastSendStatus { Matched, NotHandled, Faulted };
 
@@ -9416,7 +9418,7 @@ struct DirectEntryClosure {
   Value self = Value::null();
 };
 
-class Vm {
+class Vm : public StdlibHost {
 public:
   explicit Vm(const BcModule &module,
               std::shared_ptr<RuntimeState> state = nullptr,
@@ -9434,6 +9436,31 @@ public:
         trace_recorder_(std::move(trace_recorder)) {
     state_->initialize_for_module(module_);
     resolve_numeric_policy();
+    // Layer 0 stdlib substrate: populate the registry once here rather than via
+    // static initializers, to avoid static-init-order fiascos.
+    register_builtin_stdlib(native_registry_);
+  }
+
+  // --- StdlibHost: the native stdlib facade, forwarding to VM helpers. The
+  // active frame is type-erased through the ABI; cast it back here. ---
+  void stdlib_set_fault(const void *frame, const std::string &error_class,
+                        const std::string &message) override {
+    set_fault(*static_cast<const Frame *>(frame), error_class, message);
+  }
+  std::optional<Value> stdlib_keyword_arg_value(
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const std::string &name) override {
+    return keyword_arg_value(kw_args, name);
+  }
+  bool stdlib_reject_unknown_keywords(
+      const void *frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      std::initializer_list<const char *> allowed) override {
+    return reject_unknown_keywords(*static_cast<const Frame *>(frame), kw_args,
+                                   allowed);
+  }
+  Value stdlib_string_value_from_text(std::string text) override {
+    return string_value_from_text(std::move(text));
   }
 
   void resolve_numeric_policy() {
@@ -12884,11 +12911,15 @@ private:
     if (path == "Err") {
       return Value::native_function(RuntimeNativeFunctionKind::ResultErr);
     }
+    // Layer 0 stdlib substrate: libraries that have migrated onto the registry
+    // resolve their source path here (e.g. "Math"); the legacy inline chain
+    // below still owns everything not yet registered.
+    if (const std::optional<RuntimeNativeTypeKind> registered_kind =
+            native_registry_.kind_for_path(path)) {
+      return Value::native_type(*registered_kind);
+    }
     if (path == "Kernel") {
       return Value::native_type(RuntimeNativeTypeKind::Kernel);
-    }
-    if (path == "Math") {
-      return Value::native_type(RuntimeNativeTypeKind::Math);
     }
     if (path == "io") {
       return Value::native_type(RuntimeNativeTypeKind::Io);
@@ -19260,6 +19291,19 @@ private:
                               value_matches_native_type_kind(args[0], kind));
         return SendStatus::Matched;
       }
+      // Layer 0 stdlib substrate: registered library handlers run before the
+      // legacy inline chain below. A handler that returns NotHandled (e.g. an
+      // unknown selector for a migrated kind) falls through to the unchanged
+      // path, so any kind not yet on the registry behaves exactly as before.
+      if (const NativeStdlibHandler handler =
+              native_registry_.handler_for(kind)) {
+        NativeStdlibCall call{*this,    &frame, kind,    selector,
+                              args,     block,  kw_args, out};
+        const SendStatus status = handler(call);
+        if (status != SendStatus::NotHandled) {
+          return status;
+        }
+      }
       if (kind == RuntimeNativeTypeKind::Amber) {
         if (selector != "stringify") {
           return SendStatus::NotHandled;
@@ -19290,152 +19334,8 @@ private:
             args[0], stringify_mode, &module_, nullptr, nullptr, options));
         return SendStatus::Matched;
       }
-      if (kind == RuntimeNativeTypeKind::Math) {
-        if (!require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (!kw_args.empty()) {
-          set_fault(frame, "TypeError",
-                    "Math methods do not accept keyword arguments");
-          return SendStatus::Faulted;
-        }
-        if (selector == "PI") {
-          if (!require_arity(0)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::floating(3.141592653589793238462643383279502884);
-          return SendStatus::Matched;
-        }
-        if (selector == "E") {
-          if (!require_arity(0)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::floating(2.718281828459045235360287471352662498);
-          return SendStatus::Matched;
-        }
-        const auto math_arg = [&](std::size_t i, double *d) -> bool {
-          if (!args[i].is_integer() && !args[i].is_float()) {
-            set_fault(frame, "TypeError",
-                      "Math." + selector + " expects a number");
-            return false;
-          }
-          *d = numeric_value_as_double(args[i]);
-          return true;
-        };
-        // `abs` and `min`/`max` preserve the argument's Int/Float type; `sign`
-        // yields an Int. Everything else returns a Float.
-        if (selector == "abs") {
-          if (!require_arity(1)) {
-            return SendStatus::Faulted;
-          }
-          if (args[0].is_integer()) {
-            const std::int64_t v = args[0].as_integer();
-            *out = Value::integer(v < 0 ? -v : v);
-            return SendStatus::Matched;
-          }
-          double d = 0.0;
-          if (!math_arg(0, &d)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::floating(std::fabs(d));
-          return SendStatus::Matched;
-        }
-        if (selector == "sign") {
-          if (!require_arity(1)) {
-            return SendStatus::Faulted;
-          }
-          double d = 0.0;
-          if (!math_arg(0, &d)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::integer(d > 0.0 ? 1 : (d < 0.0 ? -1 : 0));
-          return SendStatus::Matched;
-        }
-        if (selector == "min" || selector == "max") {
-          if (!require_arity(2)) {
-            return SendStatus::Faulted;
-          }
-          double a = 0.0;
-          double b = 0.0;
-          if (!math_arg(0, &a) || !math_arg(1, &b)) {
-            return SendStatus::Faulted;
-          }
-          const bool pick_first = selector == "min" ? (a <= b) : (a >= b);
-          *out = pick_first ? args[0] : args[1];
-          return SendStatus::Matched;
-        }
-        if (selector == "pow" || selector == "hypot" || selector == "atan2") {
-          if (!require_arity(2)) {
-            return SendStatus::Faulted;
-          }
-          double a = 0.0;
-          double b = 0.0;
-          if (!math_arg(0, &a) || !math_arg(1, &b)) {
-            return SendStatus::Faulted;
-          }
-          double r = 0.0;
-          if (selector == "pow") {
-            r = std::pow(a, b);
-          } else if (selector == "hypot") {
-            r = std::hypot(a, b);
-          } else {
-            r = std::atan2(a, b);
-          }
-          *out = Value::floating(r);
-          return SendStatus::Matched;
-        }
-        if (selector == "sqrt" || selector == "cbrt" || selector == "exp" ||
-            selector == "log" || selector == "log2" || selector == "log10" ||
-            selector == "sin" || selector == "cos" || selector == "tan" ||
-            selector == "asin" || selector == "acos" || selector == "atan" ||
-            selector == "floor" || selector == "ceil" || selector == "round" ||
-            selector == "trunc") {
-          if (!require_arity(1)) {
-            return SendStatus::Faulted;
-          }
-          double d = 0.0;
-          if (!math_arg(0, &d)) {
-            return SendStatus::Faulted;
-          }
-          double r = 0.0;
-          if (selector == "sqrt") {
-            r = std::sqrt(d);
-          } else if (selector == "cbrt") {
-            r = std::cbrt(d);
-          } else if (selector == "exp") {
-            r = std::exp(d);
-          } else if (selector == "log") {
-            r = std::log(d);
-          } else if (selector == "log2") {
-            r = std::log2(d);
-          } else if (selector == "log10") {
-            r = std::log10(d);
-          } else if (selector == "sin") {
-            r = std::sin(d);
-          } else if (selector == "cos") {
-            r = std::cos(d);
-          } else if (selector == "tan") {
-            r = std::tan(d);
-          } else if (selector == "asin") {
-            r = std::asin(d);
-          } else if (selector == "acos") {
-            r = std::acos(d);
-          } else if (selector == "atan") {
-            r = std::atan(d);
-          } else if (selector == "floor") {
-            r = std::floor(d);
-          } else if (selector == "ceil") {
-            r = std::ceil(d);
-          } else if (selector == "round") {
-            r = std::round(d);
-          } else {
-            r = std::trunc(d);
-          }
-          *out = Value::floating(r);
-          return SendStatus::Matched;
-        }
-        return SendStatus::NotHandled;
-      }
+      // RuntimeNativeTypeKind::Math is handled by the registry above
+      // (runtime/stdlib_math.cpp), the Layer 0 reference migration.
       if (kind == RuntimeNativeTypeKind::Kernel) {
         if (selector == "print") {
           return apply_kernel_output_helper(frame,
@@ -29792,6 +29692,9 @@ private:
   // unsupported-profile message reported at execute() entry.
   NumericPolicy numeric_policy_;
   std::string numeric_profile_error_;
+  // Layer 0 stdlib substrate: kind->handler and path->kind tables for native
+  // libraries that have migrated off the legacy inline chains.
+  NativeRegistry native_registry_;
 };
 
 } // namespace
