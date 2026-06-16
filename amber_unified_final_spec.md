@@ -2204,6 +2204,61 @@ ensure:
 Двоеточие является обязательным маркером exception-finalization clause.
 
 
+## 10.6. `Result[T, E]` — value-based errors
+
+`Result[T, E]` is a value-based, explicit complement to `raise`/`rescue`. A
+`Result` is in exactly one of two states:
+
+- `Ok(value)` — a success carrying a payload of type `T`;
+- `Err(error)` — a failure carrying a payload of type `E`.
+
+`Ok` and `Err` are prelude constructors (used like any `Type(args)` call); each
+takes exactly one argument and accepts neither a block nor keyword arguments:
+
+```amber
+ok  = Ok(42)
+err = Err("not found")
+```
+
+A `Result` displays as `Ok(<value>)` / `Err(<value>)`, with the wrapped payload
+rendered in inspect form. Two `Result`s are equal when they share the same state
+and their payloads are equal.
+
+### 10.6.1. Methods
+
+- `result.or(default)` — returns the `Ok` payload, or `default` if `Err`. One
+  positional argument; no block.
+- `result.or_raise` — returns the `Ok` payload, or **re-raises the `Err`
+  payload through the exception path** (exactly as `raise <payload>` would), so
+  an enclosing `rescue` catches it. Spelled bare (no parentheses).
+- `result.ok?` / `result.err?` — state predicates.
+- `result.value` — the `Ok` payload; raises `ValueError` if called on an `Err`.
+- `result.error` — the `Err` payload; raises `ValueError` if called on an `Ok`.
+- `result.map |v|: …` — transforms an `Ok` payload through the block, producing
+  a new `Ok`; an `Err` is passed through unchanged.
+- `result.or_else |e|: …` — returns the `Ok` payload, or the block's result
+  applied to the `Err` payload. The block runs only in the `Err` state.
+
+`or`, `or_raise`, `value`, `error`, `ok?`, and `err?` may be written without
+parentheses; `or`, `map`, and `or_else` take their argument or block as usual.
+
+### 10.6.2. Relationship to `raise` / `rescue`
+
+`.or_raise` is the bridge from the value-based style to the exception style: the
+contained payload is raised exactly as the `raise` keyword would raise it, and an
+enclosing function-level or `try`/`rescue` handler (§10.5) catches it. When the
+`Err` payload is a rescuable error instance, `rescue ErrorClass |e|:` matches it
+by class; any payload is caught by a bare `rescue |e|:`.
+
+```amber
+def probe():
+  try:
+    Err("boom").or_raise
+  rescue |e|:
+    "caught"
+```
+
+
 ## 11. Ошибки и диагностики
 
 ### 11.1. Compile-time errors

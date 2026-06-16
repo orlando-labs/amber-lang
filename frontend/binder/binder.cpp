@@ -1325,8 +1325,8 @@ bool contains_name_ref_key(const std::vector<NameRefKey> &keys,
 bool is_native_prelude_name(const std::string &name) {
   static const std::set<std::string> names = {
       "Amber", "Array", "Atomic", "Barrier", "Bool", "Channel",
-      "Flow",  "Float", "Int",    "Kernel",  "Map",  "Math",  "Mutex",
-      "Null",  "Object", "Range",  "Set",     "Str",     "Symbol",
+      "Err",   "Flow",  "Float", "Int",    "Kernel",  "Map",  "Math",  "Mutex",
+      "Null",  "Object", "Ok", "Range",  "Set",     "Str",     "Symbol",
       "ThreadedCollection", "Tuple", "desc", "io", "p", "pp", "print", "task"};
   return names.count(name) != 0U;
 }

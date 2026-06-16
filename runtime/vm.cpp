@@ -6581,6 +6581,10 @@ Value Value::watch_handle(std::shared_ptr<RuntimeWatchHandle> value) {
   return {std::move(value)};
 }
 
+Value Value::result(std::shared_ptr<ResultValue> value) {
+  return {std::move(value)};
+}
+
 bool Value::is_null() const {
   return std::holds_alternative<std::monostate>(payload);
 }
@@ -6702,6 +6706,10 @@ bool Value::is_watch_handle() const {
   return std::holds_alternative<std::shared_ptr<RuntimeWatchHandle>>(payload);
 }
 
+bool Value::is_result() const {
+  return std::holds_alternative<std::shared_ptr<ResultValue>>(payload);
+}
+
 bool Value::as_bool() const { return std::get<bool>(payload); }
 
 std::int64_t Value::as_integer() const {
@@ -6813,6 +6821,10 @@ std::shared_ptr<RuntimeWatchCell> Value::as_watch_cell() const {
 
 std::shared_ptr<RuntimeWatchHandle> Value::as_watch_handle() const {
   return std::get<std::shared_ptr<RuntimeWatchHandle>>(payload);
+}
+
+std::shared_ptr<ResultValue> Value::as_result() const {
+  return std::get<std::shared_ptr<ResultValue>>(payload);
 }
 
 Value Value::list(IntrusivePtr<ListValue> value) { return {std::move(value)}; }
@@ -7111,6 +7123,13 @@ Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen) {
                                                       frozen);
 }
 
+Value make_result_value(bool is_ok, Value payload) {
+  auto result = std::make_shared<ResultValue>();
+  result->is_ok = is_ok;
+  result->payload = std::move(payload);
+  return Value::result(std::move(result));
+}
+
 namespace {
 
 using amber::bytecode::BcCode;
@@ -7240,6 +7259,10 @@ const char *native_function_name(RuntimeNativeFunctionKind kind) {
     return "pp";
   case RuntimeNativeFunctionKind::Desc:
     return "desc";
+  case RuntimeNativeFunctionKind::ResultOk:
+    return "Ok";
+  case RuntimeNativeFunctionKind::ResultErr:
+    return "Err";
   }
   return "native_function";
 }
@@ -7477,6 +7500,19 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
       return *text;
     }
     return "\"" + escape_string_literal(*text) + "\"";
+  }
+  if (value.is_result()) {
+    const std::shared_ptr<ResultValue> result = value.as_result();
+    if (result == nullptr) {
+      return "<result null>";
+    }
+    // The wrapped payload renders in inspect mode so strings are quoted
+    // (Ok("x"), Err(ValueError: ...)) regardless of the outer mode.
+    return std::string(result->is_ok ? "Ok(" : "Err(") +
+           runtime_stringify_value_impl(context, result->payload,
+                                        RuntimeStringifyMode::Inspect,
+                                        depth + 1U) +
+           ")";
   }
   if (value.is_native_type()) {
     return std::string("<type ") +
@@ -9211,6 +9247,16 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return left != nullptr && right != nullptr &&
            left->negative == right->negative &&
            left->magnitude == right->magnitude;
+  }
+  if (lhs.is_result()) {
+    const std::shared_ptr<ResultValue> left = lhs.as_result();
+    const std::shared_ptr<ResultValue> right = rhs.as_result();
+    if (left == right) {
+      return true;
+    }
+    return left != nullptr && right != nullptr &&
+           left->is_ok == right->is_ok &&
+           value_equals(left->payload, right->payload);
   }
   if (lhs.is_closure()) {
     return lhs.as_closure() == rhs.as_closure();
@@ -12873,6 +12919,12 @@ private:
     }
     if (path == "desc") {
       return Value::native_function(RuntimeNativeFunctionKind::Desc);
+    }
+    if (path == "Ok") {
+      return Value::native_function(RuntimeNativeFunctionKind::ResultOk);
+    }
+    if (path == "Err") {
+      return Value::native_function(RuntimeNativeFunctionKind::ResultErr);
     }
     if (path == "Kernel") {
       return Value::native_type(RuntimeNativeTypeKind::Kernel);
@@ -18779,6 +18831,30 @@ private:
       const Frame &frame, RuntimeNativeFunctionKind kind,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (kind == RuntimeNativeFunctionKind::ResultOk ||
+        kind == RuntimeNativeFunctionKind::ResultErr) {
+      // Ok(v) / Err(e): value-based Result constructors. One positional arg, no
+      // block, no keywords.
+      const bool is_ok = kind == RuntimeNativeFunctionKind::ResultOk;
+      const char *name = is_ok ? "Ok" : "Err";
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError",
+                  std::string(name) + " does not accept a block");
+        return SendStatus::Faulted;
+      }
+      if (!kw_args.empty()) {
+        set_fault(frame, "TypeError",
+                  std::string(name) + " does not accept keyword arguments");
+        return SendStatus::Faulted;
+      }
+      if (args.size() != 1U) {
+        set_fault(frame, "TypeError",
+                  std::string(name) + " expects one argument");
+        return SendStatus::Faulted;
+      }
+      *out = make_result_value(is_ok, args[0]);
+      return SendStatus::Matched;
+    }
     if (kind == RuntimeNativeFunctionKind::Desc) {
       // RFC §7.2: desc(x) tags a sort key for descending order. The marker is
       // a 2-tuple (desc-native-fn, x); compare_values_for_sort recognises it
@@ -23970,6 +24046,110 @@ private:
           selector == "cast?");
     }
 
+    if (receiver.is_result()) {
+      const std::shared_ptr<ResultValue> result = receiver.as_result();
+      if (result == nullptr) {
+        set_fault(frame, "VMError", "result value is null");
+        return SendStatus::Faulted;
+      }
+      auto require_result_block = [&]() -> bool {
+        if (block.is_null()) {
+          set_fault(frame, "TypeError",
+                    "Result." + selector + " requires a block");
+          return false;
+        }
+        return true;
+      };
+      if (selector == "ok?" || selector == "err?") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(result->is_ok == (selector == "ok?"));
+        return SendStatus::Matched;
+      }
+      if (selector == "value") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (!result->is_ok) {
+          set_fault(frame, "ValueError", "called `value` on an Err result");
+          return SendStatus::Faulted;
+        }
+        *out = result->payload;
+        return SendStatus::Matched;
+      }
+      if (selector == "error") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (result->is_ok) {
+          set_fault(frame, "ValueError", "called `error` on an Ok result");
+          return SendStatus::Faulted;
+        }
+        *out = result->payload;
+        return SendStatus::Matched;
+      }
+      if (selector == "or") {
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError", "or does not accept keyword arguments");
+          return SendStatus::Faulted;
+        }
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = result->is_ok ? result->payload : args[0];
+        return SendStatus::Matched;
+      }
+      if (selector == "or_raise") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (result->is_ok) {
+          *out = result->payload;
+          return SendStatus::Matched;
+        }
+        // Bridge Result -> exception: re-raise the contained error exactly as
+        // the `raise` keyword would, so an enclosing `rescue` catches it.
+        raise_value(frame, result->payload);
+        return SendStatus::Faulted;
+      }
+      if (selector == "or_else") {
+        if (!require_arity(0) || !require_result_block()) {
+          return SendStatus::Faulted;
+        }
+        if (result->is_ok) {
+          *out = result->payload;
+          return SendStatus::Matched;
+        }
+        const std::optional<Value> produced =
+            call_block_to_value(frame, block, {result->payload});
+        if (!produced.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = *produced;
+        return SendStatus::Matched;
+      }
+      if (selector == "map") {
+        if (!require_arity(0) || !require_result_block()) {
+          return SendStatus::Faulted;
+        }
+        if (!result->is_ok) {
+          *out = receiver; // Err passes through unchanged
+          return SendStatus::Matched;
+        }
+        const std::optional<Value> produced =
+            call_block_to_value(frame, block, {result->payload});
+        if (!produced.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = make_result_value(true, *produced);
+        return SendStatus::Matched;
+      }
+      set_fault(frame, "NoMethodError",
+                "Result has no method `" + selector + "`");
+      return SendStatus::Faulted;
+    }
+
     if (receiver.is_native_error_class()) {
       const std::uint16_t error_id = receiver.as_native_error_class().error_id;
       if (selector == "new") {
@@ -27413,6 +27593,23 @@ private:
         return false;
       }
       if (receiver.is_native_type()) {
+        Value result = Value::null();
+        const SendStatus scalar_status = try_apply_scalar_send(
+            frame, receiver, *selector, args, block, kw_args, &result);
+        if (scalar_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (scalar_status == SendStatus::Matched) {
+          if (!write_reg(frame, dst, std::move(result))) {
+            return false;
+          }
+          ++frame.pc;
+          return true;
+        }
+      }
+      if (receiver.is_result()) {
+        // Bare-nullary Result members (.or_raise, .ok?, .err?, .value, .error)
+        // route to the scalar Result handler just like a parenthesised call.
         Value result = Value::null();
         const SendStatus scalar_status = try_apply_scalar_send(
             frame, receiver, *selector, args, block, kw_args, &result);
@@ -31721,6 +31918,16 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
       return "\"" + (*debug_strings)[string.string_id] + "\"";
     }
     return "\"<invalid>\"";
+  }
+  if (value.is_result()) {
+    const std::shared_ptr<ResultValue> result = value.as_result();
+    if (result == nullptr) {
+      return "<result null>";
+    }
+    return std::string(result->is_ok ? "Ok(" : "Err(") +
+           value_to_debug_string(result->payload, module, runtime_strings,
+                                 runtime_symbols) +
+           ")";
   }
   if (value.is_class_object()) {
     const ClassObjectValue klass = value.as_class_object();

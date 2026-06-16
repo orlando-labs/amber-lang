@@ -28,6 +28,7 @@ struct TupleValue;
 struct SetValue;
 struct MapValue;
 struct MapEntry;
+struct ResultValue; // value-based Result[T,E] payload; defined after Value
 
 // Intrusive strong-reference smart pointer for the six ObjHeader-bearing heap
 // kinds (RESEARCH §7.2). The count lives in the object's ObjHeader, so this is
@@ -266,7 +267,7 @@ struct NativeTypeValue {
   RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
 };
 
-enum class RuntimeNativeFunctionKind { Print, P, Pp, Desc };
+enum class RuntimeNativeFunctionKind { Print, P, Pp, Desc, ResultOk, ResultErr };
 
 struct NativeFunctionValue {
   RuntimeNativeFunctionKind kind = RuntimeNativeFunctionKind::Print;
@@ -360,7 +361,8 @@ std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
   X(io_value, is_io_value, as_io_value, RuntimeIoValue, Io)                   \
   X(watch_cell, is_watch_cell, as_watch_cell, RuntimeWatchCell, WatchCell)    \
   X(watch_handle, is_watch_handle, as_watch_handle, RuntimeWatchHandle,       \
-    WatchHandle)
+    WatchHandle)                                                             \
+  X(result, is_result, as_result, ResultValue, Result)
 
 #ifndef AMBER_VALUE_REPR_TAGGED
 // ---- Variant representation (default, 24 bytes) ---------------------------
@@ -380,7 +382,7 @@ struct Value {
       std::shared_ptr<RuntimeThreadedCollection>,
       std::shared_ptr<RuntimeTextWriter>, std::shared_ptr<RuntimeLogger>,
       std::shared_ptr<RuntimeIoValue>, std::shared_ptr<RuntimeWatchCell>,
-      std::shared_ptr<RuntimeWatchHandle>>;
+      std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>>;
 
   Payload payload;
 
@@ -416,6 +418,7 @@ struct Value {
   static Value io_value(std::shared_ptr<RuntimeIoValue> value);
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
+  static Value result(std::shared_ptr<ResultValue> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -448,6 +451,7 @@ struct Value {
   bool is_io_value() const;
   bool is_watch_cell() const;
   bool is_watch_handle() const;
+  bool is_result() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -479,6 +483,7 @@ struct Value {
   std::shared_ptr<RuntimeIoValue> as_io_value() const;
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
+  std::shared_ptr<ResultValue> as_result() const;
 
   // Representation-agnostic helpers (see the doc comment above): a distinct
   // value per active alternative, and a pointer to the inline integer payload
@@ -535,6 +540,7 @@ enum class ValueTailKind : std::uint8_t {
   Io,
   WatchCell,
   WatchHandle,
+  Result,
 };
 
 struct ValueTailBox; // refcounted tail box; defined in vm.cpp
@@ -579,6 +585,7 @@ struct Value {
   static Value io_value(std::shared_ptr<RuntimeIoValue> value);
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
+  static Value result(std::shared_ptr<ResultValue> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -611,6 +618,7 @@ struct Value {
   bool is_io_value() const;
   bool is_watch_cell() const;
   bool is_watch_handle() const;
+  bool is_result() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -642,6 +650,7 @@ struct Value {
   std::shared_ptr<RuntimeIoValue> as_io_value() const;
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
+  std::shared_ptr<ResultValue> as_result() const;
 
   std::uint32_t kind_index() const;
   const std::int64_t *integer_if() const;
@@ -673,6 +682,14 @@ private:
 };
 static_assert(sizeof(Value) <= 16, "tagged Value must fit in 16 bytes");
 #endif // AMBER_VALUE_REPR_TAGGED
+
+// Value-based Result[T,E] (Ok/Err). A cold tail kind: a single payload slot
+// holds either the Ok value or the Err value, discriminated by `is_ok`. Defined
+// after Value because it embeds a Value member.
+struct ResultValue {
+  bool is_ok = false;
+  Value payload = Value::null();
+};
 
 struct RuntimeTextWriteResult {
   bool ok = true;
@@ -1996,6 +2013,8 @@ Value make_list_value(std::vector<Value> items, bool frozen = false);
 Value make_tuple_value(std::vector<Value> items);
 Value make_set_value(std::vector<Value> items, bool frozen = false);
 Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen = false);
+// Wrap a payload into an Ok (is_ok=true) or Err (is_ok=false) Result value.
+Value make_result_value(bool is_ok, Value payload);
 
 enum class MethodTableSide { Instance, Class };
 enum class RuntimeWorldState { Open, Frozen };

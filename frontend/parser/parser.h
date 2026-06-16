@@ -136,6 +136,9 @@ private:
   std::vector<std::string> parse_many_def_patterns(lexer::Span *span_out);
   std::string consume_method_name_text(const std::string &message);
   const lexer::Token &consume_identifier_like(const std::string &message);
+  // Like consume_identifier_like, but also accepts the boolean operator-word
+  // keywords (or/and/not) as member/method names after a `.` (e.g. Result#or).
+  const lexer::Token &consume_member_name(const std::string &message);
   std::string consume_identifier_text(const std::string &message);
   bool looks_like_property_declaration() const;
   bool looks_like_attr_declaration() const;

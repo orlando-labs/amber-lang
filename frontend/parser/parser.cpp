@@ -2693,6 +2693,19 @@ Parser::consume_identifier_like(const std::string &message) {
   return current();
 }
 
+const lexer::Token &Parser::consume_member_name(const std::string &message) {
+  // After a member-access dot, the boolean operator-word keywords are valid
+  // method names (Result#or, etc.). They are unambiguous here: a binary
+  // `or`/`and`/`not` never legally follows a member-access dot.
+  const lexer::TokenKind kind = current().kind;
+  if (kind == lexer::TokenKind::KeywordOr ||
+      kind == lexer::TokenKind::KeywordAnd ||
+      kind == lexer::TokenKind::KeywordNot) {
+    return advance();
+  }
+  return consume_identifier_like(message);
+}
+
 std::string Parser::consume_identifier_text(const std::string &message) {
   const lexer::Token token = consume_identifier_like(message);
   return token.lexeme;
@@ -3605,7 +3618,7 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
       append_postfix_tail(*chain, std::move(tail));
       return chain;
     }
-    const lexer::Token name = consume_identifier_like(
+    const lexer::Token name = consume_member_name(
         "expected method or field name");
     auto tail = ast::make_expr("AstTailDotMember",
                                ast::join_spans(dot.span, name.span));
@@ -3650,7 +3663,7 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
       append_postfix_tail(*chain, std::move(tail));
       return chain;
     }
-    const lexer::Token name = consume_identifier_like(
+    const lexer::Token name = consume_member_name(
         "expected method or field name");
     auto tail = ast::make_expr("AstTailSafeMember",
                                ast::join_spans(dot.span, name.span));
