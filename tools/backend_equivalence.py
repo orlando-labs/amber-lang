@@ -20,14 +20,22 @@ observable half of that invariant.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "run"
-AMBERC = ROOT / "build" / "amberc"
-WORK_DIR = ROOT / "build" / "backend-equivalence"
+# AMBERC / AMBER_BE_WORKDIR let an alternate build drive the harness without
+# clobbering build/ -- e.g. the tagged value-repr lane:
+#   make BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/amberc
+#   AMBERC=build-tagged/amberc AMBER_BE_WORKDIR=build-tagged/backend-equivalence \
+#       python3 tools/backend_equivalence.py
+AMBERC = Path(os.environ.get("AMBERC") or (ROOT / "build" / "amberc"))
+WORK_DIR = Path(
+    os.environ.get("AMBER_BE_WORKDIR") or (ROOT / "build" / "backend-equivalence")
+)
 
 
 def run_capture(command: list[str], timeout: float = 60.0) -> tuple[int, str, str]:

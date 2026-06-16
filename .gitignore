@@ -1,4 +1,6 @@
 build/
+# Alternate BUILD_DIRs (e.g. the tagged value-repr lane used for A/B testing).
+build-*/
 *.o
 *.dSYM/
 .DS_Store

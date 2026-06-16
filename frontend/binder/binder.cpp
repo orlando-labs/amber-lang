@@ -1327,7 +1327,16 @@ bool is_native_prelude_name(const std::string &name) {
       "Amber", "Array", "Atomic", "Barrier", "Bool", "Channel",
       "Err",   "Flow",  "Float", "Int",    "Kernel",  "Map",  "Math",  "Mutex",
       "Null",  "Object", "Ok", "Range",  "Set",     "Str",     "Symbol",
-      "ThreadedCollection", "Tuple", "desc", "io", "p", "pp", "print", "task"};
+      "ThreadedCollection", "Tuple", "desc", "io", "p", "pp", "print", "task",
+      // Builtin runtime error classes resolve to native prelude constants at
+      // runtime (see lookup_native_prelude_constant / runtime_error_id), so they
+      // may be referenced in expression position too -- e.g. ValueError.new(msg)
+      // or Err(OverflowError.new(msg)). Shared X-macro list keeps the binder and
+      // the VM's kRuntimeErrorNames in lockstep with the spec registry.
+#define AMBER_RUNTIME_ERROR(error_name) #error_name,
+#include "spec/registries/runtime_errors.def"
+#undef AMBER_RUNTIME_ERROR
+  };
   return names.count(name) != 0U;
 }
 

@@ -8504,56 +8504,14 @@ std::int64_t shr_int64(std::int64_t lhs, std::int64_t rhs) {
   return static_cast<std::int64_t>(static_cast<std::uint64_t>(lhs) >> rhs);
 }
 
-// Mirrors spec/registries/runtime_errors.yaml (registry order).
+// Registry-ordered name table. The single source of truth is the shared
+// X-macro list spec/registries/runtime_errors.def (mirrors
+// spec/registries/runtime_errors.yaml); the binder includes the same file so
+// these names also bind as prelude constants in expression position.
 constexpr const char *kRuntimeErrorNames[] = {
-    "NameError",
-    "ArgumentError",
-    "KeywordArgumentError",
-    "MatchError",
-    "UncaughtThrowError",
-    "TypeError",
-    "ValueError",
-    "NoMethodError",
-    "ImportError",
-    "ModuleInitError",
-    "WatchTargetError",
-    "EmptyCollectionError",
-    "InfiniteCollectionError",
-    "IndexError",
-    "KeyError",
-    "ZeroDivisionError",
-    "OverflowError",
-    "IsolationError",
-    "DestroyedAccessError",
-    "UseAfterFreeError",
-    "PinnedObjectError",
-    "LifetimeError",
-    "TaskError",
-    "TaskNotDoneError",
-    "TaskFailedError",
-    "IncludeCycleError",
-    "WorldFrozenError",
-    "SuperclassMismatchError",
-    "TimeoutError",
-    "CancelledError",
-    "ChannelClosedError",
-    "DeadlockError",
-    "OwnershipError",
-    "AtomicError",
-    "AtomicCompatibilityError",
-    "FlowError",
-    "FlowCancelledError",
-    "FlowPartitionError",
-    "FlowGatherError",
-    "MoveError",
-    "MovedValueError",
-    "CapabilityError",
-    "UnsupportedProfileError",
-    "EffectViolationError",
-    "DeterminismError",
-    "ReplayDivergenceError",
-    "ReadOnlyPropertyError",
-    "WriteOnlyPropertyError",
+#define AMBER_RUNTIME_ERROR(name) #name,
+#include "spec/registries/runtime_errors.def"
+#undef AMBER_RUNTIME_ERROR
 };
 
 constexpr std::uint16_t kRuntimeErrorCount =
@@ -17393,6 +17351,50 @@ private:
     return CoercedMapState{result, *result_entries};
   }
 
+  // Bare-call construction of a builtin runtime error class, e.g.
+  // `ValueError("bad")` or `Err(OverflowError("x"))`. Mirrors the `.new(msg)`
+  // SEND path: at most one positional argument (the message), no keyword args,
+  // and no block. Returns NotHandled when `callee` is not an error class so the
+  // caller falls through to its normal CALL dispatch.
+  SendStatus call_native_error_class(
+      Frame &frame, const Value &callee, const std::vector<Value> &pos_args,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const Value &block, std::uint32_t dst) {
+    if (!callee.is_native_error_class()) {
+      return SendStatus::NotHandled;
+    }
+    if (!kw_args.empty()) {
+      set_fault(frame, "TypeError",
+                "error class call does not accept keyword arguments");
+      return SendStatus::Faulted;
+    }
+    if (!block.is_null()) {
+      set_fault(frame, "TypeError", "error class call does not accept block");
+      return SendStatus::Faulted;
+    }
+    if (pos_args.size() > 1U) {
+      set_fault(frame, "TypeError",
+                "error class call accepts at most one positional argument");
+      return SendStatus::Faulted;
+    }
+    auto instance = std::make_shared<ErrorInstanceValue>();
+    instance->error_id = callee.as_native_error_class().error_id;
+    if (!pos_args.empty()) {
+      if (pos_args[0].is_string()) {
+        instance->message =
+            string_text_from_id(pos_args[0].as_string().string_id)
+                .value_or("");
+      } else {
+        instance->message = value_to_debug_string(pos_args[0], &module_);
+      }
+    }
+    if (!write_reg(frame, dst, Value::error_instance(std::move(instance)))) {
+      return SendStatus::Faulted;
+    }
+    ++frame.pc;
+    return SendStatus::Matched;
+  }
+
   bool invoke_callable_value(
       Frame &frame, const Value &callee, const std::vector<Value> &pos_args,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
@@ -17498,6 +17500,17 @@ private:
       }
       return invoke_method(frame, *method, pos_args, kw_args, callee, block,
                            dst);
+    }
+
+    {
+      const SendStatus status =
+          call_native_error_class(frame, callee, pos_args, kw_args, block, dst);
+      if (status == SendStatus::Faulted) {
+        return false;
+      }
+      if (status == SendStatus::Matched) {
+        return true;
+      }
     }
 
     set_fault(frame, "TypeError",
@@ -29181,6 +29194,15 @@ private:
           return;
         }
         return;
+      }
+
+      {
+        const SendStatus status = call_native_error_class(
+            frame, packet.callee, packet.pos_args, packet.kw_args, packet.block,
+            packet.dst);
+        if (status == SendStatus::Faulted || status == SendStatus::Matched) {
+          return;
+        }
       }
 
       set_fault(frame, "TypeError",

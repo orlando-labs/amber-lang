@@ -26,6 +26,11 @@ ANCHOR_SOURCE_EXCLUDES = {
 REGISTRY_GLOBS = [
     "spec/registries/*.yaml",
 ]
+# X-macro mirror of runtime_errors.yaml shared by the VM (kRuntimeErrorNames)
+# and the binder (is_native_prelude_name); kept byte-for-byte derivable from the
+# registry so error-class names bind identically in both.
+RUNTIME_ERRORS_YAML = ROOT / "spec/registries/runtime_errors.yaml"
+RUNTIME_ERRORS_DEF = ROOT / "spec/registries/runtime_errors.def"
 LINK_SCAN_GLOBS = [
     "README.md",
     "amber_unified_final_spec.md",
@@ -37,6 +42,8 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 FENCE_RE = re.compile(r"^```")
 SPEC_ANCHOR_RE = re.compile(r"^spec_anchor:\s*(\S+)\s*$")
+RUNTIME_ERROR_YAML_RE = re.compile(r"^\s*-\s*(\w+)\s*$")
+RUNTIME_ERROR_DEF_RE = re.compile(r"^AMBER_RUNTIME_ERROR\((\w+)\)\s*$")
 
 
 @dataclass(frozen=True)
@@ -266,6 +273,45 @@ def check_registry_anchors() -> list[str]:
     return errors
 
 
+def runtime_error_yaml_names() -> list[str]:
+    names: list[str] = []
+    in_errors = False
+    for line in RUNTIME_ERRORS_YAML.read_text(encoding="utf-8").splitlines():
+        if line.rstrip() == "errors:":
+            in_errors = True
+            continue
+        if not in_errors:
+            continue
+        match = RUNTIME_ERROR_YAML_RE.match(line)
+        if match:
+            names.append(match.group(1))
+        elif line.strip() and not line.startswith((" ", "\t")):
+            break
+    return names
+
+
+def runtime_error_def_names() -> list[str]:
+    names: list[str] = []
+    for line in RUNTIME_ERRORS_DEF.read_text(encoding="utf-8").splitlines():
+        match = RUNTIME_ERROR_DEF_RE.match(line)
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def check_runtime_error_def() -> list[str]:
+    if not RUNTIME_ERRORS_DEF.exists():
+        return [f"missing generated mirror: {rel(RUNTIME_ERRORS_DEF)}"]
+    expected = runtime_error_yaml_names()
+    actual = runtime_error_def_names()
+    if actual != expected:
+        return [
+            f"{rel(RUNTIME_ERRORS_DEF)}: out of sync with "
+            f"{rel(RUNTIME_ERRORS_YAML)} (expected {expected}, found {actual})"
+        ]
+    return []
+
+
 def cmd_anchor_map(_: argparse.Namespace) -> int:
     sys.stdout.write(generate_anchor_map())
     return 0
@@ -283,6 +329,7 @@ def cmd_check(_: argparse.Namespace) -> int:
         )
     errors.extend(check_links())
     errors.extend(check_registry_anchors())
+    errors.extend(check_runtime_error_def())
     if errors:
         for error in errors:
             print(error, file=sys.stderr)

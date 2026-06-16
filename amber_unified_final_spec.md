@@ -2259,6 +2259,23 @@ def probe():
     "caught"
 ```
 
+Builtin runtime error classes (the `…Error` names in
+`spec/registries/runtime_errors.yaml`) bind as ordinary prelude constants, so a
+rescuable error instance can be constructed wherever a value is expected — not
+only in `rescue` position. Both `ErrorClass.new(msg)` and the bare-call form
+`ErrorClass(msg)` build an instance carrying `msg` as its `.message()` (with no
+argument the message is empty); neither accepts a block or keyword arguments.
+This is the idiomatic way to populate an `Err` whose payload should re-raise as a
+typed error:
+
+```amber
+def probe():
+  try:
+    Err(KeyError.new("missing")).or_raise
+  rescue KeyError |e|:
+    "caught: " + e.message()
+```
+
 
 ## 11. Ошибки и диагностики
 
