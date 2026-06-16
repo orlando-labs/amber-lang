@@ -24060,10 +24060,11 @@ private:
         }
         return true;
       };
-      if (selector == "ok?" || selector == "err?") {
+      if (selector == "ok?" || selector == "err?" || selector == "error?") {
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
         }
+        // `error?` is an alias for `err?`; only `ok?` reports the Ok state.
         *out = Value::boolean(result->is_ok == (selector == "ok?"));
         return SendStatus::Matched;
       }

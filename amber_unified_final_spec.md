@@ -2231,7 +2231,8 @@ and their payloads are equal.
 - `result.or_raise` — returns the `Ok` payload, or **re-raises the `Err`
   payload through the exception path** (exactly as `raise <payload>` would), so
   an enclosing `rescue` catches it. Spelled bare (no parentheses).
-- `result.ok?` / `result.err?` — state predicates.
+- `result.ok?` / `result.err?` — state predicates (`error?` is an alias for
+  `err?`).
 - `result.value` — the `Ok` payload; raises `ValueError` if called on an `Err`.
 - `result.error` — the `Err` payload; raises `ValueError` if called on an `Ok`.
 - `result.map |v|: …` — transforms an `Ok` payload through the block, producing
