@@ -3053,8 +3053,16 @@ native_runtime_sources(const std::filesystem::path &root) {
 // the archive so static-initializer side effects keep parity with linking
 // every translation unit directly.
 const std::vector<std::string> &native_runtime_compile_flags() {
-  static const std::vector<std::string> flags = {"-std=c++17", "-O3",
-                                                 "-DNDEBUG"};
+  static const std::vector<std::string> flags = {
+    "-std=c++17", "-O3", "-DNDEBUG",
+#ifdef AMBER_VALUE_REPR_TAGGED
+    // Propagate the host amberc's Value representation (PLAN Phase 4 prototype)
+    // so the native runtime archive and the generated C++ share its ABI. The
+    // flag is hashed into the archive cache key, so tagged and variant archives
+    // never alias.
+    "-DAMBER_VALUE_REPR_TAGGED",
+#endif
+  };
   return flags;
 }
 

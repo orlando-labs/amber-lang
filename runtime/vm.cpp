@@ -2511,7 +2511,7 @@ private:
   }
 
   static bool atomic_value_equals(const Value &lhs, const Value &rhs) {
-    if (lhs.payload.index() != rhs.payload.index()) {
+    if (lhs.kind_index() != rhs.kind_index()) {
       return false;
     }
     if (lhs.is_null()) {
@@ -6199,7 +6199,7 @@ Value RuntimeHeap::make_list_value(std::vector<Value> items, bool frozen) {
         value.items = std::move(items);
         value.frozen = frozen;
       });
-  return {std::move(value)};
+  return Value::list(std::move(value));
 }
 
 Value RuntimeHeap::make_tuple_value(std::vector<Value> items) {
@@ -6210,7 +6210,7 @@ Value RuntimeHeap::make_tuple_value(std::vector<Value> items) {
         value.header.generation = ObjectGeneration::Shared;
         value.items = std::move(items);
       });
-  return {std::move(value)};
+  return Value::tuple(std::move(value));
 }
 
 Value RuntimeHeap::make_set_value(std::vector<Value> items, bool frozen) {
@@ -6243,7 +6243,7 @@ Value RuntimeHeap::make_set_value(std::vector<Value> items, bool frozen) {
         value.items = std::move(unique_items);
         value.frozen = frozen;
       });
-  return {std::move(value)};
+  return Value::set(std::move(value));
 }
 
 Value RuntimeHeap::make_symbol_map_value(std::vector<MapEntry> entries,
@@ -6265,7 +6265,7 @@ Value RuntimeHeap::make_symbol_map_value(std::vector<MapEntry> entries,
         value.entries = std::move(*normalized);
         value.frozen = frozen;
       });
-  return {std::move(value)};
+  return Value::map(std::move(value));
 }
 
 std::uint64_t RuntimeHeap::drain_remote_frees() {
@@ -6468,6 +6468,18 @@ RuntimeHeap &default_runtime_heap() {
   return heap;
 }
 
+// MapEntry constructors are representation-agnostic (they only use the public
+// Value API) so they live outside the variant/tagged guard below.
+MapEntry::MapEntry(std::uint32_t key_symbol_id, Value entry_value)
+    : symbol_id(key_symbol_id), key(Value::symbol(key_symbol_id)),
+      value(std::move(entry_value)) {}
+
+MapEntry::MapEntry(Value entry_key, Value entry_value)
+    : symbol_id(entry_key.is_symbol() ? entry_key.as_symbol().symbol_id : 0),
+      key(std::move(entry_key)), value(std::move(entry_value)) {}
+
+#ifndef AMBER_VALUE_REPR_TAGGED
+// ==== Variant Value method bodies (default 24-byte representation) =========
 Value Value::null() { return {std::monostate{}}; }
 
 Value Value::boolean(bool value) { return {value}; }
@@ -6479,14 +6491,6 @@ Value Value::floating(double value) { return {value}; }
 Value Value::symbol(std::uint32_t symbol_id) {
   return {SymbolValue{symbol_id}};
 }
-
-MapEntry::MapEntry(std::uint32_t key_symbol_id, Value entry_value)
-    : symbol_id(key_symbol_id), key(Value::symbol(key_symbol_id)),
-      value(std::move(entry_value)) {}
-
-MapEntry::MapEntry(Value entry_key, Value entry_value)
-    : symbol_id(entry_key.is_symbol() ? entry_key.as_symbol().symbol_id : 0),
-      key(std::move(entry_key)), value(std::move(entry_value)) {}
 
 Value Value::string(std::uint32_t string_id) {
   return {StringValue{string_id}};
@@ -6810,6 +6814,285 @@ std::shared_ptr<RuntimeWatchCell> Value::as_watch_cell() const {
 std::shared_ptr<RuntimeWatchHandle> Value::as_watch_handle() const {
   return std::get<std::shared_ptr<RuntimeWatchHandle>>(payload);
 }
+
+Value Value::list(IntrusivePtr<ListValue> value) { return {std::move(value)}; }
+Value Value::tuple(IntrusivePtr<TupleValue> value) { return {std::move(value)}; }
+Value Value::set(IntrusivePtr<SetValue> value) { return {std::move(value)}; }
+Value Value::map(IntrusivePtr<MapValue> value) { return {std::move(value)}; }
+
+std::uint32_t Value::kind_index() const {
+  return static_cast<std::uint32_t>(payload.index());
+}
+
+const std::int64_t *Value::integer_if() const {
+  return std::get_if<std::int64_t>(&payload);
+}
+
+#else // AMBER_VALUE_REPR_TAGGED
+// ==== Tagged Value method bodies (PLAN Phase 4 prototype, 16-byte rep) =====
+
+// Refcounted box for the cold tail kinds. One heap allocation per tail value;
+// the concrete shared_ptr is type-erased through shared_ptr<void> so its
+// original typed deleter still runs on drop, and static_pointer_cast recovers
+// the typed handle in the accessors.
+struct ValueTailBox {
+  std::atomic<std::uint32_t> refcount{1};
+  ValueTailKind kind;
+  std::shared_ptr<void> ptr;
+  ValueTailBox(ValueTailKind k, std::shared_ptr<void> p)
+      : kind(k), ptr(std::move(p)) {}
+};
+
+namespace {
+// Drop one reference to an ObjHeader-bearing heap object. The concrete type is
+// recovered from header.kind so the right destructor runs; this reuses the
+// typed runtime_heap_release, keeping all RuntimeHeap bookkeeping intact.
+void release_tagged_heap_object(ObjHeader *header) noexcept {
+  switch (header->kind) {
+  case HeapObjectKind::Closure:
+    runtime_heap_release(reinterpret_cast<ClosureValue *>(header));
+    break;
+  case HeapObjectKind::Instance:
+    runtime_heap_release(reinterpret_cast<InstanceValue *>(header));
+    break;
+  case HeapObjectKind::List:
+    runtime_heap_release(reinterpret_cast<ListValue *>(header));
+    break;
+  case HeapObjectKind::Tuple:
+    runtime_heap_release(reinterpret_cast<TupleValue *>(header));
+    break;
+  case HeapObjectKind::Set:
+    runtime_heap_release(reinterpret_cast<SetValue *>(header));
+    break;
+  case HeapObjectKind::Map:
+    runtime_heap_release(reinterpret_cast<MapValue *>(header));
+    break;
+  }
+}
+} // namespace
+
+void Value::retain_payload(ValueTag tag, const Storage &storage) noexcept {
+  if (tag >= ValueTag::Closure && tag <= ValueTag::Map) {
+    if (storage.obj != nullptr) {
+      storage.obj->ref_count.fetch_add(1, std::memory_order_relaxed);
+    }
+  } else if (tag == ValueTag::Tail) {
+    if (storage.tail != nullptr) {
+      storage.tail->refcount.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+}
+
+void Value::release_payload(ValueTag tag, Storage &storage) noexcept {
+  if (tag >= ValueTag::Closure && tag <= ValueTag::Map) {
+    if (storage.obj != nullptr) {
+      release_tagged_heap_object(storage.obj);
+    }
+  } else if (tag == ValueTag::Tail) {
+    if (storage.tail != nullptr &&
+        storage.tail->refcount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      delete storage.tail;
+    }
+  }
+}
+
+Value::Value(const Value &other) noexcept : tag_(other.tag_), u_(other.u_) {
+  retain_payload(tag_, u_);
+}
+
+Value::Value(Value &&other) noexcept : tag_(other.tag_), u_(other.u_) {
+  other.tag_ = ValueTag::Null;
+  other.u_.i = 0;
+}
+
+Value &Value::operator=(const Value &other) noexcept {
+  if (this != &other) {
+    // Retain the source payload before releasing ours so aliasing (two Values
+    // pointing at the same object) is safe.
+    ValueTag incoming_tag = other.tag_;
+    Storage incoming = other.u_;
+    retain_payload(incoming_tag, incoming);
+    release_payload(tag_, u_);
+    tag_ = incoming_tag;
+    u_ = incoming;
+  }
+  return *this;
+}
+
+Value &Value::operator=(Value &&other) noexcept {
+  if (this != &other) {
+    release_payload(tag_, u_);
+    tag_ = other.tag_;
+    u_ = other.u_;
+    other.tag_ = ValueTag::Null;
+    other.u_.i = 0;
+  }
+  return *this;
+}
+
+Value::~Value() { release_payload(tag_, u_); }
+
+Value Value::make_tail(ValueTailKind kind, std::shared_ptr<void> ptr) {
+  Value v;
+  v.tag_ = ValueTag::Tail;
+  v.u_.tail = new ValueTailBox(kind, std::move(ptr));
+  return v;
+}
+
+template <class T>
+Value Value::make_heap(ValueTag tag, IntrusivePtr<T> value) {
+  Value v;
+  v.tag_ = tag;
+  T *p = value.release(); // adopt the +1 reference, no atomic
+  v.u_.obj = (p != nullptr) ? &p->header : nullptr;
+  return v;
+}
+
+Value Value::null() { return Value(); }
+
+Value Value::boolean(bool value) {
+  Value v;
+  v.tag_ = ValueTag::Bool;
+  v.u_.b = value;
+  return v;
+}
+
+Value Value::integer(std::int64_t value) {
+  Value v;
+  v.tag_ = ValueTag::Int;
+  v.u_.i = value;
+  return v;
+}
+
+Value Value::floating(double value) {
+  Value v;
+  v.tag_ = ValueTag::Float;
+  v.u_.d = value;
+  return v;
+}
+
+Value Value::symbol(std::uint32_t symbol_id) {
+  Value v;
+  v.tag_ = ValueTag::Symbol;
+  v.u_.u32 = symbol_id;
+  return v;
+}
+
+Value Value::string(std::uint32_t string_id) {
+  Value v;
+  v.tag_ = ValueTag::String;
+  v.u_.u32 = string_id;
+  return v;
+}
+
+Value Value::class_object(std::uint32_t class_index) {
+  Value v;
+  v.tag_ = ValueTag::ClassObject;
+  v.u_.u32 = class_index;
+  return v;
+}
+
+Value Value::native_type(RuntimeNativeTypeKind kind) {
+  Value v;
+  v.tag_ = ValueTag::NativeType;
+  v.u_.ntype = kind;
+  return v;
+}
+
+Value Value::native_function(RuntimeNativeFunctionKind kind) {
+  Value v;
+  v.tag_ = ValueTag::NativeFunction;
+  v.u_.nfn = kind;
+  return v;
+}
+
+Value Value::native_error_class(std::uint16_t error_id) {
+  Value v;
+  v.tag_ = ValueTag::NativeErrorClass;
+  v.u_.u16 = error_id;
+  return v;
+}
+
+bool Value::is_null() const { return tag_ == ValueTag::Null; }
+bool Value::is_bool() const { return tag_ == ValueTag::Bool; }
+bool Value::is_integer() const { return tag_ == ValueTag::Int; }
+bool Value::is_float() const { return tag_ == ValueTag::Float; }
+bool Value::is_symbol() const { return tag_ == ValueTag::Symbol; }
+bool Value::is_string() const { return tag_ == ValueTag::String; }
+bool Value::is_class_object() const { return tag_ == ValueTag::ClassObject; }
+bool Value::is_native_type() const { return tag_ == ValueTag::NativeType; }
+bool Value::is_native_function() const {
+  return tag_ == ValueTag::NativeFunction;
+}
+bool Value::is_native_error_class() const {
+  return tag_ == ValueTag::NativeErrorClass;
+}
+
+bool Value::as_bool() const { return u_.b; }
+std::int64_t Value::as_integer() const { return u_.i; }
+double Value::as_float() const { return u_.d; }
+SymbolValue Value::as_symbol() const { return SymbolValue{u_.u32}; }
+StringValue Value::as_string() const { return StringValue{u_.u32}; }
+ClassObjectValue Value::as_class_object() const {
+  return ClassObjectValue{u_.u32};
+}
+NativeTypeValue Value::as_native_type() const {
+  return NativeTypeValue{u_.ntype};
+}
+NativeFunctionValue Value::as_native_function() const {
+  return NativeFunctionValue{u_.nfn};
+}
+NativeErrorClassValue Value::as_native_error_class() const {
+  return NativeErrorClassValue{u_.u16};
+}
+
+// Heap kinds: stored inline as the embedded ObjHeader*; the tag names the
+// concrete type. Factory adopts the IntrusivePtr's reference; accessor hands
+// back a fresh owning IntrusivePtr (one incref, matching the variant get-copy).
+#define X(name, is_fn, as_fn, Type, Tag)                                       \
+  Value Value::name(IntrusivePtr<Type> value) {                                \
+    return make_heap(ValueTag::Tag, std::move(value));                         \
+  }                                                                            \
+  bool Value::is_fn() const { return tag_ == ValueTag::Tag; }                  \
+  IntrusivePtr<Type> Value::as_fn() const {                                    \
+    if (u_.obj == nullptr) {                                                   \
+      return {};                                                               \
+    }                                                                          \
+    Type *p = reinterpret_cast<Type *>(u_.obj);                                \
+    runtime_heap_add_ref(p);                                                   \
+    return IntrusivePtr<Type>(p, typename IntrusivePtr<Type>::Adopt{});        \
+  }
+AMBER_VALUE_HEAP_KINDS(X)
+#undef X
+
+// Tail kinds: boxed behind a refcounted ValueTailBox; the box's ValueTailKind
+// names the concrete shared_ptr type.
+#define X(name, is_fn, as_fn, Type, Tag)                                       \
+  Value Value::name(std::shared_ptr<Type> value) {                             \
+    return make_tail(ValueTailKind::Tag, std::move(value));                    \
+  }                                                                            \
+  bool Value::is_fn() const {                                                  \
+    return tag_ == ValueTag::Tail && u_.tail != nullptr &&                     \
+           u_.tail->kind == ValueTailKind::Tag;                                \
+  }                                                                            \
+  std::shared_ptr<Type> Value::as_fn() const {                                 \
+    return std::static_pointer_cast<Type>(u_.tail->ptr);                       \
+  }
+AMBER_VALUE_TAIL_KINDS(X)
+#undef X
+
+std::uint32_t Value::kind_index() const {
+  if (tag_ == ValueTag::Tail && u_.tail != nullptr) {
+    return 0x100u + static_cast<std::uint32_t>(u_.tail->kind);
+  }
+  return static_cast<std::uint32_t>(tag_);
+}
+
+const std::int64_t *Value::integer_if() const {
+  return tag_ == ValueTag::Int ? &u_.i : nullptr;
+}
+
+#endif // AMBER_VALUE_REPR_TAGGED
 
 Value make_list_value(std::vector<Value> items, bool frozen) {
   return default_runtime_heap().make_list_value(std::move(items), frozen);
@@ -8874,7 +9157,7 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     }
     return numeric_value_as_double(lhs) == numeric_value_as_double(rhs);
   }
-  if (lhs.payload.index() != rhs.payload.index()) {
+  if (lhs.kind_index() != rhs.kind_index()) {
     return false;
   }
   if (lhs.is_null()) {
@@ -11916,8 +12199,7 @@ private:
       *out = frame.int64_regs[reg];
       return true;
     }
-    const std::int64_t *value =
-        std::get_if<std::int64_t>(&frame.regs[reg].payload);
+    const std::int64_t *value = frame.regs[reg].integer_if();
     if (value == nullptr) {
       return false;
     }

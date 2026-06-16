@@ -71,6 +71,29 @@ $(error Unknown MALLOC='$(MALLOC)'; use system, mimalloc, or jemalloc)
 endif
 # -----------------------------------------------------------------------------
 
+# --- Value representation selection ------------------------------------------
+# VALUE_REPR selects the runtime `Value` storage (PLAN Phase 4 value-repr
+# prototype). Flavors:
+#   variant  (default) -- 24-byte std::variant Value, today's behaviour.
+#   tagged             -- 16-byte tagged-union Value (prototype). Immediates and
+#                         the six ObjHeader heap kinds are stored inline; the
+#                         ~15 cold tail types (BigInt/error/task/io/...) are
+#                         boxed behind a refcounted TailBox (+1 alloc per tail
+#                         value, all cold paths). Defines AMBER_VALUE_REPR_TAGGED.
+# A/B a tagged interpreter against the default with:
+#   make build/iamber VALUE_REPR=tagged
+# (do not mix object files across reps -- rebuild from clean or use a fresh
+# BUILD_DIR, since the flag changes sizeof(Value) ABI-wide).
+VALUE_REPR ?= variant
+ifeq ($(VALUE_REPR),variant)
+# default storage; no macro needed
+else ifeq ($(VALUE_REPR),tagged)
+CPPFLAGS += -DAMBER_VALUE_REPR_TAGGED
+else
+$(error Unknown VALUE_REPR='$(VALUE_REPR)'; use variant or tagged)
+endif
+# -----------------------------------------------------------------------------
+
 LEXER_SRCS := frontend/lexer/lexer.cpp frontend/lexer/token.cpp
 AST_SRCS := frontend/ast/expr.cpp
 PARSER_SRCS := frontend/parser/parser.cpp

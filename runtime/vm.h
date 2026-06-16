@@ -90,6 +90,14 @@ public:
       ptr_ = nullptr;
     }
   }
+  // Relinquish ownership of the managed pointer *without* releasing the
+  // reference; the caller adopts the outstanding +1. Used by the tagged-Value
+  // factories to move an IntrusivePtr's reference into the union with no atomic.
+  T *release() noexcept {
+    T *p = ptr_;
+    ptr_ = nullptr;
+    return p;
+  }
   T *get() const noexcept { return ptr_; }
   T *operator->() const noexcept { return ptr_; }
   T &operator*() const noexcept { return *ptr_; }
@@ -309,6 +317,53 @@ struct NumericPolicy {
 std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
                                                 const std::string &overflow);
 
+// The runtime `Value` has two interchangeable storage representations selected
+// at build time by the VALUE_REPR Makefile flag (PLAN Phase 4 value-repr
+// prototype). Both expose an identical public API -- the factories, `is_X()`
+// predicates, and `as_X()` accessors below -- so the ~30k-line VM is
+// source-compatible across either; only the storage and the method bodies (in
+// vm.cpp) differ. The three call sites that previously read the variant
+// directly now go through `kind_index()` / `integer_if()`, which both reps
+// implement.
+//
+// X-macros listing every (factory, is_fn, as_fn, ElementType, TagEnumerator)
+// tuple so the tagged rep can generate its factory/predicate/accessor bodies in
+// lockstep (vm.cpp). Heap kinds (the six ObjHeader-bearing types, stored inline)
+// take a ValueTag enumerator; tail kinds (the ~15 cold shared_ptr types, boxed)
+// take a ValueTailKind enumerator.
+#define AMBER_VALUE_HEAP_KINDS(X)                                              \
+  X(closure, is_closure, as_closure, ClosureValue, Closure)                   \
+  X(instance, is_instance_object, as_instance_object, InstanceValue, Instance)\
+  X(list, is_list, as_list, ListValue, List)                                  \
+  X(tuple, is_tuple, as_tuple, TupleValue, Tuple)                             \
+  X(set, is_set, as_set, SetValue, Set)                                       \
+  X(map, is_map, as_map, MapValue, Map)
+
+#define AMBER_VALUE_TAIL_KINDS(X)                                             \
+  X(error_instance, is_error_instance, as_error_instance, ErrorInstanceValue, \
+    ErrorInstance)                                                            \
+  X(big_int, is_big_int, as_big_int, BigIntValue, BigInt)                     \
+  X(task_module, is_task_module, as_task_module, RuntimeTaskModule,           \
+    TaskModule)                                                               \
+  X(task_handle, is_task_handle, as_task_handle, RuntimeTaskHandle,           \
+    TaskHandle)                                                               \
+  X(channel, is_channel, as_channel, RuntimeChannel, Channel)                 \
+  X(mutex, is_mutex, as_mutex, RuntimeMutex, Mutex)                           \
+  X(atomic, is_atomic, as_atomic, RuntimeAtomic, Atomic)                      \
+  X(barrier, is_barrier, as_barrier, RuntimeBarrier, Barrier)                 \
+  X(flow_module, is_flow_module, as_flow_module, RuntimeFlowModule, Flow)     \
+  X(threaded_collection, is_threaded_collection, as_threaded_collection,     \
+    RuntimeThreadedCollection, ThreadedCollection)                           \
+  X(text_writer, is_text_writer, as_text_writer, RuntimeTextWriter,          \
+    TextWriter)                                                              \
+  X(logger, is_logger, as_logger, RuntimeLogger, Logger)                      \
+  X(io_value, is_io_value, as_io_value, RuntimeIoValue, Io)                   \
+  X(watch_cell, is_watch_cell, as_watch_cell, RuntimeWatchCell, WatchCell)    \
+  X(watch_handle, is_watch_handle, as_watch_handle, RuntimeWatchHandle,       \
+    WatchHandle)
+
+#ifndef AMBER_VALUE_REPR_TAGGED
+// ---- Variant representation (default, 24 bytes) ---------------------------
 struct Value {
   using Payload = std::variant<
       std::monostate, bool, std::int64_t, double, SymbolValue, StringValue,
@@ -338,6 +393,10 @@ struct Value {
   static Value class_object(std::uint32_t class_index);
   static Value closure(IntrusivePtr<ClosureValue> value);
   static Value instance(IntrusivePtr<InstanceValue> value);
+  static Value list(IntrusivePtr<ListValue> value);
+  static Value tuple(IntrusivePtr<TupleValue> value);
+  static Value set(IntrusivePtr<SetValue> value);
+  static Value map(IntrusivePtr<MapValue> value);
   static Value native_type(RuntimeNativeTypeKind kind);
   static Value native_function(RuntimeNativeFunctionKind kind);
   static Value native_error_class(std::uint16_t error_id);
@@ -420,7 +479,200 @@ struct Value {
   std::shared_ptr<RuntimeIoValue> as_io_value() const;
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
+
+  // Representation-agnostic helpers (see the doc comment above): a distinct
+  // value per active alternative, and a pointer to the inline integer payload
+  // (or nullptr). Replace the three former direct-variant call sites.
+  std::uint32_t kind_index() const;
+  const std::int64_t *integer_if() const;
 };
+static_assert(sizeof(Value) == 24,
+              "variant Value is expected to be 24 bytes on this platform");
+#else
+// ---- Tagged representation (PLAN Phase 4 prototype, 16 bytes) -------------
+// Immediates and the six ObjHeader heap kinds live inline in an 8-byte union;
+// the ~15 cold tail kinds are boxed behind a refcounted ValueTailBox (one extra
+// allocation + indirection per tail value, all cold paths -- BigInt/error/io/
+// task/sync). Copy/move/destroy manage the intrusive refcount of the heap
+// kinds and the box refcount manually.
+enum class ValueTag : std::uint8_t {
+  Null,
+  Bool,
+  Int,
+  Float,
+  Symbol,
+  String,
+  ClassObject,
+  NativeType,
+  NativeFunction,
+  NativeErrorClass,
+  // ObjHeader-bearing heap kinds; the union holds an ObjHeader* and the tag
+  // names the concrete type. MUST stay contiguous Closure..Map (range-checked).
+  Closure,
+  Instance,
+  List,
+  Tuple,
+  Set,
+  Map,
+  // Boxed tail kinds; the union holds a ValueTailBox* whose ValueTailKind names
+  // the concrete shared_ptr type.
+  Tail,
+};
+
+enum class ValueTailKind : std::uint8_t {
+  ErrorInstance,
+  BigInt,
+  TaskModule,
+  TaskHandle,
+  Channel,
+  Mutex,
+  Atomic,
+  Barrier,
+  Flow,
+  ThreadedCollection,
+  TextWriter,
+  Logger,
+  Io,
+  WatchCell,
+  WatchHandle,
+};
+
+struct ValueTailBox; // refcounted tail box; defined in vm.cpp
+
+struct Value {
+  Value() noexcept : tag_(ValueTag::Null) { u_.i = 0; }
+  Value(const Value &other) noexcept;
+  Value(Value &&other) noexcept;
+  Value &operator=(const Value &other) noexcept;
+  Value &operator=(Value &&other) noexcept;
+  ~Value();
+
+  static Value null();
+  static Value boolean(bool value);
+  static Value integer(std::int64_t value);
+  static Value floating(double value);
+  static Value symbol(std::uint32_t symbol_id);
+  static Value string(std::uint32_t string_id);
+  static Value class_object(std::uint32_t class_index);
+  static Value closure(IntrusivePtr<ClosureValue> value);
+  static Value instance(IntrusivePtr<InstanceValue> value);
+  static Value list(IntrusivePtr<ListValue> value);
+  static Value tuple(IntrusivePtr<TupleValue> value);
+  static Value set(IntrusivePtr<SetValue> value);
+  static Value map(IntrusivePtr<MapValue> value);
+  static Value native_type(RuntimeNativeTypeKind kind);
+  static Value native_function(RuntimeNativeFunctionKind kind);
+  static Value native_error_class(std::uint16_t error_id);
+  static Value error_instance(std::shared_ptr<ErrorInstanceValue> value);
+  static Value big_int(std::shared_ptr<BigIntValue> value);
+  static Value task_module(std::shared_ptr<RuntimeTaskModule> value);
+  static Value task_handle(std::shared_ptr<RuntimeTaskHandle> value);
+  static Value channel(std::shared_ptr<RuntimeChannel> value);
+  static Value mutex(std::shared_ptr<RuntimeMutex> value);
+  static Value atomic(std::shared_ptr<RuntimeAtomic> value);
+  static Value barrier(std::shared_ptr<RuntimeBarrier> value);
+  static Value flow_module(std::shared_ptr<RuntimeFlowModule> value);
+  static Value
+  threaded_collection(std::shared_ptr<RuntimeThreadedCollection> value);
+  static Value text_writer(std::shared_ptr<RuntimeTextWriter> value);
+  static Value logger(std::shared_ptr<RuntimeLogger> value);
+  static Value io_value(std::shared_ptr<RuntimeIoValue> value);
+  static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
+  static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
+
+  bool is_null() const;
+  bool is_bool() const;
+  bool is_integer() const;
+  bool is_float() const;
+  bool is_symbol() const;
+  bool is_string() const;
+  bool is_class_object() const;
+  bool is_closure() const;
+  bool is_instance_object() const;
+  bool is_list() const;
+  bool is_tuple() const;
+  bool is_set() const;
+  bool is_map() const;
+  bool is_native_type() const;
+  bool is_native_function() const;
+  bool is_native_error_class() const;
+  bool is_error_instance() const;
+  bool is_big_int() const;
+  bool is_task_module() const;
+  bool is_task_handle() const;
+  bool is_channel() const;
+  bool is_mutex() const;
+  bool is_atomic() const;
+  bool is_barrier() const;
+  bool is_flow_module() const;
+  bool is_threaded_collection() const;
+  bool is_text_writer() const;
+  bool is_logger() const;
+  bool is_io_value() const;
+  bool is_watch_cell() const;
+  bool is_watch_handle() const;
+
+  bool as_bool() const;
+  std::int64_t as_integer() const;
+  double as_float() const;
+  SymbolValue as_symbol() const;
+  StringValue as_string() const;
+  ClassObjectValue as_class_object() const;
+  IntrusivePtr<ClosureValue> as_closure() const;
+  IntrusivePtr<InstanceValue> as_instance_object() const;
+  IntrusivePtr<ListValue> as_list() const;
+  IntrusivePtr<TupleValue> as_tuple() const;
+  IntrusivePtr<SetValue> as_set() const;
+  IntrusivePtr<MapValue> as_map() const;
+  NativeTypeValue as_native_type() const;
+  NativeFunctionValue as_native_function() const;
+  NativeErrorClassValue as_native_error_class() const;
+  std::shared_ptr<ErrorInstanceValue> as_error_instance() const;
+  std::shared_ptr<BigIntValue> as_big_int() const;
+  std::shared_ptr<RuntimeTaskModule> as_task_module() const;
+  std::shared_ptr<RuntimeTaskHandle> as_task_handle() const;
+  std::shared_ptr<RuntimeChannel> as_channel() const;
+  std::shared_ptr<RuntimeMutex> as_mutex() const;
+  std::shared_ptr<RuntimeAtomic> as_atomic() const;
+  std::shared_ptr<RuntimeBarrier> as_barrier() const;
+  std::shared_ptr<RuntimeFlowModule> as_flow_module() const;
+  std::shared_ptr<RuntimeThreadedCollection> as_threaded_collection() const;
+  std::shared_ptr<RuntimeTextWriter> as_text_writer() const;
+  std::shared_ptr<RuntimeLogger> as_logger() const;
+  std::shared_ptr<RuntimeIoValue> as_io_value() const;
+  std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
+  std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
+
+  std::uint32_t kind_index() const;
+  const std::int64_t *integer_if() const;
+
+private:
+  union Storage {
+    bool b;
+    std::int64_t i;
+    double d;
+    std::uint32_t u32; // symbol_id / string_id / class_index
+    std::uint16_t u16; // native error_id
+    RuntimeNativeTypeKind ntype;
+    RuntimeNativeFunctionKind nfn;
+    ObjHeader *obj;       // Closure..Map (points at the embedded header)
+    ValueTailBox *tail;   // Tail
+  };
+
+  ValueTag tag_;
+  Storage u_;
+
+  // Build a boxed tail Value (one heap allocation for the ValueTailBox).
+  static Value make_tail(ValueTailKind kind, std::shared_ptr<void> ptr);
+  // Build an inline heap-kind Value, transferring `value`'s +1 reference.
+  template <class T>
+  static Value make_heap(ValueTag tag, IntrusivePtr<T> value);
+
+  static void retain_payload(ValueTag tag, const Storage &storage) noexcept;
+  static void release_payload(ValueTag tag, Storage &storage) noexcept;
+};
+static_assert(sizeof(Value) <= 16, "tagged Value must fit in 16 bytes");
+#endif // AMBER_VALUE_REPR_TAGGED
 
 struct RuntimeTextWriteResult {
   bool ok = true;

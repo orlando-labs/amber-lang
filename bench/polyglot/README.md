@@ -674,3 +674,74 @@ there, so the path is a no-op). Correct-by-construction (it only drains more
 often; nesting is safe — `RuntimeWorkerScope` is thread-local save/restore);
 validated by the full suite including the cross-strand `stdlib_task_tests`. A
 dedicated concurrent bench to quantify the queue-depth reduction is a follow-up.
+
+## Phase 4: value-representation prototype A/B (2026-06-16)
+
+PLAN Phase 4 ("value-representation prototype"): replace the 28-alternative
+`std::variant` `Value` (24 B) with a compact tagged union (16 B), behind a
+build flag, and A/B it against the variant baseline before committing to a full
+migration. Both representations are now selectable with the `VALUE_REPR` Makefile
+flag (`variant` default, `tagged` defines `-DAMBER_VALUE_REPR_TAGGED`), mirroring
+`MALLOC=`.
+
+Design (tagged): a 1-byte `ValueTag` + an 8-byte union (`static_assert(sizeof ==
+16)`). Immediates (null/bool/int/float/symbol-id/string-id/class-id/native-*)
+and the six `ObjHeader` heap kinds (closure/instance/list/tuple/set/map, stored
+as the inline header pointer) live in the union; the ~15 cold tail kinds
+(BigInt/error/task/channel/io/...) are boxed behind a refcounted `ValueTailBox`
+(one extra allocation + indirection per tail value, all cold paths). Copy/move/
+destroy manage the intrusive `ObjHeader` refcount and the box refcount manually;
+heap-kind release recovers the concrete type from `ObjHeader::kind` and reuses
+the existing typed `runtime_heap_release` (all RuntimeHeap bookkeeping intact).
+The `Value::` public API (factories, `is_X`/`as_X`) is byte-for-byte identical
+across reps; only storage + method bodies differ. The three former
+direct-variant call sites now go through `kind_index()` / `integer_if()`. The
+native lane propagates the host amberc's rep into the runtime-archive compile
+flags (hashed into the archive cache key), so the native backend matches.
+
+The int sidecar (`int64_regs`) is **kept** for this measurement, so the numbers
+below are the pure representation delta (smaller copies + cheaper dispatch),
+*not* the sidecar-removal win — under `tagged`, integers are inline so the
+sidecar becomes redundant; removing it is the next lever (it touches many opcode
+paths and is left as a follow-up).
+
+A/B, best-of-8 direct `iamber --eval-file`, interleaved reps, Darwin arm64:
+
+```text
+workload          variant     tagged     delta
+----------------------------------------------
+arithmetic         0.1515     0.1481     -2.3%
+sha-digest         0.0719     0.0702     -2.3%
+calls-collec       0.0109     0.0106     -2.3%
+```
+
+Heap churn (`bench/heap/churn.am`, system allocator, `AMBER_HEAP_STATS=1`):
+
+```text
+metric              variant      tagged      delta
+--------------------------------------------------
+peak RSS            97.76 MB     88.88 MB    -9.1%
+end RSS             92.98 MB     85.70 MB    -7.8%
+live_object_bytes      1344         1288     smaller shells
+allocations        2,400,013    2,400,013   identical
+best time             1.827s       1.672s    -8.5%
+```
+
+Correctness (both reps): `ambertest run corpus` 120/120, `backend-equivalence`
+61/61 byte-identical, and the Value-heavy C++ suites (`vm_tests`,
+`stdlib_collections_tests`, `stdlib_task_tests`) green. The tagged
+`backend-equivalence` runs the VM lane *and* the native lane under the tagged
+rep (both byte-identical), and the tail kinds are exercised by the task suite
+(channel/mutex/atomic/barrier) and BigInt/error paths.
+
+**Verdict — clear win, no regressions: proceed to the full migration.** A
+uniform ~2.3% interpreter speedup *even with the sidecar still shielding the hot
+integer path*, ~8.5% faster + ~9% lower peak RSS on collection-heavy churn, a
+33% smaller `Value` (24→16 B, so every register file / list / tuple / map / ivar
+vector is smaller and more cache-friendly), and zero correctness regressions
+across corpus + backend-equivalence + unit suites. The gate in PLAN §1.6 is met.
+Next levers (follow-ups), in order: (1) remove the now-redundant int sidecar
+under `tagged` and re-measure arithmetic; (2) make `tagged` the default and
+delete the variant branch once it has soaked; (3) the `heap_header_from_value`
+fast path can become O(1) under `tagged` (return the inline `obj` pointer
+instead of the `is_X` cascade).
