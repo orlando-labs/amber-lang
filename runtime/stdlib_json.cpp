@@ -1,21 +1,25 @@
 // Json — JSON parse/generate stdlib library on the Layer 0 substrate
 // (DESIGN-stdlib-next-libs-order-2026-06-15 §4.1, DESIGN-stdlib-json-api-2026-06-16).
 //
-// v1 surface implemented here: `Json.parse(text[, strict: Bool])`,
-// `Json.generate(value)`, `Json.pretty_generate(value[, indent: Int])`. Streaming
-// (`stream_parse`) and file I/O (`load_from_file`/`save_to_file`) land in later
-// increments. Pure compute against RFC 8259: correct Int-vs-Float typing, string
-// escapes, and UTF-8 (incl. `\u` surrogate pairs). Malformed input faults
-// `JsonParseError`; non-representable values fault `JsonGenerateError`.
+// v1 surface implemented here: `Json.parse`, `Json.generate`,
+// `Json.pretty_generate`, `Json.stream_parse`, `Json.stream_parse_file`,
+// `Json.load_from_file`, `Json.save_to_file`, and `Json.stop`. Pure compute
+// against RFC 8259: correct Int-vs-Float typing, string escapes, and UTF-8
+// (incl. `\u` surrogate pairs). Malformed input faults `JsonParseError`;
+// non-representable values fault `JsonGenerateError`.
 
 #include "runtime/stdlib_registry.h"
 
 #include <cmath>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -24,6 +28,8 @@ namespace amber::runtime {
 namespace {
 
 constexpr int kMaxDepth = 512;
+
+enum class StreamDecision { Continue, Stop, Fault };
 
 // ---------------------------------------------------------------------------
 // Generator
@@ -219,11 +225,15 @@ struct Generator {
 // ---------------------------------------------------------------------------
 
 struct Parser {
-  Parser(NativeStdlibCall &call_in, const std::string &src_in)
-      : call(call_in), src(src_in) {}
+  Parser(NativeStdlibCall &call_in, std::string_view src_in,
+         std::size_t line_base_in = 0, std::size_t offset_base_in = 0)
+      : call(call_in), src(src_in), line_base(line_base_in),
+        offset_base(offset_base_in) {}
 
   NativeStdlibCall &call;
-  const std::string &src;
+  std::string_view src;
+  std::size_t line_base = 0;
+  std::size_t offset_base = 0;
   bool strict_maps = false;
   std::size_t pos = 0;
   bool faulted = false;
@@ -239,9 +249,10 @@ struct Parser {
         ++col;
       }
     }
-    call.fault("JsonParseError", message + " at line " + std::to_string(line) +
-                                     ":" + std::to_string(col) + " (offset " +
-                                     std::to_string(pos) + ")");
+    call.fault("JsonParseError",
+               message + " at line " + std::to_string(line_base + line) +
+                   ":" + std::to_string(col) + " (offset " +
+                   std::to_string(offset_base + pos) + ")");
     faulted = true;
     return false;
   }
@@ -327,13 +338,18 @@ struct Parser {
   // Parses a JSON string body (cursor at the opening quote) into `out`.
   bool parse_string(std::string *out) {
     ++pos; // opening quote
+    std::size_t chunk_start = pos;
     while (pos < src.size()) {
       const unsigned char c = static_cast<unsigned char>(src[pos]);
       if (c == '"') {
+        out->append(src.data() + static_cast<std::ptrdiff_t>(chunk_start),
+                    pos - chunk_start);
         ++pos;
         return true;
       }
       if (c == '\\') {
+        out->append(src.data() + static_cast<std::ptrdiff_t>(chunk_start),
+                    pos - chunk_start);
         ++pos;
         if (pos >= src.size()) {
           return fail("unterminated escape");
@@ -395,12 +411,12 @@ struct Parser {
           return fail("invalid escape");
         }
         ++pos;
+        chunk_start = pos;
         continue;
       }
       if (c < 0x20) {
         return fail("unescaped control character in string");
       }
-      out->push_back(static_cast<char>(c));
       ++pos;
     }
     return fail("unterminated string");
@@ -471,16 +487,36 @@ struct Parser {
         ++pos;
       }
     }
-    const std::string token = src.substr(start, pos - start);
     if (!is_float) {
-      errno = 0;
-      char *end = nullptr;
-      const long long parsed = std::strtoll(token.c_str(), &end, 10);
-      if (errno == 0 && end == token.c_str() + token.size()) {
-        return Value::integer(static_cast<std::int64_t>(parsed));
+      const bool negative = src[start] == '-';
+      const std::size_t digits_begin = negative ? start + 1U : start;
+      constexpr std::uint64_t kInt64Max =
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+      const std::uint64_t limit = negative ? kInt64Max + 1U : kInt64Max;
+      std::uint64_t magnitude = 0;
+      bool overflow = false;
+      for (std::size_t i = digits_begin; i < pos; ++i) {
+        const std::uint64_t digit =
+            static_cast<std::uint64_t>(src[i] - '0');
+        if (magnitude > (limit - digit) / 10U) {
+          overflow = true;
+          break;
+        }
+        magnitude = magnitude * 10U + digit;
+      }
+      if (!overflow) {
+        if (negative) {
+          if (magnitude == limit) {
+            return Value::integer(std::numeric_limits<std::int64_t>::min());
+          }
+          return Value::integer(
+              -static_cast<std::int64_t>(magnitude));
+        }
+        return Value::integer(static_cast<std::int64_t>(magnitude));
       }
       // Out-of-i64-range integer: fall back to Float (lossy) per design D4.
     }
+    const std::string token(src.substr(start, pos - start));
     return Value::floating(std::strtod(token.c_str(), nullptr));
   }
 
@@ -564,6 +600,144 @@ struct Parser {
     }
   }
 
+  using StreamCallback = std::function<StreamDecision(const Value &)>;
+
+  StreamDecision parse_stream_value(int depth, int target_depth,
+                                    const StreamCallback &emit) {
+    if (depth > kMaxDepth) {
+      (void)fail("JSON nesting is too deep");
+      return StreamDecision::Fault;
+    }
+    skip_ws();
+    if (pos >= src.size()) {
+      (void)fail("unexpected end of input");
+      return StreamDecision::Fault;
+    }
+    if (depth == target_depth) {
+      bool ok = true;
+      const Value value = parse_value(depth, &ok);
+      if (!ok) {
+        return StreamDecision::Fault;
+      }
+      return emit(value);
+    }
+    const char c = src[pos];
+    if (c == '[') {
+      return parse_stream_array(depth, target_depth, emit);
+    }
+    if (c == '{') {
+      return parse_stream_object(depth, target_depth, emit);
+    }
+    bool ok = true;
+    (void)parse_value(depth, &ok);
+    return ok ? StreamDecision::Continue : StreamDecision::Fault;
+  }
+
+  StreamDecision parse_stream_array(int depth, int target_depth,
+                                    const StreamCallback &emit) {
+    ++pos; // '['
+    skip_ws();
+    if (pos < src.size() && src[pos] == ']') {
+      ++pos;
+      return StreamDecision::Continue;
+    }
+    while (true) {
+      const StreamDecision item =
+          parse_stream_value(depth + 1, target_depth, emit);
+      if (item != StreamDecision::Continue) {
+        return item;
+      }
+      skip_ws();
+      if (pos >= src.size()) {
+        (void)fail("unterminated array");
+        return StreamDecision::Fault;
+      }
+      if (src[pos] == ',') {
+        ++pos;
+        continue;
+      }
+      if (src[pos] == ']') {
+        ++pos;
+        return StreamDecision::Continue;
+      }
+      (void)fail("expected ',' or ']' in array");
+      return StreamDecision::Fault;
+    }
+  }
+
+  StreamDecision parse_stream_object(int depth, int target_depth,
+                                     const StreamCallback &emit) {
+    ++pos; // '{'
+    skip_ws();
+    if (pos < src.size() && src[pos] == '}') {
+      ++pos;
+      return StreamDecision::Continue;
+    }
+    while (true) {
+      skip_ws();
+      if (pos >= src.size() || src[pos] != '"') {
+        (void)fail("expected string key in object");
+        return StreamDecision::Fault;
+      }
+      std::string key;
+      if (!parse_string(&key)) {
+        return StreamDecision::Fault;
+      }
+      skip_ws();
+      if (pos >= src.size() || src[pos] != ':') {
+        (void)fail("expected ':' after object key");
+        return StreamDecision::Fault;
+      }
+      ++pos;
+      const StreamDecision value =
+          parse_stream_value(depth + 1, target_depth, emit);
+      if (value != StreamDecision::Continue) {
+        return value;
+      }
+      skip_ws();
+      if (pos >= src.size()) {
+        (void)fail("unterminated object");
+        return StreamDecision::Fault;
+      }
+      if (src[pos] == ',') {
+        ++pos;
+        continue;
+      }
+      if (src[pos] == '}') {
+        ++pos;
+        return StreamDecision::Continue;
+      }
+      (void)fail("expected ',' or '}' in object");
+      return StreamDecision::Fault;
+    }
+  }
+
+  bool parse_stream_document(int target_depth, const StreamCallback &emit,
+                             bool *stopped) {
+    if (target_depth < 0) {
+      return fail("depth must be non-negative");
+    }
+    if (stopped != nullptr) {
+      *stopped = false;
+    }
+    const StreamDecision decision =
+        parse_stream_value(0, target_depth, emit);
+    if (decision == StreamDecision::Fault) {
+      return false;
+    }
+    if (decision == StreamDecision::Stop) {
+      if (stopped != nullptr) {
+        *stopped = true;
+      }
+      return true;
+    }
+    skip_ws();
+    if (pos != src.size()) {
+      return fail("trailing characters after JSON value");
+    }
+    return true;
+  }
+
   // Parse a whole document: a single value with only trailing whitespace.
   bool parse_document(Value *out) {
     bool ok = true;
@@ -584,15 +758,206 @@ struct Parser {
 // Dispatch
 // ---------------------------------------------------------------------------
 
+bool int_keyword(NativeStdlibCall &call, const std::string &name,
+                 int fallback, int *out) {
+  const std::optional<Value> value = call.keyword(name);
+  if (!value.has_value()) {
+    *out = fallback;
+    return true;
+  }
+  if (!value->is_integer()) {
+    call.fault("TypeError", name + " must be Int");
+    return false;
+  }
+  if (value->as_integer() < 0 || value->as_integer() > kMaxDepth) {
+    call.fault("ArgumentError",
+               name + " must be an Int in 0.." + std::to_string(kMaxDepth));
+    return false;
+  }
+  *out = static_cast<int>(value->as_integer());
+  return true;
+}
+
+bool indent_keyword(NativeStdlibCall &call, int *out) {
+  const std::optional<Value> indent = call.keyword("indent");
+  if (!indent.has_value()) {
+    *out = 2;
+    return true;
+  }
+  if (!indent->is_integer() || indent->as_integer() < 0 ||
+      indent->as_integer() > 16) {
+    call.fault("ArgumentError", "indent must be an Int in 0..16");
+    return false;
+  }
+  *out = static_cast<int>(indent->as_integer());
+  return true;
+}
+
+bool parse_map_keyword(NativeStdlibCall &call, bool *strict) {
+  *strict = false;
+  if (!call.bool_keyword("strict", false, strict)) {
+    return false;
+  }
+  const std::optional<Value> map = call.keyword("map");
+  if (!map.has_value()) {
+    return true;
+  }
+  if (!map->is_native_type()) {
+    call.fault("TypeError", "map must be Map or StrictMap");
+    return false;
+  }
+  const RuntimeNativeTypeKind kind = map->as_native_type().kind;
+  if (kind == RuntimeNativeTypeKind::StrictMap) {
+    *strict = true;
+    return true;
+  }
+  if (kind == RuntimeNativeTypeKind::Map) {
+    *strict = false;
+    return true;
+  }
+  call.fault("ArgumentError", "map must be Map or StrictMap");
+  return false;
+}
+
+bool generate_json_text(NativeStdlibCall &call, const Value &value, bool pretty,
+                        int indent_width, std::string *out) {
+  Generator generator{call};
+  generator.pretty = pretty;
+  generator.indent_width = indent_width;
+  if (!generator.emit(value, 0)) {
+    return false;
+  }
+  *out = std::move(generator.out);
+  return true;
+}
+
+bool has_non_ws(const std::string &text, std::size_t begin, std::size_t end) {
+  for (std::size_t i = begin; i < end; ++i) {
+    const char c = text[i];
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool parse_jsonl_values(NativeStdlibCall &call, const std::string &text,
+                        bool strict_maps, std::vector<Value> *values) {
+  const std::string_view view{text};
+  std::size_t line_start = 0;
+  std::size_t line_no = 1;
+  while (line_start <= view.size()) {
+    std::size_t line_end = view.find('\n', line_start);
+    const bool last_line = line_end == std::string::npos;
+    if (last_line) {
+      line_end = view.size();
+    }
+    if (has_non_ws(text, line_start, line_end)) {
+      Parser parser{call, view.substr(line_start, line_end - line_start),
+                    line_no - 1, line_start};
+      parser.strict_maps = strict_maps;
+      Value parsed = Value::null();
+      if (!parser.parse_document(&parsed)) {
+        return false;
+      }
+      values->push_back(parsed);
+    }
+    if (last_line) {
+      break;
+    }
+    line_start = line_end + 1;
+    ++line_no;
+  }
+  return true;
+}
+
+StreamDecision call_stream_block(NativeStdlibCall &call, const Value &value,
+                                 std::int64_t *count) {
+  ++*count;
+  const StdlibBlockResult block = call.call_stream_block(value);
+  if (block.status == StdlibBlockStatus::Returned) {
+    return StreamDecision::Continue;
+  }
+  if (block.status == StdlibBlockStatus::Stopped) {
+    return StreamDecision::Stop;
+  }
+  return StreamDecision::Fault;
+}
+
+bool stream_json_text(NativeStdlibCall &call, const std::string &text,
+                      int depth, std::int64_t *count) {
+  Parser parser{call, text};
+  bool stopped = false;
+  const bool ok = parser.parse_stream_document(
+      depth,
+      [&](const Value &value) {
+        return call_stream_block(call, value, count);
+      },
+      &stopped);
+  (void)stopped;
+  return ok;
+}
+
+bool stream_jsonl_text(NativeStdlibCall &call, const std::string &text,
+                       int depth, std::int64_t *count) {
+  const std::string_view view{text};
+  std::size_t line_start = 0;
+  std::size_t line_no = 1;
+  while (line_start <= view.size()) {
+    std::size_t line_end = view.find('\n', line_start);
+    const bool last_line = line_end == std::string::npos;
+    if (last_line) {
+      line_end = view.size();
+    }
+    if (has_non_ws(text, line_start, line_end)) {
+      Parser parser{call, view.substr(line_start, line_end - line_start),
+                    line_no - 1, line_start};
+      if (depth == 0) {
+        Value parsed = Value::null();
+        if (!parser.parse_document(&parsed)) {
+          return false;
+        }
+        const StreamDecision decision =
+            call_stream_block(call, parsed, count);
+        if (decision == StreamDecision::Fault) {
+          return false;
+        }
+        if (decision == StreamDecision::Stop) {
+          return true;
+        }
+      } else {
+        bool stopped = false;
+        if (!parser.parse_stream_document(
+                depth,
+                [&](const Value &value) {
+                  return call_stream_block(call, value, count);
+                },
+                &stopped)) {
+          return false;
+        }
+        if (stopped) {
+          return true;
+        }
+      }
+    }
+    if (last_line) {
+      break;
+    }
+    line_start = line_end + 1;
+    ++line_no;
+  }
+  return true;
+}
+
 SendStatus json_parse(NativeStdlibCall &call) {
   if (!call.require_no_block() || !call.require_arity(1)) {
     return SendStatus::Faulted;
   }
-  if (!call.reject_unknown_keywords({"strict"})) {
+  if (!call.reject_unknown_keywords({"strict", "map"})) {
     return SendStatus::Faulted;
   }
   bool strict = false;
-  if (!call.bool_keyword("strict", false, &strict)) {
+  if (!parse_map_keyword(call, &strict)) {
     return SendStatus::Faulted;
   }
   const std::optional<std::string> text = call.text_of(call.args[0]);
@@ -621,20 +986,163 @@ SendStatus json_generate(NativeStdlibCall &call, bool pretty) {
   Generator generator{call};
   generator.pretty = pretty;
   if (pretty) {
-    const std::optional<Value> indent = call.keyword("indent");
-    if (indent.has_value()) {
-      if (!indent->is_integer() || indent->as_integer() < 0 ||
-          indent->as_integer() > 16) {
-        return call.fault("ArgumentError", "indent must be an Int in 0..16");
-      }
-      generator.indent_width = static_cast<int>(indent->as_integer());
+    int indent_width = 2;
+    if (!indent_keyword(call, &indent_width)) {
+      return SendStatus::Faulted;
     }
+    generator.indent_width = indent_width;
   }
   if (!generator.emit(call.args[0], 0)) {
     return SendStatus::Faulted;
   }
   *call.out = call.string_value(std::move(generator.out));
   return SendStatus::Matched;
+}
+
+SendStatus json_stream_parse(NativeStdlibCall &call) {
+  if (call.block.is_null()) {
+    return call.fault("TypeError", "Json.stream_parse requires block");
+  }
+  if (!call.require_arity(1) || !call.reject_unknown_keywords({"depth"})) {
+    return SendStatus::Faulted;
+  }
+  int depth = 1;
+  if (!int_keyword(call, "depth", 1, &depth)) {
+    return SendStatus::Faulted;
+  }
+  const std::optional<std::string> text = call.text_of(call.args[0]);
+  if (!text.has_value()) {
+    return call.fault("TypeError", "Json.stream_parse expects a Str");
+  }
+  std::int64_t count = 0;
+  if (!stream_json_text(call, *text, depth, &count)) {
+    return SendStatus::Faulted;
+  }
+  *call.out = Value::integer(count);
+  return SendStatus::Matched;
+}
+
+SendStatus json_stream_parse_file(NativeStdlibCall &call) {
+  if (call.block.is_null()) {
+    return call.fault("TypeError", "Json.stream_parse_file requires block");
+  }
+  if (!call.require_arity(1) ||
+      !call.reject_unknown_keywords({"depth", "jsonl"})) {
+    return SendStatus::Faulted;
+  }
+  bool jsonl = false;
+  if (!call.bool_keyword("jsonl", false, &jsonl)) {
+    return SendStatus::Faulted;
+  }
+  int depth = jsonl ? 0 : 1;
+  if (!int_keyword(call, "depth", depth, &depth)) {
+    return SendStatus::Faulted;
+  }
+  const std::optional<std::string> path = call.text_of(call.args[0]);
+  if (!path.has_value()) {
+    return call.fault("TypeError", "Json.stream_parse_file expects a path Str");
+  }
+  std::string text;
+  if (!call.fs_read_text(*path, &text)) {
+    return SendStatus::Faulted;
+  }
+  std::int64_t count = 0;
+  const bool ok = jsonl ? stream_jsonl_text(call, text, depth, &count)
+                        : stream_json_text(call, text, depth, &count);
+  if (!ok) {
+    return SendStatus::Faulted;
+  }
+  *call.out = Value::integer(count);
+  return SendStatus::Matched;
+}
+
+SendStatus json_load_from_file(NativeStdlibCall &call) {
+  if (!call.require_no_block() || !call.require_arity(1) ||
+      !call.reject_unknown_keywords({"jsonl"})) {
+    return SendStatus::Faulted;
+  }
+  bool jsonl = false;
+  if (!call.bool_keyword("jsonl", false, &jsonl)) {
+    return SendStatus::Faulted;
+  }
+  const std::optional<std::string> path = call.text_of(call.args[0]);
+  if (!path.has_value()) {
+    return call.fault("TypeError", "Json.load_from_file expects a path Str");
+  }
+  std::string text;
+  if (!call.fs_read_text(*path, &text)) {
+    return SendStatus::Faulted;
+  }
+  if (jsonl) {
+    std::vector<Value> values;
+    if (!parse_jsonl_values(call, text, /*strict_maps=*/false, &values)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = call.make_list(std::move(values));
+    return SendStatus::Matched;
+  }
+  Parser parser{call, text};
+  Value parsed = Value::null();
+  if (!parser.parse_document(&parsed)) {
+    return SendStatus::Faulted;
+  }
+  *call.out = parsed;
+  return SendStatus::Matched;
+}
+
+SendStatus json_save_to_file(NativeStdlibCall &call) {
+  if (!call.require_no_block() || !call.require_arity(2) ||
+      !call.reject_unknown_keywords({"pretty", "indent", "jsonl"})) {
+    return SendStatus::Faulted;
+  }
+  const std::optional<std::string> path = call.text_of(call.args[0]);
+  if (!path.has_value()) {
+    return call.fault("TypeError", "Json.save_to_file expects a path Str");
+  }
+  bool pretty = false;
+  bool jsonl = false;
+  int indent_width = 2;
+  if (!call.bool_keyword("pretty", false, &pretty) ||
+      !call.bool_keyword("jsonl", false, &jsonl) ||
+      !indent_keyword(call, &indent_width)) {
+    return SendStatus::Faulted;
+  }
+
+  std::string text;
+  if (jsonl) {
+    if (!call.args[1].is_list() || call.args[1].as_list() == nullptr) {
+      return call.fault("JsonGenerateError",
+                        "jsonl save expects a List value");
+    }
+    const IntrusivePtr<ListValue> list = call.args[1].as_list();
+    for (const Value &item : list->items) {
+      std::string line;
+      if (!generate_json_text(call, item, /*pretty=*/false, 2, &line)) {
+        return SendStatus::Faulted;
+      }
+      text += line;
+      text.push_back('\n');
+    }
+  } else {
+    if (!generate_json_text(call, call.args[1], pretty, indent_width, &text)) {
+      return SendStatus::Faulted;
+    }
+    text.push_back('\n');
+  }
+  if (!call.fs_write_text(*path, text)) {
+    return SendStatus::Faulted;
+  }
+  *call.out = Value::null();
+  return SendStatus::Matched;
+}
+
+SendStatus json_stop(NativeStdlibCall &call) {
+  if (!call.require_arity(0) || !call.require_no_block() ||
+      !call.reject_unknown_keywords({})) {
+    return SendStatus::Faulted;
+  }
+  call.throw_json_stop();
+  return SendStatus::Faulted;
 }
 
 SendStatus json_dispatch(NativeStdlibCall &call) {
@@ -647,6 +1155,21 @@ SendStatus json_dispatch(NativeStdlibCall &call) {
   }
   if (selector == "pretty_generate") {
     return json_generate(call, /*pretty=*/true);
+  }
+  if (selector == "stream_parse") {
+    return json_stream_parse(call);
+  }
+  if (selector == "stream_parse_file") {
+    return json_stream_parse_file(call);
+  }
+  if (selector == "load_from_file") {
+    return json_load_from_file(call);
+  }
+  if (selector == "save_to_file") {
+    return json_save_to_file(call);
+  }
+  if (selector == "stop") {
+    return json_stop(call);
   }
   return SendStatus::NotHandled;
 }

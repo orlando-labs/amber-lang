@@ -7240,6 +7240,12 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Math";
   case RuntimeNativeTypeKind::Json:
     return "Json";
+  case RuntimeNativeTypeKind::Base64:
+    return "Base64";
+  case RuntimeNativeTypeKind::Base64Url:
+    return "Base64Url";
+  case RuntimeNativeTypeKind::Hex:
+    return "Hex";
   case RuntimeNativeTypeKind::Io:
     return "io";
   case RuntimeNativeTypeKind::TextBuffer:
@@ -7268,6 +7274,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Set";
   case RuntimeNativeTypeKind::Map:
     return "Map";
+  case RuntimeNativeTypeKind::StrictMap:
+    return "StrictMap";
   case RuntimeNativeTypeKind::Null:
     return "Null";
   case RuntimeNativeTypeKind::Object:
@@ -9522,6 +9530,35 @@ public:
     }
     return std::nullopt;
   }
+  std::optional<std::string> stdlib_bytes_of(const void *frame,
+                                             const Value &value) override {
+    const Frame &active = *static_cast<const Frame *>(frame);
+    if (!value.is_io_value()) {
+      set_fault(active, "TypeError", "expected Bytes, ByteSlice, or ByteBuffer");
+      return std::nullopt;
+    }
+    const std::shared_ptr<RuntimeIoValue> io_value = value.as_io_value();
+    if (const auto bytes = std::dynamic_pointer_cast<RuntimeBytes>(io_value)) {
+      return bytes->string();
+    }
+    if (const auto slice =
+            std::dynamic_pointer_cast<RuntimeByteSlice>(io_value)) {
+      return slice->bytes()->string();
+    }
+    if (const auto buffer =
+            std::dynamic_pointer_cast<RuntimeByteBuffer>(io_value)) {
+      const RuntimeIoStatus access = buffer->access_status();
+      if (!set_fault_from_io_status(active, access)) {
+        return std::nullopt;
+      }
+      return buffer->bytes();
+    }
+    set_fault(active, "TypeError", "expected Bytes, ByteSlice, or ByteBuffer");
+    return std::nullopt;
+  }
+  Value stdlib_bytes_value_from_bytes(std::string bytes) override {
+    return Value::io_value(std::make_shared<RuntimeBytes>(std::move(bytes)));
+  }
   Value stdlib_make_list(std::vector<Value> items) override {
     return make_list_value(std::move(items));
   }
@@ -9531,12 +9568,39 @@ public:
     map_entries.reserve(entries.size());
     for (auto &[key, val] : entries) {
       // Keys are stored as Str; the ordinary-map wrapper interns a canonical
-      // identity so the result is name-indifferent, while a strict map keeps the
-      // Str keys exact. Entry order is preserved.
-      map_entries.push_back(
-          MapEntry{string_value_from_text(key), std::move(val)});
+      // identity so the result is name-indifferent, while a strict map keeps
+      // the Str keys exact. Do both table lookups from the source key while it
+      // is still available, instead of reconstructing the text from the string
+      // table during map canonicalization.
+      MapEntry entry;
+      if (!strict) {
+        entry.symbol_id = intern_runtime_symbol(key);
+      }
+      entry.key = string_value_from_text(std::move(key));
+      entry.value = std::move(val);
+      map_entries.push_back(std::move(entry));
     }
-    return make_symbol_map_value(std::move(map_entries), false, strict);
+    return state_->heap.make_symbol_map_value(std::move(map_entries), false,
+                                              strict);
+  }
+  StdlibBlockResult stdlib_call_stream_block(const void *frame,
+                                             const Value &block,
+                                             Value value) override {
+    return call_stream_block_to_result(*static_cast<const Frame *>(frame),
+                                       block, std::move(value));
+  }
+  void stdlib_throw_json_stop(const void *frame) override {
+    throw_value(*static_cast<const Frame *>(frame), json_stop_tag_value(),
+                Value::null());
+  }
+  bool stdlib_fs_read_text(const void *frame, const std::string &path,
+                           std::string *out) override {
+    return stdlib_read_text_file(*static_cast<const Frame *>(frame), path, out);
+  }
+  bool stdlib_fs_write_text(const void *frame, const std::string &path,
+                            const std::string &text) override {
+    return stdlib_write_text_file(*static_cast<const Frame *>(frame), path,
+                                  text);
   }
 
   void resolve_numeric_policy() {
@@ -10111,6 +10175,424 @@ private:
       return std::nullopt;
     }
     return std::move(nested.final_value_);
+  }
+
+  FastCallStatus try_evaluate_simple_stream_block(const Frame &caller,
+                                                  ClosureValue &closure,
+                                                  const BcCode &code,
+                                                  const Value &arg,
+                                                  StdlibBlockResult *result) {
+    if (code.kind != CodeKind::Block || !code.handler_table.empty() ||
+        code.reg_count == 0U) {
+      return FastCallStatus::NotHandled;
+    }
+
+    auto selector_for_send = [&](const Instruction &insn)
+        -> std::optional<std::string> {
+      std::uint32_t selector_id = 0;
+      if (!quick_operand_u32(insn, 2, &selector_id) ||
+          selector_id >= module_.symbols.size()) {
+        return std::nullopt;
+      }
+      return module_.symbols[selector_id];
+    };
+
+    for (const Instruction &insn : code.instructions) {
+      switch (insn.opcode) {
+      case Opcode::LoadUpval:
+      case Opcode::LoadK:
+      case Opcode::StoreUpval:
+      case Opcode::CloseUpvalues:
+      case Opcode::Return:
+        break;
+      case Opcode::PBind:
+      case Opcode::PCommit: {
+        std::uint32_t subject = 0;
+        if (!quick_operand_u32(insn, 0, &subject) || subject != 0U) {
+          return FastCallStatus::NotHandled;
+        }
+        break;
+      }
+      case Opcode::Send: {
+        const std::optional<std::string> selector = selector_for_send(insn);
+        if (!selector.has_value() ||
+            (*selector != "[]" && *selector != "+" && *selector != "-" &&
+             *selector != "*")) {
+          return FastCallStatus::NotHandled;
+        }
+        std::uint32_t pos_count = 0;
+        std::uint32_t kw_count = 0;
+        std::int64_t block_reg = -1;
+        if (!quick_operand_u32(insn, 3, &pos_count) || pos_count != 1U ||
+            !quick_operand_u32(insn, 5, &kw_count) || kw_count != 0U ||
+            !quick_operand_i64(insn, 6, &block_reg) ||
+            has_optional_reg(block_reg)) {
+          return FastCallStatus::NotHandled;
+        }
+        break;
+      }
+      default:
+        return FastCallStatus::NotHandled;
+      }
+    }
+
+    struct SimpleRegs {
+      std::vector<Value> regs;
+      std::vector<std::uint8_t> initialized;
+      std::vector<std::int64_t> ints;
+      std::vector<std::uint8_t> int_valid;
+    } locals;
+    locals.regs.assign(code.reg_count, Value::null());
+    locals.initialized.assign(code.reg_count, 0U);
+    locals.ints.assign(code.reg_count, 0);
+    locals.int_valid.assign(code.reg_count, 0U);
+
+    auto write_value = [&](std::uint32_t reg, Value value) -> bool {
+      if (reg >= locals.regs.size()) {
+        set_fault(caller, "VMError", "register out of range");
+        return false;
+      }
+      locals.regs[reg] = std::move(value);
+      locals.initialized[reg] = 1U;
+      if (locals.regs[reg].is_integer()) {
+        locals.ints[reg] = locals.regs[reg].as_integer();
+        locals.int_valid[reg] = 1U;
+      } else {
+        locals.int_valid[reg] = 0U;
+      }
+      return true;
+    };
+
+    auto write_int = [&](std::uint32_t reg, std::int64_t value) -> bool {
+      if (reg >= locals.regs.size()) {
+        set_fault(caller, "VMError", "register out of range");
+        return false;
+      }
+      locals.regs[reg] = Value::null();
+      locals.initialized[reg] = 1U;
+      locals.ints[reg] = value;
+      locals.int_valid[reg] = 1U;
+      return true;
+    };
+
+    auto read_value = [&](std::uint32_t reg, Value *out) -> bool {
+      if (reg >= locals.regs.size()) {
+        set_fault(caller, "VMError", "register out of range");
+        return false;
+      }
+      if (reg >= locals.initialized.size() ||
+          locals.initialized[reg] == 0U) {
+        set_fault(caller, "NameError",
+                  "read of uninitialized local/module cell");
+        return false;
+      }
+      *out = locals.int_valid[reg] != 0U ? Value::integer(locals.ints[reg])
+                                         : locals.regs[reg];
+      return true;
+    };
+
+    auto read_int = [&](std::uint32_t reg, std::int64_t *out) -> bool {
+      if (reg >= locals.regs.size()) {
+        set_fault(caller, "VMError", "register out of range");
+        return false;
+      }
+      if (reg >= locals.initialized.size() ||
+          locals.initialized[reg] == 0U) {
+        set_fault(caller, "NameError",
+                  "read of uninitialized local/module cell");
+        return false;
+      }
+      if (locals.int_valid[reg] != 0U) {
+        *out = locals.ints[reg];
+        return true;
+      }
+      if (!locals.regs[reg].is_integer()) {
+        return false;
+      }
+      *out = locals.regs[reg].as_integer();
+      locals.ints[reg] = *out;
+      locals.int_valid[reg] = 1U;
+      return true;
+    };
+
+    auto lookup_map_symbol = [&](const Value &receiver,
+                                 std::uint32_t symbol_id,
+                                 Value *out) -> FastCallStatus {
+      if (!receiver.is_map()) {
+        return FastCallStatus::NotHandled;
+      }
+      const IntrusivePtr<MapValue> map = receiver.as_map();
+      if (map == nullptr) {
+        set_fault(caller, "TypeError", "map value is null");
+        return FastCallStatus::Faulted;
+      }
+      if (map->strict) {
+        return FastCallStatus::NotHandled;
+      }
+      if (!ensure_lifecycle_access(caller, receiver)) {
+        return FastCallStatus::Faulted;
+      }
+      for (const MapEntry &entry : map->entries) {
+        if (map_key_is_nameable(entry.key) && entry.symbol_id == symbol_id) {
+          *out = entry.value;
+          return FastCallStatus::Matched;
+        }
+      }
+      set_fault(caller, "KeyError", "map key is absent");
+      return FastCallStatus::Faulted;
+    };
+
+    if (!write_value(0, arg)) {
+      return FastCallStatus::Faulted;
+    }
+
+    for (std::size_t pc = 0; pc < code.instructions.size(); ++pc) {
+      const Instruction &insn = code.instructions[pc];
+      switch (insn.opcode) {
+      case Opcode::PBind:
+      case Opcode::PCommit:
+      case Opcode::CloseUpvalues:
+        break;
+      case Opcode::LoadUpval: {
+        std::uint32_t dst = 0;
+        std::uint32_t slot = 0;
+        if (!quick_operand_u32(insn, 0, &dst) ||
+            !quick_operand_u32(insn, 1, &slot) ||
+            slot >= closure.captures.size()) {
+          set_fault(caller, "VMError", "capture slot out of range");
+          return FastCallStatus::Faulted;
+        }
+        if (!write_value(dst, unwrap_watch_value_for_read(
+                                  closure.captures[slot]))) {
+          return FastCallStatus::Faulted;
+        }
+        break;
+      }
+      case Opcode::LoadK: {
+        std::uint32_t dst = 0;
+        std::uint32_t const_id = 0;
+        if (!quick_operand_u32(insn, 0, &dst) ||
+            !quick_operand_u32(insn, 1, &const_id) ||
+            const_id >= module_.const_pool.size()) {
+          set_fault(caller, "VMError", "constant ref out of range");
+          return FastCallStatus::Faulted;
+        }
+        const Constant &constant = module_.const_pool[const_id];
+        if (constant.kind == ConstantKind::Integer) {
+          if (!write_int(dst, constant.int_value)) {
+            return FastCallStatus::Faulted;
+          }
+        } else if (!write_value(dst, load_constant(caller, const_id))) {
+          return FastCallStatus::Faulted;
+        }
+        break;
+      }
+      case Opcode::Send: {
+        std::uint32_t dst = 0;
+        std::uint32_t recv_reg = 0;
+        std::uint32_t arg_reg = 0;
+        if (!quick_operand_u32(insn, 0, &dst) ||
+            !quick_operand_u32(insn, 1, &recv_reg) ||
+            !quick_operand_u32(insn, 4, &arg_reg)) {
+          set_fault(caller, "VMError", "missing operand");
+          return FastCallStatus::Faulted;
+        }
+        const std::optional<std::string> selector = selector_for_send(insn);
+        if (!selector.has_value()) {
+          set_fault(caller, "VMError", "selector symbol ref is out of range");
+          return FastCallStatus::Faulted;
+        }
+        if (*selector == "[]") {
+          Value receiver = Value::null();
+          Value key = Value::null();
+          if (!read_value(recv_reg, &receiver) || !read_value(arg_reg, &key)) {
+            return FastCallStatus::Faulted;
+          }
+          if (key.is_symbol()) {
+            Value found = Value::null();
+            const FastCallStatus status =
+                lookup_map_symbol(receiver, key.as_symbol().symbol_id, &found);
+            if (status != FastCallStatus::Matched) {
+              return status;
+            }
+            if (!write_value(dst, std::move(found))) {
+              return FastCallStatus::Faulted;
+            }
+            break;
+          }
+          std::int64_t index = 0;
+          if (!key.is_integer()) {
+            return FastCallStatus::NotHandled;
+          }
+          index = key.as_integer();
+          const std::vector<Value> *items =
+              sequence_items_view(caller, receiver);
+          if (fault_.has_value()) {
+            return FastCallStatus::Faulted;
+          }
+          if (items == nullptr) {
+            return FastCallStatus::NotHandled;
+          }
+          const std::optional<std::size_t> normalized =
+              normalize_sequence_index(caller, index, items->size(),
+                                       "collection");
+          if (!normalized.has_value()) {
+            return FastCallStatus::Faulted;
+          }
+          if (!write_value(dst, (*items)[*normalized])) {
+            return FastCallStatus::Faulted;
+          }
+          break;
+        }
+
+        std::int64_t lhs = 0;
+        std::int64_t rhs = 0;
+        if (!read_int(recv_reg, &lhs)) {
+          return fault_.has_value() ? FastCallStatus::Faulted
+                                    : FastCallStatus::NotHandled;
+        }
+        if (!read_int(arg_reg, &rhs)) {
+          return fault_.has_value() ? FastCallStatus::Faulted
+                                    : FastCallStatus::NotHandled;
+        }
+        std::int64_t computed = 0;
+        if (*selector == "+") {
+          if (!numeric_add_int64(lhs, rhs, numeric_policy_, &computed)) {
+            raise_runtime_error(caller, "OverflowError",
+                                "Int overflow in `+`");
+            return FastCallStatus::Faulted;
+          }
+        } else if (*selector == "-") {
+          if (!numeric_sub_int64(lhs, rhs, numeric_policy_, &computed)) {
+            raise_runtime_error(caller, "OverflowError",
+                                "Int overflow in `-`");
+            return FastCallStatus::Faulted;
+          }
+        } else if (*selector == "*") {
+          if (!numeric_mul_int64(lhs, rhs, numeric_policy_, &computed)) {
+            raise_runtime_error(caller, "OverflowError",
+                                "Int overflow in `*`");
+            return FastCallStatus::Faulted;
+          }
+        } else {
+          return FastCallStatus::NotHandled;
+        }
+        if (!write_int(dst, computed)) {
+          return FastCallStatus::Faulted;
+        }
+        break;
+      }
+      case Opcode::StoreUpval: {
+        std::uint32_t slot = 0;
+        std::uint32_t src = 0;
+        if (!quick_operand_u32(insn, 0, &slot) ||
+            !quick_operand_u32(insn, 1, &src) ||
+            slot >= closure.captures.size()) {
+          set_fault(caller, "VMError", "capture slot out of range");
+          return FastCallStatus::Faulted;
+        }
+        Value value = Value::null();
+        if (!read_value(src, &value)) {
+          return FastCallStatus::Faulted;
+        }
+        if (closure.captures[slot].is_watch_cell()) {
+          const std::shared_ptr<RuntimeWatchCell> cell =
+              closure.captures[slot].as_watch_cell();
+          if (cell != nullptr) {
+            const RuntimeWatchWriteResult write = cell->write(value);
+            record_watch_write(cell, write);
+          }
+        } else {
+          closure.captures[slot] = value;
+        }
+        break;
+      }
+      case Opcode::Return: {
+        std::uint32_t src = 0;
+        if (!quick_operand_u32(insn, 0, &src)) {
+          set_fault(caller, "VMError", "missing operand");
+          return FastCallStatus::Faulted;
+        }
+        if (!read_value(src, &result->value)) {
+          return FastCallStatus::Faulted;
+        }
+        result->status = StdlibBlockStatus::Returned;
+        return FastCallStatus::Matched;
+      }
+      default:
+        return FastCallStatus::NotHandled;
+      }
+    }
+
+    return FastCallStatus::NotHandled;
+  }
+
+  Value json_stop_tag_value() {
+    return Value::symbol(intern_runtime_symbol("\x1f" "amber.Json.stop"));
+  }
+
+  StdlibBlockResult call_stream_block_to_result(const Frame &frame,
+                                                const Value &block,
+                                                Value value) {
+    StdlibBlockResult result;
+    if (block.is_null()) {
+      set_fault(frame, "TypeError", "Json.stream_parse requires block");
+      return result;
+    }
+    if (!block.is_closure()) {
+      set_fault(frame, "TypeError", "Json.stream_parse block must be closure");
+      return result;
+    }
+    if (!ensure_lifecycle_access(frame, block)) {
+      return result;
+    }
+    const IntrusivePtr<ClosureValue> closure = block.as_closure();
+    if (closure == nullptr) {
+      set_fault(frame, "TypeError", "closure value is null");
+      return result;
+    }
+    const BcCode *code = find_code(module_, closure->code_id);
+    if (code == nullptr) {
+      set_fault(frame, "VMError", "closure code id is unknown");
+      return result;
+    }
+
+    const FastCallStatus fast_status =
+        try_evaluate_simple_stream_block(frame, *closure, *code, value,
+                                         &result);
+    if (fast_status == FastCallStatus::Matched ||
+        fast_status == FastCallStatus::Faulted) {
+      return result;
+    }
+
+    BlockVmLease lease = acquire_block_vm();
+    Vm &nested = *lease.vm;
+    nested.push_frame_from_args(*code, &value, 1, closure->captures,
+                                closure->self, Value::null(), std::nullopt);
+    while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
+      nested.step();
+    }
+    merge_runtime_names_from(nested);
+    if (nested.escaped_throw_.has_value()) {
+      const PendingThrow escaped = *nested.escaped_throw_;
+      if (value_equals(escaped.tag, json_stop_tag_value())) {
+        result.status = StdlibBlockStatus::Stopped;
+        return result;
+      }
+      throw_value(frame, escaped.tag, escaped.value);
+      return result;
+    }
+    if (nested.escaped_exception_.has_value()) {
+      raise_value(frame, *nested.escaped_exception_);
+      return result;
+    }
+    if (nested.fault_.has_value()) {
+      fault_ = nested.fault_;
+      return result;
+    }
+    result.status = StdlibBlockStatus::Returned;
+    result.value = std::move(nested.final_value_);
+    return result;
   }
 
   // Builtin blocks execute on a pooled child Vm instead of constructing a
@@ -13082,6 +13564,9 @@ private:
     if (path == "Map") {
       return Value::native_type(RuntimeNativeTypeKind::Map);
     }
+    if (path == "StrictMap" || path == "StrictHashMap") {
+      return Value::native_type(RuntimeNativeTypeKind::StrictMap);
+    }
     if (path == "Range") {
       return Value::native_type(RuntimeNativeTypeKind::Range);
     }
@@ -15090,6 +15575,9 @@ private:
       return value.is_set();
     case RuntimeNativeTypeKind::Map:
       return value.is_map();
+    case RuntimeNativeTypeKind::StrictMap:
+      return value.is_map() && value.as_map() != nullptr &&
+             value.as_map()->strict;
     case RuntimeNativeTypeKind::Null:
       return value.is_null();
     case RuntimeNativeTypeKind::Object:
@@ -19234,6 +19722,59 @@ private:
                       const std::string &resource) const {
     record_io_event("io.wait",
                     {{"operation", operation}, {"resource", resource}});
+  }
+
+  bool stdlib_read_text_file(const Frame &frame, const std::string &path,
+                             std::string *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "fs read output is null");
+      return false;
+    }
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_read", "fs.read", path,
+                         !provider_active)) {
+      return false;
+    }
+    record_io_wait("fs.read", path);
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          world_options_->io_provider->fs_read_bytes(path, std::nullopt);
+      if (!set_fault_from_provider_status(frame, status,
+                                          "Json.load_from_file")) {
+        return false;
+      }
+      *out = std::move(status.bytes);
+      return true;
+    }
+    std::shared_ptr<RuntimeBytes> bytes;
+    RuntimeIoStatus status =
+        runtime_fs_read_bytes(RuntimePath(path), std::nullopt, &bytes);
+    if (!set_fault_from_io_status(frame, status)) {
+      return false;
+    }
+    *out = bytes == nullptr ? std::string{} : bytes->string();
+    return true;
+  }
+
+  bool stdlib_write_text_file(const Frame &frame, const std::string &path,
+                              const std::string &text) {
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_write", "fs.write", path,
+                         !provider_active)) {
+      return false;
+    }
+    record_io_wait("fs.write", path);
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          world_options_->io_provider->fs_write_bytes(
+              path, text, /*create=*/true, /*truncate=*/true);
+      return set_fault_from_provider_status(frame, status,
+                                            "Json.save_to_file");
+    }
+    RuntimeIoStatus status =
+        runtime_fs_write_bytes(RuntimePath(path), text, /*create=*/true,
+                               /*truncate=*/true);
+    return set_fault_from_io_status(frame, status);
   }
 
   template <typename T>
@@ -23987,6 +24528,16 @@ private:
     return SendStatus::NotHandled;
   }
 
+  SendStatus apply_json_generate_value_method(const Frame &frame,
+                                              const Value &receiver,
+                                              Value *out) {
+    const std::vector<Value> json_args{receiver};
+    const std::vector<std::pair<std::uint32_t, Value>> no_keywords;
+    return try_apply_native_stdlib_send(
+        frame, Value::native_type(RuntimeNativeTypeKind::Json), "generate",
+        json_args, Value::null(), no_keywords, out);
+  }
+
   SendStatus try_apply_scalar_send(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
@@ -24003,6 +24554,22 @@ private:
         *out = std::move(native_result);
       }
       return native_status;
+    }
+    if (selector == "to_json" && !receiver.is_instance_object() &&
+        !receiver.is_class_object()) {
+      if (args.size() != 0U) {
+        set_fault(frame, "TypeError", "to_json accepts no arguments");
+        return SendStatus::Faulted;
+      }
+      if (!kw_args.empty()) {
+        set_fault(frame, "TypeError", "to_json does not accept keywords");
+        return SendStatus::Faulted;
+      }
+      if (!block.is_null()) {
+        set_fault(frame, "TypeError", "to_json does not accept a block");
+        return SendStatus::Faulted;
+      }
+      return apply_json_generate_value_method(frame, receiver, out);
     }
 
     auto require_arity = [&](std::size_t expected) -> bool {
@@ -27314,8 +27881,7 @@ private:
                                           std::uint32_t arg_reg,
                                           std::int64_t pos_count) {
     std::int64_t integer_arg = 0;
-    if (opcode == QuickOpcode::SendSeqIndex ||
-        opcode == QuickOpcode::SendSeqIndexSet ||
+    if (opcode == QuickOpcode::SendSeqIndexSet ||
         (opcode == QuickOpcode::SendSeqFirst && pos_count == 1)) {
       const bool arg_fast =
           read_integer_reg_unboxed(frame, arg_reg, &integer_arg);
@@ -27364,6 +27930,48 @@ private:
     if (fault_.has_value()) {
       return FastSendStatus::Faulted;
     }
+    if (opcode == QuickOpcode::SendSeqIndex && receiver.is_map()) {
+      const IntrusivePtr<MapValue> map = receiver.as_map();
+      if (map == nullptr) {
+        set_fault(frame, "TypeError", "map value is null");
+        return FastSendStatus::Faulted;
+      }
+      if (map->strict) {
+        return FastSendStatus::NotHandled;
+      }
+      if (!ensure_lifecycle_access(frame, receiver)) {
+        return FastSendStatus::Faulted;
+      }
+      const Value key = read_reg(frame, arg_reg);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      if (!key.is_symbol()) {
+        return FastSendStatus::NotHandled;
+      }
+      const std::uint32_t symbol_id = key.as_symbol().symbol_id;
+      for (const MapEntry &entry : map->entries) {
+        if (map_key_is_nameable(entry.key) && entry.symbol_id == symbol_id) {
+          return write_reg_fast_plain(frame, dst, entry.value)
+                     ? FastSendStatus::Matched
+                     : FastSendStatus::Faulted;
+        }
+      }
+      set_fault(frame, "KeyError", "map key is absent");
+      return FastSendStatus::Faulted;
+    }
+
+    if (opcode == QuickOpcode::SendSeqIndex) {
+      const bool arg_fast =
+          read_integer_reg_unboxed(frame, arg_reg, &integer_arg);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      if (!arg_fast) {
+        return FastSendStatus::NotHandled;
+      }
+    }
+
     const std::vector<Value> *items = sequence_items_view(frame, receiver);
     if (fault_.has_value()) {
       return FastSendStatus::Faulted;
@@ -27682,6 +28290,21 @@ private:
           return true;
         }
       }
+      if (*selector == "to_json") {
+        Value result = Value::null();
+        const SendStatus scalar_status = try_apply_scalar_send(
+            frame, receiver, *selector, args, block, kw_args, &result);
+        if (scalar_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (scalar_status == SendStatus::Matched) {
+          if (!write_reg(frame, dst, std::move(result))) {
+            return false;
+          }
+          ++frame.pc;
+          return true;
+        }
+      }
       if (receiver.is_result()) {
         // Bare-nullary Result members (.or_raise, .ok?, .err?, .value, .error)
         // route to the scalar Result handler just like a parenthesised call.
@@ -27953,6 +28576,32 @@ private:
         return true;
       }
       if (fault_.has_value()) {
+        return false;
+      }
+      if (*selector == "to_json") {
+        if (!args.empty()) {
+          set_fault(frame, "TypeError", "to_json accepts no arguments");
+          return false;
+        }
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError", "to_json does not accept keywords");
+          return false;
+        }
+        if (!block.is_null()) {
+          set_fault(frame, "TypeError", "to_json does not accept a block");
+          return false;
+        }
+        Value json_result = Value::null();
+        const SendStatus json_status =
+            apply_json_generate_value_method(frame, receiver, &json_result);
+        if (json_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (json_status == SendStatus::Matched &&
+            write_reg(frame, dst, std::move(json_result))) {
+          ++frame.pc;
+          return true;
+        }
         return false;
       }
       set_fault(frame, "NoMethodError",

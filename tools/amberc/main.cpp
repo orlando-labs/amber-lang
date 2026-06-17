@@ -65,7 +65,7 @@ void usage(std::ostream &out) {
   out << "  amberc <file.am>\n";
   out << "  amberc build <file.am> [-o <path>] [--out-dir <dir>] "
          "[--target native|native-debug|bytecode-wrapper] "
-         "[--entry auto|init|main|main-only]\n";
+         "[--entry auto|init|main|main-only] [--grant <cap[=target]>...]\n";
   out << "  amberc lex <file>\n";
   out << "  amberc parse <file>\n";
   out << "  amberc parse-expr <file>\n";
@@ -746,6 +746,7 @@ struct RunnableModuleArtifact {
   EntryExecutionMode entry_mode = EntryExecutionMode::Init;
   std::vector<std::uint8_t> bytes;
   amber::bytecode::BcModule module;
+  std::vector<amber::capability::CapabilityRequest> capability_grants;
 };
 
 RunnableModuleArtifact compile_source_to_runnable_module(
@@ -818,6 +819,7 @@ RunnableModuleArtifact compile_source_to_runnable_module(
   artifact.entry_mode = entry_mode;
   artifact.bytes = bytes;
   artifact.module = std::move(decode_result.module);
+  artifact.capability_grants = capabilities;
   return artifact;
 }
 
@@ -1190,13 +1192,19 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
           kind != amber::bytecode::ConstantKind::Bool &&
           kind != amber::bytecode::ConstantKind::Integer &&
           kind != amber::bytecode::ConstantKind::Float &&
-          kind != amber::bytecode::ConstantKind::StringRef) {
+          kind != amber::bytecode::ConstantKind::StringRef &&
+          kind != amber::bytecode::ConstantKind::SymbolRef) {
         *reason = "non-scalar constants still use VM fallback";
         return false;
       }
       if (kind == amber::bytecode::ConstantKind::StringRef &&
           module.const_pool[const_id].ref_id >= module.strings.size()) {
         *reason = "string constant ref is out of range";
+        return false;
+      }
+      if (kind == amber::bytecode::ConstantKind::SymbolRef &&
+          module.const_pool[const_id].ref_id >= module.symbols.size()) {
+        *reason = "symbol constant ref is out of range";
         return false;
       }
       if (kind == amber::bytecode::ConstantKind::Float &&
@@ -1212,6 +1220,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
     case Opcode::GetLast:
     case Opcode::SetLast:
     case Opcode::MakeList:
+    case Opcode::MakeMap:
+    case Opcode::LookupConst:
     case Opcode::LoadUpval:
     case Opcode::StoreUpval:
     case Opcode::IAdd:
@@ -1257,6 +1267,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
     case Opcode::Return:
     case Opcode::Safepoint:
     case Opcode::CloseUpvalues:
+    case Opcode::PBind:
+    case Opcode::PCommit:
       break;
     case Opcode::MakeClosure: {
       std::uint32_t ignored_dst = 0;
@@ -1318,15 +1330,61 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       const bool scalar =
           native_cpp_scalar_selector(module, symbol_id, &selector) &&
           pos_count == 1U;
-      if (!scalar && !native_cpp_collection_selector(selector, pos_count)) {
+      const std::size_t kw_index = 4U + pos_count;
+      std::uint32_t kw_count = 0;
+      if (!operand_u32_value(instruction, kw_index, &kw_count)) {
+        *reason = "invalid SEND keyword operand";
+        return false;
+      }
+      const std::size_t block_index = kw_index + 1U + kw_count * 2U;
+      const bool no_block = operand_is_no_block(instruction, block_index);
+      bool json_send = false;
+      if ((selector == "to_json" && pos_count == 0U && kw_count == 0U &&
+           no_block) ||
+          ((selector == "parse" || selector == "pretty_generate") &&
+           pos_count == 1U && kw_count == 0U && no_block)) {
+        json_send = true;
+      } else if (selector == "stream_parse_file" && pos_count == 1U &&
+                 kw_count == 1U && !no_block) {
+        std::uint32_t kw_symbol_id = 0;
+        if (!operand_u32_value(instruction, kw_index + 1U, &kw_symbol_id) ||
+            kw_symbol_id >= module.symbols.size() ||
+            module.symbols[kw_symbol_id] != "jsonl") {
+          *reason = "unsupported Json.stream_parse_file keyword shape";
+          return false;
+        }
+        json_send = true;
+      }
+      bool codec_send = false;
+      if (selector == "new" && pos_count == 1U && kw_count == 0U && no_block) {
+        codec_send = true;
+      } else if (selector == "hex" && pos_count == 0U && kw_count == 0U &&
+                 no_block) {
+        codec_send = true;
+      } else if ((selector == "encode" || selector == "decode") &&
+                 pos_count == 1U && kw_count <= 1U && no_block) {
+        if (kw_count == 1U) {
+          std::uint32_t kw_symbol_id = 0;
+          if (!operand_u32_value(instruction, kw_index + 1U, &kw_symbol_id) ||
+              kw_symbol_id >= module.symbols.size()) {
+            *reason = "invalid codec keyword operand";
+            return false;
+          }
+          const std::string &kw_name = module.symbols[kw_symbol_id];
+          if ((selector == "encode" && kw_name != "padding") ||
+              (selector == "decode" && kw_name != "mode")) {
+            *reason = "unsupported codec keyword shape";
+            return false;
+          }
+        }
+        codec_send = true;
+      }
+      if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
+          !json_send && !codec_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
-      const std::size_t kw_index = 4U + pos_count;
-      std::uint32_t kw_count = 0;
-      if (!operand_u32_value(instruction, kw_index, &kw_count) ||
-          kw_count != 0U ||
-          !operand_is_no_block(instruction, kw_index + 1U)) {
+      if (!json_send && !codec_send && (kw_count != 0U || !no_block)) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
       }
@@ -1585,6 +1643,8 @@ native_cpp_constant_expr(const amber::bytecode::Constant &constant) {
     // The native string table is seeded with the module strings, so the
     // bytecode ref id is the native string id.
     return "NativeValue::string_ref(" + std::to_string(constant.ref_id) + ")";
+  case amber::bytecode::ConstantKind::SymbolRef:
+    return "NativeValue::symbol_ref(" + std::to_string(constant.ref_id) + ")";
   default:
     return "NativeValue::nullv()";
   }
@@ -1727,6 +1787,71 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
+    case Opcode::MakeMap: {
+      std::uint32_t dst = 0;
+      std::uint32_t count = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &count);
+      count &= amber::bytecode::kMapCountMask;
+      out << "  {\n";
+      out << "    std::vector<std::pair<std::string, NativeValue>> entries;\n";
+      out << "    entries.reserve(" << count << ");\n";
+      std::size_t operand_index = 2U;
+      for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t symbol_id = 0;
+        std::uint32_t value_reg = 0;
+        operand_u32_value(instruction, operand_index++, &symbol_id);
+        operand_u32_value(instruction, operand_index++, &value_reg);
+        out << "    native_map_store(entries, native_hex_to_string(\""
+            << string_to_hex_text(module.symbols[symbol_id]) << "\"), "
+            << read_reg_expr(value_reg) << ");\n";
+      }
+      out << "    ";
+      if (uses_local_capture_cells) {
+        out << "write_reg(frame, " << dst
+            << ", NativeValue::map(std::move(entries)));\n";
+      } else {
+        out << "frame.regs[" << dst
+            << "] = NativeValue::map(std::move(entries));\n";
+      }
+      out << "  }\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::LookupConst: {
+      std::uint32_t dst = 0;
+      std::uint32_t const_id = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &const_id);
+      std::string native_module_expr;
+      if (const_id < module.const_pool.size() &&
+          module.const_pool[const_id].kind ==
+              amber::bytecode::ConstantKind::Path &&
+          module.const_pool[const_id].items.size() == 1U) {
+        const std::uint32_t symbol_id = module.const_pool[const_id].items[0];
+        if (symbol_id < module.symbols.size()) {
+          const std::string &name = module.symbols[symbol_id];
+          if (name == "Json") {
+            native_module_expr = "NativeValue::json_module()";
+          } else if (name == "Bytes") {
+            native_module_expr = "NativeValue::bytes_module()";
+          } else if (name == "Base64") {
+            native_module_expr = "NativeValue::base64_module()";
+          } else if (name == "Base64Url") {
+            native_module_expr = "NativeValue::base64url_module()";
+          } else if (name == "Hex") {
+            native_module_expr = "NativeValue::hex_module()";
+          }
+        }
+      }
+      if (!native_module_expr.empty()) {
+        write_reg_stmt(dst, native_module_expr);
+      } else {
+        out << "  throw NativeBailout();\n";
+      }
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
     case Opcode::GetLast: {
       std::uint32_t dst = 0;
       operand_u32_value(instruction, 0, &dst);
@@ -1843,6 +1968,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t pos_count = 0;
       std::uint32_t arg = 0;
       std::uint32_t arg2 = 0;
+      std::uint32_t kw_count = 0;
+      std::uint32_t kw_value_reg = 0;
+      std::int64_t block_reg = -1;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &recv);
       operand_u32_value(instruction, 2, &symbol_id);
@@ -1852,6 +1980,15 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       if (pos_count > 1U) {
         operand_u32_value(instruction, 5, &arg2);
+      }
+      const std::size_t kw_index = 4U + pos_count;
+      operand_u32_value(instruction, kw_index, &kw_count);
+      if (kw_count == 1U) {
+        operand_u32_value(instruction, kw_index + 2U, &kw_value_reg);
+      }
+      const std::size_t block_index = kw_index + 1U + kw_count * 2U;
+      if (block_index < instruction.operands.size()) {
+        block_reg = instruction.operands[block_index].value;
       }
       const std::string selector = module.symbols[symbol_id];
       if (selector == "+") {
@@ -1920,14 +2057,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
       } else if (selector == "[]") {
-        write_reg_stmt(dst, "native_list_at(" + read_reg_expr(recv) + ", " +
+        write_reg_stmt(dst, "native_index(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
       } else if (selector == "[]=") {
         write_reg_stmt(dst, "native_list_set(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ", " +
                                 read_reg_expr(arg2) + ")");
       } else if (selector == "count") {
-        write_reg_stmt(dst, "native_list_count(" + read_reg_expr(recv) + ")");
+        write_reg_stmt(dst, "native_count(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
         write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ")");
       } else if (selector == "concat") {
@@ -1935,6 +2072,44 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "to_str") {
         write_reg_stmt(dst, "native_to_str(" + read_reg_expr(recv) + ")");
+      } else if (selector == "to_json") {
+        write_reg_stmt(dst, "native_json_generate_value(" +
+                                read_reg_expr(recv) + ", false)");
+      } else if (selector == "parse") {
+        write_reg_stmt(dst, "native_json_parse_value(" + read_reg_expr(arg) +
+                                ")");
+      } else if (selector == "pretty_generate") {
+        write_reg_stmt(dst, "native_json_generate_value(" +
+                                read_reg_expr(arg) + ", true)");
+      } else if (selector == "stream_parse_file") {
+        if (block_reg < 0) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          write_reg_stmt(dst, "native_json_stream_parse_file(" +
+                                  read_reg_expr(arg) + ", " +
+                                  read_reg_expr(kw_value_reg) + ", " +
+                                  read_reg_expr(static_cast<std::uint32_t>(
+                                      block_reg)) +
+                                  ")");
+        }
+      } else if (selector == "new") {
+        write_reg_stmt(dst, "native_bytes_new(" + read_reg_expr(arg) + ")");
+      } else if (selector == "encode") {
+        write_reg_stmt(dst, "native_codec_encode(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", " +
+                                (kw_count == 1U ? read_reg_expr(kw_value_reg)
+                                                : "NativeValue::nullv()") +
+                                ", " +
+                                (kw_count == 1U ? "true" : "false") + ")");
+      } else if (selector == "decode") {
+        write_reg_stmt(dst, "native_codec_decode(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", " +
+                                (kw_count == 1U ? read_reg_expr(kw_value_reg)
+                                                : "NativeValue::nullv()") +
+                                ", " +
+                                (kw_count == 1U ? "true" : "false") + ")");
+      } else if (selector == "hex") {
+        write_reg_stmt(dst, "native_bytes_hex(" + read_reg_expr(recv) + ")");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -2155,6 +2330,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     }
     case Opcode::CloseUpvalues:
     case Opcode::Safepoint:
+    case Opcode::PBind:
+    case Opcode::PCommit:
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     case Opcode::Return: {
@@ -2181,6 +2358,24 @@ std::string emit_embedded_hex_cpp(const std::vector<std::uint8_t> &bytes) {
     out << "  \"" << hex.substr(i, 96U) << "\"\n";
   }
   out << ";\n\n";
+  return out.str();
+}
+
+std::string emit_embedded_capability_grants_cpp(
+    const std::vector<amber::capability::CapabilityRequest> &grants) {
+  std::ostringstream out;
+  out << "static std::vector<amber::runtime::RuntimeCapabilityGrant> "
+         "embedded_capability_grants() {\n";
+  out << "  std::vector<amber::runtime::RuntimeCapabilityGrant> grants;\n";
+  for (const amber::capability::CapabilityRequest &grant : grants) {
+    out << "  grants.push_back(amber::capability::make_capability("
+        << "native_hex_to_string(\"" << string_to_hex_text(grant.name)
+        << "\"), native_hex_to_string(\"" << string_to_hex_text(grant.target)
+        << "\"), native_hex_to_string(\"" << string_to_hex_text(grant.reason)
+        << "\"), " << grant.flags << "U));\n";
+  }
+  out << "  return grants;\n";
+  out << "}\n\n";
   return out.str();
 }
 
@@ -2253,6 +2448,34 @@ std::string emit_module_strings_cpp(const amber::bytecode::BcModule &module) {
   out << "  table.push_back(text);\n";
   out << "  index.emplace(text, id);\n";
   out << "  return id;\n";
+  out << "}\n\n";
+  out << "static const char *kModuleSymbolHex[] = {\n";
+  for (const std::string &text : module.symbols) {
+    out << "  \"" << string_to_hex_text(text) << "\",\n";
+  }
+  if (module.symbols.empty()) {
+    out << "  \"\",\n";
+  }
+  out << "};\n";
+  out << "static const std::size_t kModuleSymbolCount = "
+      << module.symbols.size() << "U;\n\n";
+  out << "static std::vector<std::string> &native_symbols() {\n";
+  out << "  static std::vector<std::string> *table = [] {\n";
+  out << "    auto *out_table = new std::vector<std::string>();\n";
+  out << "    out_table->reserve(kModuleSymbolCount);\n";
+  out << "    for (std::size_t i = 0; i < kModuleSymbolCount; ++i) {\n";
+  out << "      out_table->push_back(native_hex_to_string("
+         "kModuleSymbolHex[i]));\n";
+  out << "    }\n";
+  out << "    return out_table;\n";
+  out << "  }();\n";
+  out << "  return *table;\n";
+  out << "}\n\n";
+  out << "static const std::string &native_symbol_text(std::int64_t id) {\n";
+  out << "  const auto &symbols = native_symbols();\n";
+  out << "  if (id < 0 || static_cast<std::size_t>(id) >= symbols.size()) "
+         "throw std::out_of_range(\"native symbol id\");\n";
+  out << "  return symbols[static_cast<std::size_t>(id)];\n";
   out << "}\n\n";
   return out.str();
 }
@@ -2351,15 +2574,18 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include \"bytecode/format.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
   out << "#include <array>\n";
+  out << "#include <cctype>\n";
   out << "#include <cmath>\n";
   out << "#include <cstdint>\n";
   out << "#include <exception>\n";
+  out << "#include <fstream>\n";
   out << "#include <initializer_list>\n";
   out << "#include <iostream>\n";
   out << "#include <memory>\n";
   out << "#include <optional>\n";
   out << "#include <charconv>\n";
   out << "#include <sstream>\n";
+  out << "#include <stdexcept>\n";
   out << "#include <string>\n";
   out << "#include <unordered_map>\n";
   out << "#include <utility>\n";
@@ -2367,16 +2593,19 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "namespace {\n\n";
   out << emit_embedded_hex_cpp(artifact.bytes);
   out << emit_module_strings_cpp(module);
+  out << emit_embedded_capability_grants_cpp(artifact.capability_grants);
   out << "struct NativeBailout : public std::exception {\n";
   out << "  const char *what() const noexcept override { return "
          "\"native bailout\"; }\n";
   out << "};\n\n";
   out << "struct NativeList;\n";
+  out << "struct NativeMap;\n";
   out << "struct NativeClosure;\n";
   out << "struct NativeCell;\n\n";
   out << "struct NativeValue {\n";
-  out << "  enum class Tag { Null, Bool, Integer, Float, String, List, "
-         "Closure };\n";
+  out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
+         "JsonModule, BytesModule, Base64Module, Base64UrlModule, HexModule, "
+         "Bytes, List, Map, Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
@@ -2394,10 +2623,29 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue string_ref(std::int64_t string_id) { "
          "NativeValue out; out.tag = Tag::String; out.scalar_value = "
          "string_id; return out; }\n";
+  out << "  static NativeValue symbol_ref(std::int64_t symbol_id) { "
+         "NativeValue out; out.tag = Tag::Symbol; out.scalar_value = "
+         "symbol_id; return out; }\n";
+  out << "  static NativeValue json_module() { NativeValue out; out.tag = "
+         "Tag::JsonModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue bytes_module() { NativeValue out; out.tag = "
+         "Tag::BytesModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue base64_module() { NativeValue out; out.tag = "
+         "Tag::Base64Module; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue base64url_module() { NativeValue out; out.tag = "
+         "Tag::Base64UrlModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue hex_module() { NativeValue out; out.tag = "
+         "Tag::HexModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue bytes(std::string value);\n";
   out << "  static NativeValue list(std::vector<NativeValue> items);\n";
+  out << "  static NativeValue map(std::vector<std::pair<std::string, "
+         "NativeValue>> entries);\n";
   out << "  static NativeValue closure(NativeClosure *value);\n";
   out << "};\n\n";
+  out << "struct NativeBytes { std::string bytes; };\n";
   out << "struct NativeList { std::vector<NativeValue> items; };\n";
+  out << "struct NativeMap { std::vector<std::pair<std::string, "
+         "NativeValue>> entries; };\n";
   out << "struct NativeCell { NativeValue value; };\n";
   out << "struct NativeClosure {\n";
   out << "  std::uint32_t code_id = 0;\n";
@@ -2405,16 +2653,31 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  NativeValue self = NativeValue::nullv();\n";
   out << "};\n\n";
   out << "struct NativeArena {\n";
+  out << "  std::vector<std::unique_ptr<NativeBytes>> bytes;\n";
   out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
+  out << "  std::vector<std::unique_ptr<NativeMap>> maps;\n";
   out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
   out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
   out << "};\n";
   out << "static NativeArena native_arena;\n\n";
+  out << "NativeValue NativeValue::bytes(std::string value) {\n";
+  out << "  NativeValue out; out.tag = Tag::Bytes;\n";
+  out << "  auto bytes = std::make_unique<NativeBytes>();\n";
+  out << "  bytes->bytes = std::move(value); out.heap_value = bytes.get();\n";
+  out << "  native_arena.bytes.push_back(std::move(bytes)); return out;\n";
+  out << "}\n";
   out << "NativeValue NativeValue::list(std::vector<NativeValue> items) {\n";
   out << "  NativeValue out; out.tag = Tag::List;\n";
   out << "  auto list = std::make_unique<NativeList>();\n";
   out << "  list->items = std::move(items); out.heap_value = list.get();\n";
   out << "  native_arena.lists.push_back(std::move(list)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::map(std::vector<std::pair<std::string, "
+         "NativeValue>> entries) {\n";
+  out << "  NativeValue out; out.tag = Tag::Map;\n";
+  out << "  auto map = std::make_unique<NativeMap>();\n";
+  out << "  map->entries = std::move(entries); out.heap_value = map.get();\n";
+  out << "  native_arena.maps.push_back(std::move(map)); return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::closure(NativeClosure *value) {\n";
   out << "  NativeValue out; out.tag = Tag::Closure;\n";
@@ -2496,6 +2759,16 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeList *>(value.heap_value);\n";
   out << "}\n";
+  out << "static const NativeMap &as_map(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Map || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeMap *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static const NativeBytes &as_bytes(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Bytes || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeBytes *>(value.heap_value);\n";
+  out << "}\n";
   out << "static NativeClosure *as_closure(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Closure || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
@@ -2522,9 +2795,25 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return NativeValue::integer("
          "static_cast<std::int64_t>(as_list(value).items.size()));\n";
   out << "}\n";
+  out << "static NativeValue native_count(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::List) return "
+         "native_list_count(value);\n";
+  out << "  if (value.tag == NativeValue::Tag::Bytes) return "
+         "NativeValue::integer(static_cast<std::int64_t>("
+         "as_bytes(value).bytes.size()));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n";
   out << "static NativeValue native_list_first(const NativeValue &value) {\n";
   out << "  const auto &items = as_list(value).items;\n";
   out << "  return items.empty() ? NativeValue::nullv() : items.front();\n";
+  out << "}\n\n";
+  out << "static void native_map_store(std::vector<std::pair<std::string, "
+         "NativeValue>> &entries, std::string key, NativeValue value) {\n";
+  out << "  for (auto &entry : entries) {\n";
+  out << "    if (entry.first == key) { entry.second = std::move(value); "
+         "return; }\n";
+  out << "  }\n";
+  out << "  entries.emplace_back(std::move(key), std::move(value));\n";
   out << "}\n\n";
   out << "static bool truthy(const NativeValue &value) {\n";
   out << "  return value.tag != NativeValue::Tag::Null && "
@@ -2651,6 +2940,562 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return NativeValue::string_ref(native_intern_string("
          "native_string_text(lhs) + native_string_text(rhs)));\n";
   out << "}\n\n";
+  out << R"AMBERCPP(static NativeValue amber_native_call_closure(const NativeValue &value, std::initializer_list<NativeValue> args);
+
+static const std::string &native_key_text(const NativeValue &value) {
+  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (value.tag == NativeValue::Tag::Symbol) return native_symbol_text(value.scalar_value);
+  throw NativeBailout();
+}
+
+static NativeValue native_index(const NativeValue &value, const NativeValue &key) {
+  if (value.tag == NativeValue::Tag::List) {
+    return native_list_at(value, key);
+  }
+  if (value.tag == NativeValue::Tag::Bytes) {
+    const auto &bytes = as_bytes(value).bytes;
+    const std::int64_t index = as_int(key);
+    if (index < 0 || static_cast<std::size_t>(index) >= bytes.size()) throw NativeBailout();
+    return NativeValue::integer(static_cast<unsigned char>(bytes[static_cast<std::size_t>(index)]));
+  }
+  if (value.tag == NativeValue::Tag::Map) {
+    const std::string &name = native_key_text(key);
+    for (const auto &entry : as_map(value).entries) {
+      if (entry.first == name) return entry.second;
+    }
+    throw NativeBailout();
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_bytes_new(const NativeValue &value) {
+  if (value.tag == NativeValue::Tag::String) {
+    return NativeValue::bytes(native_string_text(value));
+  }
+  if (value.tag == NativeValue::Tag::Bytes) {
+    return NativeValue::bytes(as_bytes(value).bytes);
+  }
+  throw NativeBailout();
+}
+
+static std::string native_hex_encode_bytes(const std::string &bytes) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(bytes.size() * 2U);
+  for (unsigned char byte : bytes) {
+    out.push_back(digits[(byte >> 4U) & 0x0FU]);
+    out.push_back(digits[byte & 0x0FU]);
+  }
+  return out;
+}
+
+static NativeValue native_bytes_hex(const NativeValue &value) {
+  return NativeValue::string_ref(native_intern_string(
+      native_hex_encode_bytes(as_bytes(value).bytes)));
+}
+
+static int native_hex_value(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+  if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+  return -1;
+}
+
+static bool native_ascii_space(char c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+         c == '\f' || c == '\v';
+}
+
+static std::string native_hex_decode_text(const std::string &text, bool lenient) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string normalized;
+  normalized.reserve(text.size());
+  bool allow_prefix = true;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    if (lenient && (native_ascii_space(c) || c == ':' || c == '-')) continue;
+    if (lenient && allow_prefix && c == '0' && i + 1U < text.size() &&
+        (text[i + 1U] == 'x' || text[i + 1U] == 'X')) {
+      allow_prefix = false;
+      ++i;
+      continue;
+    }
+    const int value = native_hex_value(c);
+    if (value < 0) throw NativeBailout();
+    allow_prefix = false;
+    normalized.push_back(digits[value]);
+  }
+  if (normalized.size() % 2U != 0U) throw NativeBailout();
+  std::string out;
+  out.reserve(normalized.size() / 2U);
+  for (std::size_t i = 0; i < normalized.size(); i += 2U) {
+    out.push_back(static_cast<char>((native_hex_value(normalized[i]) << 4U) |
+                                    native_hex_value(normalized[i + 1U])));
+  }
+  return out;
+}
+
+static int native_base64_value(char c, bool url) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return 26 + c - 'a';
+  if (c >= '0' && c <= '9') return 52 + c - '0';
+  if (url) {
+    if (c == '-') return 62;
+    if (c == '_') return 63;
+  } else {
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+  }
+  return -1;
+}
+
+static std::string native_base64_encode_bytes(const std::string &bytes,
+                                              bool url, bool padding) {
+  static constexpr char std_alphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  static constexpr char url_alphabet[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const char *alphabet = url ? url_alphabet : std_alphabet;
+  std::string out;
+  out.reserve(((bytes.size() + 2U) / 3U) * 4U);
+  for (std::size_t i = 0; i < bytes.size(); i += 3U) {
+    const std::uint32_t b0 = static_cast<unsigned char>(bytes[i]);
+    const bool have_b1 = i + 1U < bytes.size();
+    const bool have_b2 = i + 2U < bytes.size();
+    const std::uint32_t b1 = have_b1 ? static_cast<unsigned char>(bytes[i + 1U]) : 0U;
+    const std::uint32_t b2 = have_b2 ? static_cast<unsigned char>(bytes[i + 2U]) : 0U;
+    out.push_back(alphabet[(b0 >> 2U) & 0x3FU]);
+    out.push_back(alphabet[((b0 & 0x03U) << 4U) | ((b1 >> 4U) & 0x0FU)]);
+    if (have_b1) out.push_back(alphabet[((b1 & 0x0FU) << 2U) | ((b2 >> 6U) & 0x03U)]);
+    else if (padding) out.push_back('=');
+    if (have_b2) out.push_back(alphabet[b2 & 0x3FU]);
+    else if (padding) out.push_back('=');
+  }
+  return out;
+}
+
+static std::string native_base64_decode_text(const std::string &text,
+                                             bool url, bool lenient) {
+  std::string normalized;
+  normalized.reserve(text.size());
+  for (char c : text) {
+    if (native_ascii_space(c)) {
+      if (lenient) continue;
+      throw NativeBailout();
+    }
+    if (c == '=' || native_base64_value(c, url) >= 0) {
+      normalized.push_back(c);
+    } else {
+      throw NativeBailout();
+    }
+  }
+  const std::size_t first_pad = normalized.find('=');
+  if (first_pad != std::string::npos) {
+    for (std::size_t i = first_pad; i < normalized.size(); ++i) {
+      if (normalized[i] != '=') throw NativeBailout();
+    }
+    const std::size_t pad_count = normalized.size() - first_pad;
+    if (pad_count > 2U || normalized.size() % 4U != 0U) throw NativeBailout();
+  } else {
+    const std::size_t residue = normalized.size() % 4U;
+    if (residue == 1U) throw NativeBailout();
+    if (residue != 0U) normalized.append(4U - residue, '=');
+  }
+  std::string out;
+  out.reserve((normalized.size() / 4U) * 3U);
+  for (std::size_t i = 0; i < normalized.size(); i += 4U) {
+    const char c0 = normalized[i];
+    const char c1 = normalized[i + 1U];
+    const char c2 = normalized[i + 2U];
+    const char c3 = normalized[i + 3U];
+    const bool last = i + 4U == normalized.size();
+    if (c0 == '=' || c1 == '=' || (c2 == '=' && c3 != '=') ||
+        ((c2 == '=' || c3 == '=') && !last)) {
+      throw NativeBailout();
+    }
+    const int v0 = native_base64_value(c0, url);
+    const int v1 = native_base64_value(c1, url);
+    const int v2 = c2 == '=' ? 0 : native_base64_value(c2, url);
+    const int v3 = c3 == '=' ? 0 : native_base64_value(c3, url);
+    if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0) throw NativeBailout();
+    if (c2 == '=') {
+      if ((v1 & 0x0F) != 0) throw NativeBailout();
+      out.push_back(static_cast<char>((v0 << 2U) | (v1 >> 4U)));
+    } else if (c3 == '=') {
+      if ((v2 & 0x03) != 0) throw NativeBailout();
+      out.push_back(static_cast<char>((v0 << 2U) | (v1 >> 4U)));
+      out.push_back(static_cast<char>(((v1 & 0x0FU) << 4U) | (v2 >> 2U)));
+    } else {
+      out.push_back(static_cast<char>((v0 << 2U) | (v1 >> 4U)));
+      out.push_back(static_cast<char>(((v1 & 0x0FU) << 4U) | (v2 >> 2U)));
+      out.push_back(static_cast<char>(((v2 & 0x03U) << 6U) | v3));
+    }
+  }
+  return out;
+}
+
+static bool native_decode_lenient(const NativeValue &mode_value, bool has_mode) {
+  if (!has_mode) return false;
+  std::string mode;
+  if (mode_value.tag == NativeValue::Tag::String) mode = native_string_text(mode_value);
+  else if (mode_value.tag == NativeValue::Tag::Symbol) mode = native_symbol_text(mode_value.scalar_value);
+  else throw NativeBailout();
+  if (mode == "strict") return false;
+  if (mode == "lenient") return true;
+  throw NativeBailout();
+}
+
+static NativeValue native_codec_encode(const NativeValue &module,
+                                       const NativeValue &bytes_value,
+                                       const NativeValue &padding_value,
+                                       bool has_padding) {
+  const std::string &bytes = as_bytes(bytes_value).bytes;
+  if (module.tag == NativeValue::Tag::HexModule) {
+    if (has_padding) throw NativeBailout();
+    return NativeValue::string_ref(native_intern_string(native_hex_encode_bytes(bytes)));
+  }
+  bool url = false;
+  bool padding = true;
+  if (module.tag == NativeValue::Tag::Base64Module) {
+    url = false;
+    padding = true;
+  } else if (module.tag == NativeValue::Tag::Base64UrlModule) {
+    url = true;
+    padding = false;
+  } else {
+    throw NativeBailout();
+  }
+  if (has_padding) {
+    if (padding_value.tag != NativeValue::Tag::Bool) throw NativeBailout();
+    padding = padding_value.scalar_value != 0;
+  }
+  return NativeValue::string_ref(native_intern_string(
+      native_base64_encode_bytes(bytes, url, padding)));
+}
+
+static NativeValue native_codec_decode(const NativeValue &module,
+                                       const NativeValue &text_value,
+                                       const NativeValue &mode_value,
+                                       bool has_mode) {
+  if (text_value.tag != NativeValue::Tag::String) throw NativeBailout();
+  const std::string &text = native_string_text(text_value);
+  const bool lenient = native_decode_lenient(mode_value, has_mode);
+  if (module.tag == NativeValue::Tag::HexModule) {
+    return NativeValue::bytes(native_hex_decode_text(text, lenient));
+  }
+  if (module.tag == NativeValue::Tag::Base64Module) {
+    return NativeValue::bytes(native_base64_decode_text(text, false, lenient));
+  }
+  if (module.tag == NativeValue::Tag::Base64UrlModule) {
+    return NativeValue::bytes(native_base64_decode_text(text, true, lenient));
+  }
+  throw NativeBailout();
+}
+
+static void append_json_escaped(std::string &out, const std::string &text) {
+  out.push_back('"');
+  for (unsigned char ch : text) {
+    switch (ch) {
+    case '"': out += "\\\""; break;
+    case '\\': out += "\\\\"; break;
+    case '\b': out += "\\b"; break;
+    case '\f': out += "\\f"; break;
+    case '\n': out += "\\n"; break;
+    case '\r': out += "\\r"; break;
+    case '\t': out += "\\t"; break;
+    default:
+      if (ch < 0x20) throw NativeBailout();
+      out.push_back(static_cast<char>(ch));
+      break;
+    }
+  }
+  out.push_back('"');
+}
+
+static void append_json_indent(std::string &out, int count) {
+  for (int i = 0; i < count; ++i) out.push_back(' ');
+}
+
+static void append_json_value(std::string &out, const NativeValue &value,
+                              bool pretty, int depth) {
+  switch (value.tag) {
+  case NativeValue::Tag::Null:
+    out += "null";
+    return;
+  case NativeValue::Tag::Bool:
+    out += value.scalar_value != 0 ? "true" : "false";
+    return;
+  case NativeValue::Tag::Integer:
+    out += std::to_string(value.scalar_value);
+    return;
+  case NativeValue::Tag::Float: {
+    char buffer[128];
+    const auto converted = std::to_chars(buffer, buffer + sizeof(buffer), value.float_value);
+    if (converted.ec != std::errc{}) throw NativeBailout();
+    out.append(buffer, converted.ptr);
+    return;
+  }
+  case NativeValue::Tag::String:
+    append_json_escaped(out, native_string_text(value));
+    return;
+  case NativeValue::Tag::Symbol:
+    append_json_escaped(out, native_symbol_text(value.scalar_value));
+    return;
+  case NativeValue::Tag::List: {
+    const auto &items = as_list(value).items;
+    out.push_back('[');
+    if (pretty && !items.empty()) out.push_back('\n');
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      if (i != 0U) {
+        out.push_back(',');
+        if (pretty) out.push_back('\n');
+      }
+      if (pretty) append_json_indent(out, (depth + 1) * 2);
+      append_json_value(out, items[i], pretty, depth + 1);
+    }
+    if (pretty && !items.empty()) {
+      out.push_back('\n');
+      append_json_indent(out, depth * 2);
+    }
+    out.push_back(']');
+    return;
+  }
+  case NativeValue::Tag::Map: {
+    const auto &entries = as_map(value).entries;
+    out.push_back('{');
+    if (pretty && !entries.empty()) out.push_back('\n');
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+      if (i != 0U) {
+        out.push_back(',');
+        if (pretty) out.push_back('\n');
+      }
+      if (pretty) append_json_indent(out, (depth + 1) * 2);
+      append_json_escaped(out, entries[i].first);
+      out.push_back(':');
+      if (pretty) out.push_back(' ');
+      append_json_value(out, entries[i].second, pretty, depth + 1);
+    }
+    if (pretty && !entries.empty()) {
+      out.push_back('\n');
+      append_json_indent(out, depth * 2);
+    }
+    out.push_back('}');
+    return;
+  }
+  default:
+    throw NativeBailout();
+  }
+}
+
+static NativeValue native_json_generate_value(const NativeValue &value, bool pretty) {
+  std::string out;
+  append_json_value(out, value, pretty, 0);
+  return NativeValue::string_ref(native_intern_string(out));
+}
+
+class NativeJsonParser {
+public:
+  explicit NativeJsonParser(const std::string &text) : text_(text) {}
+
+  NativeValue parse_document() {
+    skip_ws();
+    NativeValue value = parse_value();
+    skip_ws();
+    if (pos_ != text_.size()) throw NativeBailout();
+    return value;
+  }
+
+private:
+  const std::string &text_;
+  std::size_t pos_ = 0;
+
+  void skip_ws() {
+    while (pos_ < text_.size() &&
+           std::isspace(static_cast<unsigned char>(text_[pos_]))) {
+      ++pos_;
+    }
+  }
+
+  bool consume(char expected) {
+    skip_ws();
+    if (pos_ < text_.size() && text_[pos_] == expected) {
+      ++pos_;
+      return true;
+    }
+    return false;
+  }
+
+  void expect(char expected) {
+    if (!consume(expected)) throw NativeBailout();
+  }
+
+  NativeValue parse_value() {
+    skip_ws();
+    if (pos_ >= text_.size()) throw NativeBailout();
+    const char ch = text_[pos_];
+    if (ch == '"') return NativeValue::string_ref(native_intern_string(parse_string()));
+    if (ch == '{') return parse_object();
+    if (ch == '[') return parse_array();
+    if (ch == 't' && text_.compare(pos_, 4, "true") == 0) {
+      pos_ += 4;
+      return NativeValue::boolean(true);
+    }
+    if (ch == 'f' && text_.compare(pos_, 5, "false") == 0) {
+      pos_ += 5;
+      return NativeValue::boolean(false);
+    }
+    if (ch == 'n' && text_.compare(pos_, 4, "null") == 0) {
+      pos_ += 4;
+      return NativeValue::nullv();
+    }
+    return parse_number();
+  }
+
+  std::string parse_string() {
+    expect('"');
+    std::string out;
+    while (pos_ < text_.size()) {
+      const char ch = text_[pos_++];
+      if (ch == '"') return out;
+      if (ch == '\\') {
+        if (pos_ >= text_.size()) throw NativeBailout();
+        const char esc = text_[pos_++];
+        switch (esc) {
+        case '"': out.push_back('"'); break;
+        case '\\': out.push_back('\\'); break;
+        case '/': out.push_back('/'); break;
+        case 'b': out.push_back('\b'); break;
+        case 'f': out.push_back('\f'); break;
+        case 'n': out.push_back('\n'); break;
+        case 'r': out.push_back('\r'); break;
+        case 't': out.push_back('\t'); break;
+        default: throw NativeBailout();
+        }
+      } else {
+        out.push_back(ch);
+      }
+    }
+    throw NativeBailout();
+  }
+
+  NativeValue parse_array() {
+    expect('[');
+    std::vector<NativeValue> items;
+    skip_ws();
+    if (consume(']')) return NativeValue::list(std::move(items));
+    while (true) {
+      items.push_back(parse_value());
+      skip_ws();
+      if (consume(']')) break;
+      expect(',');
+    }
+    return NativeValue::list(std::move(items));
+  }
+
+  NativeValue parse_object() {
+    expect('{');
+    std::vector<std::pair<std::string, NativeValue>> entries;
+    skip_ws();
+    if (consume('}')) return NativeValue::map(std::move(entries));
+    while (true) {
+      skip_ws();
+      const std::string key = parse_string();
+      expect(':');
+      native_map_store(entries, key, parse_value());
+      skip_ws();
+      if (consume('}')) break;
+      expect(',');
+    }
+    return NativeValue::map(std::move(entries));
+  }
+
+  NativeValue parse_number() {
+    const std::size_t start = pos_;
+    if (pos_ < text_.size() && text_[pos_] == '-') ++pos_;
+    if (pos_ >= text_.size() ||
+        !std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+      throw NativeBailout();
+    }
+    while (pos_ < text_.size() &&
+           std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+      ++pos_;
+    }
+    bool floating = false;
+    if (pos_ < text_.size() && text_[pos_] == '.') {
+      floating = true;
+      ++pos_;
+      while (pos_ < text_.size() &&
+             std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+        ++pos_;
+      }
+    }
+    if (pos_ < text_.size() && (text_[pos_] == 'e' || text_[pos_] == 'E')) {
+      floating = true;
+      ++pos_;
+      if (pos_ < text_.size() && (text_[pos_] == '+' || text_[pos_] == '-')) ++pos_;
+      while (pos_ < text_.size() &&
+             std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+        ++pos_;
+      }
+    }
+    const std::string token = text_.substr(start, pos_ - start);
+    try {
+      if (floating) return NativeValue::floating(std::stod(token));
+      return NativeValue::integer(std::stoll(token));
+    } catch (const std::exception &) {
+      throw NativeBailout();
+    }
+  }
+};
+
+static NativeValue native_json_parse_value(const NativeValue &value) {
+  if (value.tag != NativeValue::Tag::String) throw NativeBailout();
+  NativeJsonParser parser(native_string_text(value));
+  return parser.parse_document();
+}
+
+static bool native_fs_read_allowed(const std::string &path) {
+  for (const auto &grant : embedded_capability_grants()) {
+    if (grant.name != "fs.read") continue;
+    if ((grant.flags & amber::capability::kCapabilityFlagWildcardTarget) != 0U ||
+        grant.target == "*") {
+      return true;
+    }
+    if (grant.target == path) return true;
+    if (!grant.target.empty() && path.size() > grant.target.size() &&
+        path.compare(0, grant.target.size(), grant.target) == 0 &&
+        path[grant.target.size()] == '/') {
+      return true;
+    }
+  }
+  return false;
+}
+
+static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
+                                                 const NativeValue &jsonl_value,
+                                                 const NativeValue &block_value) {
+  if (path_value.tag != NativeValue::Tag::String ||
+      jsonl_value.tag != NativeValue::Tag::Bool ||
+      jsonl_value.scalar_value == 0) {
+    throw NativeBailout();
+  }
+  const std::string &path = native_string_text(path_value);
+  if (!native_fs_read_allowed(path)) throw NativeBailout();
+  std::ifstream input(path);
+  if (!input) throw NativeBailout();
+  std::string line;
+  std::int64_t count = 0;
+  while (std::getline(input, line)) {
+    if (line.empty()) continue;
+    NativeJsonParser parser(line);
+    const NativeValue row = parser.parse_document();
+    (void)amber_native_call_closure(block_value, {row});
+    ++count;
+  }
+  return NativeValue::integer(count);
+}
+
+)AMBERCPP";
   out << "static NativeValue numeric_add(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
@@ -2777,7 +3622,21 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   // tags; deep kinds (lists, closures) stay on the VM.
   out << "  if (lhs.tag == NativeValue::Tag::List || "
          "lhs.tag == NativeValue::Tag::Closure || "
+         "lhs.tag == NativeValue::Tag::Map || "
+         "lhs.tag == NativeValue::Tag::JsonModule || "
+         "lhs.tag == NativeValue::Tag::BytesModule || "
+         "lhs.tag == NativeValue::Tag::Base64Module || "
+         "lhs.tag == NativeValue::Tag::Base64UrlModule || "
+         "lhs.tag == NativeValue::Tag::HexModule || "
+         "lhs.tag == NativeValue::Tag::Bytes || "
          "rhs.tag == NativeValue::Tag::List || "
+         "rhs.tag == NativeValue::Tag::Map || "
+         "rhs.tag == NativeValue::Tag::JsonModule || "
+         "rhs.tag == NativeValue::Tag::BytesModule || "
+         "rhs.tag == NativeValue::Tag::Base64Module || "
+         "rhs.tag == NativeValue::Tag::Base64UrlModule || "
+         "rhs.tag == NativeValue::Tag::HexModule || "
+         "rhs.tag == NativeValue::Tag::Bytes || "
          "rhs.tag == NativeValue::Tag::Closure) throw NativeBailout();\n";
   out << "  bool equal;\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
@@ -2811,6 +3670,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "    return NativeValue::string_ref(native_intern_string("
          "std::string(buffer, converted.ptr)));\n";
   out << "  }\n";
+  out << "  case NativeValue::Tag::Bytes: return "
+         "NativeValue::string_ref(native_intern_string(as_bytes(value).bytes));\n";
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
   out << "}\n\n";
@@ -2905,7 +3766,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (!decoded.ok()) { std::cerr << "
          "amber::bytecode::verify_errors_to_json(decoded.errors); return 1; "
          "}\n";
-  out << "  amber::runtime::RuntimeWorld world(decoded.module);\n";
+  out << "  amber::runtime::RuntimeWorldOptions options;\n";
+  out << "  options.capability_grants = embedded_capability_grants();\n";
+  out << "  amber::runtime::RuntimeWorld world(decoded.module, "
+         "std::move(options));\n";
   out << "  amber::runtime::ExecutionResult result;\n";
   if (artifact.entry_mode != EntryExecutionMode::MainOnly) {
     out << "  if (decoded.module.init.has_entry_code_id) {\n";
@@ -3047,6 +3911,15 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   // Mirrors value_to_debug_string: quotes around the raw text, no escaping.
   out << "  case NativeValue::Tag::String: return \"\\\"\" + "
          "native_string_text(value) + \"\\\"\";\n";
+  out << "  case NativeValue::Tag::Symbol: return \":\" + "
+         "native_symbol_text(value.scalar_value);\n";
+  out << "  case NativeValue::Tag::JsonModule: return \"Json\";\n";
+  out << "  case NativeValue::Tag::BytesModule: return \"Bytes\";\n";
+  out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
+  out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
+  out << "  case NativeValue::Tag::HexModule: return \"Hex\";\n";
+  out << "  case NativeValue::Tag::Bytes: return \"<bytes \" + "
+         "std::to_string(as_bytes(value).bytes.size()) + \">\";\n";
   out << "  case NativeValue::Tag::Closure: return \"<closure>\";\n";
   out << "  case NativeValue::Tag::List: {\n";
   out << "    const auto &items = as_list(value).items;\n";
@@ -3057,6 +3930,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "    }\n";
   out << "    text << \"]\"; return text.str();\n";
   out << "  }\n";
+  out << "  case NativeValue::Tag::Map: return native_string_text("
+         "native_json_generate_value(value, false));\n";
   out << "  }\n";
   out << "  throw NativeBailout();\n";
   out << "}\n";
@@ -3163,6 +4038,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/text.cpp",         "runtime/io.cpp",
       "runtime/vm.cpp",           "runtime/stdlib_registry.cpp",
       "runtime/stdlib_math.cpp",  "runtime/stdlib_json.cpp",
+      "runtime/stdlib_codecs.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());
@@ -3469,6 +4345,7 @@ struct SourceBuildCliOptions {
   std::string out_dir;
   std::string target = "native";
   std::string entry = "auto";
+  std::vector<amber::capability::CapabilityRequest> capability_grants;
 };
 
 SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
@@ -3494,6 +4371,14 @@ SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
         throw std::runtime_error("unknown source build entry mode: " +
                                  options.entry);
       }
+    } else if (arg == "--grant" && i + 1 < argc) {
+      amber::capability::CapabilityRequest grant;
+      amber::capability::CapabilityDiagnostic diagnostic;
+      if (!amber::capability::parse_cli_grant(argv[++i], &grant,
+                                              &diagnostic)) {
+        throw std::runtime_error(diagnostic.message);
+      }
+      options.capability_grants.push_back(std::move(grant));
     } else {
       throw std::runtime_error("unknown source build option: " + arg);
     }
@@ -3570,13 +4455,19 @@ int run_source_build_command(int argc, char **argv) {
   const std::filesystem::path output_path =
       default_executable_path_for(source_path, options);
   try {
+    if (options.target == "bytecode-wrapper" &&
+        !options.capability_grants.empty()) {
+      throw std::runtime_error(
+          "source build --grant is not supported with bytecode-wrapper target");
+    }
     const std::optional<EntryExecutionMode> forced_entry =
         options.entry == "auto"
             ? std::nullopt
             : std::optional<EntryExecutionMode>(
                   parse_source_build_entry_mode(options.entry));
     const RunnableModuleArtifact artifact =
-        compile_source_to_runnable_module(source_path, forced_entry);
+        compile_source_to_runnable_module(source_path, forced_entry,
+                                          options.capability_grants);
     const std::filesystem::path parent = output_path.parent_path();
     if (!parent.empty()) {
       std::filesystem::create_directories(parent);

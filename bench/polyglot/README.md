@@ -12,14 +12,17 @@ This benchmark compares identical workloads across:
 
 The Amber built path intentionally runs an already generated executable, so
 compile time is not included in the measured run. The runner still builds fresh
-`.amberbc` artifacts as a bytecode sanity check, but the `amber-built` row is
-the native executable from `amberc build`, not `amberbc_run`.
+`.amberbc` artifacts as a bytecode sanity check. For workloads that report
+`amber-built`, that row is the native executable from `amberc build`, not
+`amberbc_run`.
 
 Run:
 
 ```sh
 python3 bench/polyglot/run_benchmark.py --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload calls-collections --repeats 5
+python3 bench/polyglot/run_benchmark.py --workload json --repeats 3
+python3 bench/polyglot/run_benchmark.py --workload codecs --repeats 3
 ```
 
 The script prints mean/best wall-clock time and peak RSS reported by a small
@@ -30,6 +33,61 @@ workload:
 - `arithmetic`: `715609516598740`
 - `calls-collections`: `2047795430`
 - `sha-digest`: `2242493101`
+- `json`: `1531352227`
+- `codecs`: `2056190`
+
+The `json` workload exercises compact JSON generation, parse round-trips,
+small pretty-generation round-trips, and streaming JSONL reads. The runner
+prepares `bench/polyglot/build/json/events.jsonl` with 20,000 deterministic
+records before measurement so peak RSS reflects streaming consumption instead
+of input generation. The Amber built executable is compiled with
+`--grant fs.read=bench/polyglot/build/json/events.jsonl` so its VM fallback can
+profile the same file-I/O path under the capability-aware runtime world. The
+runner requires full direct-native coverage for this workload; the generated
+launcher still contains its ordinary bailout VM fallback, but the measured path
+does not use it.
+
+The `codecs` workload exercises `Bytes.new`, `Base64`, `Base64Url`, and `Hex`
+encode/decode round-trips, including lenient base64/hex branches. The runner
+requires full direct-native coverage for this workload as well.
+
+Latest local `codecs` warm rerun on 2026-06-17 (Darwin arm64):
+
+```sh
+python3 bench/polyglot/run_benchmark.py --workload codecs --repeats 15 --no-build
+```
+
+This replaces the earlier 3-run cold sample whose means were skewed by first-run
+process/cache outliers for the short native workloads.
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     15     0.0433     0.0426         11.4            2056190
+amber-built           15     0.0111     0.0105          8.0            2056190
+python                15     0.0275     0.0267         11.3            2056190
+ruby                  15     0.0165     0.0160         12.7            2056190
+cpp                   15     0.0054     0.0051          1.4            2056190
+go                    15     0.0038     0.0036          4.7            2056190
+```
+
+Latest local `json` rerun on 2026-06-17 after interpreted-VM JSON
+optimizations (Darwin arm64, `go version go1.26.4 darwin/arm64`):
+
+```sh
+python3 bench/polyglot/run_benchmark.py --workload json --repeats 10
+```
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.0263     0.0260          9.5         1531352227
+amber-built           10     0.0607     0.0111          7.0         1531352227
+python                10     0.0439     0.0427          9.8         1531352227
+ruby                  10     0.0209     0.0192         13.4         1531352227
+cpp                   10     0.0381     0.0040          1.4         1531352227
+go                    10     0.0460     0.0148          9.2         1531352227
+```
 
 Baseline before bytecode arithmetic fast paths:
 

@@ -52,3 +52,5 @@ errors:
   - JsonError
   - JsonParseError
   - JsonGenerateError
+  - CodecError
+  - CodecDecodeError

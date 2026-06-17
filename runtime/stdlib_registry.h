@@ -31,6 +31,13 @@ namespace amber::runtime {
 // unknown selector for a migrated kind returns `NotHandled` and falls through.
 enum class SendStatus { Matched, NotHandled, Faulted };
 
+enum class StdlibBlockStatus { Returned, Stopped, Faulted };
+
+struct StdlibBlockResult {
+  StdlibBlockStatus status = StdlibBlockStatus::Faulted;
+  Value value = Value::null();
+};
+
 // The narrow runtime facade a stdlib handler is allowed to touch. Implemented by
 // the VM; every method that needs the active frame takes it type-erased so this
 // interface stays free of `vm.cpp`-internal types.
@@ -64,6 +71,13 @@ public:
   // module string/symbol tables directly.
   virtual std::optional<std::string> stdlib_text_of(const Value &value) = 0;
 
+  // Raw immutable byte extraction/construction for pure binary codecs. This is
+  // intentionally narrower than `Bytes.new`: String is not accepted here, so
+  // codec encoders must be fed an explicit Bytes/ByteSlice/ByteBuffer value.
+  virtual std::optional<std::string>
+  stdlib_bytes_of(const void *frame, const Value &value) = 0;
+  virtual Value stdlib_bytes_value_from_bytes(std::string bytes) = 0;
+
   // --- value construction (used by parsers) ----------------------------------
   // Build a List value from `items`.
   virtual Value stdlib_make_list(std::vector<Value> items) = 0;
@@ -75,6 +89,22 @@ public:
   virtual Value
   stdlib_make_object(std::vector<std::pair<std::string, Value>> entries,
                      bool strict) = 0;
+
+  // Invoke the block supplied to a streaming stdlib method with one value. A
+  // `Json.stop` escaped throw is reported as Stopped; other throws/exceptions
+  // are re-entered into the parent VM and reported as Faulted.
+  virtual StdlibBlockResult stdlib_call_stream_block(const void *frame,
+                                                     const Value &block,
+                                                     Value value) = 0;
+
+  // Raise the host-owned non-local stop used by Json.stream_parse.
+  virtual void stdlib_throw_json_stop(const void *frame) = 0;
+
+  // File access routed through the same runtime IO policy/provider layer as fs.
+  virtual bool stdlib_fs_read_text(const void *frame, const std::string &path,
+                                   std::string *out) = 0;
+  virtual bool stdlib_fs_write_text(const void *frame, const std::string &path,
+                                    const std::string &text) = 0;
 };
 
 // One SEND, packaged as a single context object instead of seven positional
@@ -149,6 +179,14 @@ struct NativeStdlibCall {
     return host.stdlib_text_of(value);
   }
 
+  std::optional<std::string> bytes_of(const Value &value) const {
+    return host.stdlib_bytes_of(frame, value);
+  }
+
+  Value bytes_value(std::string bytes) const {
+    return host.stdlib_bytes_value_from_bytes(std::move(bytes));
+  }
+
   Value make_list(std::vector<Value> items) const {
     return host.stdlib_make_list(std::move(items));
   }
@@ -156,6 +194,20 @@ struct NativeStdlibCall {
   Value make_object(std::vector<std::pair<std::string, Value>> entries,
                     bool strict = false) const {
     return host.stdlib_make_object(std::move(entries), strict);
+  }
+
+  StdlibBlockResult call_stream_block(Value value) const {
+    return host.stdlib_call_stream_block(frame, block, std::move(value));
+  }
+
+  void throw_json_stop() const { host.stdlib_throw_json_stop(frame); }
+
+  bool fs_read_text(const std::string &path, std::string *out) const {
+    return host.stdlib_fs_read_text(frame, path, out);
+  }
+
+  bool fs_write_text(const std::string &path, const std::string &text) const {
+    return host.stdlib_fs_write_text(frame, path, text);
   }
 };
 
@@ -199,5 +251,6 @@ void register_builtin_stdlib(NativeRegistry &registry);
 // Per-library registration entry points (defined in `runtime/stdlib_<name>.cpp`).
 void register_math(NativeRegistry &registry);
 void register_json(NativeRegistry &registry);
+void register_codecs(NativeRegistry &registry);
 
 } // namespace amber::runtime

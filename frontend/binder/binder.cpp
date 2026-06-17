@@ -1324,10 +1324,11 @@ bool contains_name_ref_key(const std::vector<NameRefKey> &keys,
 
 bool is_native_prelude_name(const std::string &name) {
   static const std::set<std::string> names = {
-      "Amber", "Array", "Atomic", "Barrier", "Bool", "Channel",
-      "Err",   "Flow",  "Float", "Int",    "Json",  "Kernel",  "Map",  "Math",
-      "Mutex", "Null",  "Object", "Ok", "Range",  "Set",     "Str",     "Symbol",
-      "ThreadedCollection", "Tuple", "desc", "io", "p", "pp", "print", "task",
+      "Amber", "Array", "Atomic", "Barrier", "Base64", "Base64Url", "Bool",
+      "Bytes", "Channel", "Err", "Flow", "Float", "Hex", "Int", "Json",
+      "Kernel", "Map", "Math", "Mutex", "Null", "Object", "Ok", "Range",
+      "Set", "Str", "StrictMap", "Symbol", "ThreadedCollection", "Tuple",
+      "desc", "io", "p", "pp", "print", "task",
       // Builtin runtime error classes resolve to native prelude constants at
       // runtime (see lookup_native_prelude_constant / runtime_error_id), so they
       // may be referenced in expression position too -- e.g. ValueError.new(msg)

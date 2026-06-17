@@ -17,6 +17,21 @@ entries:
     intrinsic_id: amber.prelude.Math.v1
     dispatch: constant_lookup
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: Base64
+    kind: prelude_module
+    intrinsic_id: amber.prelude.Base64.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Base64Url
+    kind: prelude_module
+    intrinsic_id: amber.prelude.Base64Url.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Hex
+    kind: prelude_module
+    intrinsic_id: amber.prelude.Hex.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: Amber
     kind: prelude_module
     intrinsic_id: amber.prelude.Amber.v1
@@ -75,6 +90,11 @@ entries:
   - name: Range
     kind: prelude_class
     intrinsic_id: amber.prelude.Range.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Bytes
+    kind: prelude_class
+    intrinsic_id: amber.prelude.Bytes.v1
     dispatch: constructor
     shadowing: local_binding_disables_intrinsic_lowering
   - name: LazySeq

@@ -57,6 +57,41 @@ struct MockHost : StdlibHost {
   Value stdlib_string_value_from_text(std::string /*text*/) override {
     return Value::null();
   }
+  std::optional<std::string>
+  stdlib_text_of(const Value & /*value*/) override {
+    return std::nullopt;
+  }
+  std::optional<std::string>
+  stdlib_bytes_of(const void * /*frame*/, const Value & /*value*/) override {
+    return std::nullopt;
+  }
+  Value stdlib_bytes_value_from_bytes(std::string /*bytes*/) override {
+    return Value::null();
+  }
+  Value stdlib_make_list(std::vector<Value> /*items*/) override {
+    return Value::null();
+  }
+  Value stdlib_make_object(
+      std::vector<std::pair<std::string, Value>> /*entries*/,
+      bool /*strict*/) override {
+    return Value::null();
+  }
+  amber::runtime::StdlibBlockResult
+  stdlib_call_stream_block(const void * /*frame*/, const Value & /*block*/,
+                           Value /*value*/) override {
+    return {};
+  }
+  void stdlib_throw_json_stop(const void * /*frame*/) override {}
+  bool stdlib_fs_read_text(const void * /*frame*/,
+                           const std::string & /*path*/,
+                           std::string * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_write_text(const void * /*frame*/,
+                            const std::string & /*path*/,
+                            const std::string & /*text*/) override {
+    return false;
+  }
 };
 
 // Build and dispatch one Math SEND through the registry handler. Returns the
@@ -81,6 +116,9 @@ void test_path_resolution(const NativeRegistry &registry) {
       registry.kind_for_path("Math");
   expect(math.has_value() && *math == RuntimeNativeTypeKind::Math,
          "kind_for_path(\"Math\") resolves to Math");
+  const std::optional<RuntimeNativeTypeKind> hex = registry.kind_for_path("Hex");
+  expect(hex.has_value() && *hex == RuntimeNativeTypeKind::Hex,
+         "kind_for_path(\"Hex\") resolves to Hex");
   expect(!registry.kind_for_path("NotALibrary").has_value(),
          "unregistered path resolves to nullopt");
 }
@@ -88,6 +126,8 @@ void test_path_resolution(const NativeRegistry &registry) {
 void test_handler_table(const NativeRegistry &registry) {
   expect(registry.handler_for(RuntimeNativeTypeKind::Math) != nullptr,
          "Math handler is registered");
+  expect(registry.handler_for(RuntimeNativeTypeKind::Base64) != nullptr,
+         "Base64 handler is registered");
   // Kernel has not migrated onto the registry; it must stay on the legacy chain.
   expect(registry.handler_for(RuntimeNativeTypeKind::Kernel) == nullptr,
          "unmigrated kind has no registered handler");

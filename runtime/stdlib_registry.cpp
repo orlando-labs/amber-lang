@@ -32,6 +32,7 @@ NativeRegistry::kind_for_path(const std::string &path) const {
 void register_builtin_stdlib(NativeRegistry &registry) {
   register_math(registry);
   register_json(registry);
+  register_codecs(registry);
 }
 
 } // namespace amber::runtime

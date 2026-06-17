@@ -23,6 +23,12 @@ class Workload:
     cpp_binary: str
     go_source: str
     go_binary: str
+    requires_full_amber_native: bool = True
+    amber_grants: tuple[str, ...] = ()
+
+
+JSON_RECORDS = 20000
+JSON_FIXTURE_RELATIVE = Path("bench/polyglot/build/json/events.jsonl")
 
 
 WORKLOADS = {
@@ -64,6 +70,33 @@ WORKLOADS = {
         cpp_binary="sha_digest",
         go_source="sha_digest.go",
         go_binary="sha_digest",
+    ),
+    "json": Workload(
+        name="json",
+        expected_checksum="1531352227",
+        amber_module="bench.polyglot.json",
+        amber_entry="main",
+        amber_source="json.am",
+        python_source="json_workload.py",
+        ruby_source="json_workload.rb",
+        cpp_source="json_workload.cpp",
+        cpp_binary="json_workload",
+        go_source="json_workload.go",
+        go_binary="json_workload",
+        amber_grants=("fs.read=bench/polyglot/build/json/events.jsonl",),
+    ),
+    "codecs": Workload(
+        name="codecs",
+        expected_checksum="2056190",
+        amber_module="bench.polyglot.codecs",
+        amber_entry="main",
+        amber_source="codecs.am",
+        python_source="codecs_workload.py",
+        ruby_source="codecs_workload.rb",
+        cpp_source="codecs_workload.cpp",
+        cpp_binary="codecs_workload",
+        go_source="codecs_workload.go",
+        go_binary="codecs_workload",
     ),
 }
 
@@ -121,6 +154,21 @@ def ensure_amber_tools(root: Path) -> None:
     run_command(["make", "build/amberc", "build/iamber"], root, capture=False)
 
 
+def prepare_json_fixture(root: Path) -> Path:
+    path = root / JSON_FIXTURE_RELATIVE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for i in range(JSON_RECORDS):
+            value = (i * 17) % 100000
+            group = i % 8
+            name = i % 100
+            handle.write(
+                f'{{"id":{i},"value":{value},'
+                f'"group":{group},"name":"event-{name}"}}\n'
+            )
+    return path
+
+
 def amber_artifact_path(build_dir: Path, workload: Workload) -> Path:
     return build_dir / "amber" / "out" / f"{workload.amber_module}.amberbc"
 
@@ -170,21 +218,25 @@ def build_amber_native_executable(
     output.parent.mkdir(parents=True, exist_ok=True)
     source = root / "bench" / "polyglot" / "amber" / "src" / workload.amber_source
     entry = "init" if workload.amber_entry == "__init__" else "main-only"
-    completed = run_command(
-        [
-            root / "build" / "amberc",
-            "build",
-            source,
-            "-o",
-            output,
-            "--entry",
-            entry,
-        ],
-        root,
-    )
+    command = [
+        root / "build" / "amberc",
+        "build",
+        source,
+        "-o",
+        output,
+        "--entry",
+        entry,
+    ]
+    for grant in workload.amber_grants:
+        command.extend(["--grant", grant])
+    completed = run_command(command, root)
     build_result = json.loads(completed.stdout)
     if build_result.get("status") != "ok":
         raise RuntimeError(f"Amber native build failed: {completed.stdout}")
+    if not workload.requires_full_amber_native:
+        if not output.exists():
+            raise RuntimeError(f"expected Amber built executable is missing: {output}")
+        return output
     if build_result.get("native_backend") != "cpp-bytecode-direct-v1":
         raise RuntimeError(
             "Amber built benchmark expected native backend "
@@ -265,6 +317,10 @@ def compile_amberbc_runner(root: Path, build_dir: Path, cxx: str) -> Path:
         root / "runtime" / "text.cpp",
         root / "runtime" / "io.cpp",
         root / "runtime" / "vm.cpp",
+        root / "runtime" / "stdlib_registry.cpp",
+        root / "runtime" / "stdlib_math.cpp",
+        root / "runtime" / "stdlib_json.cpp",
+        root / "runtime" / "stdlib_codecs.cpp",
     ]
     run_command(
         [
@@ -458,16 +514,19 @@ def main() -> int:
     if not build_dir.is_absolute():
         build_dir = root / build_dir
     build_dir.mkdir(parents=True, exist_ok=True)
+    if workload.name == "json":
+        prepare_json_fixture(root)
 
     cxx = choose_cxx()
     go = choose_go()
     go_unavailable_reason = None
     if args.no_build:
         amber_built = amber_native_path(build_dir, workload)
-        cpp_binary = build_dir / "cpp" / workload.cpp_binary
-        go_binary = build_dir / "go" / workload.go_binary
+        amber_built_command = [amber_built]
         if not amber_built.exists():
             raise RuntimeError(f"Amber native executable missing: {amber_built}")
+        cpp_binary = build_dir / "cpp" / workload.cpp_binary
+        go_binary = build_dir / "go" / workload.go_binary
         if not go_binary.exists():
             if go is None:
                 go_unavailable_reason = "go not found in PATH"
@@ -477,6 +536,7 @@ def main() -> int:
         ensure_amber_tools(root)
         build_amber_bytecode(root, build_dir)
         amber_built = build_amber_native_executable(root, build_dir, workload)
+        amber_built_command = [amber_built]
         cpp_binary = compile_cpp_program(root, build_dir, cxx, workload)
         if go is None:
             go_binary = None
@@ -502,7 +562,7 @@ def main() -> int:
                 / workload.amber_source,
             ],
         ),
-        ("amber-built", [amber_built]),
+        ("amber-built", amber_built_command),
         (
             "python",
             [
@@ -512,7 +572,11 @@ def main() -> int:
         ),
         (
             "ruby",
-            [ruby, root / "bench" / "polyglot" / "ruby" / workload.ruby_source],
+            [
+                ruby,
+                "--disable=gems",
+                root / "bench" / "polyglot" / "ruby" / workload.ruby_source,
+            ],
         ),
         ("cpp", [cpp_binary]),
     ]
