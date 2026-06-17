@@ -1022,6 +1022,57 @@ void test_top_level_guarded_clause_function_self_recursion() {
          "guarded recursive clause function should return factorial");
 }
 
+void test_top_level_clause_function_self_recursion_base_one_orders() {
+  amber::bytecode::EmitResult recursive_first =
+      emit_ok("def fact(x) if x > 1: x * fact(x - 1)\n"
+              "def fact(1): 1\n"
+              "\n"
+              "fact(5)\n");
+  amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(recursive_first.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
+  expect(exec.ok(), "recursive-first base-one clause recursion failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 120,
+         "recursive-first base-one clause recursion should return factorial");
+
+  amber::bytecode::EmitResult base_first =
+      emit_ok("def fact(1): 1\n"
+              "def fact(x) if x > 1: x * fact(x - 1)\n"
+              "\n"
+              "fact(5)\n");
+  decoded = amber::bytecode::deserialize_module(
+      amber::bytecode::serialize_module(base_first.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  exec = amber::runtime::execute_code(decoded.module,
+                                      decoded.module.init.entry_code_id);
+  expect(exec.ok(), "base-first base-one clause recursion failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 120,
+         "base-first base-one clause recursion should return factorial");
+}
+
+void test_top_level_clause_function_miss_raises_match_error() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("def fact(x) if x > 1: x * fact(x - 1)\n"
+              "def fact(0): 1\n"
+              "\n"
+              "fact(5)\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
+  expect(!exec.ok(), "uncovered clause recursion should fail");
+  expect(exec.fault.has_value() && exec.fault->error_name == "MatchError",
+         "uncovered clause recursion should raise MatchError");
+}
+
 void test_runtime_capability_checks() {
   amber::bytecode::BcModule module;
   module.capabilities.push_back(
@@ -3385,12 +3436,17 @@ void test_execute_emitted_clause_method_dispatch() {
               "  Particle().mass(0)\n"
               "\n"
               "def positive():\n"
-              "  Particle().mass(4)\n");
+              "  Particle().mass(4)\n"
+              "\n"
+              "def negative():\n"
+              "  Particle().mass(2 - 3)\n");
   const amber::bytecode::BcMethod *zero =
       method_by_name(emit_result.module, "zero");
   const amber::bytecode::BcMethod *positive =
       method_by_name(emit_result.module, "positive");
-  expect(zero != nullptr && positive != nullptr,
+  const amber::bytecode::BcMethod *negative =
+      method_by_name(emit_result.module, "negative");
+  expect(zero != nullptr && positive != nullptr && negative != nullptr,
          "clause dispatch probes exist");
 
   const amber::runtime::ExecutionResult zero_result =
@@ -3405,6 +3461,13 @@ void test_execute_emitted_clause_method_dispatch() {
   expect(positive_result.value.is_integer() &&
              positive_result.value.as_integer() == 4,
          "guarded clause should match positive argument");
+
+  const amber::runtime::ExecutionResult negative_result =
+      amber::runtime::execute_code(emit_result.module, negative->entry_code_id);
+  expect(!negative_result.ok(), "clause dispatch miss should fail");
+  expect(negative_result.fault.has_value() &&
+             negative_result.fault->error_name == "MatchError",
+         "clause dispatch miss should raise MatchError");
 }
 
 void test_manual_make_map() {
@@ -8612,6 +8675,8 @@ int main() {
   test_top_level_clause_function_self_recursion();
   test_top_level_plain_def_fallback_clause_recursion();
   test_top_level_guarded_clause_function_self_recursion();
+  test_top_level_clause_function_self_recursion_base_one_orders();
+  test_top_level_clause_function_miss_raises_match_error();
   test_branching_and_last_result();
   test_manual_closure_call_and_capture();
   test_runtime_uninitialized_register_read_raises_name_error();

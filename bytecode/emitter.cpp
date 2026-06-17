@@ -1171,6 +1171,7 @@ private:
     method.owner_dispatch_ref = owner_class.value_or(0U);
     method.signature_blob_id =
         intern_signature_blob(node_field(item, "signature"));
+    bool has_clause_fallback = false;
 
     const ast::ListField *auto_assign = list_field(item, "auto_assign");
     if (auto_assign != nullptr) {
@@ -1199,6 +1200,9 @@ private:
       } else {
         method.entry_code_id =
             emit_embedded_code(*procedure, *else_body, CodeKind::Method);
+        if (!is_empty_seq_expr(else_body)) {
+          has_clause_fallback = true;
+        }
         method.clause_table = build_clause_entries(item, *procedure);
       }
     } else {
@@ -1278,6 +1282,9 @@ private:
     }
     if (bool_field(item, "property_setter")) {
       method.flags |= kMethodFlagPropertySetter;
+    }
+    if (has_clause_fallback) {
+      method.flags |= kMethodFlagClauseFallback;
     }
     return method;
   }
@@ -4085,10 +4092,8 @@ std::uint32_t CodeEmitter::compile_clause_dispatch(const ast::Expr &expr) {
   if (else_body != nullptr && !is_empty_seq_expr(else_body)) {
     compile_seq_to_reg(*else_body, dst, else_body->span);
   } else {
-    emit_instruction(Opcode::LoadNull, {{dst, false}}, expr.span);
-    if (preserve_last_result_) {
-      emit_instruction(Opcode::SetLast, {{dst, false}}, expr.span);
-    }
+    emit_instruction(Opcode::PFail, {{kPatternFailModeMatchError, false}},
+                     expr.span);
   }
 
   for (std::size_t jump : end_jumps) {

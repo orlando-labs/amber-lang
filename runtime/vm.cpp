@@ -7202,6 +7202,11 @@ constexpr std::uint32_t kMethodFlagPropertyGetter =
     amber::bytecode::kMethodFlagPropertyGetter;
 constexpr std::uint32_t kMethodFlagPropertySetter =
     amber::bytecode::kMethodFlagPropertySetter;
+constexpr std::uint32_t kMethodFlagClauseFallback =
+    amber::bytecode::kMethodFlagClauseFallback;
+constexpr std::uint32_t kMethodFlagRuntimePreservedMask =
+    kMethodFlagPropertyGetter | kMethodFlagPropertySetter |
+    kMethodFlagClauseFallback;
 constexpr std::uint32_t kNativeSyntheticClassIndex =
     std::numeric_limits<std::uint32_t>::max();
 constexpr const char *kNativeRangeMarker = "__amber_range";
@@ -17864,6 +17869,11 @@ private:
       return body.value;
     }
 
+    if ((method.flags & kMethodFlagClauseFallback) == 0U) {
+      set_fault(caller, "MatchError", "method clause match failed");
+      return std::nullopt;
+    }
+
     NestedExecution fallback = execute_nested_code(
         method.entry_code_id, base_regs, base_initialized, self, block);
     if (!fallback.ok()) {
@@ -18250,6 +18260,11 @@ private:
       Value value = return_override.has_value() ? *return_override : body.value;
       return complete_invoke_result(caller, caller_result_reg,
                                     std::move(value));
+    }
+
+    if ((method.flags & kMethodFlagClauseFallback) == 0U) {
+      set_fault(caller, "MatchError", "method clause match failed");
+      return false;
     }
 
     const NestedExecution fallback = execute_nested_code(
@@ -31988,17 +32003,15 @@ RuntimeWorld::commit_transaction(const RuntimeWorldTransaction &tx) {
   for (bytecode::BcMethod method : tx.instance_methods) {
     method.owner_dispatch_ref = tx.target_index;
     method.flags = kMethodFlagInstance |
-                   (method.flags &
-                    (kMethodFlagPropertyGetter | kMethodFlagPropertySetter));
+                   (method.flags & kMethodFlagRuntimePreservedMask);
     runtime_owner.instance_method_table.entries[method.selector_sym_id] =
         std::move(method);
     changed = true;
   }
   for (bytecode::BcMethod method : tx.class_methods) {
     method.owner_dispatch_ref = tx.target_index;
-    method.flags = kMethodFlagClass |
-                   (method.flags &
-                    (kMethodFlagPropertyGetter | kMethodFlagPropertySetter));
+    method.flags =
+        kMethodFlagClass | (method.flags & kMethodFlagRuntimePreservedMask);
     runtime_owner.class_method_table.entries[method.selector_sym_id] =
         std::move(method);
     changed = true;

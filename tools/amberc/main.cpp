@@ -682,7 +682,11 @@ zero_arg_method_by_name(const amber::bytecode::BcModule &module,
   for (const amber::bytecode::BcMethod &method : module.methods) {
     if (method.selector_sym_id < module.symbols.size() &&
         module.symbols[method.selector_sym_id] == name &&
-        method.params.empty() && method.flags == 0) {
+        method.params.empty() &&
+        (method.flags & (amber::bytecode::kMethodFlagInstance |
+                         amber::bytecode::kMethodFlagClass |
+                         amber::bytecode::kMethodFlagPropertyGetter |
+                         amber::bytecode::kMethodFlagPropertySetter)) == 0U) {
       return &method;
     }
   }
@@ -3742,7 +3746,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  for (const amber::bytecode::BcMethod &method : module.methods) {\n";
   out << "    if (method.selector_sym_id < module.symbols.size() && "
          "module.symbols[method.selector_sym_id] == name && "
-         "method.params.empty() && method.flags == 0) return &method;\n";
+         "method.params.empty() && "
+         "(method.flags & (amber::bytecode::kMethodFlagInstance | "
+         "amber::bytecode::kMethodFlagClass | "
+         "amber::bytecode::kMethodFlagPropertyGetter | "
+         "amber::bytecode::kMethodFlagPropertySetter)) == 0U) return "
+         "&method;\n";
   out << "  }\n";
   out << "  return nullptr;\n";
   out << "}\n\n";

@@ -340,6 +340,7 @@ inline constexpr std::uint32_t kMethodFlagInstance = 0x1U;
 inline constexpr std::uint32_t kMethodFlagClass = 0x2U;
 inline constexpr std::uint32_t kMethodFlagPropertyGetter = 0x4U;
 inline constexpr std::uint32_t kMethodFlagPropertySetter = 0x8U;
+inline constexpr std::uint32_t kMethodFlagClauseFallback = 0x10U;
 
 inline constexpr std::uint32_t kClassFlagMixin = 0x1U;
 
