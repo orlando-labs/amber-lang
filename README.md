@@ -49,6 +49,13 @@ build/ambertest run corpus
 build/ambertest run corpus --bundle M11
 ```
 
+Documentation:
+
+- [Json standard library guide](docs/stdlib-json.md) - parse/generate, JSONL,
+  streaming, file I/O, and `.to_json` examples.
+- [Base64, Base64Url, and Hex guide](docs/stdlib-codecs.md) - byte/text
+  codecs, strict/lenient decode modes, `Bytes`, `ByteBuffer`, and error cases.
+
 Current matrix status:
 
 | Slice | Status | Notes |
