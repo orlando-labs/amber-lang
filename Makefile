@@ -108,7 +108,7 @@ PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp 
 BUILD_SRCS := buildsys/build.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 IO_SRCS := runtime/io.cpp
-STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_math.cpp
+STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_math.cpp runtime/stdlib_json.cpp
 RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp $(IO_SRCS) runtime/vm.cpp $(STDLIB_SRCS) runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
@@ -197,6 +197,7 @@ FORMAT_FILES := \
 	runtime/stdlib_registry.cpp \
 	runtime/stdlib_registry.h \
 	runtime/stdlib_math.cpp \
+	runtime/stdlib_json.cpp \
 	package/package.cpp \
 	package/package.h \
 	tools/amberc/main.cpp \

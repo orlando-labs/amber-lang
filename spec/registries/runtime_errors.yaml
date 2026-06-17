@@ -49,3 +49,6 @@ errors:
   - ReplayDivergenceError
   - ReadOnlyPropertyError
   - WriteOnlyPropertyError
+  - JsonError
+  - JsonParseError
+  - JsonGenerateError

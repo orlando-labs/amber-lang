@@ -31,6 +31,7 @@ NativeRegistry::kind_for_path(const std::string &path) const {
 // ship as `runtime/stdlib_<name>.{cpp}` — no further edit to `vm.cpp`.
 void register_builtin_stdlib(NativeRegistry &registry) {
   register_math(registry);
+  register_json(registry);
 }
 
 } // namespace amber::runtime

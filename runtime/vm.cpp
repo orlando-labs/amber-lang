@@ -7238,6 +7238,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Kernel";
   case RuntimeNativeTypeKind::Math:
     return "Math";
+  case RuntimeNativeTypeKind::Json:
+    return "Json";
   case RuntimeNativeTypeKind::Io:
     return "io";
   case RuntimeNativeTypeKind::TextBuffer:
@@ -9507,6 +9509,34 @@ public:
   }
   Value stdlib_string_value_from_text(std::string text) override {
     return string_value_from_text(std::move(text));
+  }
+  std::optional<std::string> stdlib_text_of(const Value &value) override {
+    if (value.is_string()) {
+      return string_text_from_id(value.as_string().string_id);
+    }
+    if (value.is_symbol()) {
+      const std::uint32_t sid = value.as_symbol().symbol_id;
+      if (sid < module_.symbols.size()) {
+        return module_.symbols[sid];
+      }
+    }
+    return std::nullopt;
+  }
+  Value stdlib_make_list(std::vector<Value> items) override {
+    return make_list_value(std::move(items));
+  }
+  Value stdlib_make_object(std::vector<std::pair<std::string, Value>> entries,
+                           bool strict) override {
+    std::vector<MapEntry> map_entries;
+    map_entries.reserve(entries.size());
+    for (auto &[key, val] : entries) {
+      // Keys are stored as Str; the ordinary-map wrapper interns a canonical
+      // identity so the result is name-indifferent, while a strict map keeps the
+      // Str keys exact. Entry order is preserved.
+      map_entries.push_back(
+          MapEntry{string_value_from_text(key), std::move(val)});
+    }
+    return make_symbol_map_value(std::move(map_entries), false, strict);
   }
 
   void resolve_numeric_policy() {

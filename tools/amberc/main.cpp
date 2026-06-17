@@ -3162,7 +3162,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "package/package.cpp",      "runtime/context.cpp",
       "runtime/text.cpp",         "runtime/io.cpp",
       "runtime/vm.cpp",           "runtime/stdlib_registry.cpp",
-      "runtime/stdlib_math.cpp",
+      "runtime/stdlib_math.cpp",  "runtime/stdlib_json.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());

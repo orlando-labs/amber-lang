@@ -57,6 +57,24 @@ public:
 
   // Intern `text` into the module string table and wrap it as a String value.
   virtual Value stdlib_string_value_from_text(std::string text) = 0;
+
+  // --- value introspection (used by generators) -----------------------------
+  // The text of a String or Symbol value (a Symbol yields its name); nullopt for
+  // any other kind. Lets a stdlib unit read string/key text without touching the
+  // module string/symbol tables directly.
+  virtual std::optional<std::string> stdlib_text_of(const Value &value) = 0;
+
+  // --- value construction (used by parsers) ----------------------------------
+  // Build a List value from `items`.
+  virtual Value stdlib_make_list(std::vector<Value> items) = 0;
+
+  // Build a map from string-keyed entries. `strict=false` yields an ordinary
+  // name-indifferent Map (keys stored as Str, canonical identity interned);
+  // `strict=true` yields a StrictMap. Entry order is preserved; later duplicate
+  // keys overwrite earlier ones per the map's strictness.
+  virtual Value
+  stdlib_make_object(std::vector<std::pair<std::string, Value>> entries,
+                     bool strict) = 0;
 };
 
 // One SEND, packaged as a single context object instead of seven positional
@@ -126,6 +144,19 @@ struct NativeStdlibCall {
   Value string_value(std::string text) const {
     return host.stdlib_string_value_from_text(std::move(text));
   }
+
+  std::optional<std::string> text_of(const Value &value) const {
+    return host.stdlib_text_of(value);
+  }
+
+  Value make_list(std::vector<Value> items) const {
+    return host.stdlib_make_list(std::move(items));
+  }
+
+  Value make_object(std::vector<std::pair<std::string, Value>> entries,
+                    bool strict = false) const {
+    return host.stdlib_make_object(std::move(entries), strict);
+  }
 };
 
 // A library handler keeps the proven chain-of-responsibility shape; it owns its
@@ -167,5 +198,6 @@ void register_builtin_stdlib(NativeRegistry &registry);
 
 // Per-library registration entry points (defined in `runtime/stdlib_<name>.cpp`).
 void register_math(NativeRegistry &registry);
+void register_json(NativeRegistry &registry);
 
 } // namespace amber::runtime

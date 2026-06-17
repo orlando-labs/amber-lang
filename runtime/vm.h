@@ -234,6 +234,7 @@ enum class RuntimeNativeTypeKind {
   ThreadedCollection,
   Kernel,
   Math,
+  Json,
   Io,
   TextBuffer,
   Logger,
