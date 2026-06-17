@@ -1,0 +1,27 @@
+package bench.polyglot.secure_random
+
+export main
+
+def main() -> Int !{random, mut}:
+  checksum = 0
+  i = 0
+  while i < 2000:
+    checksum = checksum + SecureRandom.bytes(32).count()
+    checksum = checksum + Hex.decode(SecureRandom.hex(16)).count()
+    checksum = checksum + Base64.decode(SecureRandom.base64(18)).count()
+    checksum = checksum + Base64.decode(SecureRandom.base64(17, padding: false)).count()
+    checksum = checksum + Base64Url.decode(SecureRandom.base64url(18)).count()
+
+    uuid = SecureRandom.uuid
+    if uuid.length() == 36 and uuid.contains?("-"):
+      checksum = checksum + 37
+
+    sample = SecureRandom.int(100..999)
+    if sample >= 100 and sample <= 999:
+      checksum = checksum + 10
+
+    i = i + 1
+
+  checksum
+
+main()

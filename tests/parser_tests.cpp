@@ -1131,6 +1131,42 @@ void test_control_flow_forms() {
          "do while stmt");
 }
 
+void test_control_header_call_colon_boundary() {
+  amber::parser::ParseModuleResult result = parse_module_raw(
+      "if uuid.contains?(\"-\"):\n"
+      "  1\n"
+      "if uuid.length() == 36 and uuid.contains?(\"-\"):\n"
+      "  2\n"
+      "if sample >= 100 and sample <= 999:\n"
+      "  3\n");
+  if (!result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(result.diagnostics);
+    std::exit(1);
+  }
+
+  expect(result.items.size() == 3, "control header regression item count");
+  const Expr &contains_if = node_field(*result.items[0], "expr");
+  expect(contains_if.kind == "AstIf", "contains? header parses as if");
+  expect(node_field(contains_if, "cond").kind == "AstPostfixChain",
+         "contains? condition remains postfix call");
+
+  const Expr &and_if = node_field(*result.items[1], "expr");
+  const Expr &and_cond = node_field(and_if, "cond");
+  expect(and_cond.kind == "AstBinary", "call and condition parses");
+  expect(string_field(and_cond, "op") == "and", "call and condition op");
+  expect(node_field(and_cond, "right").kind == "AstPostfixChain",
+         "and rhs remains postfix call");
+
+  const Expr &range_if = node_field(*result.items[2], "expr");
+  const Expr &range_cond = node_field(range_if, "cond");
+  expect(range_cond.kind == "AstBinary", "comparison and condition parses");
+  expect(string_field(range_cond, "op") == "and", "comparison and op");
+  expect(node_field(range_cond, "left").kind == "AstBinary",
+         "comparison and lhs remains comparison");
+  expect(node_field(range_cond, "right").kind == "AstBinary",
+         "comparison and rhs remains comparison");
+}
+
 void test_try_rescue_ensure_forms() {
   std::unique_ptr<Expr> expr =
       parse_ok("try:\n"
@@ -1281,6 +1317,7 @@ int main() {
   test_property_grouped_diagnostics_and_context();
   test_property_keywords_are_contextual_names();
   test_control_flow_forms();
+  test_control_header_call_colon_boundary();
   test_try_rescue_ensure_forms();
   test_throw_catch_forms();
   test_typed_signature_surface();

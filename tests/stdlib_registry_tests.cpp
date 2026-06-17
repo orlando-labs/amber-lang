@@ -82,6 +82,11 @@ struct MockHost : StdlibHost {
     return {};
   }
   void stdlib_throw_json_stop(const void * /*frame*/) override {}
+  bool stdlib_integer_range(const void * /*frame*/, const Value & /*value*/,
+                            amber::runtime::StdlibIntegerRange * /*out*/)
+      override {
+    return false;
+  }
   bool stdlib_fs_read_text(const void * /*frame*/,
                            const std::string & /*path*/,
                            std::string * /*out*/) override {
@@ -90,6 +95,11 @@ struct MockHost : StdlibHost {
   bool stdlib_fs_write_text(const void * /*frame*/,
                             const std::string & /*path*/,
                             const std::string & /*text*/) override {
+    return false;
+  }
+  bool stdlib_secure_random_bytes(const void * /*frame*/,
+                                  std::size_t /*count*/,
+                                  std::string * /*out*/) override {
     return false;
   }
 };
@@ -119,6 +129,11 @@ void test_path_resolution(const NativeRegistry &registry) {
   const std::optional<RuntimeNativeTypeKind> hex = registry.kind_for_path("Hex");
   expect(hex.has_value() && *hex == RuntimeNativeTypeKind::Hex,
          "kind_for_path(\"Hex\") resolves to Hex");
+  const std::optional<RuntimeNativeTypeKind> secure_random =
+      registry.kind_for_path("SecureRandom");
+  expect(secure_random.has_value() &&
+             *secure_random == RuntimeNativeTypeKind::SecureRandom,
+         "kind_for_path(\"SecureRandom\") resolves to SecureRandom");
   expect(!registry.kind_for_path("NotALibrary").has_value(),
          "unregistered path resolves to nullopt");
 }
@@ -128,6 +143,8 @@ void test_handler_table(const NativeRegistry &registry) {
          "Math handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::Base64) != nullptr,
          "Base64 handler is registered");
+  expect(registry.handler_for(RuntimeNativeTypeKind::SecureRandom) != nullptr,
+         "SecureRandom handler is registered");
   // Kernel has not migrated onto the registry; it must stay on the legacy chain.
   expect(registry.handler_for(RuntimeNativeTypeKind::Kernel) == nullptr,
          "unmigrated kind has no registered handler");

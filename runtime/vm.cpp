@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <charconv>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <initializer_list>
@@ -23,6 +25,14 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+
+#if defined(__linux__)
+#include <sys/random.h>
+#include <sys/types.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) ||    \
+    defined(__NetBSD__)
+#include <stdlib.h>
+#endif
 
 namespace amber::runtime {
 
@@ -88,6 +98,54 @@ bool decode_keyword_utf8_codepoint(const std::string &source,
   *codepoint = value;
   *byte_count = count;
   return true;
+}
+
+bool host_secure_random_bytes(std::size_t count, std::string *out,
+                              std::string *error) {
+  if (out == nullptr) {
+    if (error != nullptr) {
+      *error = "secure random output is null";
+    }
+    return false;
+  }
+  out->assign(count, '\0');
+  if (count == 0U) {
+    return true;
+  }
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) ||      \
+    defined(__NetBSD__)
+  arc4random_buf(&(*out)[0], out->size());
+  return true;
+#elif defined(__linux__)
+  char *cursor = &(*out)[0];
+  std::size_t remaining = out->size();
+  while (remaining > 0U) {
+    const ssize_t got = getrandom(cursor, remaining, 0);
+    if (got < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      if (error != nullptr) {
+        *error = std::string("getrandom failed: ") + std::strerror(errno);
+      }
+      return false;
+    }
+    if (got == 0) {
+      if (error != nullptr) {
+        *error = "getrandom returned no entropy";
+      }
+      return false;
+    }
+    cursor += got;
+    remaining -= static_cast<std::size_t>(got);
+  }
+  return true;
+#else
+  if (error != nullptr) {
+    *error = "secure random is not supported on this platform";
+  }
+  return false;
+#endif
 }
 
 bool keyword_identifier_start(std::uint32_t codepoint) {
@@ -7251,6 +7309,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Base64Url";
   case RuntimeNativeTypeKind::Hex:
     return "Hex";
+  case RuntimeNativeTypeKind::SecureRandom:
+    return "SecureRandom";
   case RuntimeNativeTypeKind::Io:
     return "io";
   case RuntimeNativeTypeKind::TextBuffer:
@@ -9598,6 +9658,11 @@ public:
     throw_value(*static_cast<const Frame *>(frame), json_stop_tag_value(),
                 Value::null());
   }
+  bool stdlib_integer_range(const void *frame, const Value &value,
+                            StdlibIntegerRange *out) override {
+    return stdlib_integer_range_descriptor(*static_cast<const Frame *>(frame),
+                                           value, out);
+  }
   bool stdlib_fs_read_text(const void *frame, const std::string &path,
                            std::string *out) override {
     return stdlib_read_text_file(*static_cast<const Frame *>(frame), path, out);
@@ -9606,6 +9671,11 @@ public:
                             const std::string &text) override {
     return stdlib_write_text_file(*static_cast<const Frame *>(frame), path,
                                   text);
+  }
+  bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
+                                  std::string *out) override {
+    return stdlib_secure_random_bytes_from_host(
+        *static_cast<const Frame *>(frame), count, out);
   }
 
   void resolve_numeric_policy() {
@@ -16009,6 +16079,69 @@ private:
     return true;
   }
 
+  bool stdlib_integer_range_descriptor(const Frame &frame, const Value &value,
+                                       StdlibIntegerRange *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "range output is null");
+      return false;
+    }
+    if (!value_is_range_instance(value)) {
+      set_fault(frame, "TypeError", "SecureRandom.int expects an Int range");
+      return false;
+    }
+    const std::optional<RangeBounds> bounds =
+        extract_range_bounds(frame, value);
+    if (fault_.has_value() || !bounds.has_value()) {
+      return false;
+    }
+    if (bounds->float_range) {
+      set_fault(frame, "TypeError", "SecureRandom.int expects an Int range");
+      return false;
+    }
+    if (!bounds->start.has_value() || !bounds->finish.has_value()) {
+      set_fault(frame, "ArgumentError",
+                "SecureRandom.int expects a bounded Int range");
+      return false;
+    }
+    if (!range_int_value_in_bounds(*bounds, *bounds->start)) {
+      set_fault(frame, "ArgumentError",
+                "SecureRandom.int expects a non-empty Int range");
+      return false;
+    }
+    const __int128 start = static_cast<__int128>(*bounds->start);
+    const __int128 finish = static_cast<__int128>(*bounds->finish);
+    const __int128 step = static_cast<__int128>(bounds->step);
+    __int128 count = 0;
+    if (step > 0) {
+      const __int128 last = bounds->inclusive_end ? finish : finish - 1;
+      if (start > last) {
+        set_fault(frame, "ArgumentError",
+                  "SecureRandom.int expects a non-empty Int range");
+        return false;
+      }
+      count = ((last - start) / step) + 1;
+    } else {
+      const __int128 last = bounds->inclusive_end ? finish : finish + 1;
+      if (start < last) {
+        set_fault(frame, "ArgumentError",
+                  "SecureRandom.int expects a non-empty Int range");
+        return false;
+      }
+      count = ((start - last) / (-step)) + 1;
+    }
+    if (count <= 0 ||
+        count > static_cast<__int128>(
+                    std::numeric_limits<std::uint64_t>::max())) {
+      set_fault(frame, "ArgumentError",
+                "SecureRandom.int range is too large");
+      return false;
+    }
+    out->start = *bounds->start;
+    out->step = bounds->step;
+    out->count = static_cast<std::uint64_t>(count);
+    return true;
+  }
+
   bool value_is_lazy_seq_instance(const Value &value) {
     if (!value.is_instance_object()) {
       return false;
@@ -19790,6 +19923,47 @@ private:
         runtime_fs_write_bytes(RuntimePath(path), text, /*create=*/true,
                                /*truncate=*/true);
     return set_fault_from_io_status(frame, status);
+  }
+
+  bool stdlib_secure_random_bytes_from_host(const Frame &frame,
+                                            std::size_t count,
+                                            std::string *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "secure random output is null");
+      return false;
+    }
+    if (world_options_ != nullptr) {
+      if (!check_io_effect_policy(frame, "random.secure")) {
+        return false;
+      }
+      record_io_event("capability.check",
+                      {{"capability", "random.secure"}, {"target", ""}});
+      if (capabilities_ == nullptr ||
+          !capability::capability_set_allows(capabilities_->effective,
+                                             "random.secure", "")) {
+        record_io_event("capability.denied",
+                        {{"capability", "random.secure"}, {"target", ""}});
+        set_fault(frame, "CapabilityError",
+                  "capability is not granted: random.secure");
+        return false;
+      }
+      if (world_options_->enforce_replay) {
+        record_io_event("random.secure",
+                        {{"bytes", std::to_string(count)}});
+        set_fault(frame, "DeterminismError",
+                  "secure random requires a recorded random provider in replay "
+                  "mode");
+        return false;
+      }
+    }
+    record_io_event("random.secure", {{"bytes", std::to_string(count)}});
+    std::string error;
+    if (!host_secure_random_bytes(count, out, &error)) {
+      set_fault(frame, "EntropyError",
+                error.empty() ? "secure random failed" : error);
+      return false;
+    }
+    return true;
   }
 
   template <typename T>

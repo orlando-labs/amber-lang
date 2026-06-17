@@ -23,6 +23,7 @@ python3 bench/polyglot/run_benchmark.py --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload calls-collections --repeats 5
 python3 bench/polyglot/run_benchmark.py --workload json --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload codecs --repeats 3
+python3 bench/polyglot/run_benchmark.py --workload secure-random --repeats 3
 ```
 
 The script prints mean/best wall-clock time and peak RSS reported by a small
@@ -35,6 +36,7 @@ workload:
 - `sha-digest`: `2242493101`
 - `json`: `1531352227`
 - `codecs`: `2056190`
+- `secure-random`: `296000`
 
 The `json` workload exercises compact JSON generation, parse round-trips,
 small pretty-generation round-trips, and streaming JSONL reads. The runner
@@ -50,6 +52,103 @@ does not use it.
 The `codecs` workload exercises `Bytes.new`, `Base64`, `Base64Url`, and `Hex`
 encode/decode round-trips, including lenient base64/hex branches. The runner
 requires full direct-native coverage for this workload as well.
+
+The `secure-random` workload exercises `SecureRandom.bytes`, `.hex`,
+`.base64`, `.base64url`, `.uuid`, and `.int(range)` using real OS entropy.
+The checksum validates lengths, codec round-trips, UUID shape, and integer
+range membership rather than random contents. The Amber built executable is
+compiled with `--grant random.secure`. The runner requires full direct-native
+coverage for this workload, including `Range.new`, `SecureRandom.int(range)`,
+and String shape checks.
+
+Latest local full-suite warm rerun on 2026-06-17 (Darwin arm64,
+`go version go1.26.4 darwin/arm64`):
+
+Each workload was first built once into a fresh
+`/private/tmp/amber_polyglot_suite_20260617_*` directory. The tables below are
+the immediate stable reruns against those fresh artifacts:
+
+```sh
+python3 bench/polyglot/run_benchmark.py --workload <workload> --repeats 10 --no-build --build-dir <fresh-build-dir>
+```
+
+Arithmetic:
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.1602     0.1572          3.9    715609516598740
+amber-built           10     0.0159     0.0154          1.4    715609516598740
+python                10     0.2013     0.1917          8.3    715609516598740
+ruby                  10     0.0768     0.0750         11.9    715609516598740
+cpp                   10     0.0048     0.0044          1.3    715609516598740
+go                    10     0.0066     0.0065          3.9    715609516598740
+```
+
+Calls and collections:
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.0131     0.0129          5.3         2047795430
+amber-built           10     0.0051     0.0046          1.4         2047795430
+python                10     0.0246     0.0238          8.7         2047795430
+ruby                  10     0.0119     0.0116         12.0         2047795430
+cpp                   10     0.0038     0.0025          1.3         2047795430
+go                    10     0.0033     0.0030          3.9         2047795430
+```
+
+SHA digest:
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.0770     0.0751          6.4         2242493101
+amber-built           10     0.0067     0.0063          2.1         2242493101
+python                10     0.0991     0.0982          8.9         2242493101
+ruby                  10     0.0365     0.0360         12.7         2242493101
+cpp                   10     0.0027     0.0024          1.3         2242493101
+go                    10     0.0033     0.0032          4.0         2242493101
+```
+
+JSON:
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.0268     0.0261          9.5         1531352227
+amber-built           10     0.0118     0.0112          7.1         1531352227
+python                10     0.0433     0.0428          9.8         1531352227
+ruby                  10     0.0193     0.0189         13.5         1531352227
+cpp                   10     0.0043     0.0041          1.4         1531352227
+go                    10     0.0144     0.0142          9.2         1531352227
+```
+
+Codecs:
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.0450     0.0440         11.5            2056190
+amber-built           10     0.0109     0.0105          8.0            2056190
+python                10     0.0288     0.0283         11.2            2056190
+ruby                  10     0.0169     0.0164         12.7            2056190
+cpp                   10     0.0055     0.0053          1.4            2056190
+go                    10     0.0039     0.0038          4.7            2056190
+```
+
+Secure random:
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.0272     0.0260          7.1             296000
+amber-built           10     0.0108     0.0105          4.3             296000
+python                10     0.0571     0.0553         12.9             296000
+ruby                  10     0.0241     0.0238         13.1             296000
+cpp                   10     0.0062     0.0059          1.4             296000
+go                    10     0.0062     0.0059          4.8             296000
+```
 
 Latest local `codecs` warm rerun on 2026-06-17 (Darwin arm64):
 

@@ -1125,7 +1125,11 @@ bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
   return (selector == "[]" && pos_count == 1U) ||
          (selector == "[]=" && pos_count == 2U) ||
-         ((selector == "count" || selector == "first") && pos_count == 0U) ||
+         ((selector == "count" || selector == "length" ||
+           selector == "size" || selector == "first") &&
+          pos_count == 0U) ||
+         ((selector == "contains?" || selector == "includes?") &&
+          pos_count == 1U) ||
          (selector == "concat" && pos_count == 1U) ||
          (selector == "to_str" && pos_count == 0U);
 }
@@ -1271,6 +1275,7 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
     case Opcode::Return:
     case Opcode::Safepoint:
     case Opcode::CloseUpvalues:
+    case Opcode::TypeCheck:
     case Opcode::PBind:
     case Opcode::PCommit:
       break;
@@ -1383,12 +1388,60 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         }
         codec_send = true;
       }
+      bool range_send = false;
+      if (selector == "new" && pos_count == 2U && kw_count <= 2U &&
+          no_block) {
+        std::set<std::string> seen_keywords;
+        for (std::uint32_t kw_i = 0; kw_i < kw_count; ++kw_i) {
+          std::uint32_t kw_symbol_id = 0;
+          if (!operand_u32_value(instruction, kw_index + 1U + kw_i * 2U,
+                                 &kw_symbol_id) ||
+              kw_symbol_id >= module.symbols.size()) {
+            *reason = "invalid Range keyword operand";
+            return false;
+          }
+          const std::string &kw_name = module.symbols[kw_symbol_id];
+          if ((kw_name != "inclusive_end" && kw_name != "step") ||
+              !seen_keywords.insert(kw_name).second) {
+            *reason = "unsupported Range keyword shape";
+            return false;
+          }
+        }
+        range_send = true;
+      }
+      bool random_send = false;
+      if ((selector == "bytes" || selector == "hex" ||
+           selector == "base64" || selector == "base64url") &&
+          pos_count == 1U && kw_count <= 1U && no_block) {
+        if (kw_count == 1U) {
+          std::uint32_t kw_symbol_id = 0;
+          if (!operand_u32_value(instruction, kw_index + 1U, &kw_symbol_id) ||
+              kw_symbol_id >= module.symbols.size()) {
+            *reason = "invalid SecureRandom keyword operand";
+            return false;
+          }
+          const std::string &kw_name = module.symbols[kw_symbol_id];
+          if ((selector == "bytes" || selector == "hex") ||
+              kw_name != "padding") {
+            *reason = "unsupported SecureRandom keyword shape";
+            return false;
+          }
+        }
+        random_send = true;
+      } else if (selector == "uuid" && pos_count == 0U && kw_count == 0U &&
+                 no_block) {
+        random_send = true;
+      } else if (selector == "int" && pos_count == 1U && kw_count == 0U &&
+                 no_block) {
+        random_send = true;
+      }
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
-          !json_send && !codec_send) {
+          !json_send && !codec_send && !range_send && !random_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
-      if (!json_send && !codec_send && (kw_count != 0U || !no_block)) {
+      if (!json_send && !codec_send && !range_send && !random_send &&
+          (kw_count != 0U || !no_block)) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
       }
@@ -1845,6 +1898,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::base64url_module()";
           } else if (name == "Hex") {
             native_module_expr = "NativeValue::hex_module()";
+          } else if (name == "SecureRandom") {
+            native_module_expr = "NativeValue::secure_random_module()";
+          } else if (name == "Range") {
+            native_module_expr = "NativeValue::range_module()";
           }
         }
       }
@@ -1973,7 +2030,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t arg = 0;
       std::uint32_t arg2 = 0;
       std::uint32_t kw_count = 0;
+      std::uint32_t kw_symbol_id = 0;
       std::uint32_t kw_value_reg = 0;
+      std::uint32_t kw_symbol_id2 = 0;
+      std::uint32_t kw_value_reg2 = 0;
       std::int64_t block_reg = -1;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &recv);
@@ -1987,8 +2047,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       const std::size_t kw_index = 4U + pos_count;
       operand_u32_value(instruction, kw_index, &kw_count);
-      if (kw_count == 1U) {
+      if (kw_count >= 1U) {
+        operand_u32_value(instruction, kw_index + 1U, &kw_symbol_id);
         operand_u32_value(instruction, kw_index + 2U, &kw_value_reg);
+      }
+      if (kw_count >= 2U) {
+        operand_u32_value(instruction, kw_index + 3U, &kw_symbol_id2);
+        operand_u32_value(instruction, kw_index + 4U, &kw_value_reg2);
       }
       const std::size_t block_index = kw_index + 1U + kw_count * 2U;
       if (block_index < instruction.operands.size()) {
@@ -2069,8 +2134,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 read_reg_expr(arg2) + ")");
       } else if (selector == "count") {
         write_reg_stmt(dst, "native_count(" + read_reg_expr(recv) + ")");
+      } else if (selector == "length" || selector == "size") {
+        write_reg_stmt(dst, "native_string_length(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
         write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ")");
+      } else if (selector == "contains?" || selector == "includes?") {
+        write_reg_stmt(dst, "native_string_contains(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "concat") {
         write_reg_stmt(dst, "native_string_concat(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
@@ -2096,8 +2166,67 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                       block_reg)) +
                                   ")");
         }
+      } else if (selector == "bytes") {
+        write_reg_stmt(dst, "native_secure_random_bytes_value(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
+      } else if (selector == "base64") {
+        write_reg_stmt(dst, "native_secure_random_base64(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", " +
+                                (kw_count == 1U ? read_reg_expr(kw_value_reg)
+                                                : "NativeValue::nullv()") +
+                                ", " +
+                                (kw_count == 1U ? "true" : "false") +
+                                ", false)");
+      } else if (selector == "base64url") {
+        write_reg_stmt(dst, "native_secure_random_base64(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", " +
+                                (kw_count == 1U ? read_reg_expr(kw_value_reg)
+                                                : "NativeValue::nullv()") +
+                                ", " +
+                                (kw_count == 1U ? "true" : "false") +
+                                ", true)");
+      } else if (selector == "uuid") {
+        write_reg_stmt(dst, "native_secure_random_uuid(" +
+                                read_reg_expr(recv) + ")");
       } else if (selector == "new") {
-        write_reg_stmt(dst, "native_bytes_new(" + read_reg_expr(arg) + ")");
+        if (pos_count == 1U) {
+          write_reg_stmt(dst, "native_bytes_new(" + read_reg_expr(arg) + ")");
+        } else {
+          const auto kw_name = [&](std::uint32_t symbol_id) -> std::string {
+            return symbol_id < module.symbols.size() ? module.symbols[symbol_id]
+                                                     : std::string{};
+          };
+          const bool first_inclusive = kw_count >= 1U &&
+                                       kw_name(kw_symbol_id) == "inclusive_end";
+          const bool first_step =
+              kw_count >= 1U && kw_name(kw_symbol_id) == "step";
+          const bool second_inclusive =
+              kw_count >= 2U && kw_name(kw_symbol_id2) == "inclusive_end";
+          const bool second_step =
+              kw_count >= 2U && kw_name(kw_symbol_id2) == "step";
+          const std::string inclusive_expr =
+              first_inclusive
+                  ? read_reg_expr(kw_value_reg)
+                  : (second_inclusive ? read_reg_expr(kw_value_reg2)
+                                      : "NativeValue::nullv()");
+          const std::string step_expr =
+              first_step ? read_reg_expr(kw_value_reg)
+                         : (second_step ? read_reg_expr(kw_value_reg2)
+                                        : "NativeValue::nullv()");
+          write_reg_stmt(dst, "native_range_new(" + read_reg_expr(recv) +
+                                  ", " + read_reg_expr(arg) + ", " +
+                                  read_reg_expr(arg2) + ", " +
+                                  inclusive_expr + ", " +
+                                  (first_inclusive || second_inclusive ? "true"
+                                                                       : "false") +
+                                  ", " + step_expr + ", " +
+                                  (first_step || second_step ? "true"
+                                                             : "false") +
+                                  ")");
+        }
       } else if (selector == "encode") {
         write_reg_stmt(dst, "native_codec_encode(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ", " +
@@ -2113,7 +2242,17 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 ", " +
                                 (kw_count == 1U ? "true" : "false") + ")");
       } else if (selector == "hex") {
-        write_reg_stmt(dst, "native_bytes_hex(" + read_reg_expr(recv) + ")");
+        if (pos_count == 0U) {
+          write_reg_stmt(dst, "native_bytes_hex(" + read_reg_expr(recv) + ")");
+        } else {
+          write_reg_stmt(dst, "native_secure_random_hex(" +
+                                  read_reg_expr(recv) + ", " +
+                                  read_reg_expr(arg) + ")");
+        }
+      } else if (selector == "int") {
+        write_reg_stmt(dst, "native_secure_random_int(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -2334,6 +2473,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     }
     case Opcode::CloseUpvalues:
     case Opcode::Safepoint:
+    case Opcode::TypeCheck:
     case Opcode::PBind:
     case Opcode::PCommit:
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
@@ -2578,13 +2718,16 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include \"bytecode/format.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
   out << "#include <array>\n";
+  out << "#include <cerrno>\n";
   out << "#include <cctype>\n";
   out << "#include <cmath>\n";
   out << "#include <cstdint>\n";
+  out << "#include <cstring>\n";
   out << "#include <exception>\n";
   out << "#include <fstream>\n";
   out << "#include <initializer_list>\n";
   out << "#include <iostream>\n";
+  out << "#include <limits>\n";
   out << "#include <memory>\n";
   out << "#include <optional>\n";
   out << "#include <charconv>\n";
@@ -2594,6 +2737,13 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include <unordered_map>\n";
   out << "#include <utility>\n";
   out << "#include <vector>\n\n";
+  out << "#if defined(__linux__)\n";
+  out << "#include <sys/random.h>\n";
+  out << "#include <sys/types.h>\n";
+  out << "#elif defined(__APPLE__) || defined(__FreeBSD__) || "
+         "defined(__OpenBSD__) || defined(__NetBSD__)\n";
+  out << "#include <stdlib.h>\n";
+  out << "#endif\n\n";
   out << "namespace {\n\n";
   out << emit_embedded_hex_cpp(artifact.bytes);
   out << emit_module_strings_cpp(module);
@@ -2604,12 +2754,13 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "};\n\n";
   out << "struct NativeList;\n";
   out << "struct NativeMap;\n";
+  out << "struct NativeRange;\n";
   out << "struct NativeClosure;\n";
   out << "struct NativeCell;\n\n";
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
          "JsonModule, BytesModule, Base64Module, Base64UrlModule, HexModule, "
-         "Bytes, List, Map, Closure };\n";
+         "SecureRandomModule, RangeModule, Bytes, List, Map, Range, Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
@@ -2640,16 +2791,28 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Tag::Base64UrlModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue hex_module() { NativeValue out; out.tag = "
          "Tag::HexModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue secure_random_module() { NativeValue out; "
+         "out.tag = Tag::SecureRandomModule; out.scalar_value = 0; return "
+         "out; }\n";
+  out << "  static NativeValue range_module() { NativeValue out; out.tag = "
+         "Tag::RangeModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue bytes(std::string value);\n";
   out << "  static NativeValue list(std::vector<NativeValue> items);\n";
   out << "  static NativeValue map(std::vector<std::pair<std::string, "
          "NativeValue>> entries);\n";
+  out << "  static NativeValue range(NativeRange value);\n";
   out << "  static NativeValue closure(NativeClosure *value);\n";
   out << "};\n\n";
   out << "struct NativeBytes { std::string bytes; };\n";
   out << "struct NativeList { std::vector<NativeValue> items; };\n";
   out << "struct NativeMap { std::vector<std::pair<std::string, "
          "NativeValue>> entries; };\n";
+  out << "struct NativeRange {\n";
+  out << "  std::int64_t start = 0;\n";
+  out << "  std::int64_t finish = 0;\n";
+  out << "  std::int64_t step = 1;\n";
+  out << "  bool inclusive_end = true;\n";
+  out << "};\n";
   out << "struct NativeCell { NativeValue value; };\n";
   out << "struct NativeClosure {\n";
   out << "  std::uint32_t code_id = 0;\n";
@@ -2660,6 +2823,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::vector<std::unique_ptr<NativeBytes>> bytes;\n";
   out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
   out << "  std::vector<std::unique_ptr<NativeMap>> maps;\n";
+  out << "  std::vector<std::unique_ptr<NativeRange>> ranges;\n";
   out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
   out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
   out << "};\n";
@@ -2682,6 +2846,12 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  auto map = std::make_unique<NativeMap>();\n";
   out << "  map->entries = std::move(entries); out.heap_value = map.get();\n";
   out << "  native_arena.maps.push_back(std::move(map)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::range(NativeRange value) {\n";
+  out << "  NativeValue out; out.tag = Tag::Range;\n";
+  out << "  auto range = std::make_unique<NativeRange>(value);\n";
+  out << "  out.heap_value = range.get();\n";
+  out << "  native_arena.ranges.push_back(std::move(range)); return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::closure(NativeClosure *value) {\n";
   out << "  NativeValue out; out.tag = Tag::Closure;\n";
@@ -2772,6 +2942,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (value.tag != NativeValue::Tag::Bytes || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeBytes *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static const NativeRange &as_range(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Range || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeRange *>(value.heap_value);\n";
   out << "}\n";
   out << "static NativeClosure *as_closure(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Closure || "
@@ -2944,6 +3119,26 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return NativeValue::string_ref(native_intern_string("
          "native_string_text(lhs) + native_string_text(rhs)));\n";
   out << "}\n\n";
+  out << "static std::int64_t native_string_codepoint_count("
+         "const std::string &text) {\n";
+  out << "  std::int64_t count = 0;\n";
+  out << "  for (const char c : text) {\n";
+  out << "    if ((static_cast<unsigned char>(c) & 0xC0U) != 0x80U) ++count;\n";
+  out << "  }\n";
+  out << "  return count;\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_length(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  return NativeValue::integer(native_string_codepoint_count("
+         "native_string_text(value)));\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_contains(const NativeValue &value, "
+         "const NativeValue &needle) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String || "
+         "needle.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  return NativeValue::boolean(native_string_text(value).find("
+         "native_string_text(needle)) != std::string::npos);\n";
+  out << "}\n\n";
   out << R"AMBERCPP(static NativeValue amber_native_call_closure(const NativeValue &value, std::initializer_list<NativeValue> args);
 
 static const std::string &native_key_text(const NativeValue &value) {
@@ -3076,6 +3271,188 @@ static std::string native_base64_encode_bytes(const std::string &bytes,
     else if (padding) out.push_back('=');
   }
   return out;
+}
+
+static bool native_capability_allowed(const std::string &capability) {
+  for (const auto &grant : embedded_capability_grants()) {
+    if (grant.name != capability) continue;
+    if ((grant.flags & amber::capability::kCapabilityFlagWildcardTarget) != 0U ||
+        grant.target == "*" || grant.target.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::string native_secure_random_bytes_raw(std::size_t count) {
+  if (!native_capability_allowed("random.secure")) throw NativeBailout();
+  std::string out(count, '\0');
+  if (count == 0U) return out;
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+  arc4random_buf(&out[0], out.size());
+  return out;
+#elif defined(__linux__)
+  char *cursor = &out[0];
+  std::size_t remaining = out.size();
+  while (remaining > 0U) {
+    const ssize_t got = getrandom(cursor, remaining, 0);
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      throw NativeBailout();
+    }
+    if (got == 0) throw NativeBailout();
+    cursor += got;
+    remaining -= static_cast<std::size_t>(got);
+  }
+  return out;
+#else
+  throw NativeBailout();
+#endif
+}
+
+static std::size_t native_secure_random_count(const NativeValue &value) {
+  if (value.tag != NativeValue::Tag::Integer || value.scalar_value < 0) {
+    throw NativeBailout();
+  }
+  if (static_cast<std::uint64_t>(value.scalar_value) >
+      static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    throw NativeBailout();
+  }
+  return static_cast<std::size_t>(value.scalar_value);
+}
+
+static NativeValue native_range_new(const NativeValue &module,
+                                    const NativeValue &start_value,
+                                    const NativeValue &finish_value,
+                                    const NativeValue &inclusive_value,
+                                    bool has_inclusive,
+                                    const NativeValue &step_value,
+                                    bool has_step) {
+  if (module.tag != NativeValue::Tag::RangeModule ||
+      start_value.tag != NativeValue::Tag::Integer ||
+      finish_value.tag != NativeValue::Tag::Integer) {
+    throw NativeBailout();
+  }
+  NativeRange range;
+  range.start = start_value.scalar_value;
+  range.finish = finish_value.scalar_value;
+  range.inclusive_end = true;
+  if (has_inclusive) {
+    if (inclusive_value.tag != NativeValue::Tag::Bool) throw NativeBailout();
+    range.inclusive_end = inclusive_value.scalar_value != 0;
+  }
+  range.step = 1;
+  if (has_step && step_value.tag != NativeValue::Tag::Null) {
+    if (step_value.tag != NativeValue::Tag::Integer) throw NativeBailout();
+    range.step = step_value.scalar_value;
+  }
+  if (range.step == 0) throw NativeBailout();
+  return NativeValue::range(range);
+}
+
+static std::uint64_t native_load_u64_le(const std::string &bytes) {
+  if (bytes.size() < 8U) throw NativeBailout();
+  std::uint64_t value = 0;
+  for (std::size_t i = 0; i < 8U; ++i) {
+    value |= static_cast<std::uint64_t>(
+                 static_cast<unsigned char>(bytes[i]))
+             << (i * 8U);
+  }
+  return value;
+}
+
+static NativeValue native_secure_random_int(const NativeValue &module,
+                                            const NativeValue &range_value) {
+  if (module.tag != NativeValue::Tag::SecureRandomModule) throw NativeBailout();
+  const NativeRange &range = as_range(range_value);
+  const __int128 start = static_cast<__int128>(range.start);
+  const __int128 finish = static_cast<__int128>(range.finish);
+  const __int128 step = static_cast<__int128>(range.step);
+  __int128 count = 0;
+  if (step > 0) {
+    const __int128 last = range.inclusive_end ? finish : finish - 1;
+    if (start > last) throw NativeBailout();
+    count = ((last - start) / step) + 1;
+  } else {
+    const __int128 last = range.inclusive_end ? finish : finish + 1;
+    if (start < last) throw NativeBailout();
+    count = ((start - last) / (-step)) + 1;
+  }
+  if (count <= 0 ||
+      count > static_cast<__int128>(std::numeric_limits<std::uint64_t>::max())) {
+    throw NativeBailout();
+  }
+  const std::uint64_t count_u64 = static_cast<std::uint64_t>(count);
+  if (count_u64 == 1U) {
+    (void)native_secure_random_bytes_raw(0U);
+    return NativeValue::integer(range.start);
+  }
+  const std::uint64_t threshold =
+      (std::numeric_limits<std::uint64_t>::max() - count_u64 + 1U) %
+      count_u64;
+  while (true) {
+    const std::uint64_t sample =
+        native_load_u64_le(native_secure_random_bytes_raw(8U));
+    if (sample < threshold) continue;
+    const std::uint64_t offset = sample % count_u64;
+    const __int128 value =
+        start + step * static_cast<__int128>(offset);
+    if (value < static_cast<__int128>(std::numeric_limits<std::int64_t>::min()) ||
+        value > static_cast<__int128>(std::numeric_limits<std::int64_t>::max())) {
+      throw NativeBailout();
+    }
+    return NativeValue::integer(static_cast<std::int64_t>(value));
+  }
+}
+
+static NativeValue native_secure_random_bytes_value(const NativeValue &module,
+                                                    const NativeValue &count_value) {
+  if (module.tag != NativeValue::Tag::SecureRandomModule) throw NativeBailout();
+  return NativeValue::bytes(native_secure_random_bytes_raw(
+      native_secure_random_count(count_value)));
+}
+
+static NativeValue native_secure_random_hex(const NativeValue &module,
+                                            const NativeValue &count_value) {
+  if (module.tag != NativeValue::Tag::SecureRandomModule) throw NativeBailout();
+  return NativeValue::string_ref(native_intern_string(native_hex_encode_bytes(
+      native_secure_random_bytes_raw(native_secure_random_count(count_value)))));
+}
+
+static NativeValue native_secure_random_base64(const NativeValue &module,
+                                               const NativeValue &count_value,
+                                               const NativeValue &padding_value,
+                                               bool has_padding,
+                                               bool url) {
+  if (module.tag != NativeValue::Tag::SecureRandomModule) throw NativeBailout();
+  bool padding = !url;
+  if (has_padding) {
+    if (padding_value.tag != NativeValue::Tag::Bool) throw NativeBailout();
+    padding = padding_value.scalar_value != 0;
+  }
+  return NativeValue::string_ref(native_intern_string(native_base64_encode_bytes(
+      native_secure_random_bytes_raw(native_secure_random_count(count_value)),
+      url, padding)));
+}
+
+static NativeValue native_secure_random_uuid(const NativeValue &module) {
+  if (module.tag != NativeValue::Tag::SecureRandomModule) throw NativeBailout();
+  std::string bytes = native_secure_random_bytes_raw(16U);
+  bytes[6] = static_cast<char>((static_cast<unsigned char>(bytes[6]) & 0x0FU) | 0x40U);
+  bytes[8] = static_cast<char>((static_cast<unsigned char>(bytes[8]) & 0x3FU) | 0x80U);
+  const std::string hex = native_hex_encode_bytes(bytes);
+  std::string out;
+  out.reserve(36U);
+  out.append(hex, 0U, 8U);
+  out.push_back('-');
+  out.append(hex, 8U, 4U);
+  out.push_back('-');
+  out.append(hex, 12U, 4U);
+  out.push_back('-');
+  out.append(hex, 16U, 4U);
+  out.push_back('-');
+  out.append(hex, 20U, 12U);
+  return NativeValue::string_ref(native_intern_string(out));
 }
 
 static std::string native_base64_decode_text(const std::string &text,
@@ -3632,7 +4009,10 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "lhs.tag == NativeValue::Tag::Base64Module || "
          "lhs.tag == NativeValue::Tag::Base64UrlModule || "
          "lhs.tag == NativeValue::Tag::HexModule || "
+         "lhs.tag == NativeValue::Tag::SecureRandomModule || "
+         "lhs.tag == NativeValue::Tag::RangeModule || "
          "lhs.tag == NativeValue::Tag::Bytes || "
+         "lhs.tag == NativeValue::Tag::Range || "
          "rhs.tag == NativeValue::Tag::List || "
          "rhs.tag == NativeValue::Tag::Map || "
          "rhs.tag == NativeValue::Tag::JsonModule || "
@@ -3640,7 +4020,10 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "rhs.tag == NativeValue::Tag::Base64Module || "
          "rhs.tag == NativeValue::Tag::Base64UrlModule || "
          "rhs.tag == NativeValue::Tag::HexModule || "
+         "rhs.tag == NativeValue::Tag::SecureRandomModule || "
+         "rhs.tag == NativeValue::Tag::RangeModule || "
          "rhs.tag == NativeValue::Tag::Bytes || "
+         "rhs.tag == NativeValue::Tag::Range || "
          "rhs.tag == NativeValue::Tag::Closure) throw NativeBailout();\n";
   out << "  bool equal;\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
@@ -3927,8 +4310,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
   out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
   out << "  case NativeValue::Tag::HexModule: return \"Hex\";\n";
+  out << "  case NativeValue::Tag::SecureRandomModule: return "
+         "\"SecureRandom\";\n";
+  out << "  case NativeValue::Tag::RangeModule: return \"Range\";\n";
   out << "  case NativeValue::Tag::Bytes: return \"<bytes \" + "
          "std::to_string(as_bytes(value).bytes.size()) + \">\";\n";
+  out << "  case NativeValue::Tag::Range: return \"<instance Range>\";\n";
   out << "  case NativeValue::Tag::Closure: return \"<closure>\";\n";
   out << "  case NativeValue::Tag::List: {\n";
   out << "    const auto &items = as_list(value).items;\n";
@@ -4047,7 +4434,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/text.cpp",         "runtime/io.cpp",
       "runtime/vm.cpp",           "runtime/stdlib_registry.cpp",
       "runtime/stdlib_math.cpp",  "runtime/stdlib_json.cpp",
-      "runtime/stdlib_codecs.cpp",
+      "runtime/stdlib_codecs.cpp", "runtime/stdlib_secure_random.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());

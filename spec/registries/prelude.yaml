@@ -32,6 +32,11 @@ entries:
     intrinsic_id: amber.prelude.Hex.v1
     dispatch: constant_lookup
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: SecureRandom
+    kind: prelude_module
+    intrinsic_id: amber.prelude.SecureRandom.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: Amber
     kind: prelude_module
     intrinsic_id: amber.prelude.Amber.v1

@@ -98,6 +98,20 @@ WORKLOADS = {
         go_source="codecs_workload.go",
         go_binary="codecs_workload",
     ),
+    "secure-random": Workload(
+        name="secure-random",
+        expected_checksum="296000",
+        amber_module="bench.polyglot.secure_random",
+        amber_entry="main",
+        amber_source="secure_random.am",
+        python_source="secure_random.py",
+        ruby_source="secure_random.rb",
+        cpp_source="secure_random.cpp",
+        cpp_binary="secure_random",
+        go_source="secure_random.go",
+        go_binary="secure_random",
+        amber_grants=("random.secure",),
+    ),
 }
 
 
@@ -321,6 +335,7 @@ def compile_amberbc_runner(root: Path, build_dir: Path, cxx: str) -> Path:
         root / "runtime" / "stdlib_math.cpp",
         root / "runtime" / "stdlib_json.cpp",
         root / "runtime" / "stdlib_codecs.cpp",
+        root / "runtime" / "stdlib_secure_random.cpp",
     ]
     run_command(
         [

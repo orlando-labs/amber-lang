@@ -38,6 +38,12 @@ struct StdlibBlockResult {
   Value value = Value::null();
 };
 
+struct StdlibIntegerRange {
+  std::int64_t start = 0;
+  std::int64_t step = 1;
+  std::uint64_t count = 0;
+};
+
 // The narrow runtime facade a stdlib handler is allowed to touch. Implemented by
 // the VM; every method that needs the active frame takes it type-erased so this
 // interface stays free of `vm.cpp`-internal types.
@@ -100,11 +106,22 @@ public:
   // Raise the host-owned non-local stop used by Json.stream_parse.
   virtual void stdlib_throw_json_stop(const void *frame) = 0;
 
+  // Extract a bounded integer range descriptor without exposing the VM's Range
+  // representation. Faults and returns false for non-ranges, float/open/empty
+  // ranges, or ranges too large to sample with a uint64 ordinal.
+  virtual bool stdlib_integer_range(const void *frame, const Value &value,
+                                    StdlibIntegerRange *out) = 0;
+
   // File access routed through the same runtime IO policy/provider layer as fs.
   virtual bool stdlib_fs_read_text(const void *frame, const std::string &path,
                                    std::string *out) = 0;
   virtual bool stdlib_fs_write_text(const void *frame, const std::string &path,
                                     const std::string &text) = 0;
+
+  // OS-backed cryptographic entropy. The VM owns capability/effect/replay
+  // policy for this host resource; stdlib handlers only request byte counts.
+  virtual bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
+                                          std::string *out) = 0;
 };
 
 // One SEND, packaged as a single context object instead of seven positional
@@ -202,12 +219,20 @@ struct NativeStdlibCall {
 
   void throw_json_stop() const { host.stdlib_throw_json_stop(frame); }
 
+  bool integer_range(const Value &value, StdlibIntegerRange *out) const {
+    return host.stdlib_integer_range(frame, value, out);
+  }
+
   bool fs_read_text(const std::string &path, std::string *out) const {
     return host.stdlib_fs_read_text(frame, path, out);
   }
 
   bool fs_write_text(const std::string &path, const std::string &text) const {
     return host.stdlib_fs_write_text(frame, path, text);
+  }
+
+  bool secure_random_bytes(std::size_t count, std::string *out) const {
+    return host.stdlib_secure_random_bytes(frame, count, out);
   }
 };
 
@@ -252,5 +277,6 @@ void register_builtin_stdlib(NativeRegistry &registry);
 void register_math(NativeRegistry &registry);
 void register_json(NativeRegistry &registry);
 void register_codecs(NativeRegistry &registry);
+void register_secure_random(NativeRegistry &registry);
 
 } // namespace amber::runtime

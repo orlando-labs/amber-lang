@@ -54,3 +54,5 @@ errors:
   - JsonGenerateError
   - CodecError
   - CodecDecodeError
+  - RandomError
+  - EntropyError

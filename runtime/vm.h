@@ -238,6 +238,7 @@ enum class RuntimeNativeTypeKind {
   Base64,
   Base64Url,
   Hex,
+  SecureRandom,
   Io,
   TextBuffer,
   Logger,

@@ -2765,6 +2765,7 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
                                                     StopMode stop_mode) {
   std::unique_ptr<ast::Expr> left = parse_prefix(stop_mode);
   int postfix_continuation_depth = 0;
+  const bool header_mode = stop_mode == StopMode::ControlHeader;
 
   while (true) {
     if (starts_indented_postfix_continuation()) {
@@ -2777,13 +2778,15 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
     }
 
     if (is_stop_token(stop_mode) && !(check(lexer::TokenKind::Colon) &&
+                                      !header_mode &&
                                       can_accept_direct_block_suffix(*left))) {
       break;
     }
 
     if (check(lexer::TokenKind::Dot) || check(lexer::TokenKind::ChainDot) ||
         check(lexer::TokenKind::SafeDot) || check(lexer::TokenKind::LParen) ||
-        check(lexer::TokenKind::LBracket) || check(lexer::TokenKind::Colon) ||
+        check(lexer::TokenKind::LBracket) ||
+        (!header_mode && check(lexer::TokenKind::Colon)) ||
         check(lexer::TokenKind::Pipe) || starts_bare_arg()) {
       const std::size_t before = current_;
       left = parse_postfix(std::move(left), stop_mode);
@@ -3642,7 +3645,8 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
       tail->list_field("args", std::move(args));
       auto chain = ensure_postfix_chain(std::move(expr));
       append_postfix_tail(*chain, std::move(tail));
-      if (check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe)) {
+      if (stop_mode != StopMode::ControlHeader &&
+          (check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe))) {
         auto block = parse_block_suffix(stop_mode);
         auto block_tail = ast::make_expr("AstTailBlockSuffix", block->span);
         block_tail->node_field("block", std::move(block));
@@ -3685,7 +3689,8 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
     tail->list_field("args", std::move(args));
     auto chain = ensure_postfix_chain(std::move(expr));
     append_postfix_tail(*chain, std::move(tail));
-    if (check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe)) {
+    if (stop_mode != StopMode::ControlHeader &&
+        (check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe))) {
       auto block = parse_block_suffix(stop_mode);
       auto block_tail = ast::make_expr("AstTailBlockSuffix", block->span);
       block_tail->node_field("block", std::move(block));
@@ -3709,7 +3714,8 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
     append_postfix_tail(*chain, std::move(tail));
     return chain;
   }
-  if ((check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe)) &&
+  if (stop_mode != StopMode::ControlHeader &&
+      (check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe)) &&
       can_accept_direct_block_suffix(*expr)) {
     auto block = parse_block_suffix(stop_mode);
     auto block_tail = ast::make_expr("AstTailBlockSuffix", block->span);
@@ -3729,7 +3735,8 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
     tail->list_field("args", std::move(args));
     auto chain = ensure_postfix_chain(std::move(expr));
     append_postfix_tail(*chain, std::move(tail));
-    if (check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe)) {
+    if (stop_mode != StopMode::ControlHeader &&
+        (check(lexer::TokenKind::Colon) || check(lexer::TokenKind::Pipe))) {
       auto block = parse_block_suffix(stop_mode);
       auto block_tail = ast::make_expr("AstTailBlockSuffix", block->span);
       block_tail->node_field("block", std::move(block));

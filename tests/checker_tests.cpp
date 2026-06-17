@@ -157,6 +157,15 @@ void test_effect_rows_and_call_validation() {
                         "  y = x\n");
   expect(!result.ok(), "pure effect row should reject mutation");
   expect(has_diagnostic(result, "FX0003"), "mutation effect diagnostic");
+
+  result = check_source("def token() -> Int !{random}:\n"
+                        "  SecureRandom.bytes(1).count()\n");
+  expect(result.ok(), "SecureRandom calls should be covered by random effect");
+
+  result = check_source("def token() -> Int !{}:\n"
+                        "  SecureRandom.bytes(1).count()\n");
+  expect(!result.ok(), "pure effect row should reject SecureRandom access");
+  expect(has_diagnostic(result, "FX0003"), "SecureRandom effect diagnostic");
 }
 
 } // namespace

@@ -968,7 +968,7 @@ private:
     if (lower == "clock" || lower == "time") {
       return "time";
     }
-    if (lower == "random" || lower == "rng") {
+    if (lower == "random" || lower == "securerandom" || lower == "rng") {
       return "random";
     }
     if (lower == "ffi" || lower == "native") {
