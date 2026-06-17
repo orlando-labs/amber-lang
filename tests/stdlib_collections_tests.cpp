@@ -1627,10 +1627,13 @@ void test_std001_map_protocol_matrix() {
   expect_ok(result, "Map#[] symbol key");
   expect_integer(result.value, 1, "Map#[] symbol key");
 
+  // v20.7/v20.8: ordinary maps are name-indifferent, so a Str probe resolves a
+  // Symbol-keyed entry with the same text (was a KeyError under exact-key).
   result = amber::runtime::execute_code(
       module, 10,
       {map, amber::runtime::Value::string(string_id_or_die(module, "beta"))});
-  expect_fault(result, "KeyError", "Map#[] string key is distinct from Symbol");
+  expect_ok(result, "Map#[] Str probe of Symbol key");
+  expect_integer(result.value, 2, "Map#[] Str probe of Symbol key");
 
   result = amber::runtime::execute_code(
       module, 10,

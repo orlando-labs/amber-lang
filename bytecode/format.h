@@ -263,6 +263,14 @@ inline constexpr std::uint32_t kMapSpreadEntrySymbol = 0x0U;
 inline constexpr std::uint32_t kMapSpreadEntryDynamic = 0x1U;
 inline constexpr std::uint32_t kMapSpreadEntrySpread = 0x2U;
 
+// Strictness signal for MAKE_MAP / MAKE_MAP_DYN / MAKE_MAP_SPREAD: the high bit
+// of the `count` operand marks a StrictMap / StrictHashMap literal (exact-key),
+// leaving the operand layout and opcode registry untouched. `count` itself never
+// approaches 2^31 entries, so the bit is free. Ordinary Map / HashMap literals
+// leave it clear, so existing bytecode is byte-identical.
+inline constexpr std::uint32_t kMapStrictCountFlag = 0x80000000U;
+inline constexpr std::uint32_t kMapCountMask = 0x7FFFFFFFU;
+
 struct SourceSpanEntry {
   std::uint32_t pc_from = 0;
   std::uint32_t pc_to = 0;

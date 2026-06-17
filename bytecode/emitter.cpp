@@ -536,21 +536,22 @@ private:
   bool map_literal_has_spread(const ast::ListField *entries) const;
   void emit_make_map_from_entries(std::uint32_t dst,
                                   const std::vector<CompiledMapEntry> &entries,
-                                  const lexer::Span &span);
+                                  const lexer::Span &span, bool strict);
   void emit_make_map_dyn_from_entries(
       std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
-      const lexer::Span &span);
+      const lexer::Span &span, bool strict);
   void emit_make_map_spread_from_entries(
       std::uint32_t dst, const std::vector<CompiledMapSpreadEntry> &entries,
-      const lexer::Span &span);
+      const lexer::Span &span, bool strict);
   void compile_map_literal_suffix(const ast::ListField *entries,
                                   std::size_t index,
                                   std::vector<CompiledMapEntry> prefix_entries,
-                                  std::uint32_t dst, const lexer::Span &span);
+                                  std::uint32_t dst, const lexer::Span &span,
+                                  bool strict);
   void compile_map_spread_literal_suffix(
       const ast::ListField *entries, std::size_t index,
       std::vector<CompiledMapSpreadEntry> prefix_entries, std::uint32_t dst,
-      const lexer::Span &span);
+      const lexer::Span &span, bool strict);
   std::uint32_t compile_cond_source(const ast::Expr &cond, Opcode *jump_opcode,
                                     bool *jump_to_then_branch);
   std::uint32_t block_reg_operand(const ast::Expr &expr);
@@ -2259,6 +2260,11 @@ void CodeEmitter::compile_sequence_spread_literal_suffix(
 std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
   const ast::ListField *entries = list_field(expr, "entries");
   const std::uint32_t dst = alloc_temp();
+  // StrictMap / StrictHashMap literals build exact-key maps; ordinary Map /
+  // HashMap (and unprefixed `{...}`) build name-indifferent maps.
+  const std::string collection_type = string_field(expr, "collection_type");
+  const bool strict =
+      collection_type == "StrictMap" || collection_type == "StrictHashMap";
   const bool has_spread = map_literal_has_spread(entries);
   bool has_conditional = false;
   if (entries != nullptr) {
@@ -2270,11 +2276,11 @@ std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
     }
   }
   if (has_spread) {
-    compile_map_spread_literal_suffix(entries, 0, {}, dst, expr.span);
+    compile_map_spread_literal_suffix(entries, 0, {}, dst, expr.span, strict);
     return dst;
   }
   if (has_conditional) {
-    compile_map_literal_suffix(entries, 0, {}, dst, expr.span);
+    compile_map_literal_suffix(entries, 0, {}, dst, expr.span, strict);
     return dst;
   }
 
@@ -2308,9 +2314,9 @@ std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
                     return !entry.symbol_immediate;
                   });
   if (needs_dynamic) {
-    emit_make_map_dyn_from_entries(dst, compiled_entries, expr.span);
+    emit_make_map_dyn_from_entries(dst, compiled_entries, expr.span, strict);
   } else {
-    emit_make_map_from_entries(dst, compiled_entries, expr.span);
+    emit_make_map_from_entries(dst, compiled_entries, expr.span, strict);
   }
   return dst;
 }
@@ -2327,12 +2333,25 @@ bool CodeEmitter::map_literal_has_spread(const ast::ListField *entries) const {
   return false;
 }
 
+// The strictness of a StrictMap / StrictHashMap literal is carried in the high
+// bit of the `count` operand (bytecode::kMapStrictCountFlag), leaving the opcode
+// signature unchanged; ordinary maps leave it clear.
+namespace {
+std::int64_t map_count_operand(std::size_t count, bool strict) {
+  std::uint32_t encoded = static_cast<std::uint32_t>(count);
+  if (strict) {
+    encoded |= bytecode::kMapStrictCountFlag;
+  }
+  return static_cast<std::int64_t>(encoded);
+}
+} // namespace
+
 void CodeEmitter::emit_make_map_from_entries(
     std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
-    const lexer::Span &span) {
+    const lexer::Span &span, bool strict) {
   std::vector<InstructionOperand> operands;
   operands.push_back({dst, false});
-  operands.push_back({static_cast<std::int64_t>(entries.size()), false});
+  operands.push_back({map_count_operand(entries.size(), strict), false});
   for (const CompiledMapEntry &entry : entries) {
     operands.push_back({entry.symbol_id, false});
     operands.push_back({entry.value_reg, false});
@@ -2343,10 +2362,10 @@ void CodeEmitter::emit_make_map_from_entries(
 
 void CodeEmitter::emit_make_map_dyn_from_entries(
     std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
-    const lexer::Span &span) {
+    const lexer::Span &span, bool strict) {
   std::vector<InstructionOperand> operands;
   operands.push_back({dst, false});
-  operands.push_back({static_cast<std::int64_t>(entries.size()), false});
+  operands.push_back({map_count_operand(entries.size(), strict), false});
   for (const CompiledMapEntry &entry : entries) {
     std::uint32_t key_reg = entry.key_reg;
     if (entry.symbol_immediate) {
@@ -2364,10 +2383,10 @@ void CodeEmitter::emit_make_map_dyn_from_entries(
 
 void CodeEmitter::emit_make_map_spread_from_entries(
     std::uint32_t dst, const std::vector<CompiledMapSpreadEntry> &entries,
-    const lexer::Span &span) {
+    const lexer::Span &span, bool strict) {
   std::vector<InstructionOperand> operands;
   operands.push_back({dst, false});
-  operands.push_back({static_cast<std::int64_t>(entries.size()), false});
+  operands.push_back({map_count_operand(entries.size(), strict), false});
   for (const CompiledMapSpreadEntry &entry : entries) {
     operands.push_back({entry.kind, false});
     operands.push_back({entry.key_or_symbol, false});
@@ -2380,7 +2399,7 @@ void CodeEmitter::emit_make_map_spread_from_entries(
 void CodeEmitter::compile_map_literal_suffix(
     const ast::ListField *entries, std::size_t index,
     std::vector<CompiledMapEntry> prefix_entries, std::uint32_t dst,
-    const lexer::Span &span) {
+    const lexer::Span &span, bool strict) {
   if (entries == nullptr || index >= entries->values.size()) {
     const bool needs_dynamic =
         std::any_of(prefix_entries.begin(), prefix_entries.end(),
@@ -2388,9 +2407,9 @@ void CodeEmitter::compile_map_literal_suffix(
                       return !entry.symbol_immediate;
                     });
     if (needs_dynamic) {
-      emit_make_map_dyn_from_entries(dst, prefix_entries, span);
+      emit_make_map_dyn_from_entries(dst, prefix_entries, span, strict);
     } else {
-      emit_make_map_from_entries(dst, prefix_entries, span);
+      emit_make_map_from_entries(dst, prefix_entries, span, strict);
     }
     return;
   }
@@ -2400,7 +2419,7 @@ void CodeEmitter::compile_map_literal_suffix(
   if (entry.kind != "HMapEntry" || value == nullptr) {
     diag(entry.span, "BC2001", "invalid map literal entry");
     compile_map_literal_suffix(entries, index + 1, std::move(prefix_entries),
-                               dst, span);
+                               dst, span, strict);
     return;
   }
   auto compile_entry = [&]() -> std::optional<CompiledMapEntry> {
@@ -2424,7 +2443,7 @@ void CodeEmitter::compile_map_literal_suffix(
       prefix_entries.push_back(*compiled);
     }
     compile_map_literal_suffix(entries, index + 1, std::move(prefix_entries),
-                               dst, span);
+                               dst, span, strict);
     return;
   }
 
@@ -2441,21 +2460,21 @@ void CodeEmitter::compile_map_literal_suffix(
     with_entry.push_back(*compiled);
   }
   compile_map_literal_suffix(entries, index + 1, std::move(with_entry), dst,
-                             span);
+                             span, strict);
   const std::size_t jump_end =
       emit_instruction(Opcode::Jump, {{-1, true}}, entry.span);
   patch_operand(jump_skip, 1, current_pc(), false);
   compile_map_literal_suffix(entries, index + 1, std::move(prefix_entries), dst,
-                             span);
+                             span, strict);
   patch_operand(jump_end, 0, current_pc(), false);
 }
 
 void CodeEmitter::compile_map_spread_literal_suffix(
     const ast::ListField *entries, std::size_t index,
     std::vector<CompiledMapSpreadEntry> prefix_entries, std::uint32_t dst,
-    const lexer::Span &span) {
+    const lexer::Span &span, bool strict) {
   if (entries == nullptr || index >= entries->values.size()) {
-    emit_make_map_spread_from_entries(dst, prefix_entries, span);
+    emit_make_map_spread_from_entries(dst, prefix_entries, span, strict);
     return;
   }
 
@@ -2497,8 +2516,8 @@ void CodeEmitter::compile_map_spread_literal_suffix(
     if (compiled.has_value()) {
       prefix_entries.push_back(*compiled);
     }
-    compile_map_spread_literal_suffix(entries, index + 1,
-                                      std::move(prefix_entries), dst, span);
+    compile_map_spread_literal_suffix(
+        entries, index + 1, std::move(prefix_entries), dst, span, strict);
     return;
   }
 
@@ -2515,12 +2534,12 @@ void CodeEmitter::compile_map_spread_literal_suffix(
     with_entry.push_back(*compiled);
   }
   compile_map_spread_literal_suffix(entries, index + 1, std::move(with_entry),
-                                    dst, span);
+                                    dst, span, strict);
   const std::size_t jump_end =
       emit_instruction(Opcode::Jump, {{-1, true}}, entry.span);
   patch_operand(jump_skip, 1, current_pc(), false);
-  compile_map_spread_literal_suffix(entries, index + 1,
-                                    std::move(prefix_entries), dst, span);
+  compile_map_spread_literal_suffix(
+      entries, index + 1, std::move(prefix_entries), dst, span, strict);
   patch_operand(jump_end, 0, current_pc(), false);
 }
 

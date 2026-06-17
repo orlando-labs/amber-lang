@@ -1673,6 +1673,13 @@ private:
     }
     if (expr.kind == "AstMapLiteral") {
       auto node = make_node("HMapLiteral", expr.span);
+      // Carry the literal's container kind (Map/HashMap vs StrictMap/
+      // StrictHashMap) so the emitter can mark strict (exact-key) construction.
+      if (const std::string collection_type =
+              string_value(expr, "collection_type");
+          !collection_type.empty()) {
+        node->string_field("collection_type", collection_type);
+      }
       std::vector<std::unique_ptr<Node>> entries;
       if (const ast::ListField *list = list_field(expr, "entries")) {
         for (const std::unique_ptr<ast::Expr> &entry : list->values) {

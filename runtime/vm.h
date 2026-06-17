@@ -1003,6 +1003,13 @@ struct MapValue {
   ObjHeader header;
   std::vector<MapEntry> entries;
   bool frozen = false;
+  // Exact-key (StrictMap / StrictHashMap) vs name-indifferent ordinary Map /
+  // HashMap (spec v20.7/v20.8). Ordinary maps treat a Symbol key and a Str key
+  // with the same text as the same key for lookup/dedup/pattern matching, while
+  // preserving each entry's original key Value for keys()/iteration/display;
+  // strict maps keep Symbol and Str keys distinct. See MapEntry::symbol_id,
+  // which carries the canonical key identity used by ordinary maps.
+  bool strict = false;
 };
 
 struct ClosureValue {
@@ -1943,7 +1950,7 @@ public:
   Value make_tuple_value(std::vector<Value> items);
   Value make_set_value(std::vector<Value> items, bool frozen = false);
   Value make_symbol_map_value(std::vector<MapEntry> entries,
-                              bool frozen = false);
+                              bool frozen = false, bool strict = false);
 
   std::uint64_t drain_remote_frees();
   std::uint64_t drain_remote_frees(std::uint64_t worker_id);
@@ -2012,7 +2019,8 @@ RuntimeHeap &default_runtime_heap();
 Value make_list_value(std::vector<Value> items, bool frozen = false);
 Value make_tuple_value(std::vector<Value> items);
 Value make_set_value(std::vector<Value> items, bool frozen = false);
-Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen = false);
+Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen = false,
+                            bool strict = false);
 // Wrap a payload into an Ok (is_ok=true) or Err (is_ok=false) Result value.
 Value make_result_value(bool is_ok, Value payload);
 

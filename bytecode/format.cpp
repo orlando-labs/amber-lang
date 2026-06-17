@@ -3495,8 +3495,9 @@ InstructionFlow verify_instruction_flow(
     if (instruction.operands.size() >= 2U &&
         read_u32_operand(instruction, 1, "map count must be unsigned", errors,
                          &count) &&
-        operand_count_is(instruction, 2U + static_cast<std::size_t>(count) * 2U,
-                         errors)) {
+        ((count &= kMapCountMask), // strip the StrictMap strict flag (high bit)
+         operand_count_is(instruction,
+                          2U + static_cast<std::size_t>(count) * 2U, errors))) {
       add_register_write(code, instruction, 0, flow, errors);
       std::size_t operand_index = 2;
       for (std::uint32_t index = 0; index < count; ++index) {
@@ -3520,8 +3521,9 @@ InstructionFlow verify_instruction_flow(
     if (instruction.operands.size() >= 2U &&
         read_u32_operand(instruction, 1, "map count must be unsigned", errors,
                          &count) &&
-        operand_count_is(instruction, 2U + static_cast<std::size_t>(count) * 3U,
-                         errors)) {
+        ((count &= kMapCountMask), // strip the StrictMap strict flag (high bit)
+         operand_count_is(instruction,
+                          2U + static_cast<std::size_t>(count) * 3U, errors))) {
       add_register_write(code, instruction, 0, flow, errors);
       std::size_t operand_index = 2;
       for (std::uint32_t index = 0; index < count; ++index) {
@@ -3564,8 +3566,9 @@ InstructionFlow verify_instruction_flow(
     if (instruction.operands.size() >= 2U &&
         read_u32_operand(instruction, 1, "map count must be unsigned", errors,
                          &count) &&
-        operand_count_is(instruction, 2U + static_cast<std::size_t>(count) * 2U,
-                         errors)) {
+        ((count &= kMapCountMask), // strip the StrictMap strict flag (high bit)
+         operand_count_is(instruction,
+                          2U + static_cast<std::size_t>(count) * 2U, errors))) {
       add_register_write(code, instruction, 0, flow, errors);
       std::size_t operand_index = 2;
       for (std::uint32_t index = 0; index < count; ++index) {

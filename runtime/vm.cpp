@@ -608,21 +608,60 @@ bool collection_keys_equal(const Value &stored, const Value &lookup) {
   return value_equals(stored, lookup);
 }
 
-void upsert_normalized_map_entry(std::vector<MapEntry> *entries,
-                                 MapEntry entry) {
+// A "nameable" key (Symbol or Str) carries a canonical Symbol identity in
+// `MapEntry::symbol_id` for ordinary maps. Note symbol id 0 is a *valid* id
+// (the first interned symbol), so nameability is decided by the key's type, not
+// by `symbol_id != 0`.
+bool map_key_is_nameable(const Value &key) {
+  return key.is_symbol() || key.is_string();
+}
+
+// Name-indifferent map-key equivalence against a probe key. Ordinary maps key on
+// the canonical identity (`MapEntry::symbol_id`, set for Symbol keys and for
+// interned Str keys); when the probe is non-nameable or its text was never
+// interned (so no entry can carry it) `lookup_id` is empty and we fall back to
+// exact value equality. Strict maps always compare exactly, so a Symbol key and
+// a Str key with the same text stay distinct. The caller resolves `lookup_id`
+// without interning (see `map_lookup_key_id`).
+bool map_entry_key_equivalent(const MapEntry &entry, const Value &lookup_key,
+                              std::optional<std::uint32_t> lookup_id,
+                              bool strict) {
+  if (!strict && lookup_id.has_value() && map_key_is_nameable(entry.key) &&
+      entry.symbol_id == *lookup_id) {
+    return true;
+  }
+  // Exact match always counts (and is the safety net if an entry's canonical
+  // id was not recomputed after a rebuild).
+  return value_equals(entry.key, lookup_key);
+}
+
+// Whether two stored entries denote the same key, for construction-time dedup.
+// Both nameable entries carry their canonical `symbol_id`, so ordinary maps
+// collapse name-key duplicates (`{a: 1, "a": 2}` -> one entry) while strict maps
+// keep them distinct.
+bool map_entries_same_key(const MapEntry &a, const MapEntry &b, bool strict) {
+  if (!strict && map_key_is_nameable(a.key) && map_key_is_nameable(b.key)) {
+    return a.symbol_id == b.symbol_id;
+  }
+  return value_equals(a.key, b.key);
+}
+
+void upsert_normalized_map_entry(std::vector<MapEntry> *entries, MapEntry entry,
+                                 bool strict) {
   auto existing = std::find_if(
       entries->begin(), entries->end(), [&](const MapEntry &candidate) {
-        return collection_keys_equal(candidate.key, entry.key);
+        return map_entries_same_key(candidate, entry, strict);
       });
   if (existing == entries->end()) {
     entries->push_back(std::move(entry));
     return;
   }
+  // First occurrence's key representation wins; last assignment's value wins.
   existing->value = std::move(entry.value);
 }
 
 std::optional<std::vector<MapEntry>>
-normalize_map_entries(std::vector<MapEntry> entries,
+normalize_map_entries(std::vector<MapEntry> entries, bool strict,
                       CollectionKeyError *error) {
   std::vector<MapEntry> normalized;
   normalized.reserve(entries.size());
@@ -631,8 +670,13 @@ normalize_map_entries(std::vector<MapEntry> entries,
     if (!key.has_value()) {
       return std::nullopt;
     }
-    upsert_normalized_map_entry(&normalized,
-                                MapEntry{std::move(*key), entry.value});
+    // Preserve the canonical identity computed at construction; the
+    // `(Value, Value)` constructor would recompute it as 0 for Str keys.
+    MapEntry rebuilt;
+    rebuilt.symbol_id = entry.symbol_id;
+    rebuilt.key = std::move(*key);
+    rebuilt.value = entry.value;
+    upsert_normalized_map_entry(&normalized, std::move(rebuilt), strict);
   }
   return normalized;
 }
@@ -6248,15 +6292,15 @@ Value RuntimeHeap::make_set_value(std::vector<Value> items, bool frozen) {
 }
 
 Value RuntimeHeap::make_symbol_map_value(std::vector<MapEntry> entries,
-                                         bool frozen) {
+                                         bool frozen, bool strict) {
   CollectionKeyError error;
   std::optional<std::vector<MapEntry>> normalized =
-      normalize_map_entries(std::move(entries), &error);
+      normalize_map_entries(std::move(entries), strict, &error);
   if (!normalized.has_value()) {
     throw RuntimeTaskFailure(error.error_name, error.message);
   }
   auto value = impl_->allocate<MapValue>(
-      HeapObjectKind::Map, [frozen, &normalized](MapValue &value) {
+      HeapObjectKind::Map, [frozen, strict, &normalized](MapValue &value) {
         value.header.flags =
             frozen ? kObjectFlagFrozen | kObjectFlagShareable : 0U;
         value.header.owner.kind =
@@ -6265,6 +6309,7 @@ Value RuntimeHeap::make_symbol_map_value(std::vector<MapEntry> entries,
             frozen ? ObjectGeneration::Shared : ObjectGeneration::Young;
         value.entries = std::move(*normalized);
         value.frozen = frozen;
+        value.strict = strict;
       });
   return Value::map(std::move(value));
 }
@@ -7119,9 +7164,10 @@ Value make_set_value(std::vector<Value> items, bool frozen) {
   return default_runtime_heap().make_set_value(std::move(items), frozen);
 }
 
-Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen) {
-  return default_runtime_heap().make_symbol_map_value(std::move(entries),
-                                                      frozen);
+Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen,
+                            bool strict) {
+  return default_runtime_heap().make_symbol_map_value(std::move(entries), frozen,
+                                                      strict);
 }
 
 Value make_result_value(bool is_ok, Value payload) {
@@ -9956,8 +10002,21 @@ private:
   }
 
   Value make_symbol_map_value(std::vector<MapEntry> entries,
-                              bool frozen = false) {
-    return state_->heap.make_symbol_map_value(std::move(entries), frozen);
+                              bool frozen = false, bool strict = false) {
+    // Central canonicalization for every ordinary-map construction path routed
+    // through the VM (literals, transform/merge/copy-edit verbs, conversions):
+    // give each Str key a canonical Symbol identity while preserving its key
+    // Value, so the map is name-indifferent without per-site edits. In-place
+    // mutation paths (store!, []=) bypass this and canonicalize at the site.
+    if (!strict) {
+      for (MapEntry &entry : entries) {
+        if (entry.symbol_id == 0) {
+          entry.symbol_id = canonical_map_key_id(entry.key);
+        }
+      }
+    }
+    return state_->heap.make_symbol_map_value(std::move(entries), frozen,
+                                              strict);
   }
 
   IntrusivePtr<ClosureValue> make_closure_value() {
@@ -13813,7 +13872,7 @@ private:
   void upsert_map_entry(std::vector<MapEntry> *entries, MapEntry entry) {
     auto existing = std::find_if(
         entries->begin(), entries->end(), [&](const MapEntry &candidate) {
-          return collection_keys_equal(candidate.key, entry.key);
+          return map_entries_same_key(candidate, entry, /*strict=*/false);
         });
     if (existing == entries->end()) {
       entries->push_back(std::move(entry));
@@ -14925,7 +14984,7 @@ private:
     for (const MapEntry &entry : *right) {
       auto existing = std::find_if(
           merged.begin(), merged.end(), [&](const MapEntry &candidate) {
-            return collection_keys_equal(candidate.key, entry.key);
+            return map_entries_same_key(candidate, entry, /*strict=*/false);
           });
       Value value = entry.value;
       if (existing != merged.end() && !block.is_null()) {
@@ -15865,6 +15924,51 @@ private:
     symbol_index_.emplace(text, id);
     symbol_index_folded_ = module_.symbols.size();
     return id;
+  }
+
+  // Canonical key identity for ordinary (name-indifferent) map storage. A Symbol
+  // key keeps its id; a Str key's text is interned to a Symbol so that
+  // `{user_id: 1}` and `{"user_id": 1}` share a canonical identity. Returns 0
+  // for non-nameable keys (Int, composite, ...), which then compare by value.
+  std::uint32_t canonical_map_key_id(const Value &key) {
+    if (key.is_symbol()) {
+      return key.as_symbol().symbol_id;
+    }
+    if (key.is_string()) {
+      if (const std::optional<std::string> text =
+              string_text_from_id(key.as_string().string_id)) {
+        return intern_runtime_symbol(*text);
+      }
+    }
+    return 0;
+  }
+
+  // Canonical id of a *lookup* key, resolved WITHOUT interning: a Str whose text
+  // was never interned cannot match any stored canonical id, so probing returns
+  // nullopt (falls back to exact comparison) rather than polluting the symbol
+  // table on every miss. nullopt vs id 0 must stay distinct: 0 is a valid id.
+  std::optional<std::uint32_t> map_lookup_key_id(const Value &key) {
+    if (key.is_symbol()) {
+      return key.as_symbol().symbol_id;
+    }
+    if (key.is_string()) {
+      if (const std::optional<std::string> text =
+              string_text_from_id(key.as_string().string_id)) {
+        return symbol_id_for_text(*text);
+      }
+    }
+    return std::nullopt;
+  }
+
+  // Build a map entry whose `key` Value is preserved as-written while `symbol_id`
+  // carries the canonical identity used by ordinary maps. Strict maps skip
+  // canonicalization so Symbol and Str keys stay distinct.
+  MapEntry make_canonical_map_entry(const Value &key, Value value, bool strict) {
+    MapEntry entry{key, std::move(value)};
+    if (!strict && entry.symbol_id == 0) {
+      entry.symbol_id = canonical_map_key_id(key);
+    }
+    return entry;
   }
 
   struct ConversionResult {
@@ -23476,8 +23580,9 @@ private:
         set_fault(frame, error.error_name, error.message);
         return SendStatus::Faulted;
       }
-      upsert_normalized_map_entry(&map->entries,
-                                  MapEntry{std::move(*key), args[1]});
+      upsert_normalized_map_entry(
+          &map->entries,
+          make_canonical_map_entry(*key, args[1], map->strict), map->strict);
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -23491,11 +23596,12 @@ private:
         set_fault(frame, error.error_name, error.message);
         return SendStatus::Faulted;
       }
+      const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(*key);
       Value removed = Value::null();
       std::vector<MapEntry> kept;
       kept.reserve(map->entries.size());
       for (const MapEntry &entry : map->entries) {
-        if (collection_keys_equal(entry.key, *key)) {
+        if (map_entry_key_equivalent(entry, *key, lookup_id, map->strict)) {
           removed = entry.value;
         } else {
           kept.push_back(entry);
@@ -23625,9 +23731,17 @@ private:
           set_fault(frame, error.error_name, error.message);
           return SendStatus::Faulted;
         }
-        upsert_map_entry(&result, MapEntry{std::move(*key), entry.value});
+        result.push_back(
+            make_canonical_map_entry(*key, entry.value, map->strict));
       }
-      map->entries = std::move(result);
+      // Round-trip through the canonical constructor so new string keys gain a
+      // canonical identity and name-key duplicates collapse per the map's
+      // strictness, then adopt the normalized entries in place.
+      const Value rebuilt =
+          make_symbol_map_value(std::move(result), false, map->strict);
+      const IntrusivePtr<MapValue> rebuilt_map = rebuilt.as_map();
+      map->entries =
+          rebuilt_map != nullptr ? rebuilt_map->entries : std::vector<MapEntry>{};
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -23647,7 +23761,11 @@ private:
         if (!ensure_lifecycle_access(frame, receiver)) {
           return SendStatus::Faulted;
         }
-        result.push_back({entry.key, *new_value});
+        // Keys are unchanged: copy the entry so its canonical `symbol_id` is
+        // preserved (lookup and pattern matching depend on it).
+        MapEntry rekeyed = entry;
+        rekeyed.value = *new_value;
+        result.push_back(std::move(rekeyed));
       }
       map->entries = std::move(result);
       *out = receiver;
@@ -24751,8 +24869,9 @@ private:
         set_fault(frame, error.error_name, error.message);
         return SendStatus::Faulted;
       }
-      upsert_normalized_map_entry(&map->entries,
-                                  MapEntry{std::move(*key), args[1]});
+      upsert_normalized_map_entry(
+          &map->entries,
+          make_canonical_map_entry(*key, args[1], map->strict), map->strict);
       *out = args[1];
       return SendStatus::Matched;
     }
@@ -25847,6 +25966,11 @@ private:
       if (fault_.has_value()) {
         return SendStatus::Faulted;
       }
+      // Name-indifferent vs exact-key behavior follows the receiver map's
+      // strictness; deconstructed non-map receivers behave as ordinary.
+      const bool source_strict = receiver.is_map() &&
+                                 receiver.as_map() != nullptr &&
+                                 receiver.as_map()->strict;
       if (extracted.has_value()) {
         if (collection_selector == "empty?") {
           if (!require_arity(0) || !require_no_block()) {
@@ -25894,10 +26018,12 @@ private:
             set_fault(frame, error.error_name, error.message);
             return SendStatus::Faulted;
           }
+          const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(*key);
           const bool found =
               std::find_if(extracted->begin(), extracted->end(),
                            [&](const MapEntry &entry) {
-                             return collection_keys_equal(entry.key, *key);
+                             return map_entry_key_equivalent(
+                                 entry, *key, lookup_id, source_strict);
                            }) != extracted->end();
           *out = Value::boolean(found);
           return SendStatus::Matched;
@@ -25925,10 +26051,12 @@ private:
             set_fault(frame, error.error_name, error.message);
             return SendStatus::Faulted;
           }
+          const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(*key);
           Value found = Value::null();
           bool found_key = false;
           for (const MapEntry &entry : *extracted) {
-            if (collection_keys_equal(entry.key, *key)) {
+            if (map_entry_key_equivalent(entry, *key, lookup_id,
+                                         source_strict)) {
               found = entry.value;
               found_key = true;
               break;
@@ -26153,9 +26281,10 @@ private:
             return SendStatus::Faulted;
           }
           std::vector<MapEntry> result = *extracted;
-          upsert_normalized_map_entry(&result,
-                                      MapEntry{std::move(*key), args[1]});
-          *out = make_symbol_map_value(std::move(result));
+          upsert_normalized_map_entry(
+              &result, make_canonical_map_entry(*key, args[1], source_strict),
+              source_strict);
+          *out = make_symbol_map_value(std::move(result), false, source_strict);
           return SendStatus::Matched;
         }
         if (collection_selector == "without" ||
@@ -26184,7 +26313,8 @@ private:
           for (const MapEntry &entry : *extracted) {
             bool drop = false;
             for (const Value &key : remove_keys) {
-              if (collection_keys_equal(entry.key, key)) {
+              if (map_entry_key_equivalent(entry, key, map_lookup_key_id(key),
+                                           source_strict)) {
                 drop = true;
                 break;
               }
@@ -26193,7 +26323,7 @@ private:
               result.push_back(entry);
             }
           }
-          *out = make_symbol_map_value(std::move(result));
+          *out = make_symbol_map_value(std::move(result), false, source_strict);
           return SendStatus::Matched;
         }
         if (collection_selector == "slice") {
@@ -26214,13 +26344,14 @@ private:
           std::vector<MapEntry> result;
           for (const MapEntry &entry : *extracted) {
             for (const Value &key : wanted) {
-              if (collection_keys_equal(entry.key, key)) {
+              if (map_entry_key_equivalent(entry, key, map_lookup_key_id(key),
+                                           source_strict)) {
                 result.push_back(entry);
                 break;
               }
             }
           }
-          *out = make_symbol_map_value(std::move(result));
+          *out = make_symbol_map_value(std::move(result), false, source_strict);
           return SendStatus::Matched;
         }
         if (collection_selector == "compact") {
@@ -26234,7 +26365,7 @@ private:
               result.push_back(entry);
             }
           }
-          *out = make_symbol_map_value(std::move(result));
+          *out = make_symbol_map_value(std::move(result), false, source_strict);
           return SendStatus::Matched;
         }
         if (collection_selector == "transform_keys") {
@@ -28279,6 +28410,8 @@ private:
           !operand_u32(frame, insn, 1, &count)) {
         return;
       }
+      const bool strict = (count & bytecode::kMapStrictCountFlag) != 0U;
+      count &= bytecode::kMapCountMask;
       std::size_t operand_index = 2;
       std::vector<MapEntry> entries;
       entries.reserve(count);
@@ -28293,6 +28426,8 @@ private:
         if (fault_.has_value()) {
           return;
         }
+        // Symbol keys carry their canonical identity directly; same-symbol
+        // duplicates collapse identically for strict and ordinary maps.
         const auto existing = std::find_if(
             entries.begin(), entries.end(), [symbol_id](const MapEntry &entry) {
               return entry.symbol_id == symbol_id;
@@ -28303,7 +28438,8 @@ private:
           existing->value = std::move(value);
         }
       }
-      if (!write_reg(frame, dst, make_symbol_map_value(std::move(entries)))) {
+      if (!write_reg(frame, dst,
+                     make_symbol_map_value(std::move(entries), false, strict))) {
         return;
       }
       ++frame.pc;
@@ -28316,6 +28452,8 @@ private:
           !operand_u32(frame, insn, 1, &count)) {
         return;
       }
+      const bool strict = (count & bytecode::kMapStrictCountFlag) != 0U;
+      count &= bytecode::kMapCountMask;
       std::size_t operand_index = 2;
       std::vector<MapEntry> entries;
       entries.reserve(count);
@@ -28338,9 +28476,12 @@ private:
           return;
         }
         upsert_normalized_map_entry(
-            &entries, MapEntry{std::move(*normalized_key), std::move(value)});
+            &entries,
+            make_canonical_map_entry(*normalized_key, std::move(value), strict),
+            strict);
       }
-      if (!write_reg(frame, dst, make_symbol_map_value(std::move(entries)))) {
+      if (!write_reg(frame, dst,
+                     make_symbol_map_value(std::move(entries), false, strict))) {
         return;
       }
       ++frame.pc;
@@ -28353,6 +28494,8 @@ private:
           !operand_u32(frame, insn, 1, &count)) {
         return;
       }
+      const bool strict = (count & bytecode::kMapStrictCountFlag) != 0U;
+      count &= bytecode::kMapCountMask;
       std::size_t operand_index = 2;
       std::vector<MapEntry> entries;
       for (std::uint32_t i = 0; i < count; ++i) {
@@ -28392,7 +28535,10 @@ private:
             return;
           }
           upsert_normalized_map_entry(
-              &entries, MapEntry{std::move(*normalized_key), std::move(value)});
+              &entries,
+              make_canonical_map_entry(*normalized_key, std::move(value),
+                                       strict),
+              strict);
         } else if (kind == bytecode::kMapSpreadEntrySpread) {
           Value value = read_reg(frame, value_reg);
           if (fault_.has_value()) {
@@ -28406,7 +28552,8 @@ private:
           return;
         }
       }
-      if (!write_reg(frame, dst, make_symbol_map_value(std::move(entries)))) {
+      if (!write_reg(frame, dst,
+                     make_symbol_map_value(std::move(entries), false, strict))) {
         return;
       }
       ++frame.pc;
@@ -29306,9 +29453,19 @@ private:
       state.requested_keys = keyset.items;
       state.needs_full = needs_full != 0U;
       state.fail_pc = fail_pc;
+      const bool map_is_strict = map->value.is_map() &&
+                                 map->value.as_map() != nullptr &&
+                                 map->value.as_map()->strict;
       for (std::size_t i = 0; i < state.entries.size(); ++i) {
-        if (state.entries[i].key.is_symbol()) {
-          state.index_by_key[state.entries[i].key.as_symbol().symbol_id] = i;
+        // Index by canonical identity. Ordinary maps index Symbol and interned
+        // Str keys alike (`symbol_id`, where 0 is a valid id), so named-key
+        // patterns match string-keyed payloads; strict maps index only exact
+        // Symbol keys, preserving exact-symbol matching.
+        const MapEntry &entry = state.entries[i];
+        const bool indexable =
+            entry.key.is_symbol() || (!map_is_strict && entry.key.is_string());
+        if (indexable) {
+          state.index_by_key[entry.symbol_id] = i;
         }
       }
       if (!write_reg(frame, dst, map->value)) {

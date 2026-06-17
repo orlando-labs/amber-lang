@@ -2976,7 +2976,9 @@ Parser::parse_comparison_chain(std::unique_ptr<ast::Expr> left,
 std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   const lexer::Token token = advance();
   if (is_identifier_like_token(token.kind)) {
-    const bool typed_map = token.lexeme == "Map" || token.lexeme == "HashMap";
+    const bool typed_map = token.lexeme == "Map" || token.lexeme == "HashMap" ||
+                           token.lexeme == "StrictMap" ||
+                           token.lexeme == "StrictHashMap";
     const bool typed_set = token.lexeme == "Set" || token.lexeme == "HashSet";
     if ((typed_map || typed_set) && check(lexer::TokenKind::LBrace)) {
       const lexer::Token open = advance();

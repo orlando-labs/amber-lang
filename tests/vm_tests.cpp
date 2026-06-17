@@ -878,8 +878,10 @@ void test_execute_emitted_v20_6_value_keyed_maps() {
       "tm = Map{\"typed\": 7}\n"
       "ts = Set{1, 1.0, [1, 2], (1, 2)}\n"
       "r = {(1..3): 60}\n"
+      // v20.7/v20.8: ordinary maps are name-indifferent, so a `:name` symbol
+      // probe now resolves the string key "name" (was null under exact-key).
       "if m[1] == 20 and m[1.0] == 20 and m[\"name\"] == 30 and "
-      "m[?:name] == null and m[k] == 40 and m[(1, 2)] == 50 and "
+      "m[?:name] == 30 and m[k] == 40 and m[(1, 2)] == 50 and "
       "m[[1, 2]] == 50 and m.keys().count() == 4 and s.count() == 2 and "
       "tm[\"typed\"] == 7 and ts.count() == 2 and r[(1..3)] == 60:\n"
       "  42\n"
