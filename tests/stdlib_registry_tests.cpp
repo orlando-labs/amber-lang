@@ -102,6 +102,14 @@ struct MockHost : StdlibHost {
                                   std::string * /*out*/) override {
     return false;
   }
+  std::optional<amber::runtime::RuntimeTimeValue>
+  stdlib_wall_time_now(const void * /*frame*/) override {
+    return amber::runtime::RuntimeTimeValue{};
+  }
+  std::optional<amber::runtime::RuntimeTimePeriodValue>
+  stdlib_monotonic_time(const void * /*frame*/) override {
+    return amber::runtime::RuntimeTimePeriodValue{};
+  }
 };
 
 // Build and dispatch one Math SEND through the registry handler. Returns the
@@ -115,9 +123,15 @@ SendStatus dispatch_math(const NativeRegistry &registry, MockHost &host,
   expect(handler != nullptr, "Math must be registered");
   int frame_marker = 0;
   const std::vector<std::pair<std::uint32_t, Value>> kw_args;
-  NativeStdlibCall call{host,  &frame_marker, RuntimeNativeTypeKind::Math,
-                        selector, args,       block,
-                        kw_args,  out};
+  NativeStdlibCall call{host,
+                        &frame_marker,
+                        Value::native_type(RuntimeNativeTypeKind::Math),
+                        RuntimeNativeTypeKind::Math,
+                        selector,
+                        args,
+                        block,
+                        kw_args,
+                        out};
   return handler(call);
 }
 
@@ -134,6 +148,14 @@ void test_path_resolution(const NativeRegistry &registry) {
   expect(secure_random.has_value() &&
              *secure_random == RuntimeNativeTypeKind::SecureRandom,
          "kind_for_path(\"SecureRandom\") resolves to SecureRandom");
+  const std::optional<RuntimeNativeTypeKind> time =
+      registry.kind_for_path("Time");
+  expect(time.has_value() && *time == RuntimeNativeTypeKind::Time,
+         "kind_for_path(\"Time\") resolves to Time");
+  const std::optional<RuntimeNativeTypeKind> period =
+      registry.kind_for_path("TimePeriod");
+  expect(period.has_value() && *period == RuntimeNativeTypeKind::TimePeriod,
+         "kind_for_path(\"TimePeriod\") resolves to TimePeriod");
   expect(!registry.kind_for_path("NotALibrary").has_value(),
          "unregistered path resolves to nullopt");
 }
@@ -145,6 +167,10 @@ void test_handler_table(const NativeRegistry &registry) {
          "Base64 handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::SecureRandom) != nullptr,
          "SecureRandom handler is registered");
+  expect(registry.handler_for(RuntimeNativeTypeKind::Time) != nullptr,
+         "Time handler is registered");
+  expect(registry.handler_for(RuntimeNativeTypeKind::TimePeriod) != nullptr,
+         "TimePeriod handler is registered");
   // Kernel has not migrated onto the registry; it must stay on the legacy chain.
   expect(registry.handler_for(RuntimeNativeTypeKind::Kernel) == nullptr,
          "unmigrated kind has no registered handler");

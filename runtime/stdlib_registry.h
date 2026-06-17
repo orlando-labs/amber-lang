@@ -122,6 +122,13 @@ public:
   // policy for this host resource; stdlib handlers only request byte counts.
   virtual bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
                                           std::string *out) = 0;
+
+  // Host clocks. Wall time is a UTC Unix instant; monotonic time is a signed
+  // period from an opaque steady-clock origin.
+  virtual std::optional<RuntimeTimeValue>
+  stdlib_wall_time_now(const void *frame) = 0;
+  virtual std::optional<RuntimeTimePeriodValue>
+  stdlib_monotonic_time(const void *frame) = 0;
 };
 
 // One SEND, packaged as a single context object instead of seven positional
@@ -130,6 +137,7 @@ public:
 struct NativeStdlibCall {
   StdlibHost &host;
   const void *frame;
+  const Value &receiver;
   RuntimeNativeTypeKind kind;
   const std::string &selector;
   const std::vector<Value> &args;
@@ -234,6 +242,14 @@ struct NativeStdlibCall {
   bool secure_random_bytes(std::size_t count, std::string *out) const {
     return host.stdlib_secure_random_bytes(frame, count, out);
   }
+
+  std::optional<RuntimeTimeValue> wall_time_now() const {
+    return host.stdlib_wall_time_now(frame);
+  }
+
+  std::optional<RuntimeTimePeriodValue> monotonic_time() const {
+    return host.stdlib_monotonic_time(frame);
+  }
 };
 
 // A library handler keeps the proven chain-of-responsibility shape; it owns its
@@ -278,5 +294,6 @@ void register_math(NativeRegistry &registry);
 void register_json(NativeRegistry &registry);
 void register_codecs(NativeRegistry &registry);
 void register_secure_random(NativeRegistry &registry);
+void register_time(NativeRegistry &registry);
 
 } // namespace amber::runtime

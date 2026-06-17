@@ -239,6 +239,8 @@ enum class RuntimeNativeTypeKind {
   Base64Url,
   Hex,
   SecureRandom,
+  Time,
+  TimePeriod,
   Io,
   TextBuffer,
   Logger,
@@ -299,9 +301,22 @@ struct BigIntValue {
   std::vector<std::uint64_t> magnitude;
 };
 
+struct RuntimeTimeValue {
+  std::int64_t epoch_seconds = 0;
+  std::uint32_t nanosecond = 0;
+};
+
+struct RuntimeTimePeriodValue {
+  std::int64_t months = 0;
+  std::int64_t days = 0;
+  std::int64_t nanoseconds = 0;
+};
+
 const char *runtime_error_name(std::uint16_t error_id);
 std::optional<std::uint16_t> runtime_error_id(const std::string &name);
 std::string big_int_to_decimal_string(const BigIntValue &value);
+std::string runtime_time_to_iso8601(const RuntimeTimeValue &value);
+std::string runtime_time_period_to_string(const RuntimeTimePeriodValue &value);
 
 // Overflow policy for fixed-width Int arithmetic (amber.numeric-profile.v1).
 // `checked` raises OverflowError; `wrapping` wraps two's-complement;
@@ -368,7 +383,10 @@ std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
   X(watch_cell, is_watch_cell, as_watch_cell, RuntimeWatchCell, WatchCell)    \
   X(watch_handle, is_watch_handle, as_watch_handle, RuntimeWatchHandle,       \
     WatchHandle)                                                             \
-  X(result, is_result, as_result, ResultValue, Result)
+  X(result, is_result, as_result, ResultValue, Result)                        \
+  X(time, is_time, as_time, RuntimeTimeValue, Time)                           \
+  X(time_period, is_time_period, as_time_period, RuntimeTimePeriodValue,      \
+    TimePeriod)
 
 #ifndef AMBER_VALUE_REPR_TAGGED
 // ---- Variant representation (default, 24 bytes) ---------------------------
@@ -388,7 +406,9 @@ struct Value {
       std::shared_ptr<RuntimeThreadedCollection>,
       std::shared_ptr<RuntimeTextWriter>, std::shared_ptr<RuntimeLogger>,
       std::shared_ptr<RuntimeIoValue>, std::shared_ptr<RuntimeWatchCell>,
-      std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>>;
+      std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>,
+      std::shared_ptr<RuntimeTimeValue>,
+      std::shared_ptr<RuntimeTimePeriodValue>>;
 
   Payload payload;
 
@@ -425,6 +445,8 @@ struct Value {
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
   static Value result(std::shared_ptr<ResultValue> value);
+  static Value time(std::shared_ptr<RuntimeTimeValue> value);
+  static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -458,6 +480,8 @@ struct Value {
   bool is_watch_cell() const;
   bool is_watch_handle() const;
   bool is_result() const;
+  bool is_time() const;
+  bool is_time_period() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -490,6 +514,8 @@ struct Value {
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
   std::shared_ptr<ResultValue> as_result() const;
+  std::shared_ptr<RuntimeTimeValue> as_time() const;
+  std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
 
   // Representation-agnostic helpers (see the doc comment above): a distinct
   // value per active alternative, and a pointer to the inline integer payload
@@ -547,6 +573,8 @@ enum class ValueTailKind : std::uint8_t {
   WatchCell,
   WatchHandle,
   Result,
+  Time,
+  TimePeriod,
 };
 
 struct ValueTailBox; // refcounted tail box; defined in vm.cpp
@@ -592,6 +620,8 @@ struct Value {
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
   static Value result(std::shared_ptr<ResultValue> value);
+  static Value time(std::shared_ptr<RuntimeTimeValue> value);
+  static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -625,6 +655,8 @@ struct Value {
   bool is_watch_cell() const;
   bool is_watch_handle() const;
   bool is_result() const;
+  bool is_time() const;
+  bool is_time_period() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -657,6 +689,8 @@ struct Value {
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
   std::shared_ptr<ResultValue> as_result() const;
+  std::shared_ptr<RuntimeTimeValue> as_time() const;
+  std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
 
   std::uint32_t kind_index() const;
   const std::int64_t *integer_if() const;

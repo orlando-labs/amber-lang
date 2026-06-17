@@ -1134,6 +1134,32 @@ bool native_cpp_collection_selector(const std::string &selector,
          (selector == "to_str" && pos_count == 0U);
 }
 
+bool native_cpp_time_unit_selector(const std::string &selector) {
+  return selector == "nanosecond" || selector == "nanoseconds" ||
+         selector == "microsecond" || selector == "microseconds" ||
+         selector == "millisecond" || selector == "milliseconds" ||
+         selector == "second" || selector == "seconds" ||
+         selector == "minute" || selector == "minutes" ||
+         selector == "hour" || selector == "hours" || selector == "day" ||
+         selector == "days" || selector == "week" || selector == "weeks" ||
+         selector == "month" || selector == "months" ||
+         selector == "year" || selector == "years";
+}
+
+bool native_cpp_time_nullary_selector(const std::string &selector) {
+  return native_cpp_time_unit_selector(selector) ||
+         selector == "iso8601" || selector == "to_str" ||
+         selector == "inspect" || selector == "unix_seconds" ||
+         selector == "unix_milliseconds" ||
+         selector == "unix_nanoseconds" || selector == "year" ||
+         selector == "month" || selector == "day" || selector == "hour" ||
+         selector == "minute" || selector == "second" ||
+         selector == "nanosecond" || selector == "weekday" ||
+         selector == "yearday" || selector == "months" ||
+         selector == "days" || selector == "nanoseconds" ||
+         selector == "fixed?" || selector == "total_nanoseconds";
+}
+
 // Eligibility allowlist for the cpp-bytecode-direct backend.
 //
 // INVARIANT (amber.native-backend-equivalence.v1): every opcode/selector
@@ -1435,12 +1461,43 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                  no_block) {
         random_send = true;
       }
+      bool time_send = false;
+      if (native_cpp_time_nullary_selector(selector) && pos_count == 0U &&
+          kw_count == 0U && no_block) {
+        time_send = true;
+      } else if ((selector == "parse" || selector == "from_unix_ms" ||
+                  selector == "from_unix_ns") &&
+                 pos_count == 1U && kw_count == 0U && no_block) {
+        time_send = true;
+      } else if (selector == "utc" && pos_count == 3U && kw_count <= 4U &&
+                 no_block) {
+        std::set<std::string> seen_keywords;
+        for (std::uint32_t kw_i = 0; kw_i < kw_count; ++kw_i) {
+          std::uint32_t kw_symbol_id = 0;
+          if (!operand_u32_value(instruction, kw_index + 1U + kw_i * 2U,
+                                 &kw_symbol_id) ||
+              kw_symbol_id >= module.symbols.size()) {
+            *reason = "invalid Time.utc keyword operand";
+            return false;
+          }
+          const std::string &kw_name = module.symbols[kw_symbol_id];
+          if ((kw_name != "hour" && kw_name != "minute" &&
+               kw_name != "second" && kw_name != "nanosecond") ||
+              !seen_keywords.insert(kw_name).second) {
+            *reason = "unsupported Time.utc keyword shape";
+            return false;
+          }
+        }
+        time_send = true;
+      }
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
-          !json_send && !codec_send && !range_send && !random_send) {
+          !json_send && !codec_send && !range_send && !random_send &&
+          !time_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
       if (!json_send && !codec_send && !range_send && !random_send &&
+          !time_send &&
           (kw_count != 0U || !no_block)) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
@@ -1902,6 +1959,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::secure_random_module()";
           } else if (name == "Range") {
             native_module_expr = "NativeValue::range_module()";
+          } else if (name == "Time") {
+            native_module_expr = "NativeValue::time_module()";
+          } else if (name == "TimePeriod") {
+            native_module_expr = "NativeValue::time_period_module()";
           }
         }
       }
@@ -2029,6 +2090,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t pos_count = 0;
       std::uint32_t arg = 0;
       std::uint32_t arg2 = 0;
+      std::uint32_t arg3 = 0;
       std::uint32_t kw_count = 0;
       std::uint32_t kw_symbol_id = 0;
       std::uint32_t kw_value_reg = 0;
@@ -2044,6 +2106,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       if (pos_count > 1U) {
         operand_u32_value(instruction, 5, &arg2);
+      }
+      if (pos_count > 2U) {
+        operand_u32_value(instruction, 6, &arg3);
       }
       const std::size_t kw_index = 4U + pos_count;
       operand_u32_value(instruction, kw_index, &kw_count);
@@ -2149,9 +2214,82 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "to_json") {
         write_reg_stmt(dst, "native_json_generate_value(" +
                                 read_reg_expr(recv) + ", false)");
+      } else if (selector == "utc") {
+        const auto kw_name = [&](std::uint32_t symbol_id) -> std::string {
+          return symbol_id < module.symbols.size() ? module.symbols[symbol_id]
+                                                   : std::string{};
+        };
+        std::string hour_expr = "NativeValue::nullv()";
+        std::string minute_expr = "NativeValue::nullv()";
+        std::string second_expr = "NativeValue::nullv()";
+        std::string nanosecond_expr = "NativeValue::nullv()";
+        bool has_hour = false;
+        bool has_minute = false;
+        bool has_second = false;
+        bool has_nanosecond = false;
+        auto apply_time_kw = [&](const std::string &name,
+                                 const std::string &expr) {
+          if (name == "hour") {
+            hour_expr = expr;
+            has_hour = true;
+          } else if (name == "minute") {
+            minute_expr = expr;
+            has_minute = true;
+          } else if (name == "second") {
+            second_expr = expr;
+            has_second = true;
+          } else if (name == "nanosecond") {
+            nanosecond_expr = expr;
+            has_nanosecond = true;
+          }
+        };
+        if (kw_count >= 1U) {
+          apply_time_kw(kw_name(kw_symbol_id), read_reg_expr(kw_value_reg));
+        }
+        if (kw_count >= 2U) {
+          apply_time_kw(kw_name(kw_symbol_id2), read_reg_expr(kw_value_reg2));
+        }
+        if (kw_count > 2U) {
+          std::uint32_t kw_symbol_id3 = 0;
+          std::uint32_t kw_value_reg3 = 0;
+          std::uint32_t kw_symbol_id4 = 0;
+          std::uint32_t kw_value_reg4 = 0;
+          if (kw_count >= 3U) {
+            operand_u32_value(instruction, kw_index + 5U, &kw_symbol_id3);
+            operand_u32_value(instruction, kw_index + 6U, &kw_value_reg3);
+            apply_time_kw(kw_name(kw_symbol_id3),
+                          read_reg_expr(kw_value_reg3));
+          }
+          if (kw_count >= 4U) {
+            operand_u32_value(instruction, kw_index + 7U, &kw_symbol_id4);
+            operand_u32_value(instruction, kw_index + 8U, &kw_value_reg4);
+            apply_time_kw(kw_name(kw_symbol_id4),
+                          read_reg_expr(kw_value_reg4));
+          }
+        }
+        write_reg_stmt(dst, "native_time_utc(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", " +
+                                read_reg_expr(arg2) + ", " +
+                                read_reg_expr(arg3) + ", " +
+                                hour_expr + ", " +
+                                (has_hour ? "true" : "false") + ", " +
+                                minute_expr + ", " +
+                                (has_minute ? "true" : "false") + ", " +
+                                second_expr + ", " +
+                                (has_second ? "true" : "false") + ", " +
+                                nanosecond_expr + ", " +
+                                (has_nanosecond ? "true" : "false") + ")");
+      } else if (selector == "from_unix_ms") {
+        write_reg_stmt(dst, "native_time_from_unix_ms(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
+      } else if (selector == "from_unix_ns") {
+        write_reg_stmt(dst, "native_time_from_unix_ns(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "parse") {
-        write_reg_stmt(dst, "native_json_parse_value(" + read_reg_expr(arg) +
-                                ")");
+        write_reg_stmt(dst, "native_parse_value(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "pretty_generate") {
         write_reg_stmt(dst, "native_json_generate_value(" +
                                 read_reg_expr(arg) + ", true)");
@@ -2253,6 +2391,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_secure_random_int(" +
                                 read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
+      } else if (native_cpp_time_nullary_selector(selector)) {
+        write_reg_stmt(dst, "native_time_nullary(" + read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -2755,12 +2897,15 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeList;\n";
   out << "struct NativeMap;\n";
   out << "struct NativeRange;\n";
+  out << "using NativeTime = amber::runtime::RuntimeTimeValue;\n";
+  out << "using NativeTimePeriod = amber::runtime::RuntimeTimePeriodValue;\n";
   out << "struct NativeClosure;\n";
   out << "struct NativeCell;\n\n";
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
          "JsonModule, BytesModule, Base64Module, Base64UrlModule, HexModule, "
-         "SecureRandomModule, RangeModule, Bytes, List, Map, Range, Closure };\n";
+         "SecureRandomModule, RangeModule, TimeModule, TimePeriodModule, Bytes, "
+         "List, Map, Range, Time, TimePeriod, Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
@@ -2796,11 +2941,19 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "out; }\n";
   out << "  static NativeValue range_module() { NativeValue out; out.tag = "
          "Tag::RangeModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue time_module() { NativeValue out; out.tag = "
+         "Tag::TimeModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue time_period_module() { NativeValue out; "
+         "out.tag = Tag::TimePeriodModule; out.scalar_value = 0; return "
+         "out; }\n";
   out << "  static NativeValue bytes(std::string value);\n";
   out << "  static NativeValue list(std::vector<NativeValue> items);\n";
   out << "  static NativeValue map(std::vector<std::pair<std::string, "
          "NativeValue>> entries);\n";
   out << "  static NativeValue range(NativeRange value);\n";
+  out << "  static NativeValue time(amber::runtime::RuntimeTimeValue value);\n";
+  out << "  static NativeValue time_period("
+         "amber::runtime::RuntimeTimePeriodValue value);\n";
   out << "  static NativeValue closure(NativeClosure *value);\n";
   out << "};\n\n";
   out << "struct NativeBytes { std::string bytes; };\n";
@@ -2824,6 +2977,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
   out << "  std::vector<std::unique_ptr<NativeMap>> maps;\n";
   out << "  std::vector<std::unique_ptr<NativeRange>> ranges;\n";
+  out << "  std::vector<std::unique_ptr<NativeTime>> times;\n";
+  out << "  std::vector<std::unique_ptr<NativeTimePeriod>> periods;\n";
   out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
   out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
   out << "};\n";
@@ -2852,6 +3007,20 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  auto range = std::make_unique<NativeRange>(value);\n";
   out << "  out.heap_value = range.get();\n";
   out << "  native_arena.ranges.push_back(std::move(range)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::time(amber::runtime::RuntimeTimeValue "
+         "value) {\n";
+  out << "  NativeValue out; out.tag = Tag::Time;\n";
+  out << "  auto time = std::make_unique<NativeTime>(value);\n";
+  out << "  out.heap_value = time.get();\n";
+  out << "  native_arena.times.push_back(std::move(time)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::time_period("
+         "amber::runtime::RuntimeTimePeriodValue value) {\n";
+  out << "  NativeValue out; out.tag = Tag::TimePeriod;\n";
+  out << "  auto period = std::make_unique<NativeTimePeriod>(value);\n";
+  out << "  out.heap_value = period.get();\n";
+  out << "  native_arena.periods.push_back(std::move(period)); return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::closure(NativeClosure *value) {\n";
   out << "  NativeValue out; out.tag = Tag::Closure;\n";
@@ -2947,6 +3116,17 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (value.tag != NativeValue::Tag::Range || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeRange *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static const NativeTime &as_time(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Time || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeTime *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static const NativeTimePeriod &as_time_period("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::TimePeriod || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeTimePeriod *>(value.heap_value);\n";
   out << "}\n";
   out << "static NativeClosure *as_closure(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Closure || "
@@ -3622,6 +3802,10 @@ static void append_json_value(std::string &out, const NativeValue &value,
   case NativeValue::Tag::Symbol:
     append_json_escaped(out, native_symbol_text(value.scalar_value));
     return;
+  case NativeValue::Tag::Time:
+    append_json_escaped(
+        out, amber::runtime::runtime_time_to_iso8601(as_time(value)));
+    return;
   case NativeValue::Tag::List: {
     const auto &items = as_list(value).items;
     out.push_back('[');
@@ -3835,6 +4019,523 @@ static NativeValue native_json_parse_value(const NativeValue &value) {
   return parser.parse_document();
 }
 
+struct NativeCivilDate {
+  std::int64_t year = 1970;
+  int month = 1;
+  int day = 1;
+};
+
+struct NativeUtcFields {
+  NativeCivilDate date;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  int nanosecond = 0;
+};
+
+static constexpr std::int64_t kNativeNanosPerSecond = 1000000000LL;
+static constexpr std::int64_t kNativeSecondsPerDay = 86400LL;
+
+static std::int64_t native_checked_i128(__int128 value) {
+  if (value < static_cast<__int128>(std::numeric_limits<std::int64_t>::min()) ||
+      value > static_cast<__int128>(std::numeric_limits<std::int64_t>::max())) {
+    throw NativeBailout();
+  }
+  return static_cast<std::int64_t>(value);
+}
+
+static std::int64_t native_floor_div_i64(std::int64_t a, std::int64_t b) {
+  std::int64_t q = a / b;
+  const std::int64_t r = a % b;
+  if (r != 0 && ((r < 0) != (b < 0))) --q;
+  return q;
+}
+
+static __int128 native_floor_div_i128(__int128 a, __int128 b) {
+  __int128 q = a / b;
+  const __int128 r = a % b;
+  if (r != 0 && ((r < 0) != (b < 0))) --q;
+  return q;
+}
+
+static int native_floor_mod_i64(std::int64_t a, std::int64_t b) {
+  return static_cast<int>(a - native_floor_div_i64(a, b) * b);
+}
+
+static std::int64_t native_days_from_civil(std::int64_t y, int m, int d) {
+  y -= m <= 2 ? 1 : 0;
+  const std::int64_t era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(y - era * 400);
+  const unsigned mp = static_cast<unsigned>(m + (m > 2 ? -3 : 9));
+  const unsigned doy = (153U * mp + 2U) / 5U + static_cast<unsigned>(d) - 1U;
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  return era * 146097 + static_cast<std::int64_t>(doe) - 719468;
+}
+
+static NativeCivilDate native_civil_from_days(std::int64_t z) {
+  z += 719468;
+  const std::int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned doe = static_cast<unsigned>(z - era * 146097);
+  const unsigned yoe =
+      (doe - doe / 1460U + doe / 36524U - doe / 146096U) / 365U;
+  std::int64_t y = static_cast<std::int64_t>(yoe) + era * 400;
+  const unsigned doy = doe - (365U * yoe + yoe / 4U - yoe / 100U);
+  const unsigned mp = (5U * doy + 2U) / 153U;
+  const unsigned d = doy - (153U * mp + 2U) / 5U + 1U;
+  const int m = static_cast<int>(mp) + (mp < 10U ? 3 : -9);
+  y += m <= 2 ? 1 : 0;
+  return NativeCivilDate{y, m, static_cast<int>(d)};
+}
+
+static bool native_leap_year(std::int64_t year) {
+  return year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+}
+
+static int native_days_in_month(std::int64_t year, int month) {
+  static constexpr int kDays[] = {31, 28, 31, 30, 31, 30,
+                                  31, 31, 30, 31, 30, 31};
+  if (month == 2 && native_leap_year(year)) return 29;
+  return kDays[month - 1];
+}
+
+static bool native_valid_date(std::int64_t year, int month, int day) {
+  return month >= 1 && month <= 12 && day >= 1 &&
+         day <= native_days_in_month(year, month);
+}
+
+static NativeTime native_make_time(__int128 seconds, __int128 nanosecond) {
+  const __int128 delta =
+      native_floor_div_i128(nanosecond, kNativeNanosPerSecond);
+  const __int128 nanos =
+      nanosecond - delta * static_cast<__int128>(kNativeNanosPerSecond);
+  return NativeTime{native_checked_i128(seconds + delta),
+                    static_cast<std::uint32_t>(nanos)};
+}
+
+static NativeUtcFields native_utc_fields(const NativeTime &time) {
+  const std::int64_t days =
+      native_floor_div_i64(time.epoch_seconds, kNativeSecondsPerDay);
+  const int second_of_day =
+      native_floor_mod_i64(time.epoch_seconds, kNativeSecondsPerDay);
+  NativeUtcFields out;
+  out.date = native_civil_from_days(days);
+  out.hour = second_of_day / 3600;
+  out.minute = (second_of_day / 60) % 60;
+  out.second = second_of_day % 60;
+  out.nanosecond = static_cast<int>(time.nanosecond);
+  return out;
+}
+
+static NativeTime native_time_from_utc_fields(std::int64_t year, int month,
+                                              int day, int hour, int minute,
+                                              int second, int nanosecond) {
+  if (!native_valid_date(year, month, day) || hour < 0 || hour > 23 ||
+      minute < 0 || minute > 59 || second < 0 || second > 59 ||
+      nanosecond < 0 || nanosecond >= kNativeNanosPerSecond) {
+    throw NativeBailout();
+  }
+  const __int128 days = native_days_from_civil(year, month, day);
+  return native_make_time(days * kNativeSecondsPerDay + hour * 3600 +
+                              minute * 60 + second,
+                          nanosecond);
+}
+
+static NativeTime native_apply_period_to_time(const NativeTime &time,
+                                              const NativeTimePeriod &period) {
+  NativeUtcFields fields = native_utc_fields(time);
+  if (period.months != 0) {
+    const __int128 total_month =
+        static_cast<__int128>(fields.date.year) * 12 +
+        (fields.date.month - 1) + period.months;
+    const __int128 year = native_floor_div_i128(total_month, 12);
+    const int month = static_cast<int>(total_month - year * 12) + 1;
+    fields.date.year = native_checked_i128(year);
+    fields.date.month = month;
+    fields.date.day =
+        std::min(fields.date.day, native_days_in_month(fields.date.year, month));
+  }
+  const __int128 base_days =
+      static_cast<__int128>(native_days_from_civil(
+          fields.date.year, fields.date.month, fields.date.day)) +
+      period.days;
+  return native_make_time(base_days * kNativeSecondsPerDay +
+                              fields.hour * 3600 + fields.minute * 60 +
+                              fields.second,
+                          static_cast<__int128>(fields.nanosecond) +
+                              period.nanoseconds);
+}
+
+static NativeTimePeriod native_period_add(const NativeTimePeriod &lhs,
+                                          const NativeTimePeriod &rhs,
+                                          int sign = 1) {
+  return NativeTimePeriod{
+      native_checked_i128(static_cast<__int128>(lhs.months) +
+                          sign * static_cast<__int128>(rhs.months)),
+      native_checked_i128(static_cast<__int128>(lhs.days) +
+                          sign * static_cast<__int128>(rhs.days)),
+      native_checked_i128(static_cast<__int128>(lhs.nanoseconds) +
+                          sign * static_cast<__int128>(rhs.nanoseconds))};
+}
+
+static NativeTimePeriod native_period_between(const NativeTime &lhs,
+                                              const NativeTime &rhs) {
+  const __int128 left = static_cast<__int128>(lhs.epoch_seconds) *
+                            kNativeNanosPerSecond +
+                        lhs.nanosecond;
+  const __int128 right = static_cast<__int128>(rhs.epoch_seconds) *
+                             kNativeNanosPerSecond +
+                         rhs.nanosecond;
+  return NativeTimePeriod{0, 0, native_checked_i128(left - right)};
+}
+
+static __int128 native_fixed_period_nanoseconds(
+    const NativeTimePeriod &period) {
+  if (period.months != 0) throw NativeBailout();
+  return static_cast<__int128>(period.days) * kNativeSecondsPerDay *
+             kNativeNanosPerSecond +
+         period.nanoseconds;
+}
+
+static int native_compare_time(const NativeTime &lhs, const NativeTime &rhs) {
+  if (lhs.epoch_seconds != rhs.epoch_seconds) {
+    return lhs.epoch_seconds < rhs.epoch_seconds ? -1 : 1;
+  }
+  if (lhs.nanosecond != rhs.nanosecond) {
+    return lhs.nanosecond < rhs.nanosecond ? -1 : 1;
+  }
+  return 0;
+}
+
+static int native_compare_i128(__int128 lhs, __int128 rhs) {
+  if (lhs < rhs) return -1;
+  if (lhs > rhs) return 1;
+  return 0;
+}
+
+static NativeValue native_time_from_unix_ms(const NativeValue &module,
+                                            const NativeValue &milliseconds) {
+  if (module.tag != NativeValue::Tag::TimeModule) throw NativeBailout();
+  const std::int64_t ms = as_int(milliseconds);
+  const std::int64_t seconds = native_floor_div_i64(ms, 1000);
+  const int millis = native_floor_mod_i64(ms, 1000);
+  return NativeValue::time(
+      NativeTime{seconds, static_cast<std::uint32_t>(millis * 1000000)});
+}
+
+static NativeValue native_time_from_unix_ns(const NativeValue &module,
+                                            const NativeValue &nanoseconds) {
+  if (module.tag != NativeValue::Tag::TimeModule) throw NativeBailout();
+  return NativeValue::time(native_make_time(0, as_int(nanoseconds)));
+}
+
+static std::int64_t native_optional_int(const NativeValue &value, bool has,
+                                        std::int64_t fallback) {
+  return has ? as_int(value) : fallback;
+}
+
+static NativeValue native_time_utc(
+    const NativeValue &module, const NativeValue &year_value,
+    const NativeValue &month_value, const NativeValue &day_value,
+    const NativeValue &hour_value, bool has_hour,
+    const NativeValue &minute_value, bool has_minute,
+    const NativeValue &second_value, bool has_second,
+    const NativeValue &nanosecond_value, bool has_nanosecond) {
+  if (module.tag != NativeValue::Tag::TimeModule) throw NativeBailout();
+  const std::int64_t year = as_int(year_value);
+  const std::int64_t month = as_int(month_value);
+  const std::int64_t day = as_int(day_value);
+  return NativeValue::time(native_time_from_utc_fields(
+      year, static_cast<int>(month), static_cast<int>(day),
+      static_cast<int>(native_optional_int(hour_value, has_hour, 0)),
+      static_cast<int>(native_optional_int(minute_value, has_minute, 0)),
+      static_cast<int>(native_optional_int(second_value, has_second, 0)),
+      static_cast<int>(native_optional_int(nanosecond_value, has_nanosecond,
+                                           0))));
+}
+
+static bool native_parse_digits(const std::string &text, std::size_t offset,
+                                std::size_t count, int *out) {
+  if (offset + count > text.size()) return false;
+  int value = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    const char c = text[offset + i];
+    if (c < '0' || c > '9') return false;
+    value = value * 10 + (c - '0');
+  }
+  *out = value;
+  return true;
+}
+
+static NativeValue native_time_parse(const NativeValue &module,
+                                     const NativeValue &text_value) {
+  if (module.tag != NativeValue::Tag::TimeModule ||
+      text_value.tag != NativeValue::Tag::String) {
+    throw NativeBailout();
+  }
+  const std::string &text = native_string_text(text_value);
+  std::size_t pos = 0;
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  if (!native_parse_digits(text, pos, 4, &year)) throw NativeBailout();
+  pos += 4;
+  if (pos >= text.size() || text[pos++] != '-' ||
+      !native_parse_digits(text, pos, 2, &month)) throw NativeBailout();
+  pos += 2;
+  if (pos >= text.size() || text[pos++] != '-' ||
+      !native_parse_digits(text, pos, 2, &day)) throw NativeBailout();
+  pos += 2;
+  if (pos >= text.size() || (text[pos] != 'T' && text[pos] != 't')) {
+    throw NativeBailout();
+  }
+  ++pos;
+  if (!native_parse_digits(text, pos, 2, &hour)) throw NativeBailout();
+  pos += 2;
+  if (pos >= text.size() || text[pos++] != ':' ||
+      !native_parse_digits(text, pos, 2, &minute)) throw NativeBailout();
+  pos += 2;
+  if (pos >= text.size() || text[pos++] != ':' ||
+      !native_parse_digits(text, pos, 2, &second)) throw NativeBailout();
+  pos += 2;
+  int nanosecond = 0;
+  if (pos < text.size() && text[pos] == '.') {
+    ++pos;
+    int digits = 0;
+    while (pos < text.size() && text[pos] >= '0' && text[pos] <= '9') {
+      if (digits < 9) nanosecond = nanosecond * 10 + (text[pos] - '0');
+      ++digits;
+      ++pos;
+    }
+    if (digits == 0 || digits > 9) throw NativeBailout();
+    for (; digits < 9; ++digits) nanosecond *= 10;
+  }
+  int offset_seconds = 0;
+  if (pos < text.size() && (text[pos] == 'Z' || text[pos] == 'z')) {
+    ++pos;
+  } else if (pos < text.size() && (text[pos] == '+' || text[pos] == '-')) {
+    const int sign = text[pos] == '-' ? -1 : 1;
+    ++pos;
+    int offset_hour = 0;
+    int offset_minute = 0;
+    if (!native_parse_digits(text, pos, 2, &offset_hour)) throw NativeBailout();
+    pos += 2;
+    if (pos >= text.size() || text[pos++] != ':' ||
+        !native_parse_digits(text, pos, 2, &offset_minute)) {
+      throw NativeBailout();
+    }
+    pos += 2;
+    offset_seconds = sign * (offset_hour * 3600 + offset_minute * 60);
+  } else {
+    throw NativeBailout();
+  }
+  if (pos != text.size()) throw NativeBailout();
+  NativeTime local =
+      native_time_from_utc_fields(year, month, day, hour, minute, second,
+                                  nanosecond);
+  return NativeValue::time(native_make_time(
+      static_cast<__int128>(local.epoch_seconds) - offset_seconds,
+      local.nanosecond));
+}
+
+static NativeValue native_parse_value(const NativeValue &module,
+                                      const NativeValue &text_value) {
+  if (module.tag == NativeValue::Tag::TimeModule) {
+    return native_time_parse(module, text_value);
+  }
+  return native_json_parse_value(text_value);
+}
+
+static NativeValue native_time_period_unit(const NativeValue &receiver,
+                                           const std::string &selector) {
+  std::int64_t months_per = 0;
+  std::int64_t days_per = 0;
+  std::int64_t nanos_per = 0;
+  bool calendar = false;
+  if (selector == "nanosecond" || selector == "nanoseconds") {
+    nanos_per = 1;
+  } else if (selector == "microsecond" || selector == "microseconds") {
+    nanos_per = 1000;
+  } else if (selector == "millisecond" || selector == "milliseconds") {
+    nanos_per = 1000000;
+  } else if (selector == "second" || selector == "seconds") {
+    nanos_per = 1000000000;
+  } else if (selector == "minute" || selector == "minutes") {
+    nanos_per = 60LL * 1000000000LL;
+  } else if (selector == "hour" || selector == "hours") {
+    nanos_per = 60LL * 60LL * 1000000000LL;
+  } else if (selector == "day" || selector == "days") {
+    days_per = 1;
+    calendar = true;
+  } else if (selector == "week" || selector == "weeks") {
+    days_per = 7;
+    calendar = true;
+  } else if (selector == "month" || selector == "months") {
+    months_per = 1;
+    calendar = true;
+  } else if (selector == "year" || selector == "years") {
+    months_per = 12;
+    calendar = true;
+  } else {
+    throw NativeBailout();
+  }
+  if (receiver.tag == NativeValue::Tag::Integer) {
+    const std::int64_t scalar = receiver.scalar_value;
+    return NativeValue::time_period(NativeTimePeriod{
+        native_checked_i128(static_cast<__int128>(scalar) * months_per),
+        native_checked_i128(static_cast<__int128>(scalar) * days_per),
+        native_checked_i128(static_cast<__int128>(scalar) * nanos_per)});
+  }
+  if (receiver.tag == NativeValue::Tag::Float && !calendar) {
+    if (!std::isfinite(receiver.float_value)) throw NativeBailout();
+    const long double total =
+        static_cast<long double>(receiver.float_value) *
+        static_cast<long double>(nanos_per);
+    const long double rounded = std::round(total);
+    if (std::abs(total - rounded) > 0.001L) throw NativeBailout();
+    if (rounded <
+            static_cast<long double>(std::numeric_limits<std::int64_t>::min()) ||
+        rounded >
+            static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
+      throw NativeBailout();
+    }
+    return NativeValue::time_period(
+        NativeTimePeriod{0, 0, native_checked_i128(
+                                   static_cast<__int128>(rounded))});
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_time_nullary(const NativeValue &receiver,
+                                       const std::string &selector) {
+  if ((receiver.tag == NativeValue::Tag::Integer ||
+       receiver.tag == NativeValue::Tag::Float) &&
+      (selector == "nanosecond" || selector == "nanoseconds" ||
+       selector == "microsecond" || selector == "microseconds" ||
+       selector == "millisecond" || selector == "milliseconds" ||
+       selector == "second" || selector == "seconds" ||
+       selector == "minute" || selector == "minutes" ||
+       selector == "hour" || selector == "hours" || selector == "day" ||
+       selector == "days" || selector == "week" || selector == "weeks" ||
+       selector == "month" || selector == "months" ||
+       selector == "year" || selector == "years")) {
+    return native_time_period_unit(receiver, selector);
+  }
+  if (receiver.tag == NativeValue::Tag::Time) {
+    const NativeTime &time = as_time(receiver);
+    if (selector == "iso8601" || selector == "to_str" ||
+        selector == "inspect") {
+      return NativeValue::string_ref(
+          native_intern_string(amber::runtime::runtime_time_to_iso8601(time)));
+    }
+    if (selector == "unix_seconds") {
+      return NativeValue::integer(time.epoch_seconds);
+    }
+    if (selector == "unix_milliseconds") {
+      return NativeValue::integer(native_checked_i128(
+          static_cast<__int128>(time.epoch_seconds) * 1000 +
+          time.nanosecond / 1000000));
+    }
+    if (selector == "unix_nanoseconds") {
+      return NativeValue::integer(native_checked_i128(
+          static_cast<__int128>(time.epoch_seconds) * kNativeNanosPerSecond +
+          time.nanosecond));
+    }
+    const NativeUtcFields fields = native_utc_fields(time);
+    if (selector == "year") return NativeValue::integer(fields.date.year);
+    if (selector == "month") return NativeValue::integer(fields.date.month);
+    if (selector == "day") return NativeValue::integer(fields.date.day);
+    if (selector == "hour") return NativeValue::integer(fields.hour);
+    if (selector == "minute") return NativeValue::integer(fields.minute);
+    if (selector == "second") return NativeValue::integer(fields.second);
+    if (selector == "nanosecond") {
+      return NativeValue::integer(fields.nanosecond);
+    }
+    if (selector == "weekday") {
+      const std::int64_t days =
+          native_floor_div_i64(time.epoch_seconds, kNativeSecondsPerDay);
+      return NativeValue::integer(native_floor_mod_i64(days + 3, 7) + 1);
+    }
+    if (selector == "yearday") {
+      const std::int64_t jan1 = native_days_from_civil(fields.date.year, 1, 1);
+      const std::int64_t today = native_days_from_civil(
+          fields.date.year, fields.date.month, fields.date.day);
+      return NativeValue::integer(today - jan1 + 1);
+    }
+  }
+  if (receiver.tag == NativeValue::Tag::TimePeriod) {
+    const NativeTimePeriod &period = as_time_period(receiver);
+    if (selector == "to_str" || selector == "inspect") {
+      return NativeValue::string_ref(native_intern_string(
+          amber::runtime::runtime_time_period_to_string(period)));
+    }
+    if (selector == "months") return NativeValue::integer(period.months);
+    if (selector == "days") return NativeValue::integer(period.days);
+    if (selector == "nanoseconds") {
+      return NativeValue::integer(period.nanoseconds);
+    }
+    if (selector == "fixed?") return NativeValue::boolean(period.months == 0);
+    if (selector == "total_nanoseconds") {
+      return NativeValue::integer(
+          native_checked_i128(native_fixed_period_nanoseconds(period)));
+    }
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_time_add(const NativeValue &lhs,
+                                   const NativeValue &rhs) {
+  if (lhs.tag == NativeValue::Tag::Time && rhs.tag == NativeValue::Tag::TimePeriod) {
+    return NativeValue::time(native_apply_period_to_time(as_time(lhs),
+                                                         as_time_period(rhs)));
+  }
+  if (lhs.tag == NativeValue::Tag::TimePeriod && rhs.tag == NativeValue::Tag::Time) {
+    return NativeValue::time(native_apply_period_to_time(as_time(rhs),
+                                                         as_time_period(lhs)));
+  }
+  if (lhs.tag == NativeValue::Tag::TimePeriod &&
+      rhs.tag == NativeValue::Tag::TimePeriod) {
+    return NativeValue::time_period(
+        native_period_add(as_time_period(lhs), as_time_period(rhs)));
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_time_sub(const NativeValue &lhs,
+                                   const NativeValue &rhs) {
+  if (lhs.tag == NativeValue::Tag::Time && rhs.tag == NativeValue::Tag::Time) {
+    return NativeValue::time_period(native_period_between(as_time(lhs),
+                                                          as_time(rhs)));
+  }
+  if (lhs.tag == NativeValue::Tag::Time && rhs.tag == NativeValue::Tag::TimePeriod) {
+    const NativeTimePeriod negated =
+        native_period_add(NativeTimePeriod{}, as_time_period(rhs), -1);
+    return NativeValue::time(native_apply_period_to_time(as_time(lhs), negated));
+  }
+  if (lhs.tag == NativeValue::Tag::TimePeriod &&
+      rhs.tag == NativeValue::Tag::TimePeriod) {
+    return NativeValue::time_period(
+        native_period_add(as_time_period(lhs), as_time_period(rhs), -1));
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_time_compare_value(const NativeValue &lhs,
+                                             const NativeValue &rhs) {
+  if (lhs.tag == NativeValue::Tag::Time && rhs.tag == NativeValue::Tag::Time) {
+    return NativeValue::integer(native_compare_time(as_time(lhs), as_time(rhs)));
+  }
+  if (lhs.tag == NativeValue::Tag::TimePeriod &&
+      rhs.tag == NativeValue::Tag::TimePeriod) {
+    return NativeValue::integer(native_compare_i128(
+        native_fixed_period_nanoseconds(as_time_period(lhs)),
+        native_fixed_period_nanoseconds(as_time_period(rhs))));
+  }
+  throw NativeBailout();
+}
+
 static bool native_fs_read_allowed(const std::string &path) {
   for (const auto &grant : embedded_capability_grants()) {
     if (grant.name != "fs.read") continue;
@@ -3879,6 +4580,11 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
 )AMBERCPP";
   out << "static NativeValue numeric_add(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "native_time_add(lhs, rhs);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
          "NativeValue::integer(checked_add_int64(lhs.scalar_value, "
@@ -3892,6 +4598,11 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "}\n\n";
   out << "static NativeValue numeric_sub(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "native_time_sub(lhs, rhs);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
          "NativeValue::integer(checked_sub_int64(lhs.scalar_value, "
@@ -3958,6 +4669,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "}\n\n";
   out << "static NativeValue numeric_lt(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "NativeValue::boolean("
+         "native_time_compare_value(lhs, rhs).scalar_value < 0);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
          "NativeValue::boolean(lhs.scalar_value < rhs.scalar_value);\n";
@@ -3968,6 +4685,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "}\n\n";
   out << "static NativeValue numeric_gt(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "NativeValue::boolean("
+         "native_time_compare_value(lhs, rhs).scalar_value > 0);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
          "NativeValue::boolean(lhs.scalar_value > rhs.scalar_value);\n";
@@ -3978,6 +4701,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "}\n\n";
   out << "static NativeValue numeric_le(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "NativeValue::boolean("
+         "native_time_compare_value(lhs, rhs).scalar_value <= 0);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
          "NativeValue::boolean(lhs.scalar_value <= rhs.scalar_value);\n";
@@ -3988,6 +4717,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "}\n\n";
   out << "static NativeValue numeric_ge(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "NativeValue::boolean("
+         "native_time_compare_value(lhs, rhs).scalar_value >= 0);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
          "NativeValue::boolean(lhs.scalar_value >= rhs.scalar_value);\n";
@@ -4001,6 +4736,14 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   // Mirrors value_equals for scalar kinds: numeric pairs compare by value
   // (Int/Int exact, otherwise double); other scalar pairs require matching
   // tags; deep kinds (lists, closures) stay on the VM.
+  out << "  if ((lhs.tag == NativeValue::Tag::Time && "
+         "rhs.tag == NativeValue::Tag::Time) || "
+         "(lhs.tag == NativeValue::Tag::TimePeriod && "
+         "rhs.tag == NativeValue::Tag::TimePeriod)) {\n";
+  out << "    const bool equal = "
+         "native_time_compare_value(lhs, rhs).scalar_value == 0;\n";
+  out << "    return NativeValue::boolean(negate ? !equal : equal);\n";
+  out << "  }\n";
   out << "  if (lhs.tag == NativeValue::Tag::List || "
          "lhs.tag == NativeValue::Tag::Closure || "
          "lhs.tag == NativeValue::Tag::Map || "
@@ -4011,8 +4754,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "lhs.tag == NativeValue::Tag::HexModule || "
          "lhs.tag == NativeValue::Tag::SecureRandomModule || "
          "lhs.tag == NativeValue::Tag::RangeModule || "
+         "lhs.tag == NativeValue::Tag::TimeModule || "
+         "lhs.tag == NativeValue::Tag::TimePeriodModule || "
          "lhs.tag == NativeValue::Tag::Bytes || "
          "lhs.tag == NativeValue::Tag::Range || "
+         "lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
          "rhs.tag == NativeValue::Tag::List || "
          "rhs.tag == NativeValue::Tag::Map || "
          "rhs.tag == NativeValue::Tag::JsonModule || "
@@ -4022,8 +4769,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "rhs.tag == NativeValue::Tag::HexModule || "
          "rhs.tag == NativeValue::Tag::SecureRandomModule || "
          "rhs.tag == NativeValue::Tag::RangeModule || "
+         "rhs.tag == NativeValue::Tag::TimeModule || "
+         "rhs.tag == NativeValue::Tag::TimePeriodModule || "
          "rhs.tag == NativeValue::Tag::Bytes || "
          "rhs.tag == NativeValue::Tag::Range || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod || "
          "rhs.tag == NativeValue::Tag::Closure) throw NativeBailout();\n";
   out << "  bool equal;\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
@@ -4059,11 +4810,19 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  }\n";
   out << "  case NativeValue::Tag::Bytes: return "
          "NativeValue::string_ref(native_intern_string(as_bytes(value).bytes));\n";
+  out << "  case NativeValue::Tag::Time:\n";
+  out << "  case NativeValue::Tag::TimePeriod:\n";
+  out << "    return native_time_nullary(value, \"to_str\");\n";
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
   out << "}\n\n";
   out << "static NativeValue numeric_cmp(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "native_time_compare_value(lhs, rhs);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
          "NativeValue::integer(compare_int64(lhs.scalar_value, "
@@ -4313,9 +5072,16 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::SecureRandomModule: return "
          "\"SecureRandom\";\n";
   out << "  case NativeValue::Tag::RangeModule: return \"Range\";\n";
+  out << "  case NativeValue::Tag::TimeModule: return \"Time\";\n";
+  out << "  case NativeValue::Tag::TimePeriodModule: return \"TimePeriod\";\n";
   out << "  case NativeValue::Tag::Bytes: return \"<bytes \" + "
          "std::to_string(as_bytes(value).bytes.size()) + \">\";\n";
   out << "  case NativeValue::Tag::Range: return \"<instance Range>\";\n";
+  out << "  case NativeValue::Tag::Time: return "
+         "amber::runtime::runtime_time_to_iso8601(as_time(value));\n";
+  out << "  case NativeValue::Tag::TimePeriod: return "
+         "amber::runtime::runtime_time_period_to_string("
+         "as_time_period(value));\n";
   out << "  case NativeValue::Tag::Closure: return \"<closure>\";\n";
   out << "  case NativeValue::Tag::List: {\n";
   out << "    const auto &items = as_list(value).items;\n";
@@ -4435,6 +5201,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/vm.cpp",           "runtime/stdlib_registry.cpp",
       "runtime/stdlib_math.cpp",  "runtime/stdlib_json.cpp",
       "runtime/stdlib_codecs.cpp", "runtime/stdlib_secure_random.cpp",
+      "runtime/stdlib_time.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());

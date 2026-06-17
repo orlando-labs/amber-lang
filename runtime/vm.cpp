@@ -2678,6 +2678,27 @@ private:
     if (lhs.is_io_value()) {
       return lhs.as_io_value() == rhs.as_io_value();
     }
+    if (lhs.is_time()) {
+      const std::shared_ptr<RuntimeTimeValue> left = lhs.as_time();
+      const std::shared_ptr<RuntimeTimeValue> right = rhs.as_time();
+      if (left == right) {
+        return true;
+      }
+      return left != nullptr && right != nullptr &&
+             left->epoch_seconds == right->epoch_seconds &&
+             left->nanosecond == right->nanosecond;
+    }
+    if (lhs.is_time_period()) {
+      const std::shared_ptr<RuntimeTimePeriodValue> left = lhs.as_time_period();
+      const std::shared_ptr<RuntimeTimePeriodValue> right =
+          rhs.as_time_period();
+      if (left == right) {
+        return true;
+      }
+      return left != nullptr && right != nullptr &&
+             left->months == right->months && left->days == right->days &&
+             left->nanoseconds == right->nanoseconds;
+    }
     if (lhs.is_instance_object()) {
       return lhs.as_instance_object() == rhs.as_instance_object();
     }
@@ -6689,6 +6710,14 @@ Value Value::result(std::shared_ptr<ResultValue> value) {
   return {std::move(value)};
 }
 
+Value Value::time(std::shared_ptr<RuntimeTimeValue> value) {
+  return {std::move(value)};
+}
+
+Value Value::time_period(std::shared_ptr<RuntimeTimePeriodValue> value) {
+  return {std::move(value)};
+}
+
 bool Value::is_null() const {
   return std::holds_alternative<std::monostate>(payload);
 }
@@ -6814,6 +6843,15 @@ bool Value::is_result() const {
   return std::holds_alternative<std::shared_ptr<ResultValue>>(payload);
 }
 
+bool Value::is_time() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeTimeValue>>(payload);
+}
+
+bool Value::is_time_period() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeTimePeriodValue>>(
+      payload);
+}
+
 bool Value::as_bool() const { return std::get<bool>(payload); }
 
 std::int64_t Value::as_integer() const {
@@ -6929,6 +6967,14 @@ std::shared_ptr<RuntimeWatchHandle> Value::as_watch_handle() const {
 
 std::shared_ptr<ResultValue> Value::as_result() const {
   return std::get<std::shared_ptr<ResultValue>>(payload);
+}
+
+std::shared_ptr<RuntimeTimeValue> Value::as_time() const {
+  return std::get<std::shared_ptr<RuntimeTimeValue>>(payload);
+}
+
+std::shared_ptr<RuntimeTimePeriodValue> Value::as_time_period() const {
+  return std::get<std::shared_ptr<RuntimeTimePeriodValue>>(payload);
 }
 
 Value Value::list(IntrusivePtr<ListValue> value) { return {std::move(value)}; }
@@ -7311,6 +7357,10 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Hex";
   case RuntimeNativeTypeKind::SecureRandom:
     return "SecureRandom";
+  case RuntimeNativeTypeKind::Time:
+    return "Time";
+  case RuntimeNativeTypeKind::TimePeriod:
+    return "TimePeriod";
   case RuntimeNativeTypeKind::Io:
     return "io";
   case RuntimeNativeTypeKind::TextBuffer:
@@ -7659,6 +7709,16 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_big_int()) {
     const std::shared_ptr<BigIntValue> big = value.as_big_int();
     return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
+  }
+  if (value.is_time()) {
+    const std::shared_ptr<RuntimeTimeValue> time = value.as_time();
+    return time == nullptr ? "<time null>" : runtime_time_to_iso8601(*time);
+  }
+  if (value.is_time_period()) {
+    const std::shared_ptr<RuntimeTimePeriodValue> period =
+        value.as_time_period();
+    return period == nullptr ? "<time-period null>"
+                             : runtime_time_period_to_string(*period);
   }
   if (value.is_text_writer()) {
     const std::shared_ptr<RuntimeTextWriter> writer = value.as_text_writer();
@@ -9328,6 +9388,26 @@ bool value_equals(const Value &lhs, const Value &rhs) {
            left->negative == right->negative &&
            left->magnitude == right->magnitude;
   }
+  if (lhs.is_time()) {
+    const std::shared_ptr<RuntimeTimeValue> left = lhs.as_time();
+    const std::shared_ptr<RuntimeTimeValue> right = rhs.as_time();
+    if (left == right) {
+      return true;
+    }
+    return left != nullptr && right != nullptr &&
+           left->epoch_seconds == right->epoch_seconds &&
+           left->nanosecond == right->nanosecond;
+  }
+  if (lhs.is_time_period()) {
+    const std::shared_ptr<RuntimeTimePeriodValue> left = lhs.as_time_period();
+    const std::shared_ptr<RuntimeTimePeriodValue> right = rhs.as_time_period();
+    if (left == right) {
+      return true;
+    }
+    return left != nullptr && right != nullptr &&
+           left->months == right->months && left->days == right->days &&
+           left->nanoseconds == right->nanoseconds;
+  }
   if (lhs.is_result()) {
     const std::shared_ptr<ResultValue> left = lhs.as_result();
     const std::shared_ptr<ResultValue> right = rhs.as_result();
@@ -9676,6 +9756,14 @@ public:
                                   std::string *out) override {
     return stdlib_secure_random_bytes_from_host(
         *static_cast<const Frame *>(frame), count, out);
+  }
+  std::optional<RuntimeTimeValue>
+  stdlib_wall_time_now(const void *frame) override {
+    return stdlib_wall_time_now_from_host(*static_cast<const Frame *>(frame));
+  }
+  std::optional<RuntimeTimePeriodValue>
+  stdlib_monotonic_time(const void *frame) override {
+    return stdlib_monotonic_time_from_host(*static_cast<const Frame *>(frame));
   }
 
   void resolve_numeric_policy() {
@@ -15659,6 +15747,10 @@ private:
       return true;
     case RuntimeNativeTypeKind::Range:
       return value_is_range_instance(value);
+    case RuntimeNativeTypeKind::Time:
+      return value.is_time();
+    case RuntimeNativeTypeKind::TimePeriod:
+      return value.is_time_period();
     case RuntimeNativeTypeKind::TaskModule:
       return value.is_task_module();
     case RuntimeNativeTypeKind::Channel:
@@ -19966,6 +20058,42 @@ private:
     return true;
   }
 
+  std::optional<RuntimeTimeValue>
+  stdlib_wall_time_now_from_host(const Frame &frame) {
+    if (world_options_ != nullptr && world_options_->enforce_replay) {
+      record_io_event("time.now", {});
+      set_fault(frame, "DeterminismError",
+                "Time.now requires a recorded clock provider in replay mode");
+      return std::nullopt;
+    }
+    record_io_event("time.now", {});
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(now);
+    const auto nanos =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now - seconds);
+    RuntimeTimeValue out;
+    out.epoch_seconds = seconds.count();
+    out.nanosecond = static_cast<std::uint32_t>(nanos.count());
+    return out;
+  }
+
+  std::optional<RuntimeTimePeriodValue>
+  stdlib_monotonic_time_from_host(const Frame &frame) {
+    if (world_options_ != nullptr && world_options_->enforce_replay) {
+      record_io_event("time.monotonic", {});
+      set_fault(frame, "DeterminismError",
+                "Time.monotonic requires a recorded clock provider in replay "
+                "mode");
+      return std::nullopt;
+    }
+    record_io_event("time.monotonic", {});
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(now);
+    RuntimeTimePeriodValue out;
+    out.nanoseconds = nanos.count();
+    return out;
+  }
+
   template <typename T>
   std::shared_ptr<T> io_value_as(const Frame &frame, const Value &value,
                                  const std::string &expected) {
@@ -20138,6 +20266,21 @@ private:
       return true;
     };
 
+    if (receiver.is_time() || receiver.is_time_period()) {
+      const RuntimeNativeTypeKind kind =
+          receiver.is_time() ? RuntimeNativeTypeKind::Time
+                             : RuntimeNativeTypeKind::TimePeriod;
+      if (const NativeStdlibHandler handler =
+              native_registry_.handler_for(kind)) {
+        NativeStdlibCall call{*this,    &frame, receiver, kind,    selector,
+                              args,     block,  kw_args,  out};
+        const SendStatus status = handler(call);
+        if (status != SendStatus::NotHandled) {
+          return status;
+        }
+      }
+    }
+
     if (receiver.is_native_type()) {
       const RuntimeNativeTypeKind kind = receiver.as_native_type().kind;
       if (selector == "===") {
@@ -20161,8 +20304,8 @@ private:
       // path, so any kind not yet on the registry behaves exactly as before.
       if (const NativeStdlibHandler handler =
               native_registry_.handler_for(kind)) {
-        NativeStdlibCall call{*this,    &frame, kind,    selector,
-                              args,     block,  kw_args, out};
+        NativeStdlibCall call{*this,    &frame, receiver, kind,    selector,
+                              args,     block,  kw_args,  out};
         const SendStatus status = handler(call);
         if (status != SendStatus::NotHandled) {
           return status;
@@ -24845,6 +24988,126 @@ private:
       return SendStatus::Faulted;
     };
 
+    struct PeriodUnit {
+      std::int64_t months_per = 0;
+      std::int64_t days_per = 0;
+      std::int64_t nanoseconds_per = 0;
+      bool calendar = false;
+    };
+    auto period_unit_for_selector =
+        [&](const std::string &name) -> std::optional<PeriodUnit> {
+      if (name == "nanosecond" || name == "nanoseconds") {
+        return PeriodUnit{0, 0, 1, false};
+      }
+      if (name == "microsecond" || name == "microseconds") {
+        return PeriodUnit{0, 0, 1000, false};
+      }
+      if (name == "millisecond" || name == "milliseconds") {
+        return PeriodUnit{0, 0, 1000000, false};
+      }
+      if (name == "second" || name == "seconds") {
+        return PeriodUnit{0, 0, 1000000000, false};
+      }
+      if (name == "minute" || name == "minutes") {
+        return PeriodUnit{0, 0, 60LL * 1000000000LL, false};
+      }
+      if (name == "hour" || name == "hours") {
+        return PeriodUnit{0, 0, 60LL * 60LL * 1000000000LL, false};
+      }
+      if (name == "day" || name == "days") {
+        return PeriodUnit{0, 1, 0, true};
+      }
+      if (name == "week" || name == "weeks") {
+        return PeriodUnit{0, 7, 0, true};
+      }
+      if (name == "month" || name == "months") {
+        return PeriodUnit{1, 0, 0, true};
+      }
+      if (name == "year" || name == "years") {
+        return PeriodUnit{12, 0, 0, true};
+      }
+      return std::nullopt;
+    };
+    auto int64_from_i128 = [&](const __int128 value, std::int64_t *out_value,
+                               const std::string &context) -> bool {
+      if (value < static_cast<__int128>(std::numeric_limits<std::int64_t>::min()) ||
+          value > static_cast<__int128>(std::numeric_limits<std::int64_t>::max())) {
+        raise_runtime_error(frame, "OverflowError", context + " overflow");
+        return false;
+      }
+      *out_value = static_cast<std::int64_t>(value);
+      return true;
+    };
+    auto make_period_from_int = [&](std::int64_t scalar,
+                                    const PeriodUnit &unit) -> SendStatus {
+      std::int64_t months = 0;
+      std::int64_t days = 0;
+      std::int64_t nanos = 0;
+      if (!int64_from_i128(static_cast<__int128>(scalar) * unit.months_per,
+                           &months, "TimePeriod") ||
+          !int64_from_i128(static_cast<__int128>(scalar) * unit.days_per, &days,
+                           "TimePeriod") ||
+          !int64_from_i128(static_cast<__int128>(scalar) *
+                               unit.nanoseconds_per,
+                           &nanos, "TimePeriod")) {
+        return SendStatus::Faulted;
+      }
+      auto period = std::make_shared<RuntimeTimePeriodValue>();
+      period->months = months;
+      period->days = days;
+      period->nanoseconds = nanos;
+      *out = Value::time_period(std::move(period));
+      return SendStatus::Matched;
+    };
+    auto make_period_from_float = [&](double scalar,
+                                      const PeriodUnit &unit) -> SendStatus {
+      if (unit.calendar) {
+        set_fault(frame, "TypeError",
+                  "fractional calendar TimePeriod units are not supported");
+        return SendStatus::Faulted;
+      }
+      if (!std::isfinite(scalar)) {
+        set_fault(frame, "ArgumentError", "TimePeriod unit value must be finite");
+        return SendStatus::Faulted;
+      }
+      const long double total =
+          static_cast<long double>(scalar) *
+          static_cast<long double>(unit.nanoseconds_per);
+      const long double rounded = std::round(total);
+      if (std::abs(total - rounded) > 0.001L ||
+          rounded <
+              static_cast<long double>(std::numeric_limits<std::int64_t>::min()) ||
+          rounded >
+              static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
+        raise_runtime_error(frame, "OverflowError", "TimePeriod overflow");
+        return SendStatus::Faulted;
+      }
+      auto period = std::make_shared<RuntimeTimePeriodValue>();
+      period->nanoseconds = static_cast<std::int64_t>(rounded);
+      *out = Value::time_period(std::move(period));
+      return SendStatus::Matched;
+    };
+
+    if (const std::optional<PeriodUnit> unit =
+            period_unit_for_selector(selector)) {
+      if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError",
+                    "TimePeriod unit selectors do not accept keywords");
+        }
+        return SendStatus::Faulted;
+      }
+      if (receiver.is_integer()) {
+        return make_period_from_int(receiver.as_integer(), *unit);
+      }
+      if (receiver.is_float()) {
+        return make_period_from_float(receiver.as_float(), *unit);
+      }
+      set_fault(frame, "TypeError",
+                "TimePeriod unit selector expects Int or Float receiver");
+      return SendStatus::Faulted;
+    }
+
     if (selector == "cast" || selector == "cast?" || selector == "to_type") {
       if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
         if (!kw_args.empty()) {
@@ -28458,6 +28721,16 @@ private:
         return true;
       }
     }
+    auto period_unit_selector = [](const std::string &name) {
+      return name == "nanosecond" || name == "nanoseconds" ||
+             name == "microsecond" || name == "microseconds" ||
+             name == "millisecond" || name == "milliseconds" ||
+             name == "second" || name == "seconds" || name == "minute" ||
+             name == "minutes" || name == "hour" || name == "hours" ||
+             name == "day" || name == "days" || name == "week" ||
+             name == "weeks" || name == "month" || name == "months" ||
+             name == "year" || name == "years";
+    };
     if (property_access) {
       if (!args.empty() || !kw_args.empty() || !block.is_null()) {
         set_fault(frame, "TypeError",
@@ -28465,6 +28738,23 @@ private:
         return false;
       }
       if (receiver.is_native_type()) {
+        Value result = Value::null();
+        const SendStatus scalar_status = try_apply_scalar_send(
+            frame, receiver, *selector, args, block, kw_args, &result);
+        if (scalar_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (scalar_status == SendStatus::Matched) {
+          if (!write_reg(frame, dst, std::move(result))) {
+            return false;
+          }
+          ++frame.pc;
+          return true;
+        }
+      }
+      if (receiver.is_time() || receiver.is_time_period() ||
+          ((receiver.is_integer() || receiver.is_float()) &&
+           period_unit_selector(*selector))) {
         Value result = Value::null();
         const SendStatus scalar_status = try_apply_scalar_send(
             frame, receiver, *selector, args, block, kw_args, &result);
@@ -32919,6 +33209,16 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_big_int()) {
     const std::shared_ptr<BigIntValue> big = value.as_big_int();
     return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
+  }
+  if (value.is_time()) {
+    const std::shared_ptr<RuntimeTimeValue> time = value.as_time();
+    return time == nullptr ? "<time null>" : runtime_time_to_iso8601(*time);
+  }
+  if (value.is_time_period()) {
+    const std::shared_ptr<RuntimeTimePeriodValue> period =
+        value.as_time_period();
+    return period == nullptr ? "<time-period null>"
+                             : runtime_time_period_to_string(*period);
   }
   if (value.is_text_writer()) {
     const std::shared_ptr<RuntimeTextWriter> writer = value.as_text_writer();

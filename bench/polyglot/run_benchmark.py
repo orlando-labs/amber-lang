@@ -112,6 +112,19 @@ WORKLOADS = {
         go_binary="secure_random",
         amber_grants=("random.secure",),
     ),
+    "time-flow": Workload(
+        name="time-flow",
+        expected_checksum="110397732",
+        amber_module="bench.polyglot.time_flow",
+        amber_entry="main",
+        amber_source="time_flow.am",
+        python_source="time_flow.py",
+        ruby_source="time_flow.rb",
+        cpp_source="time_flow.cpp",
+        cpp_binary="time_flow",
+        go_source="time_flow.go",
+        go_binary="time_flow",
+    ),
 }
 
 
@@ -336,6 +349,7 @@ def compile_amberbc_runner(root: Path, build_dir: Path, cxx: str) -> Path:
         root / "runtime" / "stdlib_json.cpp",
         root / "runtime" / "stdlib_codecs.cpp",
         root / "runtime" / "stdlib_secure_random.cpp",
+        root / "runtime" / "stdlib_time.cpp",
     ]
     run_command(
         [

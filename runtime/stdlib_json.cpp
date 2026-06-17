@@ -163,6 +163,14 @@ struct Generator {
       write_json_string(call.text_of(value).value_or(""), out);
       return true;
     }
+    if (value.is_time()) {
+      const std::shared_ptr<RuntimeTimeValue> time = value.as_time();
+      if (time == nullptr) {
+        return fail("Time value is null");
+      }
+      write_json_string(runtime_time_to_iso8601(*time), out);
+      return true;
+    }
     if (value.is_list()) {
       const IntrusivePtr<ListValue> list = value.as_list();
       if (list == nullptr || list->items.empty()) {

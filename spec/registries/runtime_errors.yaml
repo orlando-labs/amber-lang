@@ -56,3 +56,5 @@ errors:
   - CodecDecodeError
   - RandomError
   - EntropyError
+  - TimeError
+  - TimeParseError
