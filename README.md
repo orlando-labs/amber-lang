@@ -55,6 +55,8 @@ Documentation:
   streaming, file I/O, and `.to_json` examples.
 - [Base64, Base64Url, and Hex guide](docs/stdlib-codecs.md) - byte/text
   codecs, strict/lenient decode modes, `Bytes`, `ByteBuffer`, and error cases.
+- [Url standard library guide](docs/stdlib-url.md) - parse/build, percent
+  coding, and query-map helpers.
 
 Current matrix status:
 

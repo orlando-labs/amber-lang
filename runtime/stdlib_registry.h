@@ -96,6 +96,15 @@ public:
   stdlib_make_object(std::vector<std::pair<std::string, Value>> entries,
                      bool strict) = 0;
 
+  // Extract ordinary structured values without exposing MapValue/ListValue to
+  // stdlib translation units. Map keys must be Str/Symbol and are returned by
+  // text; values preserve their original Value.
+  virtual bool stdlib_string_keyed_entries(
+      const void *frame, const Value &value,
+      std::vector<std::pair<std::string, Value>> *out) = 0;
+  virtual bool stdlib_list_items(const void *frame, const Value &value,
+                                 std::vector<Value> *out) = 0;
+
   // Invoke the block supplied to a streaming stdlib method with one value. A
   // `Json.stop` escaped throw is reported as Stopped; other throws/exceptions
   // are re-entered into the parent VM and reported as Faulted.
@@ -221,6 +230,16 @@ struct NativeStdlibCall {
     return host.stdlib_make_object(std::move(entries), strict);
   }
 
+  bool string_keyed_entries(
+      const Value &value,
+      std::vector<std::pair<std::string, Value>> *out) const {
+    return host.stdlib_string_keyed_entries(frame, value, out);
+  }
+
+  bool list_items(const Value &value, std::vector<Value> *out) const {
+    return host.stdlib_list_items(frame, value, out);
+  }
+
   StdlibBlockResult call_stream_block(Value value) const {
     return host.stdlib_call_stream_block(frame, block, std::move(value));
   }
@@ -299,5 +318,6 @@ void register_digest(NativeRegistry &registry);
 void register_secure_random(NativeRegistry &registry);
 void register_uuid(NativeRegistry &registry);
 void register_time(NativeRegistry &registry);
+void register_url(NativeRegistry &registry);
 
 } // namespace amber::runtime

@@ -75,6 +75,15 @@ struct MockHost : StdlibHost {
                      bool /*strict*/) override {
     return Value::null();
   }
+  bool stdlib_string_keyed_entries(
+      const void * /*frame*/, const Value & /*value*/,
+      std::vector<std::pair<std::string, Value>> * /*out*/) override {
+    return false;
+  }
+  bool stdlib_list_items(const void * /*frame*/, const Value & /*value*/,
+                         std::vector<Value> * /*out*/) override {
+    return false;
+  }
   amber::runtime::StdlibBlockResult
   stdlib_call_stream_block(const void * /*frame*/, const Value & /*block*/,
                            Value /*value*/) override {
@@ -150,6 +159,10 @@ void test_path_resolution(const NativeRegistry &registry) {
       registry.kind_for_path("Digest");
   expect(digest.has_value() && *digest == RuntimeNativeTypeKind::Digest,
          "kind_for_path(\"Digest\") resolves to Digest");
+  const std::optional<RuntimeNativeTypeKind> url =
+      registry.kind_for_path("Url");
+  expect(url.has_value() && *url == RuntimeNativeTypeKind::Url,
+         "kind_for_path(\"Url\") resolves to Url");
   const std::optional<RuntimeNativeTypeKind> time =
       registry.kind_for_path("Time");
   expect(time.has_value() && *time == RuntimeNativeTypeKind::Time,
@@ -177,6 +190,8 @@ void test_handler_table(const NativeRegistry &registry) {
          "Base64 handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::Digest) != nullptr,
          "Digest handler is registered");
+  expect(registry.handler_for(RuntimeNativeTypeKind::Url) != nullptr,
+         "Url handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::SecureRandom) != nullptr,
          "SecureRandom handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::Uuid) != nullptr,

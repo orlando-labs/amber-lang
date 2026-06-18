@@ -7380,6 +7380,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Hex";
   case RuntimeNativeTypeKind::Digest:
     return "Digest";
+  case RuntimeNativeTypeKind::Url:
+    return "Url";
   case RuntimeNativeTypeKind::SecureRandom:
     return "SecureRandom";
   case RuntimeNativeTypeKind::Uuid:
@@ -9764,6 +9766,49 @@ public:
     }
     return state_->heap.make_symbol_map_value(std::move(map_entries), false,
                                               strict);
+  }
+  bool stdlib_string_keyed_entries(
+      const void *frame, const Value &value,
+      std::vector<std::pair<std::string, Value>> *out) override {
+    const Frame &active = *static_cast<const Frame *>(frame);
+    if (!value.is_map()) {
+      set_fault(active, "TypeError", "expected Map");
+      return false;
+    }
+    const std::optional<std::vector<MapEntry>> entries =
+        extract_map_entries(active, value);
+    if (!entries.has_value()) {
+      return false;
+    }
+    out->clear();
+    out->reserve(entries->size());
+    for (const MapEntry &entry : *entries) {
+      const std::optional<std::string> key = stdlib_text_of(entry.key);
+      if (!key.has_value()) {
+        set_fault(active, "TypeError", "expected Map with Str/Symbol keys");
+        return false;
+      }
+      out->push_back({*key, entry.value});
+    }
+    return true;
+  }
+  bool stdlib_list_items(const void *frame, const Value &value,
+                         std::vector<Value> *out) override {
+    const Frame &active = *static_cast<const Frame *>(frame);
+    if (!value.is_list()) {
+      set_fault(active, "TypeError", "expected List");
+      return false;
+    }
+    const IntrusivePtr<ListValue> list = value.as_list();
+    if (list == nullptr) {
+      set_fault(active, "TypeError", "list value is null");
+      return false;
+    }
+    if (!ensure_lifecycle_access(active, value)) {
+      return false;
+    }
+    *out = list->items;
+    return true;
   }
   StdlibBlockResult stdlib_call_stream_block(const void *frame,
                                              const Value &block,

@@ -1359,6 +1359,7 @@ bool is_native_prelude_name(const std::string &name) {
       "Time",
       "TimePeriod",
       "Tuple",
+      "Url",
       "UUID",
       "Uuid",
       "desc",

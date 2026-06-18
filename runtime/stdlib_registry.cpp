@@ -37,6 +37,7 @@ void register_builtin_stdlib(NativeRegistry &registry) {
   register_secure_random(registry);
   register_uuid(registry);
   register_time(registry);
+  register_url(registry);
 }
 
 } // namespace amber::runtime

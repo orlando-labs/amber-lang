@@ -37,6 +37,11 @@ entries:
     intrinsic_id: amber.prelude.Digest.v1
     dispatch: constant_lookup
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: Url
+    kind: prelude_module
+    intrinsic_id: amber.prelude.Url.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: SecureRandom
     kind: prelude_module
     intrinsic_id: amber.prelude.SecureRandom.v1

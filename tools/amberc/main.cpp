@@ -1162,6 +1162,14 @@ bool native_cpp_uuid_nullary_selector(const std::string &selector) {
   return selector == "to_str" || selector == "inspect" || selector == "version";
 }
 
+bool native_cpp_url_selector(const std::string &selector,
+                             std::uint32_t pos_count) {
+  return (selector == "parse" || selector == "build" ||
+          selector == "percent_encode" || selector == "percent_decode" ||
+          selector == "parse_query" || selector == "build_query") &&
+         pos_count == 1U;
+}
+
 // Eligibility allowlist for the cpp-bytecode-direct backend.
 //
 // INVARIANT (amber.native-backend-equivalence.v1): every opcode/selector
@@ -1511,14 +1519,17 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                  pos_count == 1U && kw_count == 0U && no_block) {
         uuid_send = true;
       }
+      const bool url_send =
+          native_cpp_url_selector(selector, pos_count) && kw_count == 0U &&
+          no_block;
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
           !json_send && !codec_send && !digest_send && !range_send && !random_send &&
-          !time_send && !uuid_send) {
+          !time_send && !uuid_send && !url_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
       if (!json_send && !codec_send && !digest_send && !range_send && !random_send &&
-          !time_send && !uuid_send && (kw_count != 0U || !no_block)) {
+          !time_send && !uuid_send && !url_send && (kw_count != 0U || !no_block)) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
       }
@@ -2106,6 +2117,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::hex_module()";
           } else if (name == "Digest") {
             native_module_expr = "NativeValue::digest_module()";
+          } else if (name == "Url") {
+            native_module_expr = "NativeValue::url_module()";
           } else if (name == "SecureRandom") {
             native_module_expr = "NativeValue::secure_random_module()";
           } else if (name == "Uuid" || name == "UUID") {
@@ -2447,6 +2460,23 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "parse") {
         write_reg_stmt(dst, "native_parse_value(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
+      } else if (selector == "build") {
+        write_reg_stmt(dst, "native_url_build(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
+      } else if (selector == "percent_encode") {
+        write_reg_stmt(dst, "native_url_percent_encode(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
+      } else if (selector == "percent_decode") {
+        write_reg_stmt(dst, "native_url_percent_decode(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
+      } else if (selector == "parse_query") {
+        write_reg_stmt(dst, "native_url_parse_query(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "build_query") {
+        write_reg_stmt(dst, "native_url_build_query(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "pretty_generate") {
         write_reg_stmt(dst, "native_json_generate_value(" + read_reg_expr(arg) +
                                 ", true)");
@@ -3044,6 +3074,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   std::ostringstream out;
   out << "#include \"bytecode/format.h\"\n";
   out << "#include \"runtime/digest.h\"\n";
+  out << "#include \"runtime/stdlib_url.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
   out << "#include <array>\n";
   out << "#include <chrono>\n";
@@ -3092,7 +3123,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
          "JsonModule, BytesModule, Base64Module, Base64UrlModule, HexModule, "
-         "DigestModule, SecureRandomModule, UuidModule, RangeModule, TimeModule, "
+         "DigestModule, UrlModule, SecureRandomModule, UuidModule, RangeModule, TimeModule, "
          "TimePeriodModule, Bytes, List, Map, Range, Uuid, Time, TimePeriod, "
          "Closure };\n";
   out << "  Tag tag;\n";
@@ -3127,6 +3158,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Tag::HexModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue digest_module() { NativeValue out; out.tag = "
          "Tag::DigestModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue url_module() { NativeValue out; out.tag = "
+         "Tag::UrlModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue secure_random_module() { NativeValue out; "
          "out.tag = Tag::SecureRandomModule; out.scalar_value = 0; return "
          "out; }\n";
@@ -3933,6 +3966,8 @@ static NativeValue native_type_matches(const NativeValue &module,
   } else if (module.tag == NativeValue::Tag::RangeModule) {
     matched = value.tag == NativeValue::Tag::Range ||
               value.tag == NativeValue::Tag::RangeModule;
+  } else if (module.tag == NativeValue::Tag::UrlModule) {
+    matched = value.tag == NativeValue::Tag::UrlModule;
   } else {
     throw NativeBailout();
   }
@@ -4688,6 +4723,229 @@ static NativeValue native_time_parse(const NativeValue &module,
       local.nanosecond));
 }
 
+static NativeValue native_url_string(const std::string &text) {
+  return NativeValue::string_ref(native_intern_string(text));
+}
+
+static NativeValue native_url_optional_string(bool present,
+                                             const std::string &text) {
+  return present ? native_url_string(text) : NativeValue::nullv();
+}
+
+static NativeValue native_url_query_value(
+    const amber::runtime::RuntimeUrlQueryValue &value);
+
+static NativeValue native_url_query_map(
+    const std::vector<std::pair<std::string, amber::runtime::RuntimeUrlQueryValue>> &entries) {
+  std::vector<std::pair<std::string, NativeValue>> object;
+  object.reserve(entries.size());
+  for (const auto &entry : entries) {
+    object.push_back({entry.first, native_url_query_value(entry.second)});
+  }
+  return NativeValue::map(std::move(object));
+}
+
+static NativeValue native_url_query_value(
+    const amber::runtime::RuntimeUrlQueryValue &value) {
+  if (value.kind == amber::runtime::RuntimeUrlQueryValue::Kind::String) {
+    return native_url_string(value.text);
+  }
+  if (value.kind == amber::runtime::RuntimeUrlQueryValue::Kind::List) {
+    std::vector<NativeValue> items;
+    items.reserve(value.list.size());
+    for (const amber::runtime::RuntimeUrlQueryValue &item : value.list) {
+      items.push_back(native_url_query_value(item));
+    }
+    return NativeValue::list(std::move(items));
+  }
+  return native_url_query_map(value.map);
+}
+
+static NativeValue native_url_parts_map(const amber::runtime::RuntimeUrlParts &parts) {
+  std::vector<std::pair<std::string, NativeValue>> entries;
+  entries.reserve(10U);
+  entries.push_back({"scheme", native_url_optional_string(!parts.scheme.empty(), parts.scheme)});
+  entries.push_back({"authority", native_url_optional_string(parts.has_authority, parts.authority)});
+  entries.push_back({"userinfo", native_url_optional_string(!parts.userinfo.empty(), parts.userinfo)});
+  entries.push_back({"host", native_url_optional_string(parts.has_authority, parts.host)});
+  entries.push_back({"port", parts.has_port ? NativeValue::integer(parts.port) : NativeValue::nullv()});
+  entries.push_back({"path", native_url_string(parts.path)});
+  entries.push_back({"query", native_url_optional_string(parts.has_query, parts.query)});
+  entries.push_back({"fragment", native_url_optional_string(parts.has_fragment, parts.fragment)});
+  if (parts.has_query) {
+    std::vector<std::pair<std::string, amber::runtime::RuntimeUrlQueryValue>> query;
+    std::string error;
+    if (!amber::runtime::runtime_url_parse_query(parts.query, &query, &error)) {
+      throw NativeBailout();
+    }
+    entries.push_back({"query_map", native_url_query_map(query)});
+  } else {
+    entries.push_back({"query_map", NativeValue::nullv()});
+  }
+  return NativeValue::map(std::move(entries));
+}
+
+static const NativeValue *native_map_field(const NativeMap &map,
+                                           const std::string &name) {
+  for (auto it = map.entries.rbegin(); it != map.entries.rend(); ++it) {
+    if (it->first == name) return &it->second;
+  }
+  return nullptr;
+}
+
+static bool native_url_optional_string_field(
+    const NativeMap &map, const std::string &name, std::string *out,
+    bool *present) {
+  const NativeValue *value = native_map_field(map, name);
+  if (value == nullptr || value->tag == NativeValue::Tag::Null) {
+    *present = false;
+    out->clear();
+    return true;
+  }
+  if (value->tag != NativeValue::Tag::String) return false;
+  *present = true;
+  *out = native_string_text(*value);
+  return true;
+}
+
+static amber::runtime::RuntimeUrlQueryValue
+native_url_query_value_from_native(const NativeValue &value);
+
+static std::vector<std::pair<std::string, amber::runtime::RuntimeUrlQueryValue>>
+native_url_query_pairs_from_map(const NativeValue &value) {
+  std::vector<std::pair<std::string, amber::runtime::RuntimeUrlQueryValue>> out;
+  const NativeMap &map = as_map(value);
+  out.reserve(map.entries.size());
+  for (const auto &entry : map.entries) {
+    out.push_back({entry.first, native_url_query_value_from_native(entry.second)});
+  }
+  return out;
+}
+
+static amber::runtime::RuntimeUrlQueryValue
+native_url_query_value_from_native(const NativeValue &value) {
+  if (value.tag == NativeValue::Tag::String) {
+    return amber::runtime::RuntimeUrlQueryValue::string(native_string_text(value));
+  }
+  if (value.tag == NativeValue::Tag::List) {
+    std::vector<amber::runtime::RuntimeUrlQueryValue> items;
+    const auto &native_items = as_list(value).items;
+    items.reserve(native_items.size());
+    for (const NativeValue &item : native_items) {
+      items.push_back(native_url_query_value_from_native(item));
+    }
+    return amber::runtime::RuntimeUrlQueryValue::list_value(std::move(items));
+  }
+  if (value.tag == NativeValue::Tag::Map) {
+    return amber::runtime::RuntimeUrlQueryValue::map_value(
+        native_url_query_pairs_from_map(value));
+  }
+  throw NativeBailout();
+}
+
+static amber::runtime::RuntimeUrlParts
+native_url_parts_from_map(const NativeValue &value) {
+  const NativeMap &map = as_map(value);
+  amber::runtime::RuntimeUrlParts parts;
+  bool present = false;
+  if (!native_url_optional_string_field(map, "scheme", &parts.scheme, &present) ||
+      !native_url_optional_string_field(map, "userinfo", &parts.userinfo, &present) ||
+      !native_url_optional_string_field(map, "host", &parts.host, &present) ||
+      !native_url_optional_string_field(map, "path", &parts.path, &present) ||
+      !native_url_optional_string_field(map, "query", &parts.query, &parts.has_query) ||
+      !native_url_optional_string_field(map, "fragment", &parts.fragment, &parts.has_fragment)) {
+    throw NativeBailout();
+  }
+  const NativeValue *host = native_map_field(map, "host");
+  parts.has_authority = host != nullptr && host->tag != NativeValue::Tag::Null;
+  const NativeValue *port = native_map_field(map, "port");
+  if (port != nullptr && port->tag != NativeValue::Tag::Null) {
+    if (port->tag != NativeValue::Tag::Integer) throw NativeBailout();
+    parts.has_port = true;
+    parts.port = port->scalar_value;
+  }
+  const NativeValue *query_map = native_map_field(map, "query_map");
+  if ((!parts.has_query || parts.query.empty()) && query_map != nullptr &&
+      query_map->tag != NativeValue::Tag::Null) {
+    parts.query = amber::runtime::runtime_url_build_query(
+        native_url_query_pairs_from_map(*query_map));
+    parts.has_query = true;
+  }
+  std::string error;
+  if (!amber::runtime::runtime_url_validate_parts(parts, &error)) {
+    throw NativeBailout();
+  }
+  return parts;
+}
+
+static NativeValue native_url_parse(const NativeValue &module,
+                                    const NativeValue &text_value) {
+  if (module.tag != NativeValue::Tag::UrlModule ||
+      text_value.tag != NativeValue::Tag::String) {
+    throw NativeBailout();
+  }
+  amber::runtime::RuntimeUrlParts parts;
+  std::string error;
+  if (!amber::runtime::runtime_url_parse(native_string_text(text_value), &parts, &error)) {
+    throw NativeBailout();
+  }
+  return native_url_parts_map(parts);
+}
+
+static NativeValue native_url_build(const NativeValue &module,
+                                    const NativeValue &parts_value) {
+  if (module.tag != NativeValue::Tag::UrlModule) throw NativeBailout();
+  return native_url_string(amber::runtime::runtime_url_build(
+      native_url_parts_from_map(parts_value)));
+}
+
+static NativeValue native_url_percent_encode(const NativeValue &module,
+                                             const NativeValue &text_value) {
+  if (module.tag != NativeValue::Tag::UrlModule ||
+      text_value.tag != NativeValue::Tag::String) {
+    throw NativeBailout();
+  }
+  return native_url_string(amber::runtime::runtime_url_percent_encode(
+      native_string_text(text_value), amber::runtime::RuntimeUrlEncodeMode::Component));
+}
+
+static NativeValue native_url_percent_decode(const NativeValue &module,
+                                             const NativeValue &text_value) {
+  if (module.tag != NativeValue::Tag::UrlModule ||
+      text_value.tag != NativeValue::Tag::String) {
+    throw NativeBailout();
+  }
+  std::string decoded;
+  std::string error;
+  if (!amber::runtime::runtime_url_percent_decode(
+          native_string_text(text_value), false, &decoded, &error)) {
+    throw NativeBailout();
+  }
+  return native_url_string(decoded);
+}
+
+static NativeValue native_url_parse_query(const NativeValue &module,
+                                          const NativeValue &text_value) {
+  if (module.tag != NativeValue::Tag::UrlModule ||
+      text_value.tag != NativeValue::Tag::String) {
+    throw NativeBailout();
+  }
+  std::vector<std::pair<std::string, amber::runtime::RuntimeUrlQueryValue>> entries;
+  std::string error;
+  if (!amber::runtime::runtime_url_parse_query(
+          native_string_text(text_value), &entries, &error)) {
+    throw NativeBailout();
+  }
+  return native_url_query_map(entries);
+}
+
+static NativeValue native_url_build_query(const NativeValue &module,
+                                          const NativeValue &map_value) {
+  if (module.tag != NativeValue::Tag::UrlModule) throw NativeBailout();
+  return native_url_string(amber::runtime::runtime_url_build_query(
+      native_url_query_pairs_from_map(map_value)));
+}
+
 static NativeValue native_parse_value(const NativeValue &module,
                                       const NativeValue &text_value) {
   if (module.tag == NativeValue::Tag::UuidModule) {
@@ -4695,6 +4953,9 @@ static NativeValue native_parse_value(const NativeValue &module,
   }
   if (module.tag == NativeValue::Tag::TimeModule) {
     return native_time_parse(module, text_value);
+  }
+  if (module.tag == NativeValue::Tag::UrlModule) {
+    return native_url_parse(module, text_value);
   }
   return native_json_parse_value(text_value);
 }
@@ -5112,6 +5373,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "lhs.tag == NativeValue::Tag::Base64UrlModule || "
          "lhs.tag == NativeValue::Tag::HexModule || "
          "lhs.tag == NativeValue::Tag::DigestModule || "
+         "lhs.tag == NativeValue::Tag::UrlModule || "
          "lhs.tag == NativeValue::Tag::SecureRandomModule || "
          "lhs.tag == NativeValue::Tag::RangeModule || "
          "lhs.tag == NativeValue::Tag::TimeModule || "
@@ -5128,6 +5390,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "rhs.tag == NativeValue::Tag::Base64UrlModule || "
          "rhs.tag == NativeValue::Tag::HexModule || "
          "rhs.tag == NativeValue::Tag::DigestModule || "
+         "rhs.tag == NativeValue::Tag::UrlModule || "
          "rhs.tag == NativeValue::Tag::SecureRandomModule || "
          "rhs.tag == NativeValue::Tag::RangeModule || "
          "rhs.tag == NativeValue::Tag::TimeModule || "
@@ -5444,6 +5707,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
   out << "  case NativeValue::Tag::HexModule: return \"Hex\";\n";
   out << "  case NativeValue::Tag::DigestModule: return \"Digest\";\n";
+  out << "  case NativeValue::Tag::UrlModule: return \"Url\";\n";
   out << "  case NativeValue::Tag::SecureRandomModule: return "
          "\"SecureRandom\";\n";
   out << "  case NativeValue::Tag::UuidModule: return \"Uuid\";\n";
@@ -5592,6 +5856,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/stdlib_secure_random.cpp",
       "runtime/stdlib_uuid.cpp",
       "runtime/stdlib_time.cpp",
+      "runtime/stdlib_url.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());
