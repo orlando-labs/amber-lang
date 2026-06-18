@@ -242,6 +242,7 @@ enum class RuntimeNativeTypeKind {
   Base64,
   Base64Url,
   Hex,
+  Digest,
   SecureRandom,
   Time,
   TimePeriod,

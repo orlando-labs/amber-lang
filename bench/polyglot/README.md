@@ -21,6 +21,7 @@ Run:
 ```sh
 python3 bench/polyglot/run_benchmark.py --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload calls-collections --repeats 5
+python3 bench/polyglot/run_benchmark.py --workload sha-digest --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload json --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload codecs --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload secure-random --repeats 3
@@ -35,7 +36,7 @@ workload:
 
 - `arithmetic`: `715609516598740`
 - `calls-collections`: `2047795430`
-- `sha-digest`: `2242493101`
+- `sha-digest`: `5616000`
 - `json`: `1531352227`
 - `codecs`: `2056190`
 - `secure-random`: `296000`
@@ -56,6 +57,13 @@ does not use it.
 The `codecs` workload exercises `Bytes.new`, `Base64`, `Base64Url`, and `Hex`
 encode/decode round-trips, including lenient base64/hex branches. The runner
 requires full direct-native coverage for this workload as well.
+
+The `sha-digest` workload now exercises the native `Digest` API rather than a
+handwritten SHA-256 compression loop: CRC32, MD5, SHA-1, SHA-256, and
+HMAC-SHA-256 over four binary payloads. Streebog-256/512 and their Latin and
+Cyrillic aliases are covered by RFC/vector tests and the full-native digest
+fixture, but are excluded from the timed polyglot intersection because Ruby
+and Go do not ship them in their standard libraries.
 
 The `secure-random` workload exercises `SecureRandom.bytes`, `.hex`,
 `.base64`, `.base64url`, `.uuid`, and `.int(range)` using real OS entropy.
@@ -79,6 +87,25 @@ equality, type matching, the `UUID` alias, and `SecureRandom.uuid`. It uses real
 OS entropy and wall time, while its checksum depends only on UUID invariants.
 The Amber executable is compiled with `--grant random.secure`, and the runner
 requires every bytecode code object to have direct native coverage.
+
+Latest local `sha-digest` API warm rerun on 2026-06-18 (Darwin arm64,
+`go version go1.26.4 darwin/arm64`):
+
+```sh
+python3 bench/polyglot/run_benchmark.py --workload sha-digest --repeats 10 \
+  --no-build --build-dir /tmp/amber-digest-bench-20260618-final
+```
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted     10     0.0429     0.0423          4.6            5616000
+amber-built           10     0.0139     0.0137          3.2            5616000
+python                10     0.0245     0.0239          9.9            5616000
+ruby                  10     0.0427     0.0411         21.7            5616000
+cpp                   10     0.0119     0.0116          1.6            5616000
+go                    10     0.0047     0.0043          6.1            5616000
+```
 
 Latest local `uuid` warm rerun on 2026-06-18 (Darwin arm64,
 `go version go1.26.4 darwin/arm64`):
@@ -119,6 +146,10 @@ go                    10     0.0059     0.0051          4.1          110397732
 
 Latest local full-suite warm rerun on 2026-06-17 (Darwin arm64,
 `go version go1.26.4 darwin/arm64`):
+
+The `sha-digest` row in this older suite used the former handwritten SHA-256
+compression workload; use the 2026-06-18 table above for the current Digest API
+workload.
 
 Each workload was first built once into a fresh
 `/private/tmp/amber_polyglot_suite_20260617_*` directory. The tables below are

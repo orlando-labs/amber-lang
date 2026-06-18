@@ -146,6 +146,10 @@ void test_path_resolution(const NativeRegistry &registry) {
   expect(secure_random.has_value() &&
              *secure_random == RuntimeNativeTypeKind::SecureRandom,
          "kind_for_path(\"SecureRandom\") resolves to SecureRandom");
+  const std::optional<RuntimeNativeTypeKind> digest =
+      registry.kind_for_path("Digest");
+  expect(digest.has_value() && *digest == RuntimeNativeTypeKind::Digest,
+         "kind_for_path(\"Digest\") resolves to Digest");
   const std::optional<RuntimeNativeTypeKind> time =
       registry.kind_for_path("Time");
   expect(time.has_value() && *time == RuntimeNativeTypeKind::Time,
@@ -171,6 +175,8 @@ void test_handler_table(const NativeRegistry &registry) {
          "Math handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::Base64) != nullptr,
          "Base64 handler is registered");
+  expect(registry.handler_for(RuntimeNativeTypeKind::Digest) != nullptr,
+         "Digest handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::SecureRandom) != nullptr,
          "SecureRandom handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::Uuid) != nullptr,

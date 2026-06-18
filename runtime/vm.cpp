@@ -7378,6 +7378,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Base64Url";
   case RuntimeNativeTypeKind::Hex:
     return "Hex";
+  case RuntimeNativeTypeKind::Digest:
+    return "Digest";
   case RuntimeNativeTypeKind::SecureRandom:
     return "SecureRandom";
   case RuntimeNativeTypeKind::Uuid:

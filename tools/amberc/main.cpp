@@ -1417,6 +1417,16 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         }
         codec_send = true;
       }
+      const bool digest_send =
+          (((selector == "crc32" || selector == "md5" ||
+             selector == "sha1" || selector == "sha256" ||
+             selector == "streebog256" || selector == "streebog512" ||
+             selector == "gost256" || selector == "gost512" ||
+             selector == "гост256" || selector == "гост512" ||
+             selector == "стрибог256" || selector == "стрибог512") &&
+            pos_count == 1U) ||
+           (selector == "hmac_sha256" && pos_count == 2U)) &&
+          kw_count == 0U && no_block;
       bool range_send = false;
       if (selector == "new" && pos_count == 2U && kw_count <= 2U && no_block) {
         std::set<std::string> seen_keywords;
@@ -1502,12 +1512,12 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         uuid_send = true;
       }
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
-          !json_send && !codec_send && !range_send && !random_send &&
+          !json_send && !codec_send && !digest_send && !range_send && !random_send &&
           !time_send && !uuid_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
-      if (!json_send && !codec_send && !range_send && !random_send &&
+      if (!json_send && !codec_send && !digest_send && !range_send && !random_send &&
           !time_send && !uuid_send && (kw_count != 0U || !no_block)) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
@@ -2094,6 +2104,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::base64url_module()";
           } else if (name == "Hex") {
             native_module_expr = "NativeValue::hex_module()";
+          } else if (name == "Digest") {
+            native_module_expr = "NativeValue::digest_module()";
           } else if (name == "SecureRandom") {
             native_module_expr = "NativeValue::secure_random_module()";
           } else if (name == "Uuid" || name == "UUID") {
@@ -2516,6 +2528,21 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                                 : "NativeValue::nullv()") +
                                 ", " + (kw_count == 1U ? "true" : "false") +
                                 ")");
+      } else if (selector == "hmac_sha256") {
+        write_reg_stmt(dst,
+                       "native_digest_hmac_sha256(" + read_reg_expr(recv) +
+                           ", " + read_reg_expr(arg) + ", " +
+                           read_reg_expr(arg2) + ")");
+      } else if (selector == "crc32" || selector == "md5" ||
+                 selector == "sha1" || selector == "sha256" ||
+                 selector == "streebog256" || selector == "streebog512" ||
+                 selector == "gost256" || selector == "gost512" ||
+                 selector == "гост256" || selector == "гост512" ||
+                 selector == "стрибог256" || selector == "стрибог512") {
+        write_reg_stmt(dst, "native_digest_one(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
       } else if (selector == "hex") {
         if (pos_count == 0U) {
           write_reg_stmt(dst, "native_bytes_hex(" + read_reg_expr(recv) + ")");
@@ -3016,6 +3043,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
 
   std::ostringstream out;
   out << "#include \"bytecode/format.h\"\n";
+  out << "#include \"runtime/digest.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
   out << "#include <array>\n";
   out << "#include <chrono>\n";
@@ -3064,7 +3092,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
          "JsonModule, BytesModule, Base64Module, Base64UrlModule, HexModule, "
-         "SecureRandomModule, UuidModule, RangeModule, TimeModule, "
+         "DigestModule, SecureRandomModule, UuidModule, RangeModule, TimeModule, "
          "TimePeriodModule, Bytes, List, Map, Range, Uuid, Time, TimePeriod, "
          "Closure };\n";
   out << "  Tag tag;\n";
@@ -3097,6 +3125,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Tag::Base64UrlModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue hex_module() { NativeValue out; out.tag = "
          "Tag::HexModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue digest_module() { NativeValue out; out.tag = "
+         "Tag::DigestModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue secure_random_module() { NativeValue out; "
          "out.tag = Tag::SecureRandomModule; out.scalar_value = 0; return "
          "out; }\n";
@@ -4029,6 +4059,42 @@ static NativeValue native_codec_decode(const NativeValue &module,
     return NativeValue::bytes(native_base64_decode_text(text, true, lenient));
   }
   throw NativeBailout();
+}
+
+static NativeValue native_digest_one(const NativeValue &module,
+                                     const NativeValue &bytes_value,
+                                     const std::string &selector) {
+  if (module.tag != NativeValue::Tag::DigestModule) throw NativeBailout();
+  const std::string &bytes = as_bytes(bytes_value).bytes;
+  if (selector == "crc32") {
+    return NativeValue::bytes(amber::runtime::digest_crc32(bytes));
+  }
+  if (selector == "md5") {
+    return NativeValue::bytes(amber::runtime::digest_md5(bytes));
+  }
+  if (selector == "sha1") {
+    return NativeValue::bytes(amber::runtime::digest_sha1(bytes));
+  }
+  if (selector == "sha256") {
+    return NativeValue::bytes(amber::runtime::digest_sha256(bytes));
+  }
+  if (selector == "streebog256" || selector == "gost256" ||
+      selector == "гост256" || selector == "стрибог256") {
+    return NativeValue::bytes(amber::runtime::digest_streebog256(bytes));
+  }
+  if (selector == "streebog512" || selector == "gost512" ||
+      selector == "гост512" || selector == "стрибог512") {
+    return NativeValue::bytes(amber::runtime::digest_streebog512(bytes));
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_digest_hmac_sha256(const NativeValue &module,
+                                             const NativeValue &key_value,
+                                             const NativeValue &bytes_value) {
+  if (module.tag != NativeValue::Tag::DigestModule) throw NativeBailout();
+  return NativeValue::bytes(amber::runtime::digest_hmac_sha256(
+      as_bytes(key_value).bytes, as_bytes(bytes_value).bytes));
 }
 
 static void append_json_escaped(std::string &out, const std::string &text) {
@@ -5045,6 +5111,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "lhs.tag == NativeValue::Tag::Base64Module || "
          "lhs.tag == NativeValue::Tag::Base64UrlModule || "
          "lhs.tag == NativeValue::Tag::HexModule || "
+         "lhs.tag == NativeValue::Tag::DigestModule || "
          "lhs.tag == NativeValue::Tag::SecureRandomModule || "
          "lhs.tag == NativeValue::Tag::RangeModule || "
          "lhs.tag == NativeValue::Tag::TimeModule || "
@@ -5060,6 +5127,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "rhs.tag == NativeValue::Tag::Base64Module || "
          "rhs.tag == NativeValue::Tag::Base64UrlModule || "
          "rhs.tag == NativeValue::Tag::HexModule || "
+         "rhs.tag == NativeValue::Tag::DigestModule || "
          "rhs.tag == NativeValue::Tag::SecureRandomModule || "
          "rhs.tag == NativeValue::Tag::RangeModule || "
          "rhs.tag == NativeValue::Tag::TimeModule || "
@@ -5375,6 +5443,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
   out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
   out << "  case NativeValue::Tag::HexModule: return \"Hex\";\n";
+  out << "  case NativeValue::Tag::DigestModule: return \"Digest\";\n";
   out << "  case NativeValue::Tag::SecureRandomModule: return "
          "\"SecureRandom\";\n";
   out << "  case NativeValue::Tag::UuidModule: return \"Uuid\";\n";
@@ -5513,11 +5582,13 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/context.cpp",
       "runtime/text.cpp",
       "runtime/io.cpp",
+      "runtime/digest.cpp",
       "runtime/vm.cpp",
       "runtime/stdlib_registry.cpp",
       "runtime/stdlib_math.cpp",
       "runtime/stdlib_json.cpp",
       "runtime/stdlib_codecs.cpp",
+      "runtime/stdlib_digest.cpp",
       "runtime/stdlib_secure_random.cpp",
       "runtime/stdlib_uuid.cpp",
       "runtime/stdlib_time.cpp",

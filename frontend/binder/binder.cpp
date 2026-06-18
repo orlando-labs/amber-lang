@@ -1335,6 +1335,7 @@ bool is_native_prelude_name(const std::string &name) {
       "Bool",
       "Bytes",
       "Channel",
+      "Digest",
       "Err",
       "Flow",
       "Float",

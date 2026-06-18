@@ -60,7 +60,7 @@ WORKLOADS = {
     ),
     "sha-digest": Workload(
         name="sha-digest",
-        expected_checksum="2242493101",
+        expected_checksum="5616000",
         amber_module="bench.polyglot.sha_digest",
         amber_entry="__init__",
         amber_source="sha_digest.am",
@@ -306,13 +306,19 @@ def compile_cpp_program(
 ) -> Path:
     output = build_dir / "cpp" / workload.cpp_binary
     output.parent.mkdir(parents=True, exist_ok=True)
+    sources = [root / "bench" / "polyglot" / "cpp" / workload.cpp_source]
+    extra_args = []
+    if workload.name == "sha-digest":
+        sources.append(root / "runtime" / "digest.cpp")
+        extra_args.extend(["-I", root])
     run_command(
         [
             cxx,
             "-std=c++17",
             "-O2",
             "-pipe",
-            root / "bench" / "polyglot" / "cpp" / workload.cpp_source,
+            *extra_args,
+            *sources,
             "-o",
             output,
         ],
@@ -357,11 +363,13 @@ def compile_amberbc_runner(root: Path, build_dir: Path, cxx: str) -> Path:
         root / "runtime" / "context.cpp",
         root / "runtime" / "text.cpp",
         root / "runtime" / "io.cpp",
+        root / "runtime" / "digest.cpp",
         root / "runtime" / "vm.cpp",
         root / "runtime" / "stdlib_registry.cpp",
         root / "runtime" / "stdlib_math.cpp",
         root / "runtime" / "stdlib_json.cpp",
         root / "runtime" / "stdlib_codecs.cpp",
+        root / "runtime" / "stdlib_digest.cpp",
         root / "runtime" / "stdlib_secure_random.cpp",
         root / "runtime" / "stdlib_uuid.cpp",
         root / "runtime" / "stdlib_time.cpp",

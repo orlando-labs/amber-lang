@@ -295,6 +295,7 @@ void register_builtin_stdlib(NativeRegistry &registry);
 void register_math(NativeRegistry &registry);
 void register_json(NativeRegistry &registry);
 void register_codecs(NativeRegistry &registry);
+void register_digest(NativeRegistry &registry);
 void register_secure_random(NativeRegistry &registry);
 void register_uuid(NativeRegistry &registry);
 void register_time(NativeRegistry &registry);
