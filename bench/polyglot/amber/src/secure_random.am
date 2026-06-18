@@ -12,7 +12,7 @@ def main() -> Int !{random, mut}:
     checksum = checksum + Base64.decode(SecureRandom.base64(17, padding: false)).count()
     checksum = checksum + Base64Url.decode(SecureRandom.base64url(18)).count()
 
-    uuid = SecureRandom.uuid
+    uuid = SecureRandom.uuid.to_str
     if uuid.length() == 36 and uuid.contains?("-"):
       checksum = checksum + 37
 

@@ -25,6 +25,7 @@ python3 bench/polyglot/run_benchmark.py --workload json --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload codecs --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload secure-random --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload time-flow --repeats 3
+python3 bench/polyglot/run_benchmark.py --workload uuid --repeats 3
 ```
 
 The script prints mean/best wall-clock time and peak RSS reported by a small
@@ -39,6 +40,7 @@ workload:
 - `codecs`: `2056190`
 - `secure-random`: `296000`
 - `time-flow`: `110397732`
+- `uuid`: `1040000`
 
 The `json` workload exercises compact JSON generation, parse round-trips,
 small pretty-generation round-trips, and streaming JSONL reads. The runner
@@ -70,6 +72,32 @@ calendar month arithmetic with end-of-month clamping, `TimePeriod + Time`,
 requires full direct-native coverage for this workload; the generated launcher
 still embeds its ordinary bailout VM fallback, but `native_entry` is true and
 every bytecode code object has direct native code.
+
+The `uuid` workload exercises UUID v4 and v7 generation, canonical parse and
+format round-trips, `inspect`, JSON formatting, version extraction, byte-value
+equality, type matching, the `UUID` alias, and `SecureRandom.uuid`. It uses real
+OS entropy and wall time, while its checksum depends only on UUID invariants.
+The Amber executable is compiled with `--grant random.secure`, and the runner
+requires every bytecode code object to have direct native coverage.
+
+Latest local `uuid` warm rerun on 2026-06-18 (Darwin arm64,
+`go version go1.26.4 darwin/arm64`):
+
+```sh
+python3 bench/polyglot/run_benchmark.py --workload uuid --repeats 3 --no-build \
+  --build-dir /tmp/amber-polyglot-uuid-final
+```
+
+```text
+program             runs     mean_s     best_s  peak_rss_mb           checksum
+----------------------------------------------------------------------------------
+amber-interpreted      3     0.0508     0.0473          8.8            1040000
+amber-built            3     0.0123     0.0114          5.8            1040000
+python                 3     0.0985     0.0924         13.1            1040000
+ruby                   3     0.2222     0.2130         24.0            1040000
+cpp                    3     0.0080     0.0076          1.4            1040000
+go                     3     0.0126     0.0113          9.0            1040000
+```
 
 Latest local `time-flow` warm rerun on 2026-06-18 (Darwin arm64,
 `go version go1.26.4 darwin/arm64`):

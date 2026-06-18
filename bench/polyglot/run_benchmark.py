@@ -125,6 +125,20 @@ WORKLOADS = {
         go_source="time_flow.go",
         go_binary="time_flow",
     ),
+    "uuid": Workload(
+        name="uuid",
+        expected_checksum="1040000",
+        amber_module="bench.polyglot.uuid",
+        amber_entry="main",
+        amber_source="uuid.am",
+        python_source="uuid_workload.py",
+        ruby_source="uuid_workload.rb",
+        cpp_source="uuid_workload.cpp",
+        cpp_binary="uuid_workload",
+        go_source="uuid_workload.go",
+        go_binary="uuid_workload",
+        amber_grants=("random.secure",),
+    ),
 }
 
 
@@ -349,6 +363,7 @@ def compile_amberbc_runner(root: Path, build_dir: Path, cxx: str) -> Path:
         root / "runtime" / "stdlib_json.cpp",
         root / "runtime" / "stdlib_codecs.cpp",
         root / "runtime" / "stdlib_secure_random.cpp",
+        root / "runtime" / "stdlib_uuid.cpp",
         root / "runtime" / "stdlib_time.cpp",
     ]
     run_command(
