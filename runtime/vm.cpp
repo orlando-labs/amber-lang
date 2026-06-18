@@ -5,8 +5,8 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
 #include <cmath>
 #include <condition_variable>
@@ -674,8 +674,8 @@ bool map_key_is_nameable(const Value &key) {
   return key.is_symbol() || key.is_string();
 }
 
-// Name-indifferent map-key equivalence against a probe key. Ordinary maps key on
-// the canonical identity (`MapEntry::symbol_id`, set for Symbol keys and for
+// Name-indifferent map-key equivalence against a probe key. Ordinary maps key
+// on the canonical identity (`MapEntry::symbol_id`, set for Symbol keys and for
 // interned Str keys); when the probe is non-nameable or its text was never
 // interned (so no entry can carry it) `lookup_id` is empty and we fall back to
 // exact value equality. Strict maps always compare exactly, so a Symbol key and
@@ -695,8 +695,8 @@ bool map_entry_key_equivalent(const MapEntry &entry, const Value &lookup_key,
 
 // Whether two stored entries denote the same key, for construction-time dedup.
 // Both nameable entries carry their canonical `symbol_id`, so ordinary maps
-// collapse name-key duplicates (`{a: 1, "a": 2}` -> one entry) while strict maps
-// keep them distinct.
+// collapse name-key duplicates (`{a: 1, "a": 2}` -> one entry) while strict
+// maps keep them distinct.
 bool map_entries_same_key(const MapEntry &a, const MapEntry &b, bool strict) {
   if (!strict && map_key_is_nameable(a.key) && map_key_is_nameable(b.key)) {
     return a.symbol_id == b.symbol_id;
@@ -2677,6 +2677,14 @@ private:
     }
     if (lhs.is_io_value()) {
       return lhs.as_io_value() == rhs.as_io_value();
+    }
+    if (lhs.is_uuid()) {
+      const std::shared_ptr<RuntimeUuidValue> left = lhs.as_uuid();
+      const std::shared_ptr<RuntimeUuidValue> right = rhs.as_uuid();
+      if (left == right) {
+        return true;
+      }
+      return left != nullptr && right != nullptr && left->bytes == right->bytes;
     }
     if (lhs.is_time()) {
       const std::shared_ptr<RuntimeTimeValue> left = lhs.as_time();
@@ -5176,7 +5184,8 @@ public:
     raw->header.allocation_size = allocation_size;
     raw->header.generation = ObjectGeneration::Young;
     // Keepalive to this heap: locates it on the drop path and keeps it alive as
-    // long as any object references it (replaces the old deleter's Impl capture).
+    // long as any object references it (replaces the old deleter's Impl
+    // capture).
     raw->header.heap = shared_from_this();
     // The returned handle owns this initial reference (adopted below).
     raw->header.ref_count.store(1, std::memory_order_relaxed);
@@ -6506,10 +6515,10 @@ template <class T> void runtime_heap_release(T *obj) noexcept {
       delete obj;
       return;
     }
-    // Hold a strong ref to the heap across the free so that, if this is the last
-    // object, the heap's destructor runs here -- outside any Impl method (whose
-    // mutex the free path locks) -- rather than mid-release. Mirrors how the old
-    // deleter's captured shared_ptr<Impl> outlived the release() call.
+    // Hold a strong ref to the heap across the free so that, if this is the
+    // last object, the heap's destructor runs here -- outside any Impl method
+    // (whose mutex the free path locks) -- rather than mid-release. Mirrors how
+    // the old deleter's captured shared_ptr<Impl> outlived the release() call.
     std::shared_ptr<void> keepalive = obj->header.heap;
     RuntimeHeap::drop_object(obj, &heap_object_deleter<T>, obj->header);
   }
@@ -6521,8 +6530,9 @@ template <class T> IntrusivePtr<T> make_intrusive() {
   return IntrusivePtr<T>(obj, typename IntrusivePtr<T>::Adopt{});
 }
 
-// IntrusivePtr<T> is only ever instantiated for the six ObjHeader-bearing kinds;
-// these explicit instantiations satisfy the out-of-line declarations in vm.h.
+// IntrusivePtr<T> is only ever instantiated for the six ObjHeader-bearing
+// kinds; these explicit instantiations satisfy the out-of-line declarations in
+// vm.h.
 template void runtime_heap_add_ref<ClosureValue>(ClosureValue *) noexcept;
 template void runtime_heap_add_ref<InstanceValue>(InstanceValue *) noexcept;
 template void runtime_heap_add_ref<ListValue>(ListValue *) noexcept;
@@ -6710,6 +6720,10 @@ Value Value::result(std::shared_ptr<ResultValue> value) {
   return {std::move(value)};
 }
 
+Value Value::uuid(std::shared_ptr<RuntimeUuidValue> value) {
+  return {std::move(value)};
+}
+
 Value Value::time(std::shared_ptr<RuntimeTimeValue> value) {
   return {std::move(value)};
 }
@@ -6843,6 +6857,10 @@ bool Value::is_result() const {
   return std::holds_alternative<std::shared_ptr<ResultValue>>(payload);
 }
 
+bool Value::is_uuid() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeUuidValue>>(payload);
+}
+
 bool Value::is_time() const {
   return std::holds_alternative<std::shared_ptr<RuntimeTimeValue>>(payload);
 }
@@ -6969,6 +6987,10 @@ std::shared_ptr<ResultValue> Value::as_result() const {
   return std::get<std::shared_ptr<ResultValue>>(payload);
 }
 
+std::shared_ptr<RuntimeUuidValue> Value::as_uuid() const {
+  return std::get<std::shared_ptr<RuntimeUuidValue>>(payload);
+}
+
 std::shared_ptr<RuntimeTimeValue> Value::as_time() const {
   return std::get<std::shared_ptr<RuntimeTimeValue>>(payload);
 }
@@ -6978,7 +7000,9 @@ std::shared_ptr<RuntimeTimePeriodValue> Value::as_time_period() const {
 }
 
 Value Value::list(IntrusivePtr<ListValue> value) { return {std::move(value)}; }
-Value Value::tuple(IntrusivePtr<TupleValue> value) { return {std::move(value)}; }
+Value Value::tuple(IntrusivePtr<TupleValue> value) {
+  return {std::move(value)};
+}
 Value Value::set(IntrusivePtr<SetValue> value) { return {std::move(value)}; }
 Value Value::map(IntrusivePtr<MapValue> value) { return {std::move(value)}; }
 
@@ -7101,8 +7125,7 @@ Value Value::make_tail(ValueTailKind kind, std::shared_ptr<void> ptr) {
   return v;
 }
 
-template <class T>
-Value Value::make_heap(ValueTag tag, IntrusivePtr<T> value) {
+template <class T> Value Value::make_heap(ValueTag tag, IntrusivePtr<T> value) {
   Value v;
   v.tag_ = tag;
   T *p = value.release(); // adopt the +1 reference, no atomic
@@ -7270,8 +7293,8 @@ Value make_set_value(std::vector<Value> items, bool frozen) {
 
 Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen,
                             bool strict) {
-  return default_runtime_heap().make_symbol_map_value(std::move(entries), frozen,
-                                                      strict);
+  return default_runtime_heap().make_symbol_map_value(std::move(entries),
+                                                      frozen, strict);
 }
 
 Value make_result_value(bool is_ok, Value payload) {
@@ -7357,6 +7380,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Hex";
   case RuntimeNativeTypeKind::SecureRandom:
     return "SecureRandom";
+  case RuntimeNativeTypeKind::Uuid:
+    return "Uuid";
   case RuntimeNativeTypeKind::Time:
     return "Time";
   case RuntimeNativeTypeKind::TimePeriod:
@@ -7709,6 +7734,10 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_big_int()) {
     const std::shared_ptr<BigIntValue> big = value.as_big_int();
     return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
+  }
+  if (value.is_uuid()) {
+    const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
+    return uuid == nullptr ? "<uuid null>" : runtime_uuid_to_string(*uuid);
   }
   if (value.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> time = value.as_time();
@@ -8260,17 +8289,15 @@ public:
   void clear() { entries_.clear(); }
 
   iterator find(std::uint32_t key) {
-    return std::find_if(entries_.begin(), entries_.end(),
-                        [key](const Entry &entry) {
-                          return entry.first == key;
-                        });
+    return std::find_if(
+        entries_.begin(), entries_.end(),
+        [key](const Entry &entry) { return entry.first == key; });
   }
 
   const_iterator find(std::uint32_t key) const {
-    return std::find_if(entries_.begin(), entries_.end(),
-                        [key](const Entry &entry) {
-                          return entry.first == key;
-                        });
+    return std::find_if(
+        entries_.begin(), entries_.end(),
+        [key](const Entry &entry) { return entry.first == key; });
   }
 
   T &operator[](std::uint32_t key) {
@@ -8696,9 +8723,8 @@ constexpr const char *kRuntimeErrorNames[] = {
 #undef AMBER_RUNTIME_ERROR
 };
 
-constexpr std::uint16_t kRuntimeErrorCount =
-    static_cast<std::uint16_t>(sizeof(kRuntimeErrorNames) /
-                               sizeof(kRuntimeErrorNames[0]));
+constexpr std::uint16_t kRuntimeErrorCount = static_cast<std::uint16_t>(
+    sizeof(kRuntimeErrorNames) / sizeof(kRuntimeErrorNames[0]));
 
 } // namespace
 
@@ -8933,8 +8959,8 @@ std::vector<std::uint32_t> big_u32_from_value(const BigIntValue &value) {
   return out;
 }
 
-std::shared_ptr<BigIntValue> big_from_u32(bool negative,
-                                          const std::vector<std::uint32_t> &mag) {
+std::shared_ptr<BigIntValue>
+big_from_u32(bool negative, const std::vector<std::uint32_t> &mag) {
   auto out = std::make_shared<BigIntValue>();
   for (std::size_t i = 0; i < mag.size(); i += 2U) {
     std::uint64_t limb = mag[i];
@@ -8963,8 +8989,9 @@ int big_compare_mag_u32(const std::vector<std::uint32_t> &lhs,
   return 0;
 }
 
-std::vector<std::uint32_t> big_add_mag_u32(const std::vector<std::uint32_t> &lhs,
-                                           const std::vector<std::uint32_t> &rhs) {
+std::vector<std::uint32_t>
+big_add_mag_u32(const std::vector<std::uint32_t> &lhs,
+                const std::vector<std::uint32_t> &rhs) {
   std::vector<std::uint32_t> out;
   out.reserve(std::max(lhs.size(), rhs.size()) + 1U);
   std::uint64_t carry = 0;
@@ -8986,8 +9013,9 @@ std::vector<std::uint32_t> big_add_mag_u32(const std::vector<std::uint32_t> &lhs
 }
 
 // Requires lhs >= rhs.
-std::vector<std::uint32_t> big_sub_mag_u32(const std::vector<std::uint32_t> &lhs,
-                                           const std::vector<std::uint32_t> &rhs) {
+std::vector<std::uint32_t>
+big_sub_mag_u32(const std::vector<std::uint32_t> &lhs,
+                const std::vector<std::uint32_t> &rhs) {
   std::vector<std::uint32_t> out;
   out.reserve(lhs.size());
   std::int64_t borrow = 0;
@@ -9010,8 +9038,9 @@ std::vector<std::uint32_t> big_sub_mag_u32(const std::vector<std::uint32_t> &lhs
   return out;
 }
 
-std::vector<std::uint32_t> big_mul_mag_u32(const std::vector<std::uint32_t> &lhs,
-                                           const std::vector<std::uint32_t> &rhs) {
+std::vector<std::uint32_t>
+big_mul_mag_u32(const std::vector<std::uint32_t> &lhs,
+                const std::vector<std::uint32_t> &rhs) {
   if (lhs.empty() || rhs.empty()) {
     return {};
   }
@@ -9019,8 +9048,8 @@ std::vector<std::uint32_t> big_mul_mag_u32(const std::vector<std::uint32_t> &lhs
   for (std::size_t i = 0; i < lhs.size(); ++i) {
     std::uint64_t carry = 0;
     for (std::size_t j = 0; j < rhs.size(); ++j) {
-      std::uint64_t acc = static_cast<std::uint64_t>(lhs[i]) * rhs[j] +
-                          out[i + j] + carry;
+      std::uint64_t acc =
+          static_cast<std::uint64_t>(lhs[i]) * rhs[j] + out[i + j] + carry;
       out[i + j] = static_cast<std::uint32_t>(acc & 0xFFFFFFFFULL);
       carry = acc >> 32U;
     }
@@ -9116,9 +9145,9 @@ std::shared_ptr<BigIntValue> big_from_int64(std::int64_t value) {
   }
   out->negative = value < 0;
   // Negate via uint64 to keep INT64_MIN well-defined.
-  const std::uint64_t magnitude =
-      value < 0 ? ~static_cast<std::uint64_t>(value) + 1U
-                : static_cast<std::uint64_t>(value);
+  const std::uint64_t magnitude = value < 0
+                                      ? ~static_cast<std::uint64_t>(value) + 1U
+                                      : static_cast<std::uint64_t>(value);
   out->magnitude.push_back(magnitude);
   return out;
 }
@@ -9132,9 +9161,9 @@ std::optional<std::int64_t> big_to_int64(const BigIntValue &value) {
   }
   const std::uint64_t magnitude = value.magnitude[0];
   if (value.negative) {
-    if (magnitude > static_cast<std::uint64_t>(
-                        std::numeric_limits<std::int64_t>::max()) +
-                        1U) {
+    if (magnitude >
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) +
+            1U) {
       return std::nullopt;
     }
     return static_cast<std::int64_t>(~magnitude + 1U);
@@ -9150,8 +9179,8 @@ int big_compare_signed(const BigIntValue &lhs, const BigIntValue &rhs) {
   if (lhs.negative != rhs.negative) {
     return lhs.negative ? -1 : 1;
   }
-  const int mag_order = big_compare_mag_u32(big_u32_from_value(lhs),
-                                            big_u32_from_value(rhs));
+  const int mag_order =
+      big_compare_mag_u32(big_u32_from_value(lhs), big_u32_from_value(rhs));
   return lhs.negative ? -mag_order : mag_order;
 }
 
@@ -9180,9 +9209,9 @@ std::shared_ptr<BigIntValue> big_negate(const BigIntValue &value) {
 
 std::shared_ptr<BigIntValue> big_mul_signed(const BigIntValue &lhs,
                                             const BigIntValue &rhs) {
-  return big_from_u32(lhs.negative != rhs.negative,
-                      big_mul_mag_u32(big_u32_from_value(lhs),
-                                      big_u32_from_value(rhs)));
+  return big_from_u32(
+      lhs.negative != rhs.negative,
+      big_mul_mag_u32(big_u32_from_value(lhs), big_u32_from_value(rhs)));
 }
 
 // Truncated division: quotient rounds toward zero, remainder keeps the
@@ -9204,8 +9233,7 @@ std::shared_ptr<BigIntValue> big_floor_mod(const BigIntValue &lhs,
   std::shared_ptr<BigIntValue> quotient;
   std::shared_ptr<BigIntValue> remainder;
   big_divmod_trunc(lhs, rhs, &quotient, &remainder);
-  if (remainder->magnitude.empty() ||
-      remainder->negative == rhs.negative) {
+  if (remainder->magnitude.empty() || remainder->negative == rhs.negative) {
     return remainder;
   }
   return big_add_signed(*remainder, rhs);
@@ -9216,8 +9244,7 @@ std::shared_ptr<BigIntValue> big_floor_div(const BigIntValue &lhs,
   std::shared_ptr<BigIntValue> quotient;
   std::shared_ptr<BigIntValue> remainder;
   big_divmod_trunc(lhs, rhs, &quotient, &remainder);
-  if (remainder->magnitude.empty() ||
-      remainder->negative == rhs.negative) {
+  if (remainder->magnitude.empty() || remainder->negative == rhs.negative) {
     return quotient;
   }
   return big_add_signed(*quotient, BigIntValue{true, {1}});
@@ -9264,7 +9291,8 @@ std::optional<BigIntValue> big_from_decimal_text(const std::string &text) {
     // mag = mag * 10 + digit
     std::uint64_t carry = static_cast<std::uint64_t>(c - '0');
     for (std::size_t i = 0; i < mag.size(); ++i) {
-      const std::uint64_t acc = static_cast<std::uint64_t>(mag[i]) * 10U + carry;
+      const std::uint64_t acc =
+          static_cast<std::uint64_t>(mag[i]) * 10U + carry;
       mag[i] = static_cast<std::uint32_t>(acc & 0xFFFFFFFFULL);
       carry = acc >> 32U;
     }
@@ -9375,8 +9403,7 @@ bool value_equals(const Value &lhs, const Value &rhs) {
       return true;
     }
     return left != nullptr && right != nullptr &&
-           left->error_id == right->error_id &&
-           left->message == right->message;
+           left->error_id == right->error_id && left->message == right->message;
   }
   if (lhs.is_big_int()) {
     const std::shared_ptr<BigIntValue> left = lhs.as_big_int();
@@ -9387,6 +9414,14 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return left != nullptr && right != nullptr &&
            left->negative == right->negative &&
            left->magnitude == right->magnitude;
+  }
+  if (lhs.is_uuid()) {
+    const std::shared_ptr<RuntimeUuidValue> left = lhs.as_uuid();
+    const std::shared_ptr<RuntimeUuidValue> right = rhs.as_uuid();
+    if (left == right) {
+      return true;
+    }
+    return left != nullptr && right != nullptr && left->bytes == right->bytes;
   }
   if (lhs.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> left = lhs.as_time();
@@ -9414,8 +9449,7 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     if (left == right) {
       return true;
     }
-    return left != nullptr && right != nullptr &&
-           left->is_ok == right->is_ok &&
+    return left != nullptr && right != nullptr && left->is_ok == right->is_ok &&
            value_equals(left->payload, right->payload);
   }
   if (lhs.is_closure()) {
@@ -9679,7 +9713,8 @@ public:
                                              const Value &value) override {
     const Frame &active = *static_cast<const Frame *>(frame);
     if (!value.is_io_value()) {
-      set_fault(active, "TypeError", "expected Bytes, ByteSlice, or ByteBuffer");
+      set_fault(active, "TypeError",
+                "expected Bytes, ByteSlice, or ByteBuffer");
       return std::nullopt;
     }
     const std::shared_ptr<RuntimeIoValue> io_value = value.as_io_value();
@@ -10137,8 +10172,7 @@ private:
 
   void release_payload_for_dealloc(const Value &value) {
     if (value.is_instance_object()) {
-      const IntrusivePtr<InstanceValue> instance =
-          value.as_instance_object();
+      const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
       if (instance == nullptr) {
         return;
       }
@@ -10280,8 +10314,7 @@ private:
     return state_->heap.make_closure_value();
   }
 
-  IntrusivePtr<InstanceValue>
-  make_instance_value(std::uint32_t class_index) {
+  IntrusivePtr<InstanceValue> make_instance_value(std::uint32_t class_index) {
     return state_->heap.make_instance_value(class_index);
   }
 
@@ -10350,8 +10383,8 @@ private:
       return FastCallStatus::NotHandled;
     }
 
-    auto selector_for_send = [&](const Instruction &insn)
-        -> std::optional<std::string> {
+    auto selector_for_send =
+        [&](const Instruction &insn) -> std::optional<std::string> {
       std::uint32_t selector_id = 0;
       if (!quick_operand_u32(insn, 2, &selector_id) ||
           selector_id >= module_.symbols.size()) {
@@ -10378,9 +10411,8 @@ private:
       }
       case Opcode::Send: {
         const std::optional<std::string> selector = selector_for_send(insn);
-        if (!selector.has_value() ||
-            (*selector != "[]" && *selector != "+" && *selector != "-" &&
-             *selector != "*")) {
+        if (!selector.has_value() || (*selector != "[]" && *selector != "+" &&
+                                      *selector != "-" && *selector != "*")) {
           return FastCallStatus::NotHandled;
         }
         std::uint32_t pos_count = 0;
@@ -10443,8 +10475,7 @@ private:
         set_fault(caller, "VMError", "register out of range");
         return false;
       }
-      if (reg >= locals.initialized.size() ||
-          locals.initialized[reg] == 0U) {
+      if (reg >= locals.initialized.size() || locals.initialized[reg] == 0U) {
         set_fault(caller, "NameError",
                   "read of uninitialized local/module cell");
         return false;
@@ -10459,8 +10490,7 @@ private:
         set_fault(caller, "VMError", "register out of range");
         return false;
       }
-      if (reg >= locals.initialized.size() ||
-          locals.initialized[reg] == 0U) {
+      if (reg >= locals.initialized.size() || locals.initialized[reg] == 0U) {
         set_fault(caller, "NameError",
                   "read of uninitialized local/module cell");
         return false;
@@ -10478,8 +10508,7 @@ private:
       return true;
     };
 
-    auto lookup_map_symbol = [&](const Value &receiver,
-                                 std::uint32_t symbol_id,
+    auto lookup_map_symbol = [&](const Value &receiver, std::uint32_t symbol_id,
                                  Value *out) -> FastCallStatus {
       if (!receiver.is_map()) {
         return FastCallStatus::NotHandled;
@@ -10525,8 +10554,8 @@ private:
           set_fault(caller, "VMError", "capture slot out of range");
           return FastCallStatus::Faulted;
         }
-        if (!write_value(dst, unwrap_watch_value_for_read(
-                                  closure.captures[slot]))) {
+        if (!write_value(dst,
+                         unwrap_watch_value_for_read(closure.captures[slot]))) {
           return FastCallStatus::Faulted;
         }
         break;
@@ -10621,20 +10650,17 @@ private:
         std::int64_t computed = 0;
         if (*selector == "+") {
           if (!numeric_add_int64(lhs, rhs, numeric_policy_, &computed)) {
-            raise_runtime_error(caller, "OverflowError",
-                                "Int overflow in `+`");
+            raise_runtime_error(caller, "OverflowError", "Int overflow in `+`");
             return FastCallStatus::Faulted;
           }
         } else if (*selector == "-") {
           if (!numeric_sub_int64(lhs, rhs, numeric_policy_, &computed)) {
-            raise_runtime_error(caller, "OverflowError",
-                                "Int overflow in `-`");
+            raise_runtime_error(caller, "OverflowError", "Int overflow in `-`");
             return FastCallStatus::Faulted;
           }
         } else if (*selector == "*") {
           if (!numeric_mul_int64(lhs, rhs, numeric_policy_, &computed)) {
-            raise_runtime_error(caller, "OverflowError",
-                                "Int overflow in `*`");
+            raise_runtime_error(caller, "OverflowError", "Int overflow in `*`");
             return FastCallStatus::Faulted;
           }
         } else {
@@ -10691,7 +10717,8 @@ private:
   }
 
   Value json_stop_tag_value() {
-    return Value::symbol(intern_runtime_symbol("\x1f" "amber.Json.stop"));
+    return Value::symbol(intern_runtime_symbol("\x1f"
+                                               "amber.Json.stop"));
   }
 
   StdlibBlockResult call_stream_block_to_result(const Frame &frame,
@@ -10720,9 +10747,8 @@ private:
       return result;
     }
 
-    const FastCallStatus fast_status =
-        try_evaluate_simple_stream_block(frame, *closure, *code, value,
-                                         &result);
+    const FastCallStatus fast_status = try_evaluate_simple_stream_block(
+        frame, *closure, *code, value, &result);
     if (fast_status == FastCallStatus::Matched ||
         fast_status == FastCallStatus::Faulted) {
       return result;
@@ -12418,8 +12444,7 @@ private:
       const BcCode *mix_code = nullptr;
       const Value mix_capture = unwrap_watch_value_for_read(captures[0]);
       if (mix_capture.is_closure()) {
-        const IntrusivePtr<ClosureValue> mix_closure =
-            mix_capture.as_closure();
+        const IntrusivePtr<ClosureValue> mix_closure = mix_capture.as_closure();
         if (mix_closure != nullptr) {
           mix_code = find_code(module_, mix_closure->code_id);
         }
@@ -13212,8 +13237,7 @@ private:
         if (opcode == Opcode::IShl || opcode == Opcode::IShlK) {
           if (!numeric_shl_int64(fast_lhs, fast_rhs, numeric_policy_,
                                  &int_result)) {
-            raise_runtime_error(frame, "OverflowError",
-                                "Int overflow in `<<`");
+            raise_runtime_error(frame, "OverflowError", "Int overflow in `<<`");
             return false;
           }
         } else {
@@ -14015,9 +14039,8 @@ private:
     return instance->watch_state;
   }
 
-  Value
-  instance_ivar_value_or_null(const IntrusivePtr<InstanceValue> &instance,
-                              const std::string &name) const {
+  Value instance_ivar_value_or_null(const IntrusivePtr<InstanceValue> &instance,
+                                    const std::string &name) const {
     if (instance == nullptr) {
       return Value::null();
     }
@@ -14332,8 +14355,7 @@ private:
       // User objects participate in keyword spread only through a readable
       // `kwargs` property: protocol positions are capability declarations,
       // never implicit nullary method sends.
-      const IntrusivePtr<InstanceValue> instance =
-          value.as_instance_object();
+      const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance value is null");
         return false;
@@ -15091,13 +15113,13 @@ private:
     for (std::size_t i = 1; i < order.size(); ++i) {
       std::size_t j = i;
       while (j > 0) {
-        const std::optional<int> cmp = compare_values_for_sort(
-            frame, keys[order[j]], keys[order[j - 1U]]);
+        const std::optional<int> cmp =
+            compare_values_for_sort(frame, keys[order[j]], keys[order[j - 1U]]);
         if (!cmp.has_value()) {
           return std::nullopt;
         }
         if (*cmp >= 0) {
-          break;  // stable: equal keys preserve input order
+          break; // stable: equal keys preserve input order
         }
         std::swap(order[j], order[j - 1U]);
         --j;
@@ -15163,10 +15185,10 @@ private:
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
     const bool block_allowed =
         selector == "take_while" || selector == "drop_while" ||
-        selector == "find_index" || selector == "sorted" ||
-        selector == "min" || selector == "max" || selector == "minmax" ||
-        selector == "uniq" || selector == "each_pair" ||
-        selector == "each_cons" || selector == "each";
+        selector == "find_index" || selector == "sorted" || selector == "min" ||
+        selector == "max" || selector == "minmax" || selector == "uniq" ||
+        selector == "each_pair" || selector == "each_cons" ||
+        selector == "each";
     if (!block.is_null() && !block_allowed) {
       set_fault(frame, "TypeError",
                 "collection operation does not accept block arguments");
@@ -15292,7 +15314,8 @@ private:
       if (items.empty()) {
         return make_list_value(std::vector<Value>{});
       }
-      return make_list_value(std::vector<Value>(items.begin(), items.end() - 1));
+      return make_list_value(
+          std::vector<Value>(items.begin(), items.end() - 1));
     }
 
     if (selector == "tail") {
@@ -15303,7 +15326,8 @@ private:
       if (items.empty()) {
         return make_list_value(std::vector<Value>{});
       }
-      return make_list_value(std::vector<Value>(items.begin() + 1, items.end()));
+      return make_list_value(
+          std::vector<Value>(items.begin() + 1, items.end()));
     }
 
     if (selector == "take_while") {
@@ -15341,8 +15365,7 @@ private:
         set_fault(frame, "ArgumentError", "take count must be non-negative");
         return std::nullopt;
       }
-      const std::size_t k =
-          std::min(static_cast<std::size_t>(n), items.size());
+      const std::size_t k = std::min(static_cast<std::size_t>(n), items.size());
       return make_list_value(
           std::vector<Value>(items.begin(), items.begin() + k));
     }
@@ -15357,8 +15380,7 @@ private:
         set_fault(frame, "ArgumentError", "drop count must be non-negative");
         return std::nullopt;
       }
-      const std::size_t k =
-          std::min(static_cast<std::size_t>(n), items.size());
+      const std::size_t k = std::min(static_cast<std::size_t>(n), items.size());
       return make_list_value(
           std::vector<Value>(items.begin() + k, items.end()));
     }
@@ -15410,8 +15432,9 @@ private:
     if (selector == "min" || selector == "max" || selector == "minmax") {
       // One-pass extremum finder. An optional arity-1 key block selects the
       // comparison key per element (RFC §7.2 sort-key convention); the element
-      // itself is returned. Ordering matches `sorted` (compare_values_for_sort).
-      // Empty collection yields null. `minmax` returns [min, max] in one pass.
+      // itself is returned. Ordering matches `sorted`
+      // (compare_values_for_sort). Empty collection yields null. `minmax`
+      // returns [min, max] in one pass.
       if (items.empty()) {
         return Value::null();
       }
@@ -15747,6 +15770,8 @@ private:
       return true;
     case RuntimeNativeTypeKind::Range:
       return value_is_range_instance(value);
+    case RuntimeNativeTypeKind::Uuid:
+      return value.is_uuid();
     case RuntimeNativeTypeKind::Time:
       return value.is_time();
     case RuntimeNativeTypeKind::TimePeriod:
@@ -16221,11 +16246,9 @@ private:
       }
       count = ((start - last) / (-step)) + 1;
     }
-    if (count <= 0 ||
-        count > static_cast<__int128>(
-                    std::numeric_limits<std::uint64_t>::max())) {
-      set_fault(frame, "ArgumentError",
-                "SecureRandom.int range is too large");
+    if (count <= 0 || count > static_cast<__int128>(
+                                  std::numeric_limits<std::uint64_t>::max())) {
+      set_fault(frame, "ArgumentError", "SecureRandom.int range is too large");
       return false;
     }
     out->start = *bounds->start;
@@ -16674,8 +16697,8 @@ private:
     return id;
   }
 
-  // Canonical key identity for ordinary (name-indifferent) map storage. A Symbol
-  // key keeps its id; a Str key's text is interned to a Symbol so that
+  // Canonical key identity for ordinary (name-indifferent) map storage. A
+  // Symbol key keeps its id; a Str key's text is interned to a Symbol so that
   // `{user_id: 1}` and `{"user_id": 1}` share a canonical identity. Returns 0
   // for non-nameable keys (Int, composite, ...), which then compare by value.
   std::uint32_t canonical_map_key_id(const Value &key) {
@@ -16691,10 +16714,11 @@ private:
     return 0;
   }
 
-  // Canonical id of a *lookup* key, resolved WITHOUT interning: a Str whose text
-  // was never interned cannot match any stored canonical id, so probing returns
-  // nullopt (falls back to exact comparison) rather than polluting the symbol
-  // table on every miss. nullopt vs id 0 must stay distinct: 0 is a valid id.
+  // Canonical id of a *lookup* key, resolved WITHOUT interning: a Str whose
+  // text was never interned cannot match any stored canonical id, so probing
+  // returns nullopt (falls back to exact comparison) rather than polluting the
+  // symbol table on every miss. nullopt vs id 0 must stay distinct: 0 is a
+  // valid id.
   std::optional<std::uint32_t> map_lookup_key_id(const Value &key) {
     if (key.is_symbol()) {
       return key.as_symbol().symbol_id;
@@ -16708,10 +16732,11 @@ private:
     return std::nullopt;
   }
 
-  // Build a map entry whose `key` Value is preserved as-written while `symbol_id`
-  // carries the canonical identity used by ordinary maps. Strict maps skip
-  // canonicalization so Symbol and Str keys stay distinct.
-  MapEntry make_canonical_map_entry(const Value &key, Value value, bool strict) {
+  // Build a map entry whose `key` Value is preserved as-written while
+  // `symbol_id` carries the canonical identity used by ordinary maps. Strict
+  // maps skip canonicalization so Symbol and Str keys stay distinct.
+  MapEntry make_canonical_map_entry(const Value &key, Value value,
+                                    bool strict) {
     MapEntry entry{key, std::move(value)};
     if (!strict && entry.symbol_id == 0) {
       entry.symbol_id = canonical_map_key_id(key);
@@ -16945,7 +16970,8 @@ private:
         return conversion_ok(value);
       }
       if (value.is_integer()) {
-        return conversion_ok(Value::big_int(big_from_int64(value.as_integer())));
+        return conversion_ok(
+            Value::big_int(big_from_int64(value.as_integer())));
       }
       if (value.is_string()) {
         const std::optional<std::string> text =
@@ -17559,8 +17585,7 @@ private:
       return true;
     }
     if (owner.is_instance_object()) {
-      const IntrusivePtr<InstanceValue> instance =
-          owner.as_instance_object();
+      const IntrusivePtr<InstanceValue> instance = owner.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance owner is null");
         return false;
@@ -17622,8 +17647,7 @@ private:
         if (!ensure_lifecycle_access(frame, value)) {
           return false;
         }
-        const IntrusivePtr<InstanceValue> instance =
-            value.as_instance_object();
+        const IntrusivePtr<InstanceValue> instance = value.as_instance_object();
         if (instance == nullptr) {
           set_fault(frame, "TypeError", "instance matcher value is null");
           return false;
@@ -17869,8 +17893,8 @@ private:
     // frame's block channel here too (not only via the prologue's LoadBlock),
     // so it is in place before auto-assign capture (`&@field`) and for the
     // clause-dispatch path that snapshots the base registers.
-    for (std::size_t slot = 0;
-         slot < params.size() && slot < frame.regs.size(); ++slot) {
+    for (std::size_t slot = 0; slot < params.size() && slot < frame.regs.size();
+         ++slot) {
       if ((params[slot].flags & bytecode::kMethodParamFlagBlock) == 0U) {
         continue;
       }
@@ -18270,8 +18294,7 @@ private:
     if (!pos_args.empty()) {
       if (pos_args[0].is_string()) {
         instance->message =
-            string_text_from_id(pos_args[0].as_string().string_id)
-                .value_or("");
+            string_text_from_id(pos_args[0].as_string().string_id).value_or("");
       } else {
         instance->message = value_to_debug_string(pos_args[0], &module_);
       }
@@ -18370,8 +18393,7 @@ private:
     }
 
     if (callee.is_instance_object()) {
-      const IntrusivePtr<InstanceValue> instance =
-          callee.as_instance_object();
+      const IntrusivePtr<InstanceValue> instance = callee.as_instance_object();
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance callee is null");
         return false;
@@ -18857,8 +18879,7 @@ private:
     if (!exception.is_instance_object()) {
       return;
     }
-    const IntrusivePtr<InstanceValue> instance =
-        exception.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = exception.as_instance_object();
     if (instance == nullptr) {
       return;
     }
@@ -19058,14 +19079,13 @@ private:
       if (pending_exception.has_value()) {
         escaped_exception_ = *pending_exception;
         const std::string error_name = exception_error_name(*pending_exception);
-        fault_ =
-            make_fault(completed_frame, error_name,
-                       pending_exception->is_error_instance() &&
-                               pending_exception->as_error_instance() != nullptr
-                           ? pending_exception->as_error_instance()->message
-                           : "unhandled exception " +
-                                 value_to_debug_string(*pending_exception,
-                                                       &module_));
+        fault_ = make_fault(
+            completed_frame, error_name,
+            pending_exception->is_error_instance() &&
+                    pending_exception->as_error_instance() != nullptr
+                ? pending_exception->as_error_instance()->message
+                : "unhandled exception " +
+                      value_to_debug_string(*pending_exception, &module_));
       } else if (pending_throw.has_value()) {
         escaped_throw_ = *pending_throw;
         fault_ =
@@ -19971,8 +19991,7 @@ private:
       return false;
     }
     const bool provider_active = replay_io_provider_active();
-    if (!check_io_policy(frame, "fs_read", "fs.read", path,
-                         !provider_active)) {
+    if (!check_io_policy(frame, "fs_read", "fs.read", path, !provider_active)) {
       return false;
     }
     record_io_wait("fs.read", path);
@@ -20008,8 +20027,7 @@ private:
       RuntimeIoProviderStatus status =
           world_options_->io_provider->fs_write_bytes(
               path, text, /*create=*/true, /*truncate=*/true);
-      return set_fault_from_provider_status(frame, status,
-                                            "Json.save_to_file");
+      return set_fault_from_provider_status(frame, status, "Json.save_to_file");
     }
     RuntimeIoStatus status =
         runtime_fs_write_bytes(RuntimePath(path), text, /*create=*/true,
@@ -20040,8 +20058,7 @@ private:
         return false;
       }
       if (world_options_->enforce_replay) {
-        record_io_event("random.secure",
-                        {{"bytes", std::to_string(count)}});
+        record_io_event("random.secure", {{"bytes", std::to_string(count)}});
         set_fault(frame, "DeterminismError",
                   "secure random requires a recorded random provider in replay "
                   "mode");
@@ -20088,7 +20105,8 @@ private:
     }
     record_io_event("time.monotonic", {});
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
-    const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(now);
+    const auto nanos =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now);
     RuntimeTimePeriodValue out;
     out.nanoseconds = nanos.count();
     return out;
@@ -20266,14 +20284,16 @@ private:
       return true;
     };
 
-    if (receiver.is_time() || receiver.is_time_period()) {
+    if (receiver.is_uuid() || receiver.is_time() || receiver.is_time_period()) {
       const RuntimeNativeTypeKind kind =
-          receiver.is_time() ? RuntimeNativeTypeKind::Time
-                             : RuntimeNativeTypeKind::TimePeriod;
+          receiver.is_uuid()
+              ? RuntimeNativeTypeKind::Uuid
+              : (receiver.is_time() ? RuntimeNativeTypeKind::Time
+                                    : RuntimeNativeTypeKind::TimePeriod);
       if (const NativeStdlibHandler handler =
               native_registry_.handler_for(kind)) {
-        NativeStdlibCall call{*this,    &frame, receiver, kind,    selector,
-                              args,     block,  kw_args,  out};
+        NativeStdlibCall call{*this, &frame, receiver, kind, selector,
+                              args,  block,  kw_args,  out};
         const SendStatus status = handler(call);
         if (status != SendStatus::NotHandled) {
           return status;
@@ -20304,8 +20324,8 @@ private:
       // path, so any kind not yet on the registry behaves exactly as before.
       if (const NativeStdlibHandler handler =
               native_registry_.handler_for(kind)) {
-        NativeStdlibCall call{*this,    &frame, receiver, kind,    selector,
-                              args,     block,  kw_args,  out};
+        NativeStdlibCall call{*this, &frame, receiver, kind, selector,
+                              args,  block,  kw_args,  out};
         const SendStatus status = handler(call);
         if (status != SendStatus::NotHandled) {
           return status;
@@ -24484,8 +24504,8 @@ private:
         return SendStatus::Faulted;
       }
       upsert_normalized_map_entry(
-          &map->entries,
-          make_canonical_map_entry(*key, args[1], map->strict), map->strict);
+          &map->entries, make_canonical_map_entry(*key, args[1], map->strict),
+          map->strict);
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -24643,8 +24663,8 @@ private:
       const Value rebuilt =
           make_symbol_map_value(std::move(result), false, map->strict);
       const IntrusivePtr<MapValue> rebuilt_map = rebuilt.as_map();
-      map->entries =
-          rebuilt_map != nullptr ? rebuilt_map->entries : std::vector<MapEntry>{};
+      map->entries = rebuilt_map != nullptr ? rebuilt_map->entries
+                                            : std::vector<MapEntry>{};
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -25030,8 +25050,10 @@ private:
     };
     auto int64_from_i128 = [&](const __int128 value, std::int64_t *out_value,
                                const std::string &context) -> bool {
-      if (value < static_cast<__int128>(std::numeric_limits<std::int64_t>::min()) ||
-          value > static_cast<__int128>(std::numeric_limits<std::int64_t>::max())) {
+      if (value <
+              static_cast<__int128>(std::numeric_limits<std::int64_t>::min()) ||
+          value >
+              static_cast<__int128>(std::numeric_limits<std::int64_t>::max())) {
         raise_runtime_error(frame, "OverflowError", context + " overflow");
         return false;
       }
@@ -25047,8 +25069,7 @@ private:
                            &months, "TimePeriod") ||
           !int64_from_i128(static_cast<__int128>(scalar) * unit.days_per, &days,
                            "TimePeriod") ||
-          !int64_from_i128(static_cast<__int128>(scalar) *
-                               unit.nanoseconds_per,
+          !int64_from_i128(static_cast<__int128>(scalar) * unit.nanoseconds_per,
                            &nanos, "TimePeriod")) {
         return SendStatus::Faulted;
       }
@@ -25067,18 +25088,18 @@ private:
         return SendStatus::Faulted;
       }
       if (!std::isfinite(scalar)) {
-        set_fault(frame, "ArgumentError", "TimePeriod unit value must be finite");
+        set_fault(frame, "ArgumentError",
+                  "TimePeriod unit value must be finite");
         return SendStatus::Faulted;
       }
-      const long double total =
-          static_cast<long double>(scalar) *
-          static_cast<long double>(unit.nanoseconds_per);
+      const long double total = static_cast<long double>(scalar) *
+                                static_cast<long double>(unit.nanoseconds_per);
       const long double rounded = std::round(total);
       if (std::abs(total - rounded) > 0.001L ||
-          rounded <
-              static_cast<long double>(std::numeric_limits<std::int64_t>::min()) ||
-          rounded >
-              static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
+          rounded < static_cast<long double>(
+                        std::numeric_limits<std::int64_t>::min()) ||
+          rounded > static_cast<long double>(
+                        std::numeric_limits<std::int64_t>::max())) {
         raise_runtime_error(frame, "OverflowError", "TimePeriod overflow");
         return SendStatus::Faulted;
       }
@@ -25245,8 +25266,7 @@ private:
         if (!args.empty()) {
           if (args[0].is_string()) {
             instance->message =
-                string_text_from_id(args[0].as_string().string_id)
-                    .value_or("");
+                string_text_from_id(args[0].as_string().string_id).value_or("");
           } else {
             instance->message = value_to_debug_string(args[0], &module_);
           }
@@ -25254,8 +25274,7 @@ private:
         *out = Value::error_instance(std::move(instance));
         return SendStatus::Matched;
       }
-      if (selector == "name" || selector == "to_str" ||
-          selector == "inspect") {
+      if (selector == "name" || selector == "to_str" || selector == "inspect") {
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -25267,10 +25286,10 @@ private:
         if (!require_arity(1) || !require_no_block()) {
           return SendStatus::Faulted;
         }
-        *out = Value::boolean(args[0].is_error_instance() &&
-                              args[0].as_error_instance() != nullptr &&
-                              args[0].as_error_instance()->error_id ==
-                                  error_id);
+        *out =
+            Value::boolean(args[0].is_error_instance() &&
+                           args[0].as_error_instance() != nullptr &&
+                           args[0].as_error_instance()->error_id == error_id);
         return SendStatus::Matched;
       }
     }
@@ -25392,8 +25411,8 @@ private:
           return SendStatus::Matched;
         }
         if (selector == "-") {
-          *out = Value::big_int(
-              big_add_signed(*lhs_big, *big_negate(*rhs_big)));
+          *out =
+              Value::big_int(big_add_signed(*lhs_big, *big_negate(*rhs_big)));
           return SendStatus::Matched;
         }
         if (selector == "*") {
@@ -25645,10 +25664,9 @@ private:
           if (!arg_str(0, &suffix)) {
             return SendStatus::Faulted;
           }
-          *out = Value::boolean(
-              self.size() >= suffix.size() &&
-              self.compare(self.size() - suffix.size(), suffix.size(),
-                           suffix) == 0);
+          *out = Value::boolean(self.size() >= suffix.size() &&
+                                self.compare(self.size() - suffix.size(),
+                                             suffix.size(), suffix) == 0);
           return SendStatus::Matched;
         }
         if (selector == "split") {
@@ -25752,18 +25770,19 @@ private:
                                 ">"});
     const bool sequence_extra_operation_selector =
         receiver_is_sequence_like &&
-        collection_selector_in({"+", "*", "concat", "take_while", "reversed",
-                                "sorted", "uniq", "each_pair", "each_cons",
-                                "appended", "inserted", "deleted", "added",
-                                "init", "tail", "take", "drop", "find_index",
-                                "drop_while", "min", "max", "minmax"});
+        collection_selector_in(
+            {"+",        "*",       "concat",     "take_while", "reversed",
+             "sorted",   "uniq",    "each_pair",  "each_cons",  "appended",
+             "inserted", "deleted", "added",      "init",       "tail",
+             "take",     "drop",    "find_index", "drop_while", "min",
+             "max",      "minmax"});
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
-         collection_selector_in({"empty?",      "[]",     "[]?",   "has_index?",
-                                 "deconstruct", "first",  "count", "to_a",
-                                 "lazy",        "each",   "map",   "flat_map",
-                                 "select",      "reject", "find",  "group",
-                                 "any?",        "all?",   "none?", "reduce"})) ||
+         collection_selector_in(
+             {"empty?", "[]",       "[]?",    "has_index?", "deconstruct",
+              "first",  "count",    "to_a",   "lazy",       "each",
+              "map",    "flat_map", "select", "reject",     "find",
+              "group",  "any?",     "all?",   "none?",      "reduce"})) ||
         sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
         sequence_collection_selector || selector == "===";
@@ -25919,8 +25938,8 @@ private:
         return SendStatus::Faulted;
       }
       upsert_normalized_map_entry(
-          &map->entries,
-          make_canonical_map_entry(*key, args[1], map->strict), map->strict);
+          &map->entries, make_canonical_map_entry(*key, args[1], map->strict),
+          map->strict);
       *out = args[1];
       return SendStatus::Matched;
     }
@@ -26062,7 +26081,8 @@ private:
       // Lazy short-circuit forms: `take(n)` pulls only n elements (so it bounds
       // an infinite source), `find_index` stops at the first match. drop/
       // drop_while are inherently unbounded on an infinite source and fall
-      // through to the materialize path (raising InfiniteCollectionError there).
+      // through to the materialize path (raising InfiniteCollectionError
+      // there).
       if (collection_selector == "take") {
         std::int64_t count = 0;
         if (!require_arity(1) || !require_no_block() ||
@@ -26811,8 +26831,7 @@ private:
         if (collection_selector == "map" || collection_selector == "select" ||
             collection_selector == "reject" ||
             collection_selector == "flat_map" ||
-            collection_selector == "find" ||
-            collection_selector == "group") {
+            collection_selector == "find" || collection_selector == "group") {
           if (!require_arity(0)) {
             return SendStatus::Faulted;
           }
@@ -27067,7 +27086,8 @@ private:
             set_fault(frame, error.error_name, error.message);
             return SendStatus::Faulted;
           }
-          const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(*key);
+          const std::optional<std::uint32_t> lookup_id =
+              map_lookup_key_id(*key);
           const bool found =
               std::find_if(extracted->begin(), extracted->end(),
                            [&](const MapEntry &entry) {
@@ -27100,7 +27120,8 @@ private:
             set_fault(frame, error.error_name, error.message);
             return SendStatus::Faulted;
           }
-          const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(*key);
+          const std::optional<std::uint32_t> lookup_id =
+              map_lookup_key_id(*key);
           Value found = Value::null();
           bool found_key = false;
           for (const MapEntry &entry : *extracted) {
@@ -27563,8 +27584,7 @@ private:
         if (args[0].is_float()) {
           const double float_rhs = args[0].as_float();
           if (float_rhs == 0.0) {
-            raise_runtime_error(frame, "ZeroDivisionError",
-                                "division by zero");
+            raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
             return SendStatus::Faulted;
           }
           *out = Value::floating(static_cast<double>(lhs) / float_rhs);
@@ -27616,8 +27636,7 @@ private:
         if (args[0].is_float()) {
           const double float_rhs = args[0].as_float();
           if (float_rhs == 0.0) {
-            raise_runtime_error(frame, "ZeroDivisionError",
-                                "division by zero");
+            raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
             return SendStatus::Faulted;
           }
           *out =
@@ -27684,8 +27703,7 @@ private:
         } else if (selector == "<<") {
           std::int64_t shifted = 0;
           if (!numeric_shl_int64(lhs, rhs, numeric_policy_, &shifted)) {
-            raise_runtime_error(frame, "OverflowError",
-                                "Int overflow in `<<`");
+            raise_runtime_error(frame, "OverflowError", "Int overflow in `<<`");
             return SendStatus::Faulted;
           }
           *out = Value::integer(shifted);
@@ -28048,8 +28066,7 @@ private:
         }
         if (selector == "<<") {
           if (!numeric_shl_int64(lhs, rhs, numeric_policy_, &fast_result)) {
-            raise_runtime_error(frame, "OverflowError",
-                                "Int overflow in `<<`");
+            raise_runtime_error(frame, "OverflowError", "Int overflow in `<<`");
             return FastSendStatus::Faulted;
           }
         } else {
@@ -28485,8 +28502,7 @@ private:
     if (!receiver.is_instance_object()) {
       return FastSendStatus::NotHandled;
     }
-    const IntrusivePtr<InstanceValue> instance =
-        receiver.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = receiver.as_instance_object();
     if (instance == nullptr || instance->watch_state != nullptr ||
         lifecycle_access_error_name(instance->header).has_value()) {
       return FastSendStatus::NotHandled;
@@ -28509,8 +28525,7 @@ private:
     if (!receiver.is_instance_object()) {
       return FastSendStatus::NotHandled;
     }
-    const IntrusivePtr<InstanceValue> instance =
-        receiver.as_instance_object();
+    const IntrusivePtr<InstanceValue> instance = receiver.as_instance_object();
     if (instance == nullptr || instance->watch_state != nullptr ||
         lifecycle_access_error_name(instance->header).has_value()) {
       return FastSendStatus::NotHandled;
@@ -28752,7 +28767,8 @@ private:
           return true;
         }
       }
-      if (receiver.is_time() || receiver.is_time_period() ||
+      if (receiver.is_uuid() || receiver.is_time() ||
+          receiver.is_time_period() ||
           ((receiver.is_integer() || receiver.is_float()) &&
            period_unit_selector(*selector))) {
         Value result = Value::null();
@@ -28970,9 +28986,8 @@ private:
         };
         const auto hint = kHints.find(*selector);
         if (hint != kHints.end()) {
-          message = "`" + *selector +
-                    "` is not a collection method; use " + hint->second +
-                    ". Amber marks receiver mutation with `!`";
+          message = "`" + *selector + "` is not a collection method; use " +
+                    hint->second + ". Amber marks receiver mutation with `!`";
         }
       }
       set_fault(frame, "NoMethodError", message);
@@ -29596,8 +29611,9 @@ private:
           existing->value = std::move(value);
         }
       }
-      if (!write_reg(frame, dst,
-                     make_symbol_map_value(std::move(entries), false, strict))) {
+      if (!write_reg(
+              frame, dst,
+              make_symbol_map_value(std::move(entries), false, strict))) {
         return;
       }
       ++frame.pc;
@@ -29638,8 +29654,9 @@ private:
             make_canonical_map_entry(*normalized_key, std::move(value), strict),
             strict);
       }
-      if (!write_reg(frame, dst,
-                     make_symbol_map_value(std::move(entries), false, strict))) {
+      if (!write_reg(
+              frame, dst,
+              make_symbol_map_value(std::move(entries), false, strict))) {
         return;
       }
       ++frame.pc;
@@ -29692,11 +29709,11 @@ private:
             set_fault(frame, error.error_name, error.message);
             return;
           }
-          upsert_normalized_map_entry(
-              &entries,
-              make_canonical_map_entry(*normalized_key, std::move(value),
-                                       strict),
-              strict);
+          upsert_normalized_map_entry(&entries,
+                                      make_canonical_map_entry(*normalized_key,
+                                                               std::move(value),
+                                                               strict),
+                                      strict);
         } else if (kind == bytecode::kMapSpreadEntrySpread) {
           Value value = read_reg(frame, value_reg);
           if (fault_.has_value()) {
@@ -29710,8 +29727,9 @@ private:
           return;
         }
       }
-      if (!write_reg(frame, dst,
-                     make_symbol_map_value(std::move(entries), false, strict))) {
+      if (!write_reg(
+              frame, dst,
+              make_symbol_map_value(std::move(entries), false, strict))) {
         return;
       }
       ++frame.pc;
@@ -30222,8 +30240,7 @@ private:
         if (!ensure_lifecycle_access(frame, packet.callee)) {
           return;
         }
-        const IntrusivePtr<ClosureValue> closure =
-            packet.callee.as_closure();
+        const IntrusivePtr<ClosureValue> closure = packet.callee.as_closure();
         if (closure == nullptr) {
           set_fault(frame, "TypeError", "closure value is null");
           return;
@@ -30402,9 +30419,9 @@ private:
       }
 
       {
-        const SendStatus status = call_native_error_class(
-            frame, packet.callee, packet.pos_args, packet.kw_args, packet.block,
-            packet.dst);
+        const SendStatus status =
+            call_native_error_class(frame, packet.callee, packet.pos_args,
+                                    packet.kw_args, packet.block, packet.dst);
         if (status == SendStatus::Faulted || status == SendStatus::Matched) {
           return;
         }
@@ -32466,8 +32483,8 @@ RuntimeWorld::commit_transaction(const RuntimeWorldTransaction &tx) {
   bool changed = false;
   for (bytecode::BcMethod method : tx.instance_methods) {
     method.owner_dispatch_ref = tx.target_index;
-    method.flags = kMethodFlagInstance |
-                   (method.flags & kMethodFlagRuntimePreservedMask);
+    method.flags =
+        kMethodFlagInstance | (method.flags & kMethodFlagRuntimePreservedMask);
     runtime_owner.instance_method_table.entries[method.selector_sym_id] =
         std::move(method);
     changed = true;
@@ -33209,6 +33226,10 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_big_int()) {
     const std::shared_ptr<BigIntValue> big = value.as_big_int();
     return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
+  }
+  if (value.is_uuid()) {
+    const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
+    return uuid == nullptr ? "<uuid null>" : runtime_uuid_to_string(*uuid);
   }
   if (value.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> time = value.as_time();

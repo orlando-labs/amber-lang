@@ -166,6 +166,29 @@ void test_effect_rows_and_call_validation() {
                         "  SecureRandom.bytes(1).count()\n");
   expect(!result.ok(), "pure effect row should reject SecureRandom access");
   expect(has_diagnostic(result, "FX0003"), "SecureRandom effect diagnostic");
+
+  result = check_source("def id() -> UUID !{random}:\n"
+                        "  Uuid.v4()\n");
+  expect(result.ok(), "Uuid.v4 should require the random effect");
+
+  result = check_source("def id() -> UUID !{}:\n"
+                        "  Uuid.v4()\n");
+  expect(!result.ok(), "pure effect row should reject Uuid.v4");
+  expect(has_diagnostic(result, "FX0003"), "Uuid.v4 effect diagnostic");
+
+  result = check_source("def ordered_id() -> UUID !{random, time}:\n"
+                        "  UUID.v7()\n");
+  expect(result.ok(), "Uuid.v7 should require random and time effects");
+
+  result = check_source("def ordered_id() -> UUID !{random}:\n"
+                        "  UUID.v7()\n");
+  expect(!result.ok(), "Uuid.v7 should require the time effect too");
+  expect(has_diagnostic(result, "FX0003"), "Uuid.v7 effect diagnostic");
+
+  result =
+      check_source("def parsed() -> UUID !{}:\n"
+                   "  Uuid.parse(\"550e8400-e29b-41d4-a716-446655440000\")\n");
+  expect(result.ok(), "Uuid.parse should remain pure");
 }
 
 } // namespace

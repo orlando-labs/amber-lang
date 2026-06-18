@@ -57,12 +57,11 @@ struct MockHost : StdlibHost {
   Value stdlib_string_value_from_text(std::string /*text*/) override {
     return Value::null();
   }
-  std::optional<std::string>
-  stdlib_text_of(const Value & /*value*/) override {
+  std::optional<std::string> stdlib_text_of(const Value & /*value*/) override {
     return std::nullopt;
   }
-  std::optional<std::string>
-  stdlib_bytes_of(const void * /*frame*/, const Value & /*value*/) override {
+  std::optional<std::string> stdlib_bytes_of(const void * /*frame*/,
+                                             const Value & /*value*/) override {
     return std::nullopt;
   }
   Value stdlib_bytes_value_from_bytes(std::string /*bytes*/) override {
@@ -71,9 +70,9 @@ struct MockHost : StdlibHost {
   Value stdlib_make_list(std::vector<Value> /*items*/) override {
     return Value::null();
   }
-  Value stdlib_make_object(
-      std::vector<std::pair<std::string, Value>> /*entries*/,
-      bool /*strict*/) override {
+  Value
+  stdlib_make_object(std::vector<std::pair<std::string, Value>> /*entries*/,
+                     bool /*strict*/) override {
     return Value::null();
   }
   amber::runtime::StdlibBlockResult
@@ -82,13 +81,12 @@ struct MockHost : StdlibHost {
     return {};
   }
   void stdlib_throw_json_stop(const void * /*frame*/) override {}
-  bool stdlib_integer_range(const void * /*frame*/, const Value & /*value*/,
-                            amber::runtime::StdlibIntegerRange * /*out*/)
-      override {
+  bool
+  stdlib_integer_range(const void * /*frame*/, const Value & /*value*/,
+                       amber::runtime::StdlibIntegerRange * /*out*/) override {
     return false;
   }
-  bool stdlib_fs_read_text(const void * /*frame*/,
-                           const std::string & /*path*/,
+  bool stdlib_fs_read_text(const void * /*frame*/, const std::string & /*path*/,
                            std::string * /*out*/) override {
     return false;
   }
@@ -97,8 +95,7 @@ struct MockHost : StdlibHost {
                             const std::string & /*text*/) override {
     return false;
   }
-  bool stdlib_secure_random_bytes(const void * /*frame*/,
-                                  std::size_t /*count*/,
+  bool stdlib_secure_random_bytes(const void * /*frame*/, std::size_t /*count*/,
                                   std::string * /*out*/) override {
     return false;
   }
@@ -140,7 +137,8 @@ void test_path_resolution(const NativeRegistry &registry) {
       registry.kind_for_path("Math");
   expect(math.has_value() && *math == RuntimeNativeTypeKind::Math,
          "kind_for_path(\"Math\") resolves to Math");
-  const std::optional<RuntimeNativeTypeKind> hex = registry.kind_for_path("Hex");
+  const std::optional<RuntimeNativeTypeKind> hex =
+      registry.kind_for_path("Hex");
   expect(hex.has_value() && *hex == RuntimeNativeTypeKind::Hex,
          "kind_for_path(\"Hex\") resolves to Hex");
   const std::optional<RuntimeNativeTypeKind> secure_random =
@@ -156,6 +154,14 @@ void test_path_resolution(const NativeRegistry &registry) {
       registry.kind_for_path("TimePeriod");
   expect(period.has_value() && *period == RuntimeNativeTypeKind::TimePeriod,
          "kind_for_path(\"TimePeriod\") resolves to TimePeriod");
+  const std::optional<RuntimeNativeTypeKind> uuid =
+      registry.kind_for_path("Uuid");
+  expect(uuid.has_value() && *uuid == RuntimeNativeTypeKind::Uuid,
+         "kind_for_path(\"Uuid\") resolves to Uuid");
+  const std::optional<RuntimeNativeTypeKind> uuid_alias =
+      registry.kind_for_path("UUID");
+  expect(uuid_alias.has_value() && *uuid_alias == RuntimeNativeTypeKind::Uuid,
+         "kind_for_path(\"UUID\") resolves to Uuid");
   expect(!registry.kind_for_path("NotALibrary").has_value(),
          "unregistered path resolves to nullopt");
 }
@@ -167,11 +173,14 @@ void test_handler_table(const NativeRegistry &registry) {
          "Base64 handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::SecureRandom) != nullptr,
          "SecureRandom handler is registered");
+  expect(registry.handler_for(RuntimeNativeTypeKind::Uuid) != nullptr,
+         "Uuid handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::Time) != nullptr,
          "Time handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::TimePeriod) != nullptr,
          "TimePeriod handler is registered");
-  // Kernel has not migrated onto the registry; it must stay on the legacy chain.
+  // Kernel has not migrated onto the registry; it must stay on the legacy
+  // chain.
   expect(registry.handler_for(RuntimeNativeTypeKind::Kernel) == nullptr,
          "unmigrated kind has no registered handler");
 }
@@ -191,8 +200,7 @@ void test_math_compute(const NativeRegistry &registry) {
   expect(dispatch_math(registry, host, "abs", {Value::integer(-5)},
                        Value::null(), &out) == SendStatus::Matched,
          "Math.abs dispatches");
-  expect(out.is_integer() && out.as_integer() == 5,
-         "Math.abs(-5) == 5 as Int");
+  expect(out.is_integer() && out.as_integer() == 5, "Math.abs(-5) == 5 as Int");
 
   // `sign` yields an Int.
   out = Value::null();
@@ -230,8 +238,8 @@ void test_math_faults(const NativeRegistry &registry) {
   {
     MockHost host;
     Value out = Value::null();
-    expect(dispatch_math(registry, host, "sqrt", {Value::null()},
-                         Value::null(), &out) == SendStatus::Faulted,
+    expect(dispatch_math(registry, host, "sqrt", {Value::null()}, Value::null(),
+                         &out) == SendStatus::Faulted,
            "Math.sqrt of non-number faults");
     expect(host.fault_message == "Math.sqrt expects a number",
            "type fault message matches legacy");

@@ -503,10 +503,9 @@ private:
         check_callable(item, kind, nullptr, list_field(item, "getter_body"));
       }
       if (bool_field(item, "has_setter")) {
-        check_callable(item, kind + "_setter",
-                       node_field(item, "setter_signature"),
-                       list_field(item, "setter_body"),
-                       string_field(item, "name") + "=");
+        check_callable(
+            item, kind + "_setter", node_field(item, "setter_signature"),
+            list_field(item, "setter_body"), string_field(item, "name") + "=");
       }
       return;
     }
@@ -1025,6 +1024,13 @@ private:
     }
     if (!has_call) {
       return;
+    }
+    if ((base_name == "Uuid" || base_name == "UUID") &&
+        (first_member == "v4" || first_member == "v7")) {
+      effects.insert("random");
+      if (first_member == "v7") {
+        effects.insert("time");
+      }
     }
     const auto declared = declared_effects_by_owner_.find(base_name);
     if (declared != declared_effects_by_owner_.end()) {

@@ -296,8 +296,8 @@ private:
                                     const lexer::Span &span, bool has_getter,
                                     bool has_setter) {
     if (Binding *existing = find_local_binding(scope_index, name)) {
-      if (!same_decl_span(*existing, span) ||
-          !binding_is_property(*existing) || existing->role != role) {
+      if (!same_decl_span(*existing, span) || !binding_is_property(*existing) ||
+          existing->role != role) {
         diagnostic("E_MEMBER_NAME_CONFLICT", "error", "binder",
                    "external member '" + name + "' declared multiple times",
                    span);
@@ -559,7 +559,8 @@ private:
     graph_.signatures.push_back(std::move(descriptor));
   }
 
-  bool property_allowed_in_scope(int parent_scope, const ast::Expr &item) const {
+  bool property_allowed_in_scope(int parent_scope,
+                                 const ast::Expr &item) const {
     const std::string scope_kind = graph_.scopes[parent_scope].kind;
     if (item.kind == "AstClassPropDef") {
       return scope_kind == "class";
@@ -709,7 +710,8 @@ private:
         auto_assign_fields.insert(auto_assign_kind + local_name);
         const int field_scope = nearest_object_scope(owner_scope);
         const std::string field_name = auto_assign_kind + local_name;
-        const int target_scope = field_scope >= 0 ? field_scope : function_scope;
+        const int target_scope =
+            field_scope >= 0 ? field_scope : function_scope;
         declare_binding(target_scope, field_name,
                         auto_assign_kind == "@" ? "ivar" : "cvar", "field",
                         param->span, false);
@@ -826,8 +828,8 @@ private:
                    "wildcard '_' cannot be used as an ordinary binding",
                    clause.span);
       } else {
-        declare_binding(scope, binding, "local", "rescue_binding",
-                        clause.span, false, "", DuplicatePolicy::Error);
+        declare_binding(scope, binding, "local", "rescue_binding", clause.span,
+                        false, "", DuplicatePolicy::Error);
       }
     }
     if (body != nullptr) {
@@ -978,7 +980,8 @@ private:
       }
       if (const ast::ListField *rescues = list_field(expr, "rescues")) {
         for (std::size_t index = 0; index < rescues->values.size(); ++index) {
-          visit_rescue_clause(scope_index, "try.rescue." + std::to_string(index),
+          visit_rescue_clause(scope_index,
+                              "try.rescue." + std::to_string(index),
                               *rescues->values[index]);
         }
       }
@@ -1071,8 +1074,7 @@ private:
     if (tails == nullptr) {
       return;
     }
-    if (base != nullptr && base->kind == "AstName" &&
-        !tails->values.empty() &&
+    if (base != nullptr && base->kind == "AstName" && !tails->values.empty() &&
         tails->values.front()->kind == "AstTailCall") {
       const Binding *binding =
           resolve(scope_index, string_value(*base, "name"));
@@ -1324,17 +1326,51 @@ bool contains_name_ref_key(const std::vector<NameRefKey> &keys,
 
 bool is_native_prelude_name(const std::string &name) {
   static const std::set<std::string> names = {
-      "Amber", "Array", "Atomic", "Barrier", "Base64", "Base64Url", "Bool",
-      "Bytes", "Channel", "Err", "Flow", "Float", "Hex", "Int", "Json",
-      "Kernel", "Map", "Math", "Mutex", "Null", "Object", "Ok", "Range",
-      "SecureRandom", "Set", "Str", "StrictMap", "Symbol",
-      "ThreadedCollection", "Time", "TimePeriod", "Tuple", "desc", "io", "p",
-      "pp", "print", "task",
-      // Builtin runtime error classes resolve to native prelude constants at
-      // runtime (see lookup_native_prelude_constant / runtime_error_id), so they
-      // may be referenced in expression position too -- e.g. ValueError.new(msg)
-      // or Err(OverflowError.new(msg)). Shared X-macro list keeps the binder and
-      // the VM's kRuntimeErrorNames in lockstep with the spec registry.
+      "Amber",
+      "Array",
+      "Atomic",
+      "Barrier",
+      "Base64",
+      "Base64Url",
+      "Bool",
+      "Bytes",
+      "Channel",
+      "Err",
+      "Flow",
+      "Float",
+      "Hex",
+      "Int",
+      "Json",
+      "Kernel",
+      "Map",
+      "Math",
+      "Mutex",
+      "Null",
+      "Object",
+      "Ok",
+      "Range",
+      "SecureRandom",
+      "Set",
+      "Str",
+      "StrictMap",
+      "Symbol",
+      "ThreadedCollection",
+      "Time",
+      "TimePeriod",
+      "Tuple",
+      "UUID",
+      "Uuid",
+      "desc",
+      "io",
+      "p",
+      "pp",
+      "print",
+      "task",
+  // Builtin runtime error classes resolve to native prelude constants at
+  // runtime (see lookup_native_prelude_constant / runtime_error_id), so they
+  // may be referenced in expression position too -- e.g. ValueError.new(msg)
+  // or Err(OverflowError.new(msg)). Shared X-macro list keeps the binder and
+  // the VM's kRuntimeErrorNames in lockstep with the spec registry.
 #define AMBER_RUNTIME_ERROR(error_name) #error_name,
 #include "spec/registries/runtime_errors.def"
 #undef AMBER_RUNTIME_ERROR
@@ -1366,8 +1402,7 @@ bool is_kernel_watch_chain(const ast::Expr &base, const ast::ListField &tails) {
   const ast::Expr &member = *tails.values[0];
   const ast::Expr &call = *tails.values[1];
   return member.kind == "AstTailDotMember" &&
-         string_value(member, "name") == "watch" &&
-         call.kind == "AstTailCall";
+         string_value(member, "name") == "watch" && call.kind == "AstTailCall";
 }
 
 void collect_call_name_contexts(const ast::Expr &expr,
@@ -1470,8 +1505,8 @@ CallBindResult bind_call_shape(const Signature &signature,
   std::vector<int> positional_indices;
   std::map<std::string, int> first_keyword_indices;
   std::set<std::string> consumed_keywords;
-  const bool has_spread = std::any_of(
-      args.begin(), args.end(), [](const CallArgShape &arg) {
+  const bool has_spread =
+      std::any_of(args.begin(), args.end(), [](const CallArgShape &arg) {
         return arg.positional_spread || arg.keyword_spread;
       });
   if (has_spread) {
@@ -1604,13 +1639,11 @@ std::vector<lexer::Diagnostic> unresolved_name_diagnostics(
       continue;
     }
     const bool callable = contains_name_ref_key(callable_names, key);
-    diagnostics.push_back(lexer::Diagnostic{
-        "E2012",
-        "error",
-        "binder",
-        callable ? "undefined callable '" + ref.name + "'"
-                 : "undefined name '" + ref.name + "'",
-        ref.span});
+    diagnostics.push_back(
+        lexer::Diagnostic{"E2012", "error", "binder",
+                          callable ? "undefined callable '" + ref.name + "'"
+                                   : "undefined name '" + ref.name + "'",
+                          ref.span});
   }
   return diagnostics;
 }
@@ -1661,8 +1694,7 @@ std::string bind_graph_to_json(const BindGraph &graph,
         << ",\"property_has_getter\":"
         << (binding.property_has_getter ? "true" : "false")
         << ",\"property_has_setter\":"
-        << (binding.property_has_setter ? "true" : "false")
-        << ",\"span\":";
+        << (binding.property_has_setter ? "true" : "false") << ",\"span\":";
     append_span_json(out, binding.span);
     out << ",\"source\":\"" << json_escape(binding.source) << "\"}";
     if (i + 1 < graph.bindings.size()) {

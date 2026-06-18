@@ -58,3 +58,5 @@ errors:
   - EntropyError
   - TimeError
   - TimeParseError
+  - UuidError
+  - UuidParseError

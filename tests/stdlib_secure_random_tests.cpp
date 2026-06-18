@@ -6,8 +6,8 @@
 #include "profile/capabilities.h"
 #include "runtime/vm.h"
 
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -91,9 +91,9 @@ std::string string_result_text(const SourceRun &run) {
   expect(run.result.ok(), "string result should succeed");
   expect(run.result.value.is_string(), "result should be Str");
   const std::uint32_t id = run.result.value.as_string().string_id;
-  const std::vector<std::string> &strings =
-      run.result.runtime_strings.empty() ? run.module.strings
-                                         : run.result.runtime_strings;
+  const std::vector<std::string> &strings = run.result.runtime_strings.empty()
+                                                ? run.module.strings
+                                                : run.result.runtime_strings;
   expect(id < strings.size(), "string id should be in range");
   return strings[id];
 }
@@ -125,8 +125,7 @@ bool uuid_v4_shape(const std::string &uuid) {
   if (uuid.size() != 36U) {
     return false;
   }
-  if (uuid[8] != '-' || uuid[13] != '-' || uuid[18] != '-' ||
-      uuid[23] != '-') {
+  if (uuid[8] != '-' || uuid[13] != '-' || uuid[18] != '-' || uuid[23] != '-') {
     return false;
   }
   if (uuid[14] != '4') {
@@ -154,54 +153,53 @@ void expect_fault(const std::string &source, const std::string &error_name,
   const SourceRun run = execute_source(source);
   expect(!run.result.ok() && run.result.fault.has_value(),
          message + " should fault");
-  expect(run.result.fault->error_name == error_name,
-         message + " should fault with " + error_name + ", got " +
-             (run.result.fault.has_value() ? run.result.fault->error_name
-                                           : ""));
+  expect(
+      run.result.fault->error_name == error_name,
+      message + " should fault with " + error_name + ", got " +
+          (run.result.fault.has_value() ? run.result.fault->error_name : ""));
 }
 
 void test_bytes_and_formats() {
   expect_ok_integer(execute_source("SecureRandom.bytes(16).count()\n").result,
                     16, "bytes length");
 
-  const std::string hex = string_result_text(execute_source(
-      "SecureRandom.hex(8)\n"));
+  const std::string hex =
+      string_result_text(execute_source("SecureRandom.hex(8)\n"));
   expect(hex.size() == 16U && all_hex(hex), "hex token shape");
 
-  const std::string b64 = string_result_text(execute_source(
-      "SecureRandom.base64(3)\n"));
+  const std::string b64 =
+      string_result_text(execute_source("SecureRandom.base64(3)\n"));
   expect(b64.size() == 4U, "base64 3 bytes yields 4 chars");
 
-  const std::string b64_unpadded = string_result_text(execute_source(
-      "SecureRandom.base64(1, padding: false)\n"));
+  const std::string b64_unpadded = string_result_text(
+      execute_source("SecureRandom.base64(1, padding: false)\n"));
   expect(b64_unpadded.size() == 2U &&
              b64_unpadded.find('=') == std::string::npos,
          "base64 unpadded shape");
 
-  const std::string url = string_result_text(execute_source(
-      "SecureRandom.base64url(32)\n"));
+  const std::string url =
+      string_result_text(execute_source("SecureRandom.base64url(32)\n"));
   expect(all_base64url_unpadded(url), "base64url default is url-safe");
 }
 
 void test_uuid_and_int_range() {
-  const std::string uuid = string_result_text(execute_source(
-      "SecureRandom.uuid\n"));
+  const std::string uuid =
+      string_result_text(execute_source("SecureRandom.uuid.to_str\n"));
   expect(uuid_v4_shape(uuid), "uuid v4 shape");
 
-  const SourceRun ranged = execute_source(
-      "x = SecureRandom.int(3..7)\n"
-      "if x >= 3 and x <= 7:\n"
-      "  42\n"
-      "else:\n"
-      "  0\n");
+  const SourceRun ranged = execute_source("x = SecureRandom.int(3..7)\n"
+                                          "if x >= 3 and x <= 7:\n"
+                                          "  42\n"
+                                          "else:\n"
+                                          "  0\n");
   expect_ok_integer(ranged.result, 42, "inclusive range sample");
 
-  const SourceRun stepped = execute_source(
-      "x = SecureRandom.int(Range.new(10, 2, step: -2))\n"
-      "if x == 10 or x == 8 or x == 6 or x == 4 or x == 2:\n"
-      "  42\n"
-      "else:\n"
-      "  0\n");
+  const SourceRun stepped =
+      execute_source("x = SecureRandom.int(Range.new(10, 2, step: -2))\n"
+                     "if x == 10 or x == 8 or x == 6 or x == 4 or x == 2:\n"
+                     "  42\n"
+                     "else:\n"
+                     "  0\n");
   expect_ok_integer(stepped.result, 42, "stepped descending range sample");
 
   expect_ok_integer(

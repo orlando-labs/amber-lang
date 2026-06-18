@@ -108,7 +108,7 @@ PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp 
 BUILD_SRCS := buildsys/build.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 IO_SRCS := runtime/io.cpp
-STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_math.cpp runtime/stdlib_json.cpp runtime/stdlib_codecs.cpp runtime/stdlib_secure_random.cpp runtime/stdlib_time.cpp
+STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_math.cpp runtime/stdlib_json.cpp runtime/stdlib_codecs.cpp runtime/stdlib_secure_random.cpp runtime/stdlib_uuid.cpp runtime/stdlib_time.cpp
 RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp $(IO_SRCS) runtime/vm.cpp $(STDLIB_SRCS) runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
@@ -139,6 +139,7 @@ STDLIB_REGISTRY_TEST_SRCS := tests/stdlib_registry_tests.cpp $(CORE_SRCS) $(RUNT
 STDLIB_JSON_TEST_SRCS := tests/stdlib_json_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_CODECS_TEST_SRCS := tests/stdlib_codecs_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_SECURE_RANDOM_TEST_SRCS := tests/stdlib_secure_random_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
+STDLIB_UUID_TEST_SRCS := tests/stdlib_uuid_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_TIME_TEST_SRCS := tests/stdlib_time_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 IO_TEST_SRCS := tests/io_tests.cpp runtime/context.cpp runtime/text.cpp $(IO_SRCS)
 MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BUILD_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
@@ -204,6 +205,8 @@ FORMAT_FILES := \
 	runtime/stdlib_json.cpp \
 	runtime/stdlib_codecs.cpp \
 	runtime/stdlib_secure_random.cpp \
+	runtime/stdlib_uuid.h \
+	runtime/stdlib_uuid.cpp \
 	runtime/stdlib_time.cpp \
 	package/package.cpp \
 	package/package.h \
@@ -233,6 +236,7 @@ FORMAT_FILES := \
 	tests/stdlib_json_tests.cpp \
 	tests/stdlib_codecs_tests.cpp \
 	tests/stdlib_secure_random_tests.cpp \
+	tests/stdlib_uuid_tests.cpp \
 	tests/stdlib_time_tests.cpp \
 	tests/io_tests.cpp
 
@@ -240,7 +244,7 @@ FORMAT_FILES := \
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/stdlib_registry_tests $(BUILD_DIR)/stdlib_json_tests $(BUILD_DIR)/stdlib_codecs_tests $(BUILD_DIR)/stdlib_secure_random_tests $(BUILD_DIR)/stdlib_time_tests $(BUILD_DIR)/io_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/stdlib_registry_tests $(BUILD_DIR)/stdlib_json_tests $(BUILD_DIR)/stdlib_codecs_tests $(BUILD_DIR)/stdlib_secure_random_tests $(BUILD_DIR)/stdlib_uuid_tests $(BUILD_DIR)/stdlib_time_tests $(BUILD_DIR)/io_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -318,6 +322,9 @@ $(BUILD_DIR)/stdlib_codecs_tests: $(STDLIB_CODECS_TEST_SRCS) | $(BUILD_DIR)/.dir
 $(BUILD_DIR)/stdlib_secure_random_tests: $(STDLIB_SECURE_RANDOM_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STDLIB_SECURE_RANDOM_TEST_SRCS) $(LDFLAGS) -o $@
 
+$(BUILD_DIR)/stdlib_uuid_tests: $(STDLIB_UUID_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STDLIB_UUID_TEST_SRCS) $(LDFLAGS) -o $@
+
 $(BUILD_DIR)/stdlib_time_tests: $(STDLIB_TIME_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STDLIB_TIME_TEST_SRCS) $(LDFLAGS) -o $@
 
@@ -351,6 +358,7 @@ test: build
 	$(BUILD_DIR)/stdlib_json_tests
 	$(BUILD_DIR)/stdlib_codecs_tests
 	$(BUILD_DIR)/stdlib_secure_random_tests
+	$(BUILD_DIR)/stdlib_uuid_tests
 	$(BUILD_DIR)/stdlib_time_tests
 	$(BUILD_DIR)/io_tests
 	$(BUILD_DIR)/module_loader_tests
@@ -388,6 +396,10 @@ test: build
 	$(BUILD_DIR)/amberc build tests/fixtures/secure_random_native/int.am --entry main-only --grant random.secure -o $(BUILD_DIR)/secure-random-native-int > $(BUILD_DIR)/secure-random-native-int-build.json
 	$(BUILD_DIR)/secure-random-native-int > $(BUILD_DIR)/secure-random-native-int.out
 	grep -q '^42$$' $(BUILD_DIR)/secure-random-native-int.out
+	$(BUILD_DIR)/amberc build tests/fixtures/uuid_native/main.am --entry main-only --grant random.secure -o $(BUILD_DIR)/uuid-native > $(BUILD_DIR)/uuid-native-build.json
+	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/uuid-native-build.json
+	$(BUILD_DIR)/uuid-native > $(BUILD_DIR)/uuid-native.out
+	grep -q '^42$$' $(BUILD_DIR)/uuid-native.out
 	$(BUILD_DIR)/amberc build bench/polyglot/amber/src/time_flow.am --entry main-only -o $(BUILD_DIR)/time-flow-native > $(BUILD_DIR)/time-flow-native-build.json
 	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/time-flow-native-build.json
 	$(BUILD_DIR)/time-flow-native > $(BUILD_DIR)/time-flow-native.out

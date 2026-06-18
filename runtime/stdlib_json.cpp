@@ -1,5 +1,6 @@
 // Json — JSON parse/generate stdlib library on the Layer 0 substrate
-// (DESIGN-stdlib-next-libs-order-2026-06-15 §4.1, DESIGN-stdlib-json-api-2026-06-16).
+// (DESIGN-stdlib-next-libs-order-2026-06-15 §4.1,
+// DESIGN-stdlib-json-api-2026-06-16).
 //
 // v1 surface implemented here: `Json.parse`, `Json.generate`,
 // `Json.pretty_generate`, `Json.stream_parse`, `Json.stream_parse_file`,
@@ -10,8 +11,8 @@
 
 #include "runtime/stdlib_registry.h"
 
-#include <cmath>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -171,6 +172,14 @@ struct Generator {
       write_json_string(runtime_time_to_iso8601(*time), out);
       return true;
     }
+    if (value.is_uuid()) {
+      const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
+      if (uuid == nullptr) {
+        return fail("Uuid value is null");
+      }
+      write_json_string(runtime_uuid_to_string(*uuid), out);
+      return true;
+    }
     if (value.is_list()) {
       const IntrusivePtr<ListValue> list = value.as_list();
       if (list == nullptr || list->items.empty()) {
@@ -257,10 +266,10 @@ struct Parser {
         ++col;
       }
     }
-    call.fault("JsonParseError",
-               message + " at line " + std::to_string(line_base + line) +
-                   ":" + std::to_string(col) + " (offset " +
-                   std::to_string(offset_base + pos) + ")");
+    call.fault("JsonParseError", message + " at line " +
+                                     std::to_string(line_base + line) + ":" +
+                                     std::to_string(col) + " (offset " +
+                                     std::to_string(offset_base + pos) + ")");
     faulted = true;
     return false;
   }
@@ -504,8 +513,7 @@ struct Parser {
       std::uint64_t magnitude = 0;
       bool overflow = false;
       for (std::size_t i = digits_begin; i < pos; ++i) {
-        const std::uint64_t digit =
-            static_cast<std::uint64_t>(src[i] - '0');
+        const std::uint64_t digit = static_cast<std::uint64_t>(src[i] - '0');
         if (magnitude > (limit - digit) / 10U) {
           overflow = true;
           break;
@@ -517,8 +525,7 @@ struct Parser {
           if (magnitude == limit) {
             return Value::integer(std::numeric_limits<std::int64_t>::min());
           }
-          return Value::integer(
-              -static_cast<std::int64_t>(magnitude));
+          return Value::integer(-static_cast<std::int64_t>(magnitude));
         }
         return Value::integer(static_cast<std::int64_t>(magnitude));
       }
@@ -728,8 +735,7 @@ struct Parser {
     if (stopped != nullptr) {
       *stopped = false;
     }
-    const StreamDecision decision =
-        parse_stream_value(0, target_depth, emit);
+    const StreamDecision decision = parse_stream_value(0, target_depth, emit);
     if (decision == StreamDecision::Fault) {
       return false;
     }
@@ -766,8 +772,8 @@ struct Parser {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-bool int_keyword(NativeStdlibCall &call, const std::string &name,
-                 int fallback, int *out) {
+bool int_keyword(NativeStdlibCall &call, const std::string &name, int fallback,
+                 int *out) {
   const std::optional<Value> value = call.keyword(name);
   if (!value.has_value()) {
     *out = fallback;
@@ -898,9 +904,7 @@ bool stream_json_text(NativeStdlibCall &call, const std::string &text,
   bool stopped = false;
   const bool ok = parser.parse_stream_document(
       depth,
-      [&](const Value &value) {
-        return call_stream_block(call, value, count);
-      },
+      [&](const Value &value) { return call_stream_block(call, value, count); },
       &stopped);
   (void)stopped;
   return ok;
@@ -925,8 +929,7 @@ bool stream_jsonl_text(NativeStdlibCall &call, const std::string &text,
         if (!parser.parse_document(&parsed)) {
           return false;
         }
-        const StreamDecision decision =
-            call_stream_block(call, parsed, count);
+        const StreamDecision decision = call_stream_block(call, parsed, count);
         if (decision == StreamDecision::Fault) {
           return false;
         }
@@ -986,9 +989,9 @@ SendStatus json_generate(NativeStdlibCall &call, bool pretty) {
   if (!call.require_no_block() || !call.require_arity(1)) {
     return SendStatus::Faulted;
   }
-  if (!call.reject_unknown_keywords(pretty ? std::initializer_list<const char *>{
-                                                 "indent"}
-                                           : std::initializer_list<const char *>{})) {
+  if (!call.reject_unknown_keywords(
+          pretty ? std::initializer_list<const char *>{"indent"}
+                 : std::initializer_list<const char *>{})) {
     return SendStatus::Faulted;
   }
   Generator generator{call};
@@ -1119,8 +1122,7 @@ SendStatus json_save_to_file(NativeStdlibCall &call) {
   std::string text;
   if (jsonl) {
     if (!call.args[1].is_list() || call.args[1].as_list() == nullptr) {
-      return call.fault("JsonGenerateError",
-                        "jsonl save expects a List value");
+      return call.fault("JsonGenerateError", "jsonl save expects a List value");
     }
     const IntrusivePtr<ListValue> list = call.args[1].as_list();
     for (const Value &item : list->items) {

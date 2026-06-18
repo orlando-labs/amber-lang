@@ -4,6 +4,7 @@
 #include "package/package.h"
 #include "profile/capabilities.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -93,7 +94,8 @@ public:
   }
   // Relinquish ownership of the managed pointer *without* releasing the
   // reference; the caller adopts the outstanding +1. Used by the tagged-Value
-  // factories to move an IntrusivePtr's reference into the union with no atomic.
+  // factories to move an IntrusivePtr's reference into the union with no
+  // atomic.
   T *release() noexcept {
     T *p = ptr_;
     ptr_ = nullptr;
@@ -104,10 +106,12 @@ public:
   T &operator*() const noexcept { return *ptr_; }
   explicit operator bool() const noexcept { return ptr_ != nullptr; }
 
-  friend bool operator==(const IntrusivePtr &a, const IntrusivePtr &b) noexcept {
+  friend bool operator==(const IntrusivePtr &a,
+                         const IntrusivePtr &b) noexcept {
     return a.ptr_ == b.ptr_;
   }
-  friend bool operator!=(const IntrusivePtr &a, const IntrusivePtr &b) noexcept {
+  friend bool operator!=(const IntrusivePtr &a,
+                         const IntrusivePtr &b) noexcept {
     return a.ptr_ != b.ptr_;
   }
   friend bool operator==(const IntrusivePtr &a, std::nullptr_t) noexcept {
@@ -268,14 +272,22 @@ enum class RuntimeNativeTypeKind {
   FsFile,
   NetEndpoint,
   NetTcp,
-  NetUdp
+  NetUdp,
+  Uuid
 };
 
 struct NativeTypeValue {
   RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
 };
 
-enum class RuntimeNativeFunctionKind { Print, P, Pp, Desc, ResultOk, ResultErr };
+enum class RuntimeNativeFunctionKind {
+  Print,
+  P,
+  Pp,
+  Desc,
+  ResultOk,
+  ResultErr
+};
 
 struct NativeFunctionValue {
   RuntimeNativeFunctionKind kind = RuntimeNativeFunctionKind::Print;
@@ -306,6 +318,10 @@ struct RuntimeTimeValue {
   std::uint32_t nanosecond = 0;
 };
 
+struct RuntimeUuidValue {
+  std::array<std::uint8_t, 16> bytes{};
+};
+
 struct RuntimeTimePeriodValue {
   std::int64_t months = 0;
   std::int64_t days = 0;
@@ -315,6 +331,7 @@ struct RuntimeTimePeriodValue {
 const char *runtime_error_name(std::uint16_t error_id);
 std::optional<std::uint16_t> runtime_error_id(const std::string &name);
 std::string big_int_to_decimal_string(const BigIntValue &value);
+std::string runtime_uuid_to_string(const RuntimeUuidValue &value);
 std::string runtime_time_to_iso8601(const RuntimeTimeValue &value);
 std::string runtime_time_period_to_string(const RuntimeTimePeriodValue &value);
 
@@ -350,65 +367,65 @@ std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
 //
 // X-macros listing every (factory, is_fn, as_fn, ElementType, TagEnumerator)
 // tuple so the tagged rep can generate its factory/predicate/accessor bodies in
-// lockstep (vm.cpp). Heap kinds (the six ObjHeader-bearing types, stored inline)
-// take a ValueTag enumerator; tail kinds (the ~15 cold shared_ptr types, boxed)
-// take a ValueTailKind enumerator.
+// lockstep (vm.cpp). Heap kinds (the six ObjHeader-bearing types, stored
+// inline) take a ValueTag enumerator; tail kinds (the ~15 cold shared_ptr
+// types, boxed) take a ValueTailKind enumerator.
 #define AMBER_VALUE_HEAP_KINDS(X)                                              \
-  X(closure, is_closure, as_closure, ClosureValue, Closure)                   \
-  X(instance, is_instance_object, as_instance_object, InstanceValue, Instance)\
-  X(list, is_list, as_list, ListValue, List)                                  \
-  X(tuple, is_tuple, as_tuple, TupleValue, Tuple)                             \
-  X(set, is_set, as_set, SetValue, Set)                                       \
+  X(closure, is_closure, as_closure, ClosureValue, Closure)                    \
+  X(instance, is_instance_object, as_instance_object, InstanceValue, Instance) \
+  X(list, is_list, as_list, ListValue, List)                                   \
+  X(tuple, is_tuple, as_tuple, TupleValue, Tuple)                              \
+  X(set, is_set, as_set, SetValue, Set)                                        \
   X(map, is_map, as_map, MapValue, Map)
 
-#define AMBER_VALUE_TAIL_KINDS(X)                                             \
-  X(error_instance, is_error_instance, as_error_instance, ErrorInstanceValue, \
-    ErrorInstance)                                                            \
-  X(big_int, is_big_int, as_big_int, BigIntValue, BigInt)                     \
-  X(task_module, is_task_module, as_task_module, RuntimeTaskModule,           \
-    TaskModule)                                                               \
-  X(task_handle, is_task_handle, as_task_handle, RuntimeTaskHandle,           \
-    TaskHandle)                                                               \
-  X(channel, is_channel, as_channel, RuntimeChannel, Channel)                 \
-  X(mutex, is_mutex, as_mutex, RuntimeMutex, Mutex)                           \
-  X(atomic, is_atomic, as_atomic, RuntimeAtomic, Atomic)                      \
-  X(barrier, is_barrier, as_barrier, RuntimeBarrier, Barrier)                 \
-  X(flow_module, is_flow_module, as_flow_module, RuntimeFlowModule, Flow)     \
-  X(threaded_collection, is_threaded_collection, as_threaded_collection,     \
-    RuntimeThreadedCollection, ThreadedCollection)                           \
-  X(text_writer, is_text_writer, as_text_writer, RuntimeTextWriter,          \
-    TextWriter)                                                              \
-  X(logger, is_logger, as_logger, RuntimeLogger, Logger)                      \
-  X(io_value, is_io_value, as_io_value, RuntimeIoValue, Io)                   \
-  X(watch_cell, is_watch_cell, as_watch_cell, RuntimeWatchCell, WatchCell)    \
-  X(watch_handle, is_watch_handle, as_watch_handle, RuntimeWatchHandle,       \
-    WatchHandle)                                                             \
-  X(result, is_result, as_result, ResultValue, Result)                        \
-  X(time, is_time, as_time, RuntimeTimeValue, Time)                           \
-  X(time_period, is_time_period, as_time_period, RuntimeTimePeriodValue,      \
-    TimePeriod)
+#define AMBER_VALUE_TAIL_KINDS(X)                                              \
+  X(error_instance, is_error_instance, as_error_instance, ErrorInstanceValue,  \
+    ErrorInstance)                                                             \
+  X(big_int, is_big_int, as_big_int, BigIntValue, BigInt)                      \
+  X(task_module, is_task_module, as_task_module, RuntimeTaskModule,            \
+    TaskModule)                                                                \
+  X(task_handle, is_task_handle, as_task_handle, RuntimeTaskHandle,            \
+    TaskHandle)                                                                \
+  X(channel, is_channel, as_channel, RuntimeChannel, Channel)                  \
+  X(mutex, is_mutex, as_mutex, RuntimeMutex, Mutex)                            \
+  X(atomic, is_atomic, as_atomic, RuntimeAtomic, Atomic)                       \
+  X(barrier, is_barrier, as_barrier, RuntimeBarrier, Barrier)                  \
+  X(flow_module, is_flow_module, as_flow_module, RuntimeFlowModule, Flow)      \
+  X(threaded_collection, is_threaded_collection, as_threaded_collection,       \
+    RuntimeThreadedCollection, ThreadedCollection)                             \
+  X(text_writer, is_text_writer, as_text_writer, RuntimeTextWriter,            \
+    TextWriter)                                                                \
+  X(logger, is_logger, as_logger, RuntimeLogger, Logger)                       \
+  X(io_value, is_io_value, as_io_value, RuntimeIoValue, Io)                    \
+  X(watch_cell, is_watch_cell, as_watch_cell, RuntimeWatchCell, WatchCell)     \
+  X(watch_handle, is_watch_handle, as_watch_handle, RuntimeWatchHandle,        \
+    WatchHandle)                                                               \
+  X(result, is_result, as_result, ResultValue, Result)                         \
+  X(time, is_time, as_time, RuntimeTimeValue, Time)                            \
+  X(time_period, is_time_period, as_time_period, RuntimeTimePeriodValue,       \
+    TimePeriod)                                                               \
+  X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)
 
 #ifndef AMBER_VALUE_REPR_TAGGED
 // ---- Variant representation (default, 24 bytes) ---------------------------
 struct Value {
   using Payload = std::variant<
       std::monostate, bool, std::int64_t, double, SymbolValue, StringValue,
-      ClassObjectValue, IntrusivePtr<ClosureValue>,
-      IntrusivePtr<InstanceValue>, IntrusivePtr<ListValue>,
-      IntrusivePtr<TupleValue>, IntrusivePtr<SetValue>,
+      ClassObjectValue, IntrusivePtr<ClosureValue>, IntrusivePtr<InstanceValue>,
+      IntrusivePtr<ListValue>, IntrusivePtr<TupleValue>, IntrusivePtr<SetValue>,
       IntrusivePtr<MapValue>, NativeTypeValue, NativeFunctionValue,
       NativeErrorClassValue, std::shared_ptr<ErrorInstanceValue>,
-      std::shared_ptr<BigIntValue>,
-      std::shared_ptr<RuntimeTaskModule>, std::shared_ptr<RuntimeTaskHandle>,
-      std::shared_ptr<RuntimeChannel>, std::shared_ptr<RuntimeMutex>,
-      std::shared_ptr<RuntimeAtomic>, std::shared_ptr<RuntimeBarrier>,
-      std::shared_ptr<RuntimeFlowModule>,
+      std::shared_ptr<BigIntValue>, std::shared_ptr<RuntimeTaskModule>,
+      std::shared_ptr<RuntimeTaskHandle>, std::shared_ptr<RuntimeChannel>,
+      std::shared_ptr<RuntimeMutex>, std::shared_ptr<RuntimeAtomic>,
+      std::shared_ptr<RuntimeBarrier>, std::shared_ptr<RuntimeFlowModule>,
       std::shared_ptr<RuntimeThreadedCollection>,
       std::shared_ptr<RuntimeTextWriter>, std::shared_ptr<RuntimeLogger>,
       std::shared_ptr<RuntimeIoValue>, std::shared_ptr<RuntimeWatchCell>,
       std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>,
       std::shared_ptr<RuntimeTimeValue>,
-      std::shared_ptr<RuntimeTimePeriodValue>>;
+      std::shared_ptr<RuntimeTimePeriodValue>,
+      std::shared_ptr<RuntimeUuidValue>>;
 
   Payload payload;
 
@@ -445,6 +462,7 @@ struct Value {
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
   static Value result(std::shared_ptr<ResultValue> value);
+  static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
   static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
 
@@ -480,6 +498,7 @@ struct Value {
   bool is_watch_cell() const;
   bool is_watch_handle() const;
   bool is_result() const;
+  bool is_uuid() const;
   bool is_time() const;
   bool is_time_period() const;
 
@@ -514,6 +533,7 @@ struct Value {
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
   std::shared_ptr<ResultValue> as_result() const;
+  std::shared_ptr<RuntimeUuidValue> as_uuid() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
   std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
 
@@ -575,6 +595,7 @@ enum class ValueTailKind : std::uint8_t {
   Result,
   Time,
   TimePeriod,
+  Uuid,
 };
 
 struct ValueTailBox; // refcounted tail box; defined in vm.cpp
@@ -620,6 +641,7 @@ struct Value {
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
   static Value result(std::shared_ptr<ResultValue> value);
+  static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
   static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
 
@@ -655,6 +677,7 @@ struct Value {
   bool is_watch_cell() const;
   bool is_watch_handle() const;
   bool is_result() const;
+  bool is_uuid() const;
   bool is_time() const;
   bool is_time_period() const;
 
@@ -689,6 +712,7 @@ struct Value {
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
   std::shared_ptr<ResultValue> as_result() const;
+  std::shared_ptr<RuntimeUuidValue> as_uuid() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
   std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
 
@@ -704,8 +728,8 @@ private:
     std::uint16_t u16; // native error_id
     RuntimeNativeTypeKind ntype;
     RuntimeNativeFunctionKind nfn;
-    ObjHeader *obj;       // Closure..Map (points at the embedded header)
-    ValueTailBox *tail;   // Tail
+    ObjHeader *obj;     // Closure..Map (points at the embedded header)
+    ValueTailBox *tail; // Tail
   };
 
   ValueTag tag_;
@@ -1074,7 +1098,8 @@ struct RuntimeHeapStats {
   // shells whose payloads are cleared but whose memory a stale shared_ptr still
   // holds); live_object_bytes counts only logically-live shells. Neither counts
   // interior payloads (item vectors, strings) -- they are a cheap proxy for the
-  // §9 fragmentation ratio (RSS / live heap bytes), not an exact live-byte total.
+  // §9 fragmentation ratio (RSS / live heap bytes), not an exact live-byte
+  // total.
   std::uint64_t live_object_bytes = 0;
   std::uint64_t tracked_object_bytes = 0;
   std::uint64_t local_frees = 0;

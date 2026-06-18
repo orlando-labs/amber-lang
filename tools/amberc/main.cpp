@@ -25,7 +25,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <unistd.h>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -35,6 +34,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include <sys/resource.h>
@@ -851,8 +851,9 @@ std::size_t current_rss_bytes() {
 }
 
 // Peak resident set size of this process in bytes, or 0 if unavailable. This is
-// the kernel's high-water mark, so it captures the churn peak regardless of when
-// objects were freed -- the most comparable number across allocator flavors.
+// the kernel's high-water mark, so it captures the churn peak regardless of
+// when objects were freed -- the most comparable number across allocator
+// flavors.
 std::size_t peak_rss_bytes() {
   struct rusage usage;
   if (getrusage(RUSAGE_SELF, &usage) != 0) {
@@ -1117,16 +1118,15 @@ bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
          *selector == "<" || *selector == ">" || *selector == "<=" ||
          *selector == ">=" || *selector == "==" || *selector == "!=" ||
          *selector == "<=>" || *selector == "&" || *selector == "|" ||
-         *selector == "^" || *selector == "<<" ||
-         *selector == ">>";
+         *selector == "^" || *selector == "<<" || *selector == ">>";
 }
 
 bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
   return (selector == "[]" && pos_count == 1U) ||
          (selector == "[]=" && pos_count == 2U) ||
-         ((selector == "count" || selector == "length" ||
-           selector == "size" || selector == "first") &&
+         ((selector == "count" || selector == "length" || selector == "size" ||
+           selector == "first") &&
           pos_count == 0U) ||
          ((selector == "contains?" || selector == "includes?") &&
           pos_count == 1U) ||
@@ -1139,25 +1139,27 @@ bool native_cpp_time_unit_selector(const std::string &selector) {
          selector == "microsecond" || selector == "microseconds" ||
          selector == "millisecond" || selector == "milliseconds" ||
          selector == "second" || selector == "seconds" ||
-         selector == "minute" || selector == "minutes" ||
-         selector == "hour" || selector == "hours" || selector == "day" ||
-         selector == "days" || selector == "week" || selector == "weeks" ||
-         selector == "month" || selector == "months" ||
-         selector == "year" || selector == "years";
+         selector == "minute" || selector == "minutes" || selector == "hour" ||
+         selector == "hours" || selector == "day" || selector == "days" ||
+         selector == "week" || selector == "weeks" || selector == "month" ||
+         selector == "months" || selector == "year" || selector == "years";
 }
 
 bool native_cpp_time_nullary_selector(const std::string &selector) {
-  return native_cpp_time_unit_selector(selector) ||
-         selector == "iso8601" || selector == "to_str" ||
-         selector == "inspect" || selector == "unix_seconds" ||
-         selector == "unix_milliseconds" ||
+  return native_cpp_time_unit_selector(selector) || selector == "iso8601" ||
+         selector == "to_str" || selector == "inspect" ||
+         selector == "unix_seconds" || selector == "unix_milliseconds" ||
          selector == "unix_nanoseconds" || selector == "year" ||
          selector == "month" || selector == "day" || selector == "hour" ||
          selector == "minute" || selector == "second" ||
          selector == "nanosecond" || selector == "weekday" ||
-         selector == "yearday" || selector == "months" ||
-         selector == "days" || selector == "nanoseconds" ||
-         selector == "fixed?" || selector == "total_nanoseconds";
+         selector == "yearday" || selector == "months" || selector == "days" ||
+         selector == "nanoseconds" || selector == "fixed?" ||
+         selector == "total_nanoseconds";
+}
+
+bool native_cpp_uuid_nullary_selector(const std::string &selector) {
+  return selector == "to_str" || selector == "inspect" || selector == "version";
 }
 
 // Eligibility allowlist for the cpp-bytecode-direct backend.
@@ -1316,7 +1318,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         return false;
       }
       std::size_t operand_index = 3U;
-      for (std::uint32_t capture_i = 0; capture_i < capture_count; ++capture_i) {
+      for (std::uint32_t capture_i = 0; capture_i < capture_count;
+           ++capture_i) {
         std::uint32_t kind = 0;
         std::uint32_t slot = 0;
         if (!operand_u32_value(instruction, operand_index++, &kind) ||
@@ -1415,8 +1418,7 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         codec_send = true;
       }
       bool range_send = false;
-      if (selector == "new" && pos_count == 2U && kw_count <= 2U &&
-          no_block) {
+      if (selector == "new" && pos_count == 2U && kw_count <= 2U && no_block) {
         std::set<std::string> seen_keywords;
         for (std::uint32_t kw_i = 0; kw_i < kw_count; ++kw_i) {
           std::uint32_t kw_symbol_id = 0;
@@ -1436,8 +1438,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         range_send = true;
       }
       bool random_send = false;
-      if ((selector == "bytes" || selector == "hex" ||
-           selector == "base64" || selector == "base64url") &&
+      if ((selector == "bytes" || selector == "hex" || selector == "base64" ||
+           selector == "base64url") &&
           pos_count == 1U && kw_count <= 1U && no_block) {
         if (kw_count == 1U) {
           std::uint32_t kw_symbol_id = 0;
@@ -1490,15 +1492,23 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         }
         time_send = true;
       }
+      bool uuid_send = false;
+      if ((selector == "v4" || selector == "v7" ||
+           native_cpp_uuid_nullary_selector(selector)) &&
+          pos_count == 0U && kw_count == 0U && no_block) {
+        uuid_send = true;
+      } else if ((selector == "parse" || selector == "===") &&
+                 pos_count == 1U && kw_count == 0U && no_block) {
+        uuid_send = true;
+      }
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
           !json_send && !codec_send && !range_send && !random_send &&
-          !time_send) {
+          !time_send && !uuid_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
       if (!json_send && !codec_send && !range_send && !random_send &&
-          !time_send &&
-          (kw_count != 0U || !no_block)) {
+          !time_send && !uuid_send && (kw_count != 0U || !no_block)) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
       }
@@ -1522,11 +1532,10 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
 //   - no captures (cross-function references in this design are captures);
 //   - no closure creation, calls, dynamic sends, or object/class state;
 //   - every send selector is from the pure compute allow-list below.
-// The call site additionally gates at runtime: all arguments must be
-// scalars (null/bool/Int/Float — immutable, so the value-bridge copy
-// cannot diverge) and the result must convert back to a native value;
-// otherwise the program falls back to the whole-program restart, which
-// stays sound because these functions are effect-free.
+// The call site additionally gates at runtime: arguments must be immutable
+// bridge values (null/bool/Int/Float/Uuid) and the result must convert back to
+// a native value; otherwise the program falls back to the whole-program
+// restart, which stays sound because these functions are effect-free.
 bool native_vm_callable_pure_selector(const std::string &selector) {
   // Every selector here must be observably effect-free: it may allocate and
   // read locally but must not mutate state shared with the native lane or
@@ -1539,58 +1548,170 @@ bool native_vm_callable_pure_selector(const std::string &selector) {
   // mutating `!`-suffixed verbs are deliberately excluded.
   static const std::set<std::string> pure = {
       // numeric / comparison / bitwise (Int and Float share selectors)
-      "+", "-", "*", "/", "%", "//", "<", ">", "<=", ">=", "==", "!=",
-      "<=>", "&", "|", "^", "<<", ">>", "**", "u+", "u-", "abs",
+      "+",
+      "-",
+      "*",
+      "/",
+      "%",
+      "//",
+      "<",
+      ">",
+      "<=",
+      ">=",
+      "==",
+      "!=",
+      "<=>",
+      "&",
+      "|",
+      "^",
+      "<<",
+      ">>",
+      "**",
+      "u+",
+      "u-",
+      "abs",
       // conversions and formatting (allocate locally, no effects)
-      "to_str", "to_int", "to_float", "inspect", "cast", "cast?", "to_type",
+      "to_str",
+      "to_int",
+      "to_float",
+      "inspect",
+      "cast",
+      "cast?",
+      "to_type",
       // local collection/string reads
-      "[]", "[]=", "[]?", "count", "length", "size", "first", "empty?",
-      "has_index?", "include?", "includes?", "contains?", "member?",
-      "keys", "values", "entries", "to_a", "to_array", "deconstruct",
+      "[]",
+      "[]=",
+      "[]?",
+      "count",
+      "length",
+      "size",
+      "first",
+      "empty?",
+      "has_index?",
+      "include?",
+      "includes?",
+      "contains?",
+      "member?",
+      "keys",
+      "values",
+      "entries",
+      "to_a",
+      "to_array",
+      "deconstruct",
       "deconstruct_keys",
       // pure (copy-edit) collection verbs: each returns a new value and never
       // mutates the receiver (vm.cpp RFC §7.1 + the sequence "extra" verbs).
-      "reverse", "reversed", "sort", "sorted", "uniq", "concat", "compact",
-      "appended", "inserted", "deleted", "added", "init", "tail",
-      "take", "drop", "with", "without", "slice", "join",
-      "min", "max", "minmax",
+      "reverse",
+      "reversed",
+      "sort",
+      "sorted",
+      "uniq",
+      "concat",
+      "compact",
+      "appended",
+      "inserted",
+      "deleted",
+      "added",
+      "init",
+      "tail",
+      "take",
+      "drop",
+      "with",
+      "without",
+      "slice",
+      "join",
+      "min",
+      "max",
+      "minmax",
       // pure Map copy verbs (each returns a new map; the `!` forms mutate).
-      "except", "merge", "invert",
+      "except",
+      "merge",
+      "invert",
       // pure Set algebra (each returns a new set; predicates return Bool).
-      "union", "intersection", "difference", "symmetric_difference",
-      "subset?", "superset?", "proper_subset?", "proper_superset?",
+      "union",
+      "intersection",
+      "difference",
+      "symmetric_difference",
+      "subset?",
+      "superset?",
+      "proper_subset?",
+      "proper_superset?",
       "disjoint?",
       // pure higher-order enumerables: each consumes a block but never mutates
       // the receiver (the in-place forms are the `!` mutators). Admitting them
       // is only useful together with MakeClosure/block-send support below, and
       // is sound only because the block body is itself proven bridge-pure.
-      "map", "flat_map", "select", "filter", "reject", "find", "detect",
-      "find_index", "each", "each_pair", "each_cons", "reduce", "fold",
-      "inject", "group", "take_while", "drop_while", "any?", "all?", "none?",
-      "transform_keys", "transform_values", "partition", "count_by",
+      "map",
+      "flat_map",
+      "select",
+      "filter",
+      "reject",
+      "find",
+      "detect",
+      "find_index",
+      "each",
+      "each_pair",
+      "each_cons",
+      "reduce",
+      "fold",
+      "inject",
+      "group",
+      "take_while",
+      "drop_while",
+      "any?",
+      "all?",
+      "none?",
+      "transform_keys",
+      "transform_values",
+      "partition",
+      "count_by",
       // pure Math-prelude / numeric methods. `Math` resolves to a built-in
       // value independent of module init, so it is reachable in the embedded
       // bridge world, and these run the same libm as every other lane (so the
       // result is bit-identical). `log` is intentionally EXCLUDED: it is
       // overloaded as the effectful `io.Logger#log`; likewise we never admit
       // info/warn/error/debug/write/puts/print.
-      "sqrt", "cbrt", "pow", "exp", "hypot", "floor", "ceil", "round", "trunc",
-      "sign", "sin", "cos", "tan", "asin", "acos", "atan", "log2", "log10",
+      "sqrt",
+      "cbrt",
+      "pow",
+      "exp",
+      "hypot",
+      "floor",
+      "ceil",
+      "round",
+      "trunc",
+      "sign",
+      "sin",
+      "cos",
+      "tan",
+      "asin",
+      "acos",
+      "atan",
+      "log2",
+      "log10",
       // pure string transforms (Str is immutable; these allocate new strings)
-      "upcase", "downcase", "trim", "strip", "split", "replace",
-      "starts_with?", "ends_with?", "chars",
+      "upcase",
+      "downcase",
+      "trim",
+      "strip",
+      "split",
+      "replace",
+      "starts_with?",
+      "ends_with?",
+      "chars",
   };
   return pure.find(selector) != pure.end();
 }
 
 // In-place (`!`-suffixed) collection mutators are *also* bridge-eligible, even
 // though they are not pure. Soundness here does not come from purity but from
-// reachability: a vm-callable function takes only scalar arguments (runtime
-// gate) and has no captures, upvalues, ivars/cvars, closures, or `Call`s
-// (static gates), so every heap value it touches is one it constructed itself
-// inside the embedded fallback world. Mutating such a value is invisible to
-// the native lane (separate heaps, no aliasing) and is discarded after the
-// call, and the function still emits no observable output before it can bail.
+// reachability: a vm-callable function takes only immutable copied arguments
+// (runtime gate) and has no captures, upvalues, ivars/cvars, closures, or
+// `Call`s (static gates), so every mutable heap value it touches is one it
+// constructed itself inside the embedded fallback world. Mutating such a value
+// is invisible to the native lane (separate heaps, no aliasing) and is
+// discarded after the call, and the function still emits no observable output
+// before it can bail.
 // Re-running the whole program on bailout therefore stays byte-identical.
 // The block-taking mutators (`delete_if!`, `select!`, `map!`, `transform_*!`,
 // …) are admitted too: a block-bearing send is now allowed when its block body
@@ -1601,17 +1722,37 @@ bool native_vm_callable_pure_selector(const std::string &selector) {
 bool native_vm_callable_local_mutator_selector(const std::string &selector) {
   static const std::set<std::string> mutators = {
       // Array (vm.cpp RFC §8.1)
-      "push!", "append!", "unshift!", "prepend!", "insert!", "pop!", "shift!",
-      "delete_at!", "delete!", "sort!", "uniq!", "reverse!", "clear!",
+      "push!",
+      "append!",
+      "unshift!",
+      "prepend!",
+      "insert!",
+      "pop!",
+      "shift!",
+      "delete_at!",
+      "delete!",
+      "sort!",
+      "uniq!",
+      "reverse!",
+      "clear!",
       "replace!",
       // Map (vm.cpp RFC §8.2)
-      "store!", "merge!", "update!", "compact!",
+      "store!",
+      "merge!",
+      "update!",
+      "compact!",
       // Set (vm.cpp RFC §8.3)
-      "add!", "subtract!",
+      "add!",
+      "subtract!",
       // Block-taking in-place mutators (sound once the block body is proven
       // bridge-pure): shared by Array/Map/Set.
-      "delete_if!", "keep_if!", "select!", "reject!", "map!",
-      "transform_keys!", "transform_values!",
+      "delete_if!",
+      "keep_if!",
+      "select!",
+      "reject!",
+      "map!",
+      "transform_keys!",
+      "transform_values!",
   };
   return mutators.find(selector) != mutators.end();
 }
@@ -1667,9 +1808,8 @@ bool native_vm_callable_code_body(const amber::bytecode::BcModule &module,
         return false;
       }
       const amber::bytecode::BcCode *block = native_code_by_id(module, code_id);
-      if (block == nullptr ||
-          !native_vm_callable_code_body(module, *block, true, visiting,
-                                        reason)) {
+      if (block == nullptr || !native_vm_callable_code_body(
+                                  module, *block, true, visiting, reason)) {
         if (block == nullptr) {
           *reason = "block body is not in the module";
         }
@@ -1703,8 +1843,7 @@ bool native_vm_callable_code_body(const amber::bytecode::BcModule &module,
       const std::string &selector = module.symbols[symbol_id];
       if (!native_vm_callable_pure_selector(selector) &&
           !native_vm_callable_local_mutator_selector(selector)) {
-        *reason = "selector `" + selector +
-                  "` is not in the bridge allow-list";
+        *reason = "selector `" + selector + "` is not in the bridge allow-list";
         return false;
       }
       // Keyword arguments still bail, but a trailing block operand is now
@@ -1850,7 +1989,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t const_id = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &const_id);
-      write_reg_stmt(dst, native_cpp_constant_expr(module.const_pool[const_id]));
+      write_reg_stmt(dst,
+                     native_cpp_constant_expr(module.const_pool[const_id]));
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
@@ -1866,9 +2006,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t value = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &value);
-      write_reg_stmt(
-          dst, std::string("NativeValue::boolean(") +
-                   (value != 0U ? "true" : "false") + ")");
+      write_reg_stmt(dst, std::string("NativeValue::boolean(") +
+                              (value != 0U ? "true" : "false") + ")");
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
@@ -1957,6 +2096,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::hex_module()";
           } else if (name == "SecureRandom") {
             native_module_expr = "NativeValue::secure_random_module()";
+          } else if (name == "Uuid" || name == "UUID") {
+            native_module_expr = "NativeValue::uuid_module()";
           } else if (name == "Range") {
             native_module_expr = "NativeValue::range_module()";
           } else if (name == "Time") {
@@ -2016,7 +2157,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 2, &capture_count);
       bool self_capture = false;
       std::size_t operand_index = 3U;
-      for (std::uint32_t capture_i = 0; capture_i < capture_count; ++capture_i) {
+      for (std::uint32_t capture_i = 0; capture_i < capture_count;
+           ++capture_i) {
         std::uint32_t kind = 0;
         std::uint32_t slot = 0;
         operand_u32_value(instruction, operand_index++, &kind);
@@ -2038,7 +2180,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         }
       }
       operand_index = 3U;
-      for (std::uint32_t capture_i = 0; capture_i < capture_count; ++capture_i) {
+      for (std::uint32_t capture_i = 0; capture_i < capture_count;
+           ++capture_i) {
         std::uint32_t kind = 0;
         std::uint32_t slot = 0;
         operand_u32_value(instruction, operand_index++, &kind);
@@ -2068,8 +2211,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 1, &callee);
       operand_u32_value(instruction, 2, &pos_count);
       std::ostringstream expr;
-      expr << "amber_native_call_closure(" << read_reg_expr(callee)
-           << ", {";
+      expr << "amber_native_call_closure(" << read_reg_expr(callee) << ", {";
       for (std::uint32_t index = 0; index < pos_count; ++index) {
         std::uint32_t arg_reg = 0;
         operand_u32_value(instruction, 3U + index, &arg_reg);
@@ -2177,16 +2319,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
       } else if (selector == "<<") {
-        out << "  if (as_int(" << read_reg_expr(arg)
-            << ") < 0 || as_int(" << read_reg_expr(arg)
-            << ") >= 64) throw NativeBailout();\n";
+        out << "  if (as_int(" << read_reg_expr(arg) << ") < 0 || as_int("
+            << read_reg_expr(arg) << ") >= 64) throw NativeBailout();\n";
         write_reg_stmt(dst, "NativeValue::integer(checked_shl_int64(as_int(" +
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
       } else if (selector == ">>") {
-        out << "  if (as_int(" << read_reg_expr(arg)
-            << ") < 0 || as_int(" << read_reg_expr(arg)
-            << ") >= 64) throw NativeBailout();\n";
+        out << "  if (as_int(" << read_reg_expr(arg) << ") < 0 || as_int("
+            << read_reg_expr(arg) << ") >= 64) throw NativeBailout();\n";
         write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
@@ -2200,7 +2340,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "count") {
         write_reg_stmt(dst, "native_count(" + read_reg_expr(recv) + ")");
       } else if (selector == "length" || selector == "size") {
-        write_reg_stmt(dst, "native_string_length(" + read_reg_expr(recv) + ")");
+        write_reg_stmt(dst,
+                       "native_string_length(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
         write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ")");
       } else if (selector == "contains?" || selector == "includes?") {
@@ -2211,6 +2352,17 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "to_str") {
         write_reg_stmt(dst, "native_to_str(" + read_reg_expr(recv) + ")");
+      } else if (selector == "version") {
+        write_reg_stmt(dst, "native_uuid_nullary(" + read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
+      } else if (selector == "v4") {
+        write_reg_stmt(dst, "native_uuid_v4(" + read_reg_expr(recv) + ")");
+      } else if (selector == "v7") {
+        write_reg_stmt(dst, "native_uuid_v7(" + read_reg_expr(recv) + ")");
+      } else if (selector == "===") {
+        write_reg_stmt(dst, "native_type_matches(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "to_json") {
         write_reg_stmt(dst, "native_json_generate_value(" +
                                 read_reg_expr(recv) + ", false)");
@@ -2257,78 +2409,66 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
           if (kw_count >= 3U) {
             operand_u32_value(instruction, kw_index + 5U, &kw_symbol_id3);
             operand_u32_value(instruction, kw_index + 6U, &kw_value_reg3);
-            apply_time_kw(kw_name(kw_symbol_id3),
-                          read_reg_expr(kw_value_reg3));
+            apply_time_kw(kw_name(kw_symbol_id3), read_reg_expr(kw_value_reg3));
           }
           if (kw_count >= 4U) {
             operand_u32_value(instruction, kw_index + 7U, &kw_symbol_id4);
             operand_u32_value(instruction, kw_index + 8U, &kw_value_reg4);
-            apply_time_kw(kw_name(kw_symbol_id4),
-                          read_reg_expr(kw_value_reg4));
+            apply_time_kw(kw_name(kw_symbol_id4), read_reg_expr(kw_value_reg4));
           }
         }
-        write_reg_stmt(dst, "native_time_utc(" + read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ", " +
-                                read_reg_expr(arg2) + ", " +
-                                read_reg_expr(arg3) + ", " +
-                                hour_expr + ", " +
-                                (has_hour ? "true" : "false") + ", " +
-                                minute_expr + ", " +
-                                (has_minute ? "true" : "false") + ", " +
-                                second_expr + ", " +
-                                (has_second ? "true" : "false") + ", " +
-                                nanosecond_expr + ", " +
-                                (has_nanosecond ? "true" : "false") + ")");
+        write_reg_stmt(
+            dst, "native_time_utc(" + read_reg_expr(recv) + ", " +
+                     read_reg_expr(arg) + ", " + read_reg_expr(arg2) + ", " +
+                     read_reg_expr(arg3) + ", " + hour_expr + ", " +
+                     (has_hour ? "true" : "false") + ", " + minute_expr + ", " +
+                     (has_minute ? "true" : "false") + ", " + second_expr +
+                     ", " + (has_second ? "true" : "false") + ", " +
+                     nanosecond_expr + ", " +
+                     (has_nanosecond ? "true" : "false") + ")");
       } else if (selector == "from_unix_ms") {
-        write_reg_stmt(dst, "native_time_from_unix_ms(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
-      } else if (selector == "from_unix_ns") {
-        write_reg_stmt(dst, "native_time_from_unix_ns(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
-      } else if (selector == "parse") {
-        write_reg_stmt(dst, "native_parse_value(" + read_reg_expr(recv) +
+        write_reg_stmt(dst, "native_time_from_unix_ms(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "from_unix_ns") {
+        write_reg_stmt(dst, "native_time_from_unix_ns(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "parse") {
+        write_reg_stmt(dst, "native_parse_value(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "pretty_generate") {
-        write_reg_stmt(dst, "native_json_generate_value(" +
-                                read_reg_expr(arg) + ", true)");
+        write_reg_stmt(dst, "native_json_generate_value(" + read_reg_expr(arg) +
+                                ", true)");
       } else if (selector == "stream_parse_file") {
         if (block_reg < 0) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "native_json_stream_parse_file(" +
-                                  read_reg_expr(arg) + ", " +
-                                  read_reg_expr(kw_value_reg) + ", " +
-                                  read_reg_expr(static_cast<std::uint32_t>(
-                                      block_reg)) +
-                                  ")");
+          write_reg_stmt(
+              dst, "native_json_stream_parse_file(" + read_reg_expr(arg) +
+                       ", " + read_reg_expr(kw_value_reg) + ", " +
+                       read_reg_expr(static_cast<std::uint32_t>(block_reg)) +
+                       ")");
         }
       } else if (selector == "bytes") {
         write_reg_stmt(dst, "native_secure_random_bytes_value(" +
                                 read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
       } else if (selector == "base64") {
-        write_reg_stmt(dst, "native_secure_random_base64(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ", " +
-                                (kw_count == 1U ? read_reg_expr(kw_value_reg)
-                                                : "NativeValue::nullv()") +
-                                ", " +
-                                (kw_count == 1U ? "true" : "false") +
-                                ", false)");
+        write_reg_stmt(
+            dst, "native_secure_random_base64(" + read_reg_expr(recv) + ", " +
+                     read_reg_expr(arg) + ", " +
+                     (kw_count == 1U ? read_reg_expr(kw_value_reg)
+                                     : "NativeValue::nullv()") +
+                     ", " + (kw_count == 1U ? "true" : "false") + ", false)");
       } else if (selector == "base64url") {
-        write_reg_stmt(dst, "native_secure_random_base64(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ", " +
-                                (kw_count == 1U ? read_reg_expr(kw_value_reg)
-                                                : "NativeValue::nullv()") +
-                                ", " +
-                                (kw_count == 1U ? "true" : "false") +
-                                ", true)");
+        write_reg_stmt(
+            dst, "native_secure_random_base64(" + read_reg_expr(recv) + ", " +
+                     read_reg_expr(arg) + ", " +
+                     (kw_count == 1U ? read_reg_expr(kw_value_reg)
+                                     : "NativeValue::nullv()") +
+                     ", " + (kw_count == 1U ? "true" : "false") + ", true)");
       } else if (selector == "uuid") {
-        write_reg_stmt(dst, "native_secure_random_uuid(" +
-                                read_reg_expr(recv) + ")");
+        write_reg_stmt(dst, "native_secure_random_uuid(" + read_reg_expr(recv) +
+                                ")");
       } else if (selector == "new") {
         if (pos_count == 1U) {
           write_reg_stmt(dst, "native_bytes_new(" + read_reg_expr(arg) + ")");
@@ -2337,8 +2477,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             return symbol_id < module.symbols.size() ? module.symbols[symbol_id]
                                                      : std::string{};
           };
-          const bool first_inclusive = kw_count >= 1U &&
-                                       kw_name(kw_symbol_id) == "inclusive_end";
+          const bool first_inclusive =
+              kw_count >= 1U && kw_name(kw_symbol_id) == "inclusive_end";
           const bool first_step =
               kw_count >= 1U && kw_name(kw_symbol_id) == "step";
           const bool second_inclusive =
@@ -2346,39 +2486,36 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
           const bool second_step =
               kw_count >= 2U && kw_name(kw_symbol_id2) == "step";
           const std::string inclusive_expr =
-              first_inclusive
-                  ? read_reg_expr(kw_value_reg)
-                  : (second_inclusive ? read_reg_expr(kw_value_reg2)
-                                      : "NativeValue::nullv()");
+              first_inclusive ? read_reg_expr(kw_value_reg)
+                              : (second_inclusive ? read_reg_expr(kw_value_reg2)
+                                                  : "NativeValue::nullv()");
           const std::string step_expr =
               first_step ? read_reg_expr(kw_value_reg)
                          : (second_step ? read_reg_expr(kw_value_reg2)
                                         : "NativeValue::nullv()");
-          write_reg_stmt(dst, "native_range_new(" + read_reg_expr(recv) +
-                                  ", " + read_reg_expr(arg) + ", " +
-                                  read_reg_expr(arg2) + ", " +
-                                  inclusive_expr + ", " +
-                                  (first_inclusive || second_inclusive ? "true"
-                                                                       : "false") +
-                                  ", " + step_expr + ", " +
-                                  (first_step || second_step ? "true"
-                                                             : "false") +
-                                  ")");
+          write_reg_stmt(
+              dst,
+              "native_range_new(" + read_reg_expr(recv) + ", " +
+                  read_reg_expr(arg) + ", " + read_reg_expr(arg2) + ", " +
+                  inclusive_expr + ", " +
+                  (first_inclusive || second_inclusive ? "true" : "false") +
+                  ", " + step_expr + ", " +
+                  (first_step || second_step ? "true" : "false") + ")");
         }
       } else if (selector == "encode") {
         write_reg_stmt(dst, "native_codec_encode(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ", " +
                                 (kw_count == 1U ? read_reg_expr(kw_value_reg)
                                                 : "NativeValue::nullv()") +
-                                ", " +
-                                (kw_count == 1U ? "true" : "false") + ")");
+                                ", " + (kw_count == 1U ? "true" : "false") +
+                                ")");
       } else if (selector == "decode") {
         write_reg_stmt(dst, "native_codec_decode(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ", " +
                                 (kw_count == 1U ? read_reg_expr(kw_value_reg)
                                                 : "NativeValue::nullv()") +
-                                ", " +
-                                (kw_count == 1U ? "true" : "false") + ")");
+                                ", " + (kw_count == 1U ? "true" : "false") +
+                                ")");
       } else if (selector == "hex") {
         if (pos_count == 0U) {
           write_reg_stmt(dst, "native_bytes_hex(" + read_reg_expr(recv) + ")");
@@ -2388,9 +2525,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                   read_reg_expr(arg) + ")");
         }
       } else if (selector == "int") {
-        write_reg_stmt(dst, "native_secure_random_int(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_secure_random_int(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (native_cpp_time_nullary_selector(selector)) {
         write_reg_stmt(dst, "native_time_nullary(" + read_reg_expr(recv) +
                                 ", native_hex_to_string(\"" +
@@ -2469,16 +2605,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 read_reg_expr(lhs) + "), as_int(" +
                                 read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::IShl) {
-        out << "  if (as_int(" << read_reg_expr(rhs)
-            << ") < 0 || as_int(" << read_reg_expr(rhs)
-            << ") >= 64) throw NativeBailout();\n";
+        out << "  if (as_int(" << read_reg_expr(rhs) << ") < 0 || as_int("
+            << read_reg_expr(rhs) << ") >= 64) throw NativeBailout();\n";
         write_reg_stmt(dst, "NativeValue::integer(checked_shl_int64(as_int(" +
                                 read_reg_expr(lhs) + "), as_int(" +
                                 read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::IShr) {
-        out << "  if (as_int(" << read_reg_expr(rhs)
-            << ") < 0 || as_int(" << read_reg_expr(rhs)
-            << ") >= 64) throw NativeBailout();\n";
+        out << "  if (as_int(" << read_reg_expr(rhs) << ") < 0 || as_int("
+            << read_reg_expr(rhs) << ") >= 64) throw NativeBailout();\n";
         write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
                                 read_reg_expr(lhs) + "), as_int(" +
                                 read_reg_expr(rhs) + ")))");
@@ -2518,37 +2652,57 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 2, &const_id);
       const std::int64_t rhs = module.const_pool[const_id].int_value;
       if (instruction.opcode == Opcode::IAddK) {
-        write_reg_stmt(dst, "numeric_add(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_add(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::ISubK) {
-        write_reg_stmt(dst, "numeric_sub(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_sub(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IMulK) {
-        write_reg_stmt(dst, "numeric_mul(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_mul(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IDivK) {
         if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst,
-                         "numeric_div(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+          write_reg_stmt(dst, "numeric_div(" + read_reg_expr(lhs) +
+                                  ", NativeValue::integer(" +
+                                  cpp_decimal_i64(rhs) + "))");
         }
       } else if (instruction.opcode == Opcode::IModK) {
         if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst,
-                         "numeric_mod(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+          write_reg_stmt(dst, "numeric_mod(" + read_reg_expr(lhs) +
+                                  ", NativeValue::integer(" +
+                                  cpp_decimal_i64(rhs) + "))");
         }
       } else if (instruction.opcode == Opcode::IFloorDivK) {
-        write_reg_stmt(dst, "numeric_floor_div(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_floor_div(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::ILeK) {
-        write_reg_stmt(dst, "numeric_le(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_le(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IGeK) {
-        write_reg_stmt(dst, "numeric_ge(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_ge(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IEqK) {
-        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "), false)");
+        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "), false)");
       } else if (instruction.opcode == Opcode::INeK) {
-        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "), true)");
+        write_reg_stmt(dst, "numeric_eq(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "), true)");
       } else if (instruction.opcode == Opcode::ICmpK) {
-        write_reg_stmt(dst, "numeric_cmp(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_cmp(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       } else if (instruction.opcode == Opcode::IBitAndK) {
         write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
                                 read_reg_expr(lhs) + "), " +
@@ -2565,10 +2719,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         if (rhs < 0 || rhs >= 64) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst,
-                         "NativeValue::integer(checked_shl_int64(as_int(" +
-                             read_reg_expr(lhs) + "), " + cpp_decimal_i64(rhs) +
-                             "))");
+          write_reg_stmt(dst, "NativeValue::integer(checked_shl_int64(as_int(" +
+                                  read_reg_expr(lhs) + "), " +
+                                  cpp_decimal_i64(rhs) + "))");
         }
       } else if (instruction.opcode == Opcode::IShrK) {
         if (rhs < 0 || rhs >= 64) {
@@ -2579,9 +2732,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                   cpp_decimal_i64(rhs) + "))");
         }
       } else if (instruction.opcode == Opcode::ILtK) {
-        write_reg_stmt(dst, "numeric_lt(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_lt(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       } else {
-        write_reg_stmt(dst, "numeric_gt(" + read_reg_expr(lhs) + ", NativeValue::integer(" + cpp_decimal_i64(rhs) + "))");
+        write_reg_stmt(dst, "numeric_gt(" + read_reg_expr(lhs) +
+                                ", NativeValue::integer(" +
+                                cpp_decimal_i64(rhs) + "))");
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
@@ -2603,8 +2760,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         out << "  if (truthy(" << read_reg_expr(cond) << ")) goto pc_" << target
             << ";\n";
       } else if (instruction.opcode == Opcode::JumpIfFalse) {
-        out << "  if (!truthy(" << read_reg_expr(cond) << ")) goto pc_" << target
-            << ";\n";
+        out << "  if (!truthy(" << read_reg_expr(cond) << ")) goto pc_"
+            << target << ";\n";
       } else {
         out << "  if (" << read_reg_expr(cond)
             << ".tag == NativeValue::Tag::Null) "
@@ -2835,8 +2992,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   };
   const bool init_native =
       artifact.entry_mode == EntryExecutionMode::MainOnly ||
-      !module.init.has_entry_code_id ||
-      direct_entry_native(init_code_id);
+      !module.init.has_entry_code_id || direct_entry_native(init_code_id);
   const bool main_native =
       (artifact.entry_mode != EntryExecutionMode::MainAfterInit &&
        artifact.entry_mode != EntryExecutionMode::MainOnly) ||
@@ -2845,14 +3001,16 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   if (!plan.entry_native && first_reason.empty()) {
     const bool init_requires_captures =
         artifact.entry_mode != EntryExecutionMode::MainOnly &&
-        module.init.has_entry_code_id && direct_entry_has_captures(init_code_id);
+        module.init.has_entry_code_id &&
+        direct_entry_has_captures(init_code_id);
     const bool main_requires_captures =
         (artifact.entry_mode == EntryExecutionMode::MainAfterInit ||
          artifact.entry_mode == EntryExecutionMode::MainOnly) &&
         has_main && direct_entry_has_captures(main_code_id);
-    first_reason = init_requires_captures || main_requires_captures
-                       ? "direct entry with captures requires VM materialization"
-                       : "entry code is not native eligible";
+    first_reason =
+        init_requires_captures || main_requires_captures
+            ? "direct entry with captures requires VM materialization"
+            : "entry code is not native eligible";
   }
   plan.fallback_reason = first_reason;
 
@@ -2860,6 +3018,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include \"bytecode/format.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
   out << "#include <array>\n";
+  out << "#include <chrono>\n";
   out << "#include <cerrno>\n";
   out << "#include <cctype>\n";
   out << "#include <cmath>\n";
@@ -2899,13 +3058,15 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeRange;\n";
   out << "using NativeTime = amber::runtime::RuntimeTimeValue;\n";
   out << "using NativeTimePeriod = amber::runtime::RuntimeTimePeriodValue;\n";
+  out << "using NativeUuid = amber::runtime::RuntimeUuidValue;\n";
   out << "struct NativeClosure;\n";
   out << "struct NativeCell;\n\n";
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
          "JsonModule, BytesModule, Base64Module, Base64UrlModule, HexModule, "
-         "SecureRandomModule, RangeModule, TimeModule, TimePeriodModule, Bytes, "
-         "List, Map, Range, Time, TimePeriod, Closure };\n";
+         "SecureRandomModule, UuidModule, RangeModule, TimeModule, "
+         "TimePeriodModule, Bytes, List, Map, Range, Uuid, Time, TimePeriod, "
+         "Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
@@ -2939,6 +3100,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue secure_random_module() { NativeValue out; "
          "out.tag = Tag::SecureRandomModule; out.scalar_value = 0; return "
          "out; }\n";
+  out << "  static NativeValue uuid_module() { NativeValue out; out.tag = "
+         "Tag::UuidModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue range_module() { NativeValue out; out.tag = "
          "Tag::RangeModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue time_module() { NativeValue out; out.tag = "
@@ -2951,6 +3114,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue map(std::vector<std::pair<std::string, "
          "NativeValue>> entries);\n";
   out << "  static NativeValue range(NativeRange value);\n";
+  out << "  static NativeValue uuid(amber::runtime::RuntimeUuidValue value);\n";
   out << "  static NativeValue time(amber::runtime::RuntimeTimeValue value);\n";
   out << "  static NativeValue time_period("
          "amber::runtime::RuntimeTimePeriodValue value);\n";
@@ -2977,6 +3141,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
   out << "  std::vector<std::unique_ptr<NativeMap>> maps;\n";
   out << "  std::vector<std::unique_ptr<NativeRange>> ranges;\n";
+  out << "  std::vector<std::unique_ptr<NativeUuid>> uuids;\n";
   out << "  std::vector<std::unique_ptr<NativeTime>> times;\n";
   out << "  std::vector<std::unique_ptr<NativeTimePeriod>> periods;\n";
   out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
@@ -3007,6 +3172,13 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  auto range = std::make_unique<NativeRange>(value);\n";
   out << "  out.heap_value = range.get();\n";
   out << "  native_arena.ranges.push_back(std::move(range)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::uuid(amber::runtime::RuntimeUuidValue "
+         "value) {\n";
+  out << "  NativeValue out; out.tag = Tag::Uuid;\n";
+  out << "  auto uuid = std::make_unique<NativeUuid>(value);\n";
+  out << "  out.heap_value = uuid.get();\n";
+  out << "  native_arena.uuids.push_back(std::move(uuid)); return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::time(amber::runtime::RuntimeTimeValue "
          "value) {\n";
@@ -3084,7 +3256,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n";
   out << "static NativeValue read_capture(const NativeFrame &frame, "
          "std::uint32_t slot) { return capture_cell(frame, slot)->value; }\n";
-  out << "static void write_capture(const NativeFrame &frame, std::uint32_t slot, "
+  out << "static void write_capture(const NativeFrame &frame, std::uint32_t "
+         "slot, "
          "NativeValue value) { capture_cell(frame, slot)->value = "
          "std::move(value); }\n\n";
   out << "static std::int64_t as_int(const NativeValue &value) {\n";
@@ -3116,6 +3289,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (value.tag != NativeValue::Tag::Range || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeRange *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static const NativeUuid &as_uuid(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Uuid || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeUuid *>(value.heap_value);\n";
   out << "}\n";
   out << "static const NativeTime &as_time(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Time || "
@@ -3307,8 +3485,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  }\n";
   out << "  return count;\n";
   out << "}\n\n";
-  out << "static NativeValue native_string_length(const NativeValue &value) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "static NativeValue native_string_length(const NativeValue &value) "
+         "{\n";
+  out << "  if (value.tag != NativeValue::Tag::String) throw "
+         "NativeBailout();\n";
   out << "  return NativeValue::integer(native_string_codepoint_count("
          "native_string_text(value)));\n";
   out << "}\n\n";
@@ -3615,24 +3795,122 @@ static NativeValue native_secure_random_base64(const NativeValue &module,
       url, padding)));
 }
 
+static NativeValue native_uuid_v4(const NativeValue &module) {
+  if (module.tag != NativeValue::Tag::UuidModule &&
+      module.tag != NativeValue::Tag::SecureRandomModule) {
+    throw NativeBailout();
+  }
+  const std::string random = native_secure_random_bytes_raw(16U);
+  NativeUuid uuid;
+  for (std::size_t i = 0; i < uuid.bytes.size(); ++i) {
+    uuid.bytes[i] =
+        static_cast<std::uint8_t>(static_cast<unsigned char>(random[i]));
+  }
+  uuid.bytes[6] =
+      static_cast<std::uint8_t>((uuid.bytes[6] & 0x0FU) | 0x40U);
+  uuid.bytes[8] =
+      static_cast<std::uint8_t>((uuid.bytes[8] & 0x3FU) | 0x80U);
+  return NativeValue::uuid(uuid);
+}
+
+static NativeValue native_uuid_v7(const NativeValue &module) {
+  if (module.tag != NativeValue::Tag::UuidModule) throw NativeBailout();
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
+  const auto millis =
+      std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+  if (millis < 0 ||
+      static_cast<std::uint64_t>(millis) > ((1ULL << 48U) - 1U)) {
+    throw NativeBailout();
+  }
+  const std::string random = native_secure_random_bytes_raw(10U);
+  NativeUuid uuid;
+  const std::uint64_t timestamp = static_cast<std::uint64_t>(millis);
+  for (std::size_t i = 0; i < 6U; ++i) {
+    uuid.bytes[i] =
+        static_cast<std::uint8_t>(timestamp >> ((5U - i) * 8U));
+  }
+  for (std::size_t i = 0; i < random.size(); ++i) {
+    uuid.bytes[6U + i] =
+        static_cast<std::uint8_t>(static_cast<unsigned char>(random[i]));
+  }
+  uuid.bytes[6] =
+      static_cast<std::uint8_t>((uuid.bytes[6] & 0x0FU) | 0x70U);
+  uuid.bytes[8] =
+      static_cast<std::uint8_t>((uuid.bytes[8] & 0x3FU) | 0x80U);
+  return NativeValue::uuid(uuid);
+}
+
+static NativeValue native_uuid_parse(const NativeValue &module,
+                                     const NativeValue &text_value) {
+  if (module.tag != NativeValue::Tag::UuidModule ||
+      text_value.tag != NativeValue::Tag::String) {
+    throw NativeBailout();
+  }
+  const std::string &text = native_string_text(text_value);
+  if (text.size() != 36U || text[8] != '-' || text[13] != '-' ||
+      text[18] != '-' || text[23] != '-') {
+    throw NativeBailout();
+  }
+  NativeUuid uuid;
+  std::size_t byte_index = 0;
+  for (std::size_t i = 0; i < text.size();) {
+    if (text[i] == '-') {
+      ++i;
+      continue;
+    }
+    if (i + 1U >= text.size() || byte_index >= uuid.bytes.size()) {
+      throw NativeBailout();
+    }
+    const int high = native_hex_value(text[i]);
+    const int low = native_hex_value(text[i + 1U]);
+    if (high < 0 || low < 0) throw NativeBailout();
+    uuid.bytes[byte_index++] =
+        static_cast<std::uint8_t>((high << 4U) | low);
+    i += 2U;
+  }
+  if (byte_index != uuid.bytes.size()) throw NativeBailout();
+  return NativeValue::uuid(uuid);
+}
+
+static NativeValue native_uuid_nullary(const NativeValue &receiver,
+                                       const std::string &selector) {
+  const NativeUuid &uuid = as_uuid(receiver);
+  if (selector == "to_str" || selector == "inspect") {
+    return NativeValue::string_ref(native_intern_string(
+        amber::runtime::runtime_uuid_to_string(uuid)));
+  }
+  if (selector == "version") {
+    return NativeValue::integer((uuid.bytes[6] >> 4U) & 0x0FU);
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_type_matches(const NativeValue &module,
+                                       const NativeValue &value) {
+  bool matched = false;
+  if (module.tag == NativeValue::Tag::UuidModule) {
+    matched = value.tag == NativeValue::Tag::Uuid ||
+              value.tag == NativeValue::Tag::UuidModule;
+  } else if (module.tag == NativeValue::Tag::TimeModule) {
+    matched = value.tag == NativeValue::Tag::Time ||
+              value.tag == NativeValue::Tag::TimeModule;
+  } else if (module.tag == NativeValue::Tag::TimePeriodModule) {
+    matched = value.tag == NativeValue::Tag::TimePeriod ||
+              value.tag == NativeValue::Tag::TimePeriodModule;
+  } else if (module.tag == NativeValue::Tag::BytesModule) {
+    matched = value.tag == NativeValue::Tag::Bytes ||
+              value.tag == NativeValue::Tag::BytesModule;
+  } else if (module.tag == NativeValue::Tag::RangeModule) {
+    matched = value.tag == NativeValue::Tag::Range ||
+              value.tag == NativeValue::Tag::RangeModule;
+  } else {
+    throw NativeBailout();
+  }
+  return NativeValue::boolean(matched);
+}
+
 static NativeValue native_secure_random_uuid(const NativeValue &module) {
-  if (module.tag != NativeValue::Tag::SecureRandomModule) throw NativeBailout();
-  std::string bytes = native_secure_random_bytes_raw(16U);
-  bytes[6] = static_cast<char>((static_cast<unsigned char>(bytes[6]) & 0x0FU) | 0x40U);
-  bytes[8] = static_cast<char>((static_cast<unsigned char>(bytes[8]) & 0x3FU) | 0x80U);
-  const std::string hex = native_hex_encode_bytes(bytes);
-  std::string out;
-  out.reserve(36U);
-  out.append(hex, 0U, 8U);
-  out.push_back('-');
-  out.append(hex, 8U, 4U);
-  out.push_back('-');
-  out.append(hex, 12U, 4U);
-  out.push_back('-');
-  out.append(hex, 16U, 4U);
-  out.push_back('-');
-  out.append(hex, 20U, 12U);
-  return NativeValue::string_ref(native_intern_string(out));
+  return native_uuid_v4(module);
 }
 
 static std::string native_base64_decode_text(const std::string &text,
@@ -3805,6 +4083,10 @@ static void append_json_value(std::string &out, const NativeValue &value,
   case NativeValue::Tag::Time:
     append_json_escaped(
         out, amber::runtime::runtime_time_to_iso8601(as_time(value)));
+    return;
+  case NativeValue::Tag::Uuid:
+    append_json_escaped(
+        out, amber::runtime::runtime_uuid_to_string(as_uuid(value)));
     return;
   case NativeValue::Tag::List: {
     const auto &items = as_list(value).items;
@@ -4342,6 +4624,9 @@ static NativeValue native_time_parse(const NativeValue &module,
 
 static NativeValue native_parse_value(const NativeValue &module,
                                       const NativeValue &text_value) {
+  if (module.tag == NativeValue::Tag::UuidModule) {
+    return native_uuid_parse(module, text_value);
+  }
   if (module.tag == NativeValue::Tag::TimeModule) {
     return native_time_parse(module, text_value);
   }
@@ -4410,6 +4695,9 @@ static NativeValue native_time_period_unit(const NativeValue &receiver,
 
 static NativeValue native_time_nullary(const NativeValue &receiver,
                                        const std::string &selector) {
+  if (receiver.tag == NativeValue::Tag::Uuid) {
+    return native_uuid_nullary(receiver, selector);
+  }
   if ((receiver.tag == NativeValue::Tag::Integer ||
        receiver.tag == NativeValue::Tag::Float) &&
       (selector == "nanosecond" || selector == "nanoseconds" ||
@@ -4744,6 +5032,11 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "native_time_compare_value(lhs, rhs).scalar_value == 0;\n";
   out << "    return NativeValue::boolean(negate ? !equal : equal);\n";
   out << "  }\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Uuid && "
+         "rhs.tag == NativeValue::Tag::Uuid) {\n";
+  out << "    const bool equal = as_uuid(lhs).bytes == as_uuid(rhs).bytes;\n";
+  out << "    return NativeValue::boolean(negate ? !equal : equal);\n";
+  out << "  }\n";
   out << "  if (lhs.tag == NativeValue::Tag::List || "
          "lhs.tag == NativeValue::Tag::Closure || "
          "lhs.tag == NativeValue::Tag::Map || "
@@ -4809,7 +5102,10 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "std::string(buffer, converted.ptr)));\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Bytes: return "
-         "NativeValue::string_ref(native_intern_string(as_bytes(value).bytes));\n";
+         "NativeValue::string_ref(native_intern_string(as_bytes(value).bytes));"
+         "\n";
+  out << "  case NativeValue::Tag::Uuid:\n";
+  out << "    return native_uuid_nullary(value, \"to_str\");\n";
   out << "  case NativeValue::Tag::Time:\n";
   out << "  case NativeValue::Tag::TimePeriod:\n";
   out << "    return native_time_nullary(value, \"to_str\");\n";
@@ -4850,14 +5146,15 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
         << native_cpp_function_name(code_id) << "(args, current_closure);\n";
   }
   for (std::uint32_t code_id : plan.vm_callable_code_ids) {
-    out << "  case " << code_id
-        << ": return amber_vm_fallback_call(" << code_id << ", args);\n";
+    out << "  case " << code_id << ": return amber_vm_fallback_call(" << code_id
+        << ", args);\n";
   }
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
   out << "}\n\n";
   out << "static NativeValue amber_native_call_closure("
-         "const NativeValue &value, std::initializer_list<NativeValue> args) {\n";
+         "const NativeValue &value, std::initializer_list<NativeValue> args) "
+         "{\n";
   out << "  NativeClosure *closure = as_closure(value);\n";
   out << "  return amber_native_call_code(closure->code_id, args, closure);\n";
   out << "}\n\n";
@@ -4952,12 +5249,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  return 0;\n";
   out << "}\n\n";
   if (!plan.vm_callable_code_ids.empty()) {
-    // Per-function VM fallback: a lazily-created embedded world (module
-    // init NOT run — vm-callable functions cannot reach module state)
-    // executes single code objects across a scalar value bridge. Faults and
-    // non-convertible argument/result values throw NativeBailout, which
-    // remains a sound whole-program restart because vm-callable functions
-    // are effect-free by construction.
+    // Per-function VM fallback: a lazily-created embedded world (module init
+    // NOT run — vm-callable functions cannot reach module state) executes
+    // single code objects across an immutable-value bridge. Faults and
+    // non-convertible argument/result values throw NativeBailout, which remains
+    // a sound whole-program restart because vm-callable functions are
+    // effect-free by construction.
     out << "struct AmberVmFallbackState {\n";
     out << "  amber::bytecode::DecodeResult decoded;\n";
     out << "  std::unique_ptr<amber::runtime::RuntimeWorld> world;\n";
@@ -5002,6 +5299,11 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
     out << "    return NativeValue::string_ref(native_intern_string("
            "vm_strings[string_id]));\n";
     out << "  }\n";
+    out << "  if (value.is_uuid()) {\n";
+    out << "    const auto uuid = value.as_uuid();\n";
+    out << "    if (uuid == nullptr) throw NativeBailout();\n";
+    out << "    return NativeValue::uuid(*uuid);\n";
+    out << "  }\n";
     out << "  if (value.is_list()) {\n";
     out << "    const auto list = value.as_list();\n";
     out << "    if (list == nullptr) throw NativeBailout();\n";
@@ -5032,6 +5334,10 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
     out << "    case NativeValue::Tag::Float: "
            "vm_args.push_back(amber::runtime::Value::floating("
            "arg.float_value)); break;\n";
+    out << "    case NativeValue::Tag::Uuid: "
+           "vm_args.push_back(amber::runtime::Value::uuid("
+           "std::make_shared<amber::runtime::RuntimeUuidValue>("
+           "as_uuid(arg)))); break;\n";
     out << "    default: throw NativeBailout();\n";
     out << "    }\n";
     out << "  }\n";
@@ -5071,12 +5377,15 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::HexModule: return \"Hex\";\n";
   out << "  case NativeValue::Tag::SecureRandomModule: return "
          "\"SecureRandom\";\n";
+  out << "  case NativeValue::Tag::UuidModule: return \"Uuid\";\n";
   out << "  case NativeValue::Tag::RangeModule: return \"Range\";\n";
   out << "  case NativeValue::Tag::TimeModule: return \"Time\";\n";
   out << "  case NativeValue::Tag::TimePeriodModule: return \"TimePeriod\";\n";
   out << "  case NativeValue::Tag::Bytes: return \"<bytes \" + "
          "std::to_string(as_bytes(value).bytes.size()) + \">\";\n";
   out << "  case NativeValue::Tag::Range: return \"<instance Range>\";\n";
+  out << "  case NativeValue::Tag::Uuid: return "
+         "amber::runtime::runtime_uuid_to_string(as_uuid(value));\n";
   out << "  case NativeValue::Tag::Time: return "
          "amber::runtime::runtime_time_to_iso8601(as_time(value));\n";
   out << "  case NativeValue::Tag::TimePeriod: return "
@@ -5192,15 +5501,25 @@ std::string shell_command(const std::vector<std::string> &parts) {
 std::vector<std::string>
 native_runtime_sources(const std::filesystem::path &root) {
   const std::vector<std::string> relative = {
-      "bytecode/format.cpp",      "frontend/lexer/token.cpp",
-      "profile/capabilities.cpp", "profile/effects.cpp",
-      "profile/replay.cpp",       "profile/data.cpp",
-      "profile/wasm_accel.cpp",   "profile/modern.cpp",
-      "package/package.cpp",      "runtime/context.cpp",
-      "runtime/text.cpp",         "runtime/io.cpp",
-      "runtime/vm.cpp",           "runtime/stdlib_registry.cpp",
-      "runtime/stdlib_math.cpp",  "runtime/stdlib_json.cpp",
-      "runtime/stdlib_codecs.cpp", "runtime/stdlib_secure_random.cpp",
+      "bytecode/format.cpp",
+      "frontend/lexer/token.cpp",
+      "profile/capabilities.cpp",
+      "profile/effects.cpp",
+      "profile/replay.cpp",
+      "profile/data.cpp",
+      "profile/wasm_accel.cpp",
+      "profile/modern.cpp",
+      "package/package.cpp",
+      "runtime/context.cpp",
+      "runtime/text.cpp",
+      "runtime/io.cpp",
+      "runtime/vm.cpp",
+      "runtime/stdlib_registry.cpp",
+      "runtime/stdlib_math.cpp",
+      "runtime/stdlib_json.cpp",
+      "runtime/stdlib_codecs.cpp",
+      "runtime/stdlib_secure_random.cpp",
+      "runtime/stdlib_uuid.cpp",
       "runtime/stdlib_time.cpp",
   };
   std::vector<std::string> out;
@@ -5219,13 +5538,15 @@ native_runtime_sources(const std::filesystem::path &root) {
 // every translation unit directly.
 const std::vector<std::string> &native_runtime_compile_flags() {
   static const std::vector<std::string> flags = {
-    "-std=c++17", "-O3", "-DNDEBUG",
+      "-std=c++17",
+      "-O3",
+      "-DNDEBUG",
 #ifdef AMBER_VALUE_REPR_TAGGED
-    // Propagate the host amberc's Value representation (PLAN Phase 4 prototype)
-    // so the native runtime archive and the generated C++ share its ABI. The
-    // flag is hashed into the archive cache key, so tagged and variant archives
-    // never alias.
-    "-DAMBER_VALUE_REPR_TAGGED",
+      // Propagate the host amberc's Value representation (PLAN Phase 4
+      // prototype) so the native runtime archive and the generated C++ share
+      // its ABI. The flag is hashed into the archive cache key, so tagged and
+      // variant archives never alias.
+      "-DAMBER_VALUE_REPR_TAGGED",
 #endif
   };
   return flags;
@@ -5277,7 +5598,7 @@ native_runtime_cache_key(const std::string &cxx,
     hashed_files.push_back(source);
   }
   const std::vector<std::string> header_dirs = {
-      "runtime", "bytecode", "frontend", "profile",
+      "runtime", "bytecode",  "frontend", "profile",
       "package", "optimizer", "buildsys", "frozen"};
   for (const std::string &dir : header_dirs) {
     const std::filesystem::path root = runtime_root / dir;
@@ -5306,8 +5627,7 @@ ensure_native_runtime_archive(const std::string &cxx,
   const std::string key =
       native_runtime_cache_key(cxx, runtime_root, runtime_sources);
   const std::filesystem::path cache_root = native_runtime_cache_root();
-  const std::filesystem::path final_path =
-      cache_root / key / "libamber_rt.a";
+  const std::filesystem::path final_path = cache_root / key / "libamber_rt.a";
   if (std::filesystem::exists(final_path)) {
     return final_path;
   }
@@ -5341,8 +5661,7 @@ ensure_native_runtime_archive(const std::string &cxx,
   const std::filesystem::path temp_archive = temp_dir / "libamber_rt.a";
   std::vector<std::string> archive_command = {"ar", "rcs",
                                               temp_archive.string()};
-  archive_command.insert(archive_command.end(), objects.begin(),
-                         objects.end());
+  archive_command.insert(archive_command.end(), objects.begin(), objects.end());
   const std::string rendered_archive = shell_command(archive_command);
   if (std::system(rendered_archive.c_str()) != 0) {
     std::filesystem::remove_all(temp_dir);
@@ -5537,8 +5856,7 @@ SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
     } else if (arg == "--grant" && i + 1 < argc) {
       amber::capability::CapabilityRequest grant;
       amber::capability::CapabilityDiagnostic diagnostic;
-      if (!amber::capability::parse_cli_grant(argv[++i], &grant,
-                                              &diagnostic)) {
+      if (!amber::capability::parse_cli_grant(argv[++i], &grant, &diagnostic)) {
         throw std::runtime_error(diagnostic.message);
       }
       options.capability_grants.push_back(std::move(grant));
@@ -5628,9 +5946,8 @@ int run_source_build_command(int argc, char **argv) {
             ? std::nullopt
             : std::optional<EntryExecutionMode>(
                   parse_source_build_entry_mode(options.entry));
-    const RunnableModuleArtifact artifact =
-        compile_source_to_runnable_module(source_path, forced_entry,
-                                          options.capability_grants);
+    const RunnableModuleArtifact artifact = compile_source_to_runnable_module(
+        source_path, forced_entry, options.capability_grants);
     const std::filesystem::path parent = output_path.parent_path();
     if (!parent.empty()) {
       std::filesystem::create_directories(parent);
@@ -5864,11 +6181,10 @@ void reconcile_manifest_numeric_profile(
   }
   const std::string manifest_int =
       profiles.numeric_int.empty() ? "Int64" : profiles.numeric_int;
-  const std::string manifest_overflow = profiles.numeric_overflow.empty()
-                                            ? "checked"
-                                            : profiles.numeric_overflow;
-  const std::string module_int = module_attr_text(*bc_module,
-                                                  "amber.numeric.int");
+  const std::string manifest_overflow =
+      profiles.numeric_overflow.empty() ? "checked" : profiles.numeric_overflow;
+  const std::string module_int =
+      module_attr_text(*bc_module, "amber.numeric.int");
   const std::string module_overflow =
       module_attr_text(*bc_module, "amber.numeric.overflow");
   if (!module_int.empty() || !module_overflow.empty()) {

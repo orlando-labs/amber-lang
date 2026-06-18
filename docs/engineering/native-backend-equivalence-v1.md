@@ -107,17 +107,17 @@ Soundness rests on three constraints, each enforced where stated:
    VM, so any value it constructs, transforms, or locally mutates is already
    exact — widening these lists only changes which functions skip the
    whole-program restart, never the computed result.
-2. **Bridge immutability (runtime):** all arguments must be scalars
-   (null/bool/Int/Float); scalars are immutable, so the copy across the
-   value bridge cannot diverge. Any heap-valued argument throws
-   `NativeBailout` before the callee runs.
+2. **Bridge immutability (runtime):** arguments must be immutable bridge values
+   (null/bool/Int/Float/Uuid). UUIDs cross by copying their 16 bytes; the other
+   admitted values are scalars, so the two heaps cannot share mutable state.
+   Any other heap-valued argument throws `NativeBailout` before the callee runs.
 3. **Restart compatibility (runtime):** faults and results that do not
    convert back to native values throw `NativeBailout`. Convertible results
    are null/bool/Int/Float, strings (re-interned into the native string table
-   by content), and lists nesting any of those; maps, sets, closures, and
-   other heap kinds bail. The restart stays sound because vm-callable code
-   produces no observable effect before it bails (constraint 1), and it
-   reproduces full VM fault traces exactly.
+   by content), UUIDs (copied by value), and lists nesting any of those; maps,
+   sets, closures, and other heap kinds bail. The restart stays sound because
+   vm-callable code produces no observable effect before it bails (constraint
+   1), and it reproduces full VM fault traces exactly.
 
 `vm_fallback_code_count` in the build JSON reports how many code objects
 took this path. Pinned by `corpus/run/native_vm_fallback_scalar_bridge` (a

@@ -2,10 +2,10 @@
 
 // Layer 0 stdlib substrate (DESIGN-stdlib-next-libs-order-2026-06-15 §4.0).
 //
-// A native stdlib library is reached through two hand-written `if`-chains in the
-// 1.1 MB `runtime/vm.cpp`: dispatch (`try_apply_native_stdlib_send`) and name
-// resolution (`lookup_native_prelude_constant`). This header is the seam that
-// lets a library land as a self-contained `runtime/stdlib_<name>.{h,cpp}`
+// A native stdlib library is reached through two hand-written `if`-chains in
+// the 1.1 MB `runtime/vm.cpp`: dispatch (`try_apply_native_stdlib_send`) and
+// name resolution (`lookup_native_prelude_constant`). This header is the seam
+// that lets a library land as a self-contained `runtime/stdlib_<name>.{h,cpp}`
 // translation unit registered through a table, instead of more branches.
 //
 // The ABI deliberately names no `vm.cpp`-internal type. `Value` and
@@ -44,9 +44,9 @@ struct StdlibIntegerRange {
   std::uint64_t count = 0;
 };
 
-// The narrow runtime facade a stdlib handler is allowed to touch. Implemented by
-// the VM; every method that needs the active frame takes it type-erased so this
-// interface stays free of `vm.cpp`-internal types.
+// The narrow runtime facade a stdlib handler is allowed to touch. Implemented
+// by the VM; every method that needs the active frame takes it type-erased so
+// this interface stays free of `vm.cpp`-internal types.
 class StdlibHost {
 public:
   virtual ~StdlibHost() = default;
@@ -61,8 +61,8 @@ public:
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
       const std::string &name) = 0;
 
-  // Fault unless every supplied keyword is in `allowed`. Returns false (and sets
-  // the fault) on the first stray keyword.
+  // Fault unless every supplied keyword is in `allowed`. Returns false (and
+  // sets the fault) on the first stray keyword.
   virtual bool stdlib_reject_unknown_keywords(
       const void *frame,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
@@ -72,16 +72,16 @@ public:
   virtual Value stdlib_string_value_from_text(std::string text) = 0;
 
   // --- value introspection (used by generators) -----------------------------
-  // The text of a String or Symbol value (a Symbol yields its name); nullopt for
-  // any other kind. Lets a stdlib unit read string/key text without touching the
-  // module string/symbol tables directly.
+  // The text of a String or Symbol value (a Symbol yields its name); nullopt
+  // for any other kind. Lets a stdlib unit read string/key text without
+  // touching the module string/symbol tables directly.
   virtual std::optional<std::string> stdlib_text_of(const Value &value) = 0;
 
   // Raw immutable byte extraction/construction for pure binary codecs. This is
   // intentionally narrower than `Bytes.new`: String is not accepted here, so
   // codec encoders must be fed an explicit Bytes/ByteSlice/ByteBuffer value.
-  virtual std::optional<std::string>
-  stdlib_bytes_of(const void *frame, const Value &value) = 0;
+  virtual std::optional<std::string> stdlib_bytes_of(const void *frame,
+                                                     const Value &value) = 0;
   virtual Value stdlib_bytes_value_from_bytes(std::string bytes) = 0;
 
   // --- value construction (used by parsers) ----------------------------------
@@ -177,8 +177,8 @@ struct NativeStdlibCall {
     return host.stdlib_keyword_arg_value(kw_args, name);
   }
 
-  bool reject_unknown_keywords(
-      std::initializer_list<const char *> allowed) const {
+  bool
+  reject_unknown_keywords(std::initializer_list<const char *> allowed) const {
     return host.stdlib_reject_unknown_keywords(frame, kw_args, allowed);
   }
 
@@ -261,7 +261,8 @@ using NativeStdlibHandler = SendStatus (*)(NativeStdlibCall &call);
 // `path -> kind` for prelude name resolution.
 class NativeRegistry {
 public:
-  void register_handler(RuntimeNativeTypeKind kind, NativeStdlibHandler handler);
+  void register_handler(RuntimeNativeTypeKind kind,
+                        NativeStdlibHandler handler);
   void register_path(std::string path, RuntimeNativeTypeKind kind);
 
   // The handler that owns `kind`, or nullptr when the kind is still on the
@@ -289,11 +290,13 @@ private:
 // that lists them.
 void register_builtin_stdlib(NativeRegistry &registry);
 
-// Per-library registration entry points (defined in `runtime/stdlib_<name>.cpp`).
+// Per-library registration entry points (defined in
+// `runtime/stdlib_<name>.cpp`).
 void register_math(NativeRegistry &registry);
 void register_json(NativeRegistry &registry);
 void register_codecs(NativeRegistry &registry);
 void register_secure_random(NativeRegistry &registry);
+void register_uuid(NativeRegistry &registry);
 void register_time(NativeRegistry &registry);
 
 } // namespace amber::runtime

@@ -6,9 +6,10 @@
 //   SecureRandom.hex(n)                    -> Str
 //   SecureRandom.base64(n, padding: true)  -> Str
 //   SecureRandom.base64url(n, padding: false) -> Str
-//   SecureRandom.uuid                      -> Str, UUID v4 canonical text
+//   SecureRandom.uuid                      -> Uuid, delegates to Uuid.v4()
 
 #include "runtime/stdlib_registry.h"
+#include "runtime/stdlib_uuid.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -81,8 +82,7 @@ std::string base64_encode(const std::string &bytes, bool url, bool padding) {
 std::uint64_t load_u64_le(const std::string &bytes) {
   std::uint64_t value = 0;
   for (std::size_t i = 0; i < 8U; ++i) {
-    value |= static_cast<std::uint64_t>(
-                 static_cast<unsigned char>(bytes[i]))
+    value |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[i]))
              << (i * 8U);
   }
   return value;
@@ -129,9 +129,8 @@ SendStatus random_base64(NativeStdlibCall &call, bool url) {
       !call.reject_unknown_keywords({"padding"})) {
     return SendStatus::Faulted;
   }
-  const std::optional<std::size_t> count =
-      byte_count_arg(call, url ? "SecureRandom.base64url"
-                               : "SecureRandom.base64");
+  const std::optional<std::size_t> count = byte_count_arg(
+      call, url ? "SecureRandom.base64url" : "SecureRandom.base64");
   if (!count.has_value()) {
     return SendStatus::Faulted;
   }
@@ -144,35 +143,6 @@ SendStatus random_base64(NativeStdlibCall &call, bool url) {
     return SendStatus::Faulted;
   }
   *call.out = call.string_value(base64_encode(bytes, url, padding));
-  return SendStatus::Matched;
-}
-
-SendStatus random_uuid(NativeStdlibCall &call) {
-  if (!call.require_no_block() || !call.require_arity(0) ||
-      !call.reject_unknown_keywords({})) {
-    return SendStatus::Faulted;
-  }
-  std::string bytes;
-  if (!call.secure_random_bytes(16U, &bytes)) {
-    return SendStatus::Faulted;
-  }
-  bytes[6] = static_cast<char>((static_cast<unsigned char>(bytes[6]) & 0x0FU) |
-                               0x40U);
-  bytes[8] = static_cast<char>((static_cast<unsigned char>(bytes[8]) & 0x3FU) |
-                               0x80U);
-  const std::string hex = hex_encode(bytes);
-  std::string out;
-  out.reserve(36U);
-  out.append(hex, 0U, 8U);
-  out.push_back('-');
-  out.append(hex, 8U, 4U);
-  out.push_back('-');
-  out.append(hex, 12U, 4U);
-  out.push_back('-');
-  out.append(hex, 16U, 4U);
-  out.push_back('-');
-  out.append(hex, 20U, 12U);
-  *call.out = call.string_value(std::move(out));
   return SendStatus::Matched;
 }
 
@@ -208,8 +178,7 @@ SendStatus random_int(NativeStdlibCall &call) {
     const std::uint64_t offset = sample % range.count;
     *call.out = Value::integer(static_cast<std::int64_t>(
         static_cast<__int128>(range.start) +
-        static_cast<__int128>(range.step) *
-            static_cast<__int128>(offset)));
+        static_cast<__int128>(range.step) * static_cast<__int128>(offset)));
     return SendStatus::Matched;
   }
 }
@@ -234,7 +203,7 @@ SendStatus secure_random_dispatch(NativeStdlibCall &call) {
     return random_base64(call, true);
   }
   if (call.selector == "uuid") {
-    return random_uuid(call);
+    return uuid_v4(call);
   }
   return SendStatus::NotHandled;
 }

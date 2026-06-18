@@ -46,8 +46,8 @@ Check with `make spec-sync-check`.
 | `spec/registries/bytecode_sections.yaml` | 88 | `a1ece16c9bc4bb08c156aa91646f89ad9f8398add5191f4f6a17d5cabc487907` |
 | `spec/registries/diagnostics.yaml` | 108 | `a7627a70b3d7ac864e783bb924ca92622c402463adcb98063dc442adb8031046` |
 | `spec/registries/opcodes.yaml` | 192 | `c74537900d7c6df3b704c19a258ac8c79c8b867ac1c00cb7466634f863101d27` |
-| `spec/registries/prelude.yaml` | 389 | `58a01ba1500b72c0cc76442961bc3c64a31b158aedae3771e6a6bf6325480a45` |
-| `spec/registries/runtime_errors.yaml` | 60 | `0002ef135e5e44d7dc6b10f32ded213f20758b14bd8b299c84135db9c7e264f0` |
+| `spec/registries/prelude.yaml` | 399 | `295bbf6f8f782cc1df68101454dc39a47c779fc10444df50366f7c8c801ee7e0` |
+| `spec/registries/runtime_errors.yaml` | 62 | `6d870e00c184fd7970ab680cd3ecdb658f09339aee46ae3ab070ee0a95e64942` |
 | `spec/registries/tokens.yaml` | 127 | `8f625d0ae80376759b848e935282dca05065e1d7b742c69b6371d611f1a42fab` |
 
 ## Anchor Map
