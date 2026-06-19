@@ -3,8 +3,9 @@
 // DESIGN-stdlib-json-api-2026-06-16).
 //
 // v1 surface implemented here: `Json.parse`, `Json.generate`,
-// `Json.pretty_generate`, `Json.stream_parse`, `Json.stream_parse_file`,
-// `Json.load_from_file`, `Json.save_to_file`, and `Json.stop`. Pure compute
+// `Json.pretty_generate`, `Json.path`, `Json.paths`, `Json.stream_parse`,
+// `Json.stream_parse_file`, `Json.load_from_file`, `Json.save_to_file`, and
+// `Json.stop`. Pure compute
 // against RFC 8259: correct Int-vs-Float typing, string escapes, and UTF-8
 // (incl. `\u` surrogate pairs). Malformed input faults `JsonParseError`;
 // non-representable values fault `JsonGenerateError`.
@@ -12,6 +13,7 @@
 #include "runtime/stdlib_registry.h"
 
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -236,6 +238,288 @@ struct Generator {
     return fail("value is not representable as JSON");
   }
 };
+
+// ---------------------------------------------------------------------------
+// Data path
+// ---------------------------------------------------------------------------
+
+constexpr std::size_t kMaxPathSteps = 128;
+
+enum class PathStepKind { Key, Index, Wildcard };
+
+struct PathStep {
+  PathStepKind kind = PathStepKind::Key;
+  std::string key;
+  std::int64_t index = 0;
+};
+
+bool is_path_ident_start(char c) {
+  const unsigned char uc = static_cast<unsigned char>(c);
+  return std::isalpha(uc) || c == '_';
+}
+
+bool is_path_ident_continue(char c) {
+  const unsigned char uc = static_cast<unsigned char>(c);
+  return std::isalnum(uc) || c == '_';
+}
+
+struct PathParser {
+  explicit PathParser(NativeStdlibCall &call_in, std::string text_in)
+      : call(call_in), text(std::move(text_in)) {}
+
+  NativeStdlibCall &call;
+  std::string text;
+  std::size_t pos = 0;
+  bool faulted = false;
+
+  bool fail(const std::string &message) {
+    call.fault("JsonPathError", message);
+    faulted = true;
+    return false;
+  }
+
+  bool parse(std::vector<PathStep> *steps) {
+    if (text.empty() || text[0] != '$') {
+      return fail("path must start with `$`");
+    }
+    pos = 1;
+    while (pos < text.size()) {
+      if (steps->size() >= kMaxPathSteps) {
+        return fail("path has too many steps");
+      }
+      const char c = text[pos];
+      if (c == '.') {
+        if (!parse_dot_step(steps)) {
+          return false;
+        }
+        continue;
+      }
+      if (c == '[') {
+        if (!parse_bracket_step(steps)) {
+          return false;
+        }
+        continue;
+      }
+      return fail("expected `.key`, `[index]`, `[\"key\"]`, or `[*]`");
+    }
+    return true;
+  }
+
+  bool parse_dot_step(std::vector<PathStep> *steps) {
+    ++pos;
+    if (pos >= text.size() || !is_path_ident_start(text[pos])) {
+      return fail("expected identifier after `.`");
+    }
+    const std::size_t begin = pos;
+    ++pos;
+    while (pos < text.size() && is_path_ident_continue(text[pos])) {
+      ++pos;
+    }
+    PathStep step;
+    step.kind = PathStepKind::Key;
+    step.key = text.substr(begin, pos - begin);
+    steps->push_back(std::move(step));
+    return true;
+  }
+
+  bool parse_quoted_key(char quote, std::string *out) {
+    ++pos;
+    while (pos < text.size()) {
+      const char c = text[pos++];
+      if (c == quote) {
+        return true;
+      }
+      if (c != '\\') {
+        out->push_back(c);
+        continue;
+      }
+      if (pos >= text.size()) {
+        return fail("unterminated escape in quoted path key");
+      }
+      const char esc = text[pos++];
+      switch (esc) {
+      case '"':
+      case '\'':
+      case '\\':
+      case '/':
+        out->push_back(esc);
+        break;
+      case 'b':
+        out->push_back('\b');
+        break;
+      case 'f':
+        out->push_back('\f');
+        break;
+      case 'n':
+        out->push_back('\n');
+        break;
+      case 'r':
+        out->push_back('\r');
+        break;
+      case 't':
+        out->push_back('\t');
+        break;
+      default:
+        return fail("unsupported escape in quoted path key");
+      }
+    }
+    return fail("unterminated quoted path key");
+  }
+
+  bool parse_bracket_step(std::vector<PathStep> *steps) {
+    ++pos;
+    if (pos >= text.size()) {
+      return fail("unterminated `[` in path");
+    }
+    if (text[pos] == '*') {
+      ++pos;
+      if (pos >= text.size() || text[pos] != ']') {
+        return fail("expected `]` after `*`");
+      }
+      ++pos;
+      PathStep step;
+      step.kind = PathStepKind::Wildcard;
+      steps->push_back(std::move(step));
+      return true;
+    }
+    if (text[pos] == '"' || text[pos] == '\'') {
+      const char quote = text[pos];
+      PathStep step;
+      step.kind = PathStepKind::Key;
+      if (!parse_quoted_key(quote, &step.key)) {
+        return false;
+      }
+      if (pos >= text.size() || text[pos] != ']') {
+        return fail("expected `]` after quoted path key");
+      }
+      ++pos;
+      steps->push_back(std::move(step));
+      return true;
+    }
+    if (!std::isdigit(static_cast<unsigned char>(text[pos]))) {
+      return fail("expected array index, quoted key, or `*` inside `[]`");
+    }
+    std::int64_t index = 0;
+    while (pos < text.size() &&
+           std::isdigit(static_cast<unsigned char>(text[pos]))) {
+      const int digit = text[pos] - '0';
+      if (index > (std::numeric_limits<std::int64_t>::max() - digit) / 10) {
+        return fail("array index is too large");
+      }
+      index = index * 10 + digit;
+      ++pos;
+    }
+    if (pos >= text.size() || text[pos] != ']') {
+      return fail("expected `]` after array index");
+    }
+    ++pos;
+    PathStep step;
+    step.kind = PathStepKind::Index;
+    step.index = index;
+    steps->push_back(std::move(step));
+    return true;
+  }
+};
+
+struct PathWalker {
+  NativeStdlibCall &call;
+  const std::vector<PathStep> &steps;
+  std::function<bool(const Value &, bool *)> visit;
+
+  bool walk(const Value &value, std::size_t step_index, bool *stopped) {
+    if (*stopped) {
+      return true;
+    }
+    if (step_index == steps.size()) {
+      return visit(value, stopped);
+    }
+
+    const PathStep &step = steps[step_index];
+    switch (step.kind) {
+    case PathStepKind::Key: {
+      if (!value.is_map()) {
+        return true;
+      }
+      Value found_value = Value::null();
+      bool found = false;
+      if (!call.lookup_string_key(value, step.key, &found_value, &found)) {
+        return false;
+      }
+      if (found) {
+        return walk(found_value, step_index + 1, stopped);
+      }
+      return true;
+    }
+    case PathStepKind::Index: {
+      if (!value.is_list()) {
+        return true;
+      }
+      std::vector<Value> items;
+      if (!call.list_items(value, &items)) {
+        return false;
+      }
+      if (step.index >= 0 &&
+          static_cast<std::uint64_t>(step.index) < items.size()) {
+        return walk(items[static_cast<std::size_t>(step.index)],
+                    step_index + 1, stopped);
+      }
+      return true;
+    }
+    case PathStepKind::Wildcard: {
+      if (value.is_list()) {
+        std::vector<Value> items;
+        if (!call.list_items(value, &items)) {
+          return false;
+        }
+        for (const Value &item : items) {
+          if (!walk(item, step_index + 1, stopped)) {
+            return false;
+          }
+          if (*stopped) {
+            return true;
+          }
+        }
+        return true;
+      }
+      if (value.is_map()) {
+        std::vector<Value> values;
+        if (!call.map_values(value, &values)) {
+          return false;
+        }
+        for (const Value &item : values) {
+          if (!walk(item, step_index + 1, stopped)) {
+            return false;
+          }
+          if (*stopped) {
+            return true;
+          }
+        }
+      }
+      return true;
+    }
+    }
+    return true;
+  }
+};
+
+bool parse_path_query(NativeStdlibCall &call, const Value &query_value,
+                      std::vector<PathStep> *steps) {
+  const std::optional<std::string> query = call.text_of(query_value);
+  if (!query.has_value()) {
+    call.fault("TypeError", "Json.path expects a path Str");
+    return false;
+  }
+  PathParser parser{call, *query};
+  return parser.parse(steps);
+}
+
+bool walk_path(NativeStdlibCall &call, const Value &root,
+               const std::vector<PathStep> &steps,
+               std::function<bool(const Value &, bool *)> visit) {
+  bool stopped = false;
+  PathWalker walker{call, steps, std::move(visit)};
+  return walker.walk(root, 0, &stopped);
+}
 
 // ---------------------------------------------------------------------------
 // Parser
@@ -893,6 +1177,11 @@ StreamDecision call_stream_block(NativeStdlibCall &call, const Value &value,
     return StreamDecision::Continue;
   }
   if (block.status == StdlibBlockStatus::Stopped) {
+    if (block.stop_value_present) {
+      call.fault("ArgumentError",
+                 "Json.stop(value) is only valid in Json.paths path fold");
+      return StreamDecision::Fault;
+    }
     return StreamDecision::Stop;
   }
   return StreamDecision::Fault;
@@ -958,6 +1247,90 @@ bool stream_jsonl_text(NativeStdlibCall &call, const std::string &text,
     ++line_no;
   }
   return true;
+}
+
+SendStatus json_path(NativeStdlibCall &call) {
+  if (!call.require_no_block() || !call.require_arity(2) ||
+      !call.reject_unknown_keywords({})) {
+    return SendStatus::Faulted;
+  }
+  std::vector<PathStep> steps;
+  if (!parse_path_query(call, call.args[1], &steps)) {
+    return SendStatus::Faulted;
+  }
+  Value first = Value::null();
+  bool found = false;
+  const bool ok = walk_path(
+      call, call.args[0], steps, [&](const Value &value, bool *stopped) {
+        first = value;
+        found = true;
+        *stopped = true;
+        return true;
+      });
+  if (!ok) {
+    return SendStatus::Faulted;
+  }
+  *call.out = found ? first : Value::null();
+  return SendStatus::Matched;
+}
+
+SendStatus json_paths(NativeStdlibCall &call) {
+  if (!call.reject_unknown_keywords({})) {
+    return SendStatus::Faulted;
+  }
+  std::vector<PathStep> steps;
+  if (call.block.is_null()) {
+    if (!call.require_arity(2)) {
+      return SendStatus::Faulted;
+    }
+    if (!parse_path_query(call, call.args[1], &steps)) {
+      return SendStatus::Faulted;
+    }
+    std::vector<Value> matches;
+    const bool ok = walk_path(
+        call, call.args[0], steps, [&](const Value &value, bool *stopped) {
+          (void)stopped;
+          matches.push_back(value);
+          return true;
+        });
+    if (!ok) {
+      return SendStatus::Faulted;
+    }
+    *call.out = call.make_list(std::move(matches));
+    return SendStatus::Matched;
+  }
+
+  if (!call.require_arity(3)) {
+    return SendStatus::Faulted;
+  }
+  if (!parse_path_query(call, call.args[1], &steps)) {
+    return SendStatus::Faulted;
+  }
+  Value accumulator = call.args[2];
+  const bool ok = walk_path(
+      call, call.args[0], steps, [&](const Value &value, bool *stopped) {
+        const StdlibBlockResult block =
+            call.call_path_block(value, accumulator);
+        if (block.status == StdlibBlockStatus::Returned) {
+          if (!block.value.is_null()) {
+            accumulator = block.value;
+          }
+          return true;
+        }
+        if (block.status == StdlibBlockStatus::Stopped) {
+          if (block.stop_value_present) {
+            accumulator = block.value;
+          }
+          *stopped = true;
+          return true;
+        }
+        return false;
+      });
+  if (!ok) {
+    return SendStatus::Faulted;
+  }
+  *call.out = accumulator;
+  return SendStatus::Matched;
 }
 
 SendStatus json_parse(NativeStdlibCall &call) {
@@ -1147,16 +1520,28 @@ SendStatus json_save_to_file(NativeStdlibCall &call) {
 }
 
 SendStatus json_stop(NativeStdlibCall &call) {
-  if (!call.require_arity(0) || !call.require_no_block() ||
-      !call.reject_unknown_keywords({})) {
+  if (!call.require_no_block() || !call.reject_unknown_keywords({})) {
     return SendStatus::Faulted;
   }
-  call.throw_json_stop();
+  if (call.args.size() > 1U) {
+    return call.fault("TypeError", "Json.stop expects zero or one argument");
+  }
+  if (call.args.empty()) {
+    call.throw_json_stop();
+  } else {
+    call.throw_json_stop(call.args[0]);
+  }
   return SendStatus::Faulted;
 }
 
 SendStatus json_dispatch(NativeStdlibCall &call) {
   const std::string &selector = call.selector;
+  if (selector == "path") {
+    return json_path(call);
+  }
+  if (selector == "paths") {
+    return json_paths(call);
+  }
   if (selector == "parse") {
     return json_parse(call);
   }

@@ -151,6 +151,69 @@ loaded[0][:value] + loaded[1][:value]
 Для больших логов и event streams чаще лучше использовать потоковый API ниже:
 он не материализует весь список строк.
 
+## Path
+
+`Json.path` и `Json.paths` выполняют маленький стабильный subset JSONPath-like
+навигации по обычным Amber-значениям (`Map`, `StrictMap`, `List` и скаляры).
+Это не отдельный язык выражений: фильтры, условия и агрегация пишутся обычным
+Amber-блоком.
+
+Поддерживаемый синтаксис:
+
+| Синтаксис | Значение |
+| --- | --- |
+| `$` | корневое значение |
+| `.key` | строковый ключ-идентификатор |
+| `["key"]` / `['key']` | строковый ключ с любыми символами |
+| `[0]` | индекс списка |
+| `[*]` | все элементы списка или все значения map |
+
+```amber
+payload = Json.parse("{\"items\":[{\"id\":1},{\"id\":2}],\"user\":{\"name\":\"Ada\"}}")
+
+payload.path("$.user.name")        # "Ada"
+payload.path("$.items[*].id")      # 1
+payload.paths("$.items[*].id")     # [1, 2]
+
+Json.path(payload, "$.user.name")
+Json.paths(payload, "$.items[*].id")
+```
+
+`path(query)` работает как `find_first`: возвращает первый match или `null`.
+`paths(query)` работает как `find_all`: возвращает `List` всех matches.
+
+`Map#path`, `Map#paths`, `List#path` и `List#paths` - shorthand-формы для тех
+же функций. Обычный `Map` использует name-indifferent lookup, а `StrictMap`
+ищет точный строковый ключ:
+
+```amber
+{name: 1}.path("$.name")                       # 1
+StrictMap{name: 1, "name": 2}.path("$.name")   # 2
+```
+
+Для фильтрации и reduce используйте `paths(query, init)` с блоком
+`|element, accumulator|`. Если блок возвращает non-`null`, это становится новым
+accumulator; если возвращает `null`, сохраняется текущий accumulator, что удобно
+для мутации коллекции.
+
+```amber
+ids = payload.paths("$.items[*]", []) |item, acc|:
+  if item[:id] > 1:
+    acc.push!(item[:id])
+  null
+```
+
+В path-fold блоке `Json.stop` прекращает дальнейший обход и возвращает текущий
+accumulator. `Json.stop(value)` прекращает обход и возвращает `value` как
+финальный accumulator.
+
+```amber
+first_big = payload.paths("$.items[*]", null) |item, acc|:
+  if item[:id] > 1:
+    Json.stop(item)
+  acc
+```
+
 ## Streaming
 
 `Json.stream_parse` и `Json.stream_parse_file` вызывают блок для уже разобранных
@@ -231,9 +294,11 @@ seen = Json.stream_parse_file("events.jsonl", jsonl: true) |row|:
 seen
 ```
 
-`Json.stop` предназначен только для блока `Json.stream_parse` /
-`Json.stream_parse_file`. Вызов вне такого блока является runtime fault.
-Любая другая ошибка из блока не проглатывается и выходит наружу.
+`Json.stop(value)` предназначен для path-fold и в streaming-блоке является
+`ArgumentError`: streaming API всегда возвращает count. `Json.stop` без
+аргументов работает в `Json.stream_parse`, `Json.stream_parse_file` и path-fold.
+Вызов вне такого блока является runtime fault. Любая другая ошибка из блока не
+проглатывается и выходит наружу.
 
 ## Производительность
 
@@ -259,6 +324,9 @@ python3 bench/polyglot/run_benchmark.py --workload json --repeats 5
 | --- | --- | --- |
 | `Json.parse(text)` | value | разобрать один JSON-документ |
 | `Json.parse(text, map: StrictMap)` | `StrictMap` внутри объектов | разобрать без name-indifferent ключей |
+| `Json.path(value, query)` | value / `null` | первый match по path |
+| `Json.paths(value, query)` | `List` | все matches по path |
+| `Json.paths(value, query, init) ...` | value | fold по matches |
 | `Json.generate(value)` | `Str` | компактный JSON |
 | `Json.pretty_generate(value, indent: 2)` | `Str` | форматированный JSON |
 | `value.to_json` | `Str` | value-method форма `Json.generate` |

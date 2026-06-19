@@ -80,6 +80,15 @@ void expect_ok_integer(const amber::runtime::ExecutionResult &result,
   expect(result.value.as_integer() == expected, message + " value");
 }
 
+void expect_fault(const std::string &source, const std::string &error_name,
+                  const std::string &message) {
+  const amber::runtime::ExecutionResult result = execute_source_or_die(source);
+  expect(!result.ok() && result.fault.has_value(), message + " should fault");
+  expect(result.fault->error_name == error_name,
+         message + " should fault with " + error_name + ", got " +
+             (result.fault.has_value() ? result.fault->error_name : ""));
+}
+
 amber::runtime::RuntimeIoProviderStatus provider_ok() {
   amber::runtime::RuntimeIoProviderStatus status;
   status.handled = true;
@@ -155,6 +164,47 @@ void test_stream_parse_stop() {
   expect_ok_integer(result, 33, "Json.stream_parse stop");
 }
 
+void test_path_and_paths() {
+  const amber::runtime::ExecutionResult result = execute_source_or_die(
+      "p = Json.parse(\"{\\\"items\\\":[{\\\"id\\\":1},{\\\"id\\\":2},{\\\"id\\\":3}],\\\"weird-key\\\":9}\")\n"
+      "first = Json.path(p, \"$.items[*].id\")\n"
+      "all = Json.paths(p, \"$.items[*].id\")\n"
+      "short_first = p.path(\"$.items[*].id\")\n"
+      "short_all = p.paths(\"$.items[*].id\")\n"
+      "quoted = p.path(\"$[\\\"weird-key\\\"]\")\n"
+      "kept = p.paths(\"$.items[*]\", []) |el, acc|:\n"
+      "  if el[:id] > 1:\n"
+      "    acc.push!(el[:id])\n"
+      "  null\n"
+      "stopped = p.paths(\"$.items[*]\", []) |el, acc|:\n"
+      "  acc.push!(el[:id])\n"
+      "  if el[:id] == 2:\n"
+      "    Json.stop\n"
+      "  null\n"
+      "payload = p.paths(\"$.items[*]\", 0) |el, acc|:\n"
+      "  if el[:id] == 2:\n"
+      "    Json.stop(acc + 20)\n"
+      "  acc + el[:id]\n"
+      "strict = StrictMap{name: 1, \"name\": 2}\n"
+      "plain = {name: 7}\n"
+      "if first == 1 and all.count() == 3 and all[2] == 3 and "
+      "short_first == 1 and short_all[1] == 2 and quoted == 9 and "
+      "kept.count() == 2 and kept[0] == 2 and stopped.count() == 2 and "
+      "stopped[1] == 2 and payload == 21 and strict.path(\"$.name\") == 2 "
+      "and plain.path(\"$.name\") == 7:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "Json.path/paths and shorthands");
+}
+
+void test_stop_payload_rejected_by_streaming() {
+  expect_fault(
+      "Json.stream_parse(\"[1]\", depth: 1) |value|:\n"
+      "  Json.stop(42)\n",
+      "ArgumentError", "Json.stop payload in stream_parse");
+}
+
 void test_provider_file_jsonl_and_stream_file() {
   amber::bytecode::BcModule module = compile_source_or_die(
       "Json.save_to_file(\"events.jsonl\", [{id: 1}, {id: 2}], jsonl: true)\n"
@@ -190,6 +240,8 @@ void test_provider_file_jsonl_and_stream_file() {
 int main() {
   test_parse_strict_map_and_to_json();
   test_stream_parse_stop();
+  test_path_and_paths();
+  test_stop_payload_rejected_by_streaming();
   test_provider_file_jsonl_and_stream_file();
 
   std::cout << "stdlib_json_tests: ok\n";

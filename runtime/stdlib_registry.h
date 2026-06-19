@@ -36,6 +36,7 @@ enum class StdlibBlockStatus { Returned, Stopped, Faulted };
 struct StdlibBlockResult {
   StdlibBlockStatus status = StdlibBlockStatus::Faulted;
   Value value = Value::null();
+  bool stop_value_present = false;
 };
 
 struct StdlibIntegerRange {
@@ -102,6 +103,11 @@ public:
   virtual bool stdlib_string_keyed_entries(
       const void *frame, const Value &value,
       std::vector<std::pair<std::string, Value>> *out) = 0;
+  virtual bool stdlib_lookup_string_key(const void *frame, const Value &value,
+                                        const std::string &key, Value *out,
+                                        bool *found) = 0;
+  virtual bool stdlib_map_values(const void *frame, const Value &value,
+                                 std::vector<Value> *out) = 0;
   virtual bool stdlib_list_items(const void *frame, const Value &value,
                                  std::vector<Value> *out) = 0;
 
@@ -111,9 +117,14 @@ public:
   virtual StdlibBlockResult stdlib_call_stream_block(const void *frame,
                                                      const Value &block,
                                                      Value value) = 0;
+  virtual StdlibBlockResult stdlib_call_path_block(const void *frame,
+                                                   const Value &block,
+                                                   Value value,
+                                                   Value accumulator) = 0;
 
-  // Raise the host-owned non-local stop used by Json.stream_parse.
-  virtual void stdlib_throw_json_stop(const void *frame) = 0;
+  // Raise the host-owned non-local stop used by Json stream/path APIs.
+  virtual void stdlib_throw_json_stop(const void *frame,
+                                      std::optional<Value> value) = 0;
 
   // Extract a bounded integer range descriptor without exposing the VM's Range
   // representation. Faults and returns false for non-ranges, float/open/empty
@@ -236,6 +247,15 @@ struct NativeStdlibCall {
     return host.stdlib_string_keyed_entries(frame, value, out);
   }
 
+  bool lookup_string_key(const Value &value, const std::string &key, Value *out,
+                         bool *found) const {
+    return host.stdlib_lookup_string_key(frame, value, key, out, found);
+  }
+
+  bool map_values(const Value &value, std::vector<Value> *out) const {
+    return host.stdlib_map_values(frame, value, out);
+  }
+
   bool list_items(const Value &value, std::vector<Value> *out) const {
     return host.stdlib_list_items(frame, value, out);
   }
@@ -244,7 +264,14 @@ struct NativeStdlibCall {
     return host.stdlib_call_stream_block(frame, block, std::move(value));
   }
 
-  void throw_json_stop() const { host.stdlib_throw_json_stop(frame); }
+  StdlibBlockResult call_path_block(Value value, Value accumulator) const {
+    return host.stdlib_call_path_block(frame, block, std::move(value),
+                                       std::move(accumulator));
+  }
+
+  void throw_json_stop(std::optional<Value> value = std::nullopt) const {
+    host.stdlib_throw_json_stop(frame, std::move(value));
+  }
 
   bool integer_range(const Value &value, StdlibIntegerRange *out) const {
     return host.stdlib_integer_range(frame, value, out);

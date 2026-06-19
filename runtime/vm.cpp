@@ -8272,6 +8272,7 @@ struct QuickCode {
 struct PendingThrow {
   Value tag = Value::null();
   Value value = Value::null();
+  bool value_present = true;
 };
 
 // Register-keyed per-frame map for pattern state. These hold at most a
@@ -9792,6 +9793,52 @@ public:
     }
     return true;
   }
+  bool stdlib_lookup_string_key(const void *frame, const Value &value,
+                                const std::string &key, Value *out,
+                                bool *found) override {
+    const Frame &active = *static_cast<const Frame *>(frame);
+    if (!value.is_map()) {
+      set_fault(active, "TypeError", "expected Map");
+      return false;
+    }
+    const std::optional<std::vector<MapEntry>> entries =
+        extract_map_entries(active, value);
+    if (!entries.has_value()) {
+      return false;
+    }
+    const bool strict = value.as_map() != nullptr && value.as_map()->strict;
+    const Value lookup = string_value_from_text(key);
+    const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(lookup);
+    *found = false;
+    for (const MapEntry &entry : *entries) {
+      if (map_entry_key_equivalent(entry, lookup, lookup_id, strict)) {
+        *out = entry.value;
+        *found = true;
+        return true;
+      }
+    }
+    *out = Value::null();
+    return true;
+  }
+  bool stdlib_map_values(const void *frame, const Value &value,
+                         std::vector<Value> *out) override {
+    const Frame &active = *static_cast<const Frame *>(frame);
+    if (!value.is_map()) {
+      set_fault(active, "TypeError", "expected Map");
+      return false;
+    }
+    const std::optional<std::vector<MapEntry>> entries =
+        extract_map_entries(active, value);
+    if (!entries.has_value()) {
+      return false;
+    }
+    out->clear();
+    out->reserve(entries->size());
+    for (const MapEntry &entry : *entries) {
+      out->push_back(entry.value);
+    }
+    return true;
+  }
   bool stdlib_list_items(const void *frame, const Value &value,
                          std::vector<Value> *out) override {
     const Frame &active = *static_cast<const Frame *>(frame);
@@ -9816,9 +9863,17 @@ public:
     return call_stream_block_to_result(*static_cast<const Frame *>(frame),
                                        block, std::move(value));
   }
-  void stdlib_throw_json_stop(const void *frame) override {
+  StdlibBlockResult stdlib_call_path_block(const void *frame,
+                                           const Value &block, Value value,
+                                           Value accumulator) override {
+    return call_path_block_to_result(*static_cast<const Frame *>(frame), block,
+                                     std::move(value),
+                                     std::move(accumulator));
+  }
+  void stdlib_throw_json_stop(const void *frame,
+                              std::optional<Value> value) override {
     throw_value(*static_cast<const Frame *>(frame), json_stop_tag_value(),
-                Value::null());
+                value.value_or(Value::null()), value.has_value());
   }
   bool stdlib_integer_range(const void *frame, const Value &value,
                             StdlibIntegerRange *out) override {
@@ -10813,6 +10868,68 @@ private:
       const PendingThrow escaped = *nested.escaped_throw_;
       if (value_equals(escaped.tag, json_stop_tag_value())) {
         result.status = StdlibBlockStatus::Stopped;
+        result.value = escaped.value;
+        result.stop_value_present = escaped.value_present;
+        return result;
+      }
+      throw_value(frame, escaped.tag, escaped.value);
+      return result;
+    }
+    if (nested.escaped_exception_.has_value()) {
+      raise_value(frame, *nested.escaped_exception_);
+      return result;
+    }
+    if (nested.fault_.has_value()) {
+      fault_ = nested.fault_;
+      return result;
+    }
+    result.status = StdlibBlockStatus::Returned;
+    result.value = std::move(nested.final_value_);
+    return result;
+  }
+
+  StdlibBlockResult call_path_block_to_result(const Frame &frame,
+                                              const Value &block, Value value,
+                                              Value accumulator) {
+    StdlibBlockResult result;
+    if (block.is_null()) {
+      set_fault(frame, "TypeError", "Json.paths requires block");
+      return result;
+    }
+    if (!block.is_closure()) {
+      set_fault(frame, "TypeError", "Json.paths block must be closure");
+      return result;
+    }
+    if (!ensure_lifecycle_access(frame, block)) {
+      return result;
+    }
+    const IntrusivePtr<ClosureValue> closure = block.as_closure();
+    if (closure == nullptr) {
+      set_fault(frame, "TypeError", "closure value is null");
+      return result;
+    }
+    const BcCode *code = find_code(module_, closure->code_id);
+    if (code == nullptr) {
+      set_fault(frame, "VMError", "closure code id is unknown");
+      return result;
+    }
+
+    std::vector<Value> args{std::move(value), std::move(accumulator)};
+    BlockVmLease lease = acquire_block_vm();
+    Vm &nested = *lease.vm;
+    nested.push_frame_from_args(*code, args.data(), args.size(),
+                                closure->captures, closure->self,
+                                Value::null(), std::nullopt);
+    while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
+      nested.step();
+    }
+    merge_runtime_names_from(nested);
+    if (nested.escaped_throw_.has_value()) {
+      const PendingThrow escaped = *nested.escaped_throw_;
+      if (value_equals(escaped.tag, json_stop_tag_value())) {
+        result.status = StdlibBlockStatus::Stopped;
+        result.value = escaped.value;
+        result.stop_value_present = escaped.value_present;
         return result;
       }
       throw_value(frame, escaped.tag, escaped.value);
@@ -19161,7 +19278,7 @@ private:
     if (pending_throw.has_value()) {
       PendingThrow pending = *pending_throw;
       recycle_frame(std::move(completed_frame));
-      throw_value(caller, pending.tag, pending.value);
+      throw_value(caller, pending.tag, pending.value, pending.value_present);
       return;
     }
     if (!caller_reg.has_value() || !write_reg(caller, *caller_reg, value)) {
@@ -19239,8 +19356,8 @@ private:
   }
 
   bool throw_value(const Frame &throwing_frame, const Value &tag,
-                   const Value &value) {
-    PendingThrow active_throw{tag, value};
+                   const Value &value, bool value_present = true) {
+    PendingThrow active_throw{tag, value, value_present};
 
     while (true) {
       std::size_t target_index = 0;
@@ -25859,13 +25976,16 @@ private:
         collection_selector_in({"add!", "delete!", "merge!", "subtract!",
                                 "delete_if!", "keep_if!", "select!", "reject!",
                                 "clear!", "replace!"});
+    const bool data_path_selector =
+        (receiver.is_list() || receiver.is_map()) &&
+        collection_selector_in({"path", "paths"});
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          sequence_collection_selector) ||
         (receiver.is_list() && collection_selector == "[]=") ||
         list_mutation_selector || map_mutation_selector ||
-        set_mutation_selector ||
+        set_mutation_selector || data_path_selector ||
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() && collection_selector_in({"empty?",
@@ -25910,6 +26030,29 @@ private:
       set_fault(frame, "TypeError",
                 "builtin SEND does not accept keyword arguments");
       return SendStatus::Faulted;
+    }
+
+    if (data_path_selector) {
+      const NativeStdlibHandler handler =
+          native_registry_.handler_for(RuntimeNativeTypeKind::Json);
+      if (handler == nullptr) {
+        return SendStatus::NotHandled;
+      }
+      std::vector<Value> path_args;
+      path_args.reserve(args.size() + 1U);
+      path_args.push_back(receiver);
+      path_args.insert(path_args.end(), args.begin(), args.end());
+      const Value json_receiver = Value::native_type(RuntimeNativeTypeKind::Json);
+      NativeStdlibCall call{*this,
+                            &frame,
+                            json_receiver,
+                            RuntimeNativeTypeKind::Json,
+                            collection_selector,
+                            path_args,
+                            block,
+                            kw_args,
+                            out};
+      return handler(call);
     }
 
     if ((selector == "==" || selector == "===" || selector == "!=") &&

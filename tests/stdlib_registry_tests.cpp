@@ -80,6 +80,15 @@ struct MockHost : StdlibHost {
       std::vector<std::pair<std::string, Value>> * /*out*/) override {
     return false;
   }
+  bool stdlib_lookup_string_key(const void * /*frame*/, const Value & /*value*/,
+                                const std::string & /*key*/, Value * /*out*/,
+                                bool * /*found*/) override {
+    return false;
+  }
+  bool stdlib_map_values(const void * /*frame*/, const Value & /*value*/,
+                         std::vector<Value> * /*out*/) override {
+    return false;
+  }
   bool stdlib_list_items(const void * /*frame*/, const Value & /*value*/,
                          std::vector<Value> * /*out*/) override {
     return false;
@@ -89,7 +98,13 @@ struct MockHost : StdlibHost {
                            Value /*value*/) override {
     return {};
   }
-  void stdlib_throw_json_stop(const void * /*frame*/) override {}
+  amber::runtime::StdlibBlockResult
+  stdlib_call_path_block(const void * /*frame*/, const Value & /*block*/,
+                         Value /*value*/, Value /*accumulator*/) override {
+    return {};
+  }
+  void stdlib_throw_json_stop(const void * /*frame*/,
+                              std::optional<Value> /*value*/) override {}
   bool
   stdlib_integer_range(const void * /*frame*/, const Value & /*value*/,
                        amber::runtime::StdlibIntegerRange * /*out*/) override {
