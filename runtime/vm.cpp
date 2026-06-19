@@ -4769,6 +4769,38 @@ public:
     return filter(std::move(function), true);
   }
 
+  RuntimeFlowGatherResult filter_map(MapFunction function) {
+    if (!function) {
+      return argument_error("threaded filter_map block is missing");
+    }
+
+    RuntimeFlowGatherResult gathered =
+        flow_.scatter_map(items_, std::move(function), options_);
+    if (!gathered.ok || gathered.failed) {
+      record([&](RuntimeThreadedCollectionStats *stats) {
+        ++stats->filter_map_operations;
+      });
+      return gathered;
+    }
+
+    RuntimeFlowGatherResult result = gathered;
+    result.values.clear();
+    for (const Value &value : gathered.values) {
+      const bool truthy =
+          !value.is_null() && !(value.is_bool() && !value.as_bool());
+      if (truthy) {
+        result.values.push_back(value);
+      }
+    }
+    result.completed_count = static_cast<std::uint64_t>(result.values.size());
+    record([&](RuntimeThreadedCollectionStats *stats) {
+      ++stats->filter_map_operations;
+      stats->generated_values +=
+          static_cast<std::uint64_t>(result.values.size());
+    });
+    return result;
+  }
+
   RuntimeFlowGatherResult flat_map(FlatMapFunction function) {
     if (!function) {
       return argument_error("threaded flat_map block is missing");
@@ -5080,6 +5112,11 @@ RuntimeFlowGatherResult RuntimeThreadedCollection::each(EachFunction function) {
 
 RuntimeFlowGatherResult RuntimeThreadedCollection::map(MapFunction function) {
   return impl_->map(std::move(function));
+}
+
+RuntimeFlowGatherResult
+RuntimeThreadedCollection::filter_map(MapFunction function) {
+  return impl_->filter_map(std::move(function));
 }
 
 RuntimeFlowGatherResult
@@ -8134,6 +8171,7 @@ enum class LazySeqOpKind : std::int64_t {
   FlatMap = 2,
   Select = 3,
   Reject = 4,
+  FilterMap = 5,
 };
 
 struct LazySeqOp {
@@ -16442,6 +16480,9 @@ private:
     if (selector == "flat_map") {
       return LazySeqOpKind::FlatMap;
     }
+    if (selector == "filter_map") {
+      return LazySeqOpKind::FilterMap;
+    }
     if (selector == "select") {
       return LazySeqOpKind::Select;
     }
@@ -16515,7 +16556,7 @@ private:
       }
       const std::int64_t op_code = tuple->items[0].as_integer();
       if (op_code < static_cast<std::int64_t>(LazySeqOpKind::Map) ||
-          op_code > static_cast<std::int64_t>(LazySeqOpKind::Reject)) {
+          op_code > static_cast<std::int64_t>(LazySeqOpKind::FilterMap)) {
         set_fault(frame, "VMError", "LazySeq op code is invalid");
         return std::nullopt;
       }
@@ -16575,6 +16616,13 @@ private:
     }
 
     if (op.kind == LazySeqOpKind::Map) {
+      return emit_lazy_seq_value(frame, state, receiver, *value, op_index + 1U,
+                                 visitor);
+    }
+    if (op.kind == LazySeqOpKind::FilterMap) {
+      if (!is_truthy(*value)) {
+        return LazySeqVisitStatus::Continue;
+      }
       return emit_lazy_seq_value(frame, state, receiver, *value, op_index + 1U,
                                  visitor);
     }
@@ -24204,6 +24252,7 @@ private:
           canonical_collection_selector(selector);
       if (collection_selector == "map" || collection_selector == "select" ||
           collection_selector == "reject" ||
+          collection_selector == "filter_map" ||
           collection_selector == "flat_map" || collection_selector == "each") {
         if (!require_arity(0) || !kw_args.empty()) {
           if (!kw_args.empty()) {
@@ -24222,6 +24271,13 @@ private:
           result =
               threaded->map([invoker = *invoker](const Value &value,
                                                  std::size_t index) mutable {
+                return invoker(std::vector<Value>{
+                    value, Value::integer(static_cast<std::int64_t>(index))});
+              });
+        } else if (collection_selector == "filter_map") {
+          result = threaded->filter_map(
+              [invoker = *invoker](const Value &value,
+                                   std::size_t index) mutable {
                 return invoker(std::vector<Value>{
                     value, Value::integer(static_cast<std::int64_t>(index))});
               });
@@ -24555,6 +24611,30 @@ private:
       *out = receiver;
       return SendStatus::Matched;
     }
+    if (selector == "filter_map!") {
+      if (!reject_keywords() || !require_args(0) || !require_block()) {
+        return SendStatus::Faulted;
+      }
+      const std::vector<Value> snapshot = list->items;
+      std::vector<Value> mapped;
+      mapped.reserve(snapshot.size());
+      for (const Value &item : snapshot) {
+        const std::optional<Value> value =
+            call_block_to_value(frame, block, {item});
+        if (!value.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return SendStatus::Faulted;
+        }
+        if (is_truthy(*value)) {
+          mapped.push_back(*value);
+        }
+      }
+      list->items = std::move(mapped);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
     if (selector == "uniq!") {
       if (!reject_keywords() || !require_args(0)) {
         return SendStatus::Faulted;
@@ -24858,7 +24938,6 @@ private:
       *out = receiver;
       return SendStatus::Matched;
     }
-
     return SendStatus::NotHandled;
   }
 
@@ -25037,6 +25116,37 @@ private:
         }
       }
       set->items = std::move(kept);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "filter_map!") {
+      if (!require_args(0) || !require_block()) {
+        return SendStatus::Faulted;
+      }
+      const std::vector<Value> snapshot = set->items;
+      std::vector<Value> result;
+      result.reserve(snapshot.size());
+      for (const Value &item : snapshot) {
+        const std::optional<Value> value =
+            call_block_to_value(frame, block, {item});
+        if (!value.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return SendStatus::Faulted;
+        }
+        if (!is_truthy(*value)) {
+          continue;
+        }
+        CollectionKeyError error;
+        std::optional<Value> element = normalize_set_element(*value, &error);
+        if (!element.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return SendStatus::Faulted;
+        }
+        append_unique_value(&result, *element);
+      }
+      set->items = std::move(result);
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -25945,8 +26055,9 @@ private:
          collection_selector_in(
              {"empty?", "[]",       "[]?",    "has_index?", "deconstruct",
               "first",  "count",    "to_a",   "lazy",       "each",
-              "map",    "flat_map", "select", "reject",     "find",
-              "group",  "any?",     "all?",   "none?",      "reduce"})) ||
+              "map",    "filter_map", "flat_map", "select", "reject",
+              "find",   "group",      "any?",     "all?",   "none?",
+              "reduce"})) ||
         sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
         sequence_collection_selector || selector == "===";
@@ -25963,8 +26074,8 @@ private:
         collection_selector_in({"push!", "append!", "unshift!", "prepend!",
                                 "insert!", "pop!", "shift!", "delete_at!",
                                 "delete!", "delete_if!", "keep_if!", "select!",
-                                "reject!", "map!", "sort!", "uniq!", "reverse!",
-                                "clear!", "replace!"});
+                                "reject!", "map!", "filter_map!", "sort!",
+                                "uniq!", "reverse!", "clear!", "replace!"});
     const bool map_mutation_selector =
         receiver.is_map() &&
         collection_selector_in({"store!", "delete!", "delete_if!", "keep_if!",
@@ -25975,7 +26086,7 @@ private:
         receiver.is_set() &&
         collection_selector_in({"add!", "delete!", "merge!", "subtract!",
                                 "delete_if!", "keep_if!", "select!", "reject!",
-                                "clear!", "replace!"});
+                                "filter_map!", "clear!", "replace!"});
     const bool data_path_selector =
         (receiver.is_list() || receiver.is_map()) &&
         collection_selector_in({"path", "paths"});
@@ -26001,6 +26112,7 @@ private:
                                                       "each",
                                                       "map",
                                                       "select",
+                                                      "filter_map",
                                                       "reject",
                                                       "transform",
                                                       "transform_values",
@@ -27018,7 +27130,9 @@ private:
           *out = receiver;
           return SendStatus::Matched;
         }
-        if (collection_selector == "map" || collection_selector == "select" ||
+        if (collection_selector == "map" ||
+            collection_selector == "filter_map" ||
+            collection_selector == "select" ||
             collection_selector == "reject" ||
             collection_selector == "flat_map" ||
             collection_selector == "find" || collection_selector == "group") {
@@ -27038,6 +27152,25 @@ private:
                 return SendStatus::Faulted;
               }
               mapped.push_back(*value);
+            }
+            *out = make_list_value(std::move(mapped));
+            return SendStatus::Matched;
+          }
+          if (collection_selector == "filter_map") {
+            std::vector<Value> mapped;
+            mapped.reserve(items.size());
+            for (const Value &item : items) {
+              const std::optional<Value> value =
+                  call_block_to_value(frame, block, {item});
+              if (!value.has_value()) {
+                return SendStatus::Faulted;
+              }
+              if (!require_receiver_live_after_block()) {
+                return SendStatus::Faulted;
+              }
+              if (is_truthy(*value)) {
+                mapped.push_back(*value);
+              }
             }
             *out = make_list_value(std::move(mapped));
             return SendStatus::Matched;
@@ -27442,6 +27575,28 @@ private:
               return SendStatus::Faulted;
             }
             mapped.push_back(*value);
+          }
+          *out = make_list_value(std::move(mapped));
+          return SendStatus::Matched;
+        }
+        if (collection_selector == "filter_map") {
+          if (!require_arity(0)) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> mapped;
+          mapped.reserve(extracted->size());
+          for (const MapEntry &entry : *extracted) {
+            const std::optional<Value> value =
+                call_block_to_value(frame, block, {entry.key, entry.value});
+            if (!value.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (!require_receiver_live_after_block()) {
+              return SendStatus::Faulted;
+            }
+            if (is_truthy(*value)) {
+              mapped.push_back(*value);
+            }
           }
           *out = make_list_value(std::move(mapped));
           return SendStatus::Matched;

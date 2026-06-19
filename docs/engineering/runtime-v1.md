@@ -166,13 +166,15 @@ Current implemented slice:
   cycle-aware `ModuleInitError`, and source-mapped VM fault propagation for
   failed module init;
 - `W8.3` collections baseline in `runtime/vm.{h,cpp}` with closure-block
-  execution for eager sequence `each`, `map`, `flat_map`, `select`, `reject`,
-  `reduce`, `find`, `any?`, `all?`, `none?`, `first`, `count`, `group_by`,
+  execution for eager sequence `each`, `map`, `filter_map`, `flat_map`,
+  `select`, `reject`, `reduce`, `find`, `any?`, `all?`, `none?`, `first`,
+  `count`, `group_by`,
   `to_a`, membership checks, set-like operations, subset/superset/disjoint
   predicates, collection operator methods, `each(size, step:)`,
   `each_pair`, `each_cons`, `take_while`, `reverse`, `sort`, `uniq`,
-  `permutation`, `combination`, and eager-compatible `lazy`, plus `Map#each`,
-  `Map#each_pair`, `Map#map`, `Map#select`, `Map#reject`, `Map#transform`,
+  `permutation`, `combination`, eager-compatible `lazy`, and mutating
+  `Array` / `Set` `filter_map!`, plus `Map#each`, `Map#each_pair`,
+  `Map#map`, `Map#filter_map`, `Map#select`, `Map#reject`, `Map#transform`,
   `transform_values`, `merge`, `contains?`, `include?`, `+` / `|` merge
   aliases, `keys`, `values`, and `entries` with insertion-order-preserving
   results and canonical `IndexError` / `KeyError` edge behavior;

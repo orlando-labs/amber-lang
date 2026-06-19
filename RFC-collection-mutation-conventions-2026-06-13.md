@@ -223,6 +223,7 @@ xs.select: _1.good?
 xs.reject: _1.bad?
 xs.filter: _1.good?
 xs.map: transform(_1)
+xs.filter_map: transform_or_null(_1)
 xs.sorted()                       # natural order
 xs.sorted: _1.key                 # by key (optional block, §7.2)
 xs.sorted(reverse: true): _1.key  # descending
@@ -247,6 +248,7 @@ xs.select!: _1.good?
 xs.reject!: _1.bad?
 xs.keep_if!: _1.good?
 xs.map!: transform(_1)
+xs.filter_map!: transform_or_null(_1)
 xs.sort!()                        # natural order
 xs.sort!: _1.key                  # by key (optional block, §7.2)
 xs.reverse!()
@@ -274,6 +276,7 @@ m.slice(*keys)
 m.compact()
 m.select |k, v|: pred(k, v)
 m.reject |k, v|: pred(k, v)
+m.filter_map |k, v|: transform_or_null(k, v)
 m.transform_keys |k, v|: new_key(k)
 m.transform_values |v, k|: new_value(v)
 
@@ -296,6 +299,11 @@ m.shift!()                  # returns (key, value)
 
 Note: prefer a single insertion mutator. This RFC keeps `store!` and drops `put!` — two names for "insert/overwrite a key" is exactly the redundancy the rule is meant to remove. `m[key] = value` remains the idiomatic single-key write (assignment syntax, §5.1 rule 5).
 
+Deliberately absent: `m.filter_map!`. `Map#filter_map` is extracting and
+returns an `Array`, so a bang sibling would not be a shape-preserving receiver
+mutation. Use `select!` / `reject!` / `transform_keys!` /
+`transform_values!` for in-place `Map` changes.
+
 ### 8.3 Set
 
 ```amber
@@ -309,6 +317,7 @@ s.symmetric_difference(other)
 s.select: pred(_1)
 s.reject: pred(_1)
 s.filter: pred(_1)
+s.filter_map: transform_or_null(_1)
 
 # mutating
 s.add!(value)
@@ -319,6 +328,7 @@ s.delete_if!: pred(_1)
 s.select!: pred(_1)
 s.reject!: pred(_1)
 s.keep_if!: pred(_1)
+s.filter_map!: transform_or_null(_1)
 s.clear!()
 s.replace!(other)
 ```

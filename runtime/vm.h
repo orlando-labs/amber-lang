@@ -1964,6 +1964,7 @@ struct RuntimeThreadedCollectionStats {
   std::uint64_t each_operations = 0;
   std::uint64_t map_operations = 0;
   std::uint64_t filter_operations = 0;
+  std::uint64_t filter_map_operations = 0;
   std::uint64_t flat_map_operations = 0;
   std::uint64_t combination_operations = 0;
   std::uint64_t permutation_operations = 0;
@@ -1993,6 +1994,7 @@ public:
 
   RuntimeFlowGatherResult each(EachFunction function);
   RuntimeFlowGatherResult map(MapFunction function);
+  RuntimeFlowGatherResult filter_map(MapFunction function);
   RuntimeFlowGatherResult select(PredicateFunction function);
   RuntimeFlowGatherResult reject(PredicateFunction function);
   RuntimeFlowGatherResult flat_map(FlatMapFunction function);

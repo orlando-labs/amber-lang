@@ -310,9 +310,9 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
 
   BcModule module;
   for (const std::string &symbol :
-       {"each", "map", "flat_map", "select", "reject", "reduce", "find", "any?",
-        "all?", "none?", "first", "count", "to_a", "to_array", "lazy",
-        "group", "+", ">",
+       {"each", "map", "filter_map", "flat_map", "select", "reject",
+        "reduce", "find", "any?", "all?", "none?", "first", "count", "to_a",
+        "to_array", "lazy", "group", "+", ">",
         "contains?", "include?", "===", "empty?", "[]", "Range", "low",
         "high", "collect", "collect_concat", "filter", "find_all", "detect",
         "inject", "member?", "length", "size", "entries", "times"}) {
@@ -335,6 +335,8 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
       make_send_code(2, symbol_id_or_die(module, "map"), true));
   module.code_objects.push_back(
       make_send_code(3, symbol_id_or_die(module, "flat_map"), true));
+  module.code_objects.push_back(
+      make_send_code(44, symbol_id_or_die(module, "filter_map"), true));
   module.code_objects.push_back(
       make_send_code(4, symbol_id_or_die(module, "select"), true));
   module.code_objects.push_back(
@@ -495,6 +497,19 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   lazy_flat_map_to_a.instructions.push_back({Opcode::Return, {{4, false}}});
   module.code_objects.push_back(lazy_flat_map_to_a);
 
+  BcCode lazy_filter_map_to_a;
+  lazy_filter_map_to_a.code_id = 45;
+  lazy_filter_map_to_a.kind = CodeKind::Method;
+  lazy_filter_map_to_a.reg_count = 5;
+  lazy_filter_map_to_a.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, "lazy")));
+  lazy_filter_map_to_a.instructions.push_back(
+      send_instr(3, 2, symbol_id_or_die(module, "filter_map"), {}, 1));
+  lazy_filter_map_to_a.instructions.push_back(
+      send_instr(4, 3, symbol_id_or_die(module, "to_a")));
+  lazy_filter_map_to_a.instructions.push_back({Opcode::Return, {{4, false}}});
+  module.code_objects.push_back(lazy_filter_map_to_a);
+
   BcCode inc;
   inc.code_id = 100;
   inc.kind = CodeKind::Block;
@@ -542,6 +557,25 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
       {Opcode::MakeList, {{2, false}, {0, false}, {2, false}}});
   pairify.instructions.push_back({Opcode::Return, {{2, false}}});
   module.code_objects.push_back(pairify);
+
+  BcCode keep_gt_one_plus_one;
+  keep_gt_one_plus_one.code_id = 108;
+  keep_gt_one_plus_one.kind = CodeKind::Block;
+  keep_gt_one_plus_one.reg_count = 4;
+  keep_gt_one_plus_one.instructions.push_back(
+      {Opcode::LoadK, {{1, false}, {one, false}}});
+  keep_gt_one_plus_one.instructions.push_back(
+      send_instr(2, 0, symbol_id_or_die(module, ">"), {1}));
+  keep_gt_one_plus_one.instructions.push_back(
+      {Opcode::JumpIfFalse, {{2, false}, {5, false}}});
+  keep_gt_one_plus_one.instructions.push_back(
+      send_instr(3, 0, symbol_id_or_die(module, "+"), {1}));
+  keep_gt_one_plus_one.instructions.push_back({Opcode::Return, {{3, false}}});
+  keep_gt_one_plus_one.instructions.push_back(
+      {Opcode::LoadNull, {{3, false}}});
+  keep_gt_one_plus_one.instructions.push_back(
+      {Opcode::Return, {{3, false}}});
+  module.code_objects.push_back(keep_gt_one_plus_one);
 
   BcCode low_high_key;
   low_high_key.code_id = 106;
@@ -592,6 +626,7 @@ void assert_sequence_protocol_for(const amber::bytecode::BcModule &module,
   const amber::runtime::Value gt_zero = make_closure_value(104);
   const amber::runtime::Value gt_three = make_closure_value(105);
   const amber::runtime::Value low_high_key = make_closure_value(106);
+  const amber::runtime::Value keep_gt_one_plus_one = make_closure_value(108);
 
   amber::runtime::ExecutionResult result =
       amber::runtime::execute_code(module, 1, {source, inc});
@@ -620,6 +655,11 @@ void assert_sequence_protocol_for(const amber::bytecode::BcModule &module,
   result = amber::runtime::execute_code(module, 3, {source, pairify});
   expect_ok(result, label + " flat_map");
   expect_integer_list(result.value, {1, 2, 2, 3, 3, 4}, label + " flat_map");
+
+  result =
+      amber::runtime::execute_code(module, 44, {source, keep_gt_one_plus_one});
+  expect_ok(result, label + " filter_map");
+  expect_integer_list(result.value, {3, 4}, label + " filter_map");
 
   result = amber::runtime::execute_code(module, 4, {source, gt_one});
   expect_ok(result, label + " select");
@@ -969,6 +1009,12 @@ void test_std003_lazy_pipeline_and_materialization() {
   expect_ok(result, "LazySeq flat_map/to_a pipeline");
   expect_integer_list(result.value, {1, 2, 2, 3, 3, 4},
                       "LazySeq flat_map/to_a pipeline");
+
+  result = amber::runtime::execute_code(module, 45,
+                                        {source, make_closure_value(108)});
+  expect_ok(result, "LazySeq filter_map/to_a pipeline");
+  expect_integer_list(result.value, {3, 4},
+                      "LazySeq filter_map/to_a pipeline");
 
   amber::runtime::Value open_end = make_range_value(module, 4, 0, true);
   open_end.as_instance_object()->ivars["finish"] =
@@ -1419,10 +1465,10 @@ amber::bytecode::BcModule make_map_protocol_module() {
   BcModule module;
   for (const std::string &symbol :
        {"keys", "values", "entries", "to_a", "each", "map", "select", "reject",
-        "transform", "transform_values", "[]", "contains?", "include?", "+",
-        ">", "==", "count", "length", "size", "key?", "has_key?", "member?",
-        "value?", "has_value?", "collect", "filter", "find_all", "alpha",
-        "beta", "gamma", "missing"}) {
+        "filter_map", "transform", "transform_values", "[]", "contains?",
+        "include?", "+", ">", "==", "count", "length", "size", "key?",
+        "has_key?", "member?", "value?", "has_value?", "collect", "filter",
+        "find_all", "alpha", "beta", "gamma", "missing"}) {
     ensure_symbol_id(&module, symbol);
   }
   append_string(&module, "beta");
@@ -1480,6 +1526,8 @@ amber::bytecode::BcModule make_map_protocol_module() {
       make_send_code(23, symbol_id_or_die(module, "filter"), true));
   module.code_objects.push_back(
       make_send_code(24, symbol_id_or_die(module, "find_all"), true));
+  module.code_objects.push_back(
+      make_send_code(25, symbol_id_or_die(module, "filter_map"), true));
 
   BcCode value_gt_one;
   value_gt_one.code_id = 100;
@@ -1578,6 +1626,26 @@ amber::bytecode::BcModule make_map_protocol_module() {
       {Opcode::Return, {{0, false}}});
   module.code_objects.push_back(transform_value_with_key);
 
+  BcCode map_filter_map_value;
+  map_filter_map_value.code_id = 107;
+  map_filter_map_value.kind = CodeKind::Block;
+  map_filter_map_value.reg_count = 4;
+  map_filter_map_value.instructions.push_back(
+      {Opcode::LoadK, {{2, false}, {one, false}}});
+  map_filter_map_value.instructions.push_back(
+      send_instr(3, 1, symbol_id_or_die(module, ">"), {2}));
+  map_filter_map_value.instructions.push_back(
+      {Opcode::JumpIfFalse, {{3, false}, {5, false}}});
+  map_filter_map_value.instructions.push_back(
+      send_instr(3, 1, symbol_id_or_die(module, "+"), {2}));
+  map_filter_map_value.instructions.push_back(
+      {Opcode::Return, {{3, false}}});
+  map_filter_map_value.instructions.push_back(
+      {Opcode::LoadNull, {{3, false}}});
+  map_filter_map_value.instructions.push_back(
+      {Opcode::Return, {{3, false}}});
+  module.code_objects.push_back(map_filter_map_value);
+
   return module;
 }
 
@@ -1594,6 +1662,7 @@ void test_std001_map_protocol_matrix() {
   const amber::runtime::Value transform_rekey = make_closure_value(105);
   const amber::runtime::Value transform_value_with_key =
       make_closure_value(106);
+  const amber::runtime::Value map_filter_map_value = make_closure_value(107);
   amber::runtime::Value string_key_map =
       amber::runtime::make_symbol_map_value(
           std::vector<amber::runtime::MapEntry>{
@@ -1660,6 +1729,11 @@ void test_std001_map_protocol_matrix() {
   expect_ok(result, "Map#map key/value args");
   expect_entry_list(module, result.value, {{"alpha", 1}, {"beta", 2}},
                     "Map#map key/value args");
+
+  result =
+      amber::runtime::execute_code(module, 25, {map, map_filter_map_value});
+  expect_ok(result, "Map#filter_map");
+  expect_integer_list(result.value, {3}, "Map#filter_map");
 
   result = amber::runtime::execute_code(module, 7, {map, value_gt_one});
   expect_ok(result, "Map#select");
@@ -1759,6 +1833,7 @@ void test_std001_empty_map_edges() {
   const amber::runtime::Value inc_value = make_closure_value(101);
   const amber::runtime::Value map_value_plus_one = make_closure_value(102);
   const amber::runtime::Value transform_rekey = make_closure_value(105);
+  const amber::runtime::Value map_filter_map_value = make_closure_value(107);
 
   amber::runtime::ExecutionResult result =
       amber::runtime::execute_code(module, 1, {empty});
@@ -1793,6 +1868,11 @@ void test_std001_empty_map_edges() {
   result = amber::runtime::execute_code(module, 6, {empty, map_value_plus_one});
   expect_ok(result, "empty Map#map");
   expect_integer_list(result.value, {}, "empty Map#map");
+
+  result =
+      amber::runtime::execute_code(module, 25, {empty, map_filter_map_value});
+  expect_ok(result, "empty Map#filter_map");
+  expect_integer_list(result.value, {}, "empty Map#filter_map");
 
   result = amber::runtime::execute_code(module, 7, {empty, value_gt_one});
   expect_ok(result, "empty Map#select");

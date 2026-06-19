@@ -2860,6 +2860,7 @@ Detached / orphan task в v1 не вводятся.
 - `each_pair`
 - `each_cons`
 - `map`
+- `filter_map`
 - `flat_map`
 - `select`
 - `reject`
@@ -2900,7 +2901,9 @@ Detached / orphan task в v1 не вводятся.
  `step`; без `step:` шаг равен `size`;
 - `each_pair` эквивалентен `each(2, step: 1)`;
 - `each_cons(size)` эквивалентен `each(size, step: 1)`;
-- `map`, `flat_map`, `select`, `reject` и `group_by` по умолчанию eager;
+- `map`, `filter_map`, `flat_map`, `select`, `reject` и `group_by` по
+ умолчанию eager;
+- `filter_map` применяет block и возвращает `Array` truthy-результатов блока;
 - `take_while`, `reverse`, `sort` и `uniq` возвращают `Array`, кроме
  `Set#uniq`, сохраняющего `Set`;
 - `uniq |x|:` использует block как ключ дедупликации;
@@ -2934,6 +2937,7 @@ xs.reduce |acc, x|:...
 
 - `each |k, v|:`
 - `map |k, v|:`
+- `filter_map |k, v|:`
 - `select |k, v|:`
 - `reject |k, v|:`
 - `transform |k, v|:` возвращает key/value tuple или list
@@ -2948,6 +2952,7 @@ xs.reduce |acc, x|:...
 Нормативно:
 
 - `Map#map` возвращает `Array`;
+- `Map#filter_map` возвращает `Array` truthy-результатов block;
 - `Map#select` и `Map#reject` возвращают `Map`;
 - `Map#transform` возвращает `Map` и может менять ключи;
 - `Map#transform_values` возвращает `Map`;
@@ -2959,7 +2964,17 @@ xs.reduce |acc, x|:...
  `entries`;
 - `Map#contains?` и `Map#include?` проверяют наличие key.
 
-С ordinary `Map` operations используют normalized key semantics. Для name keys canonical export — `Str`: `keys`, `entries`, `each`, `map`, `select`, `reject`, `transform`, `transform_values` и `merge` обязаны передавать/возвращать string key для `Symbol(:name)` / `Str("name")` entry. `Map#[]`, `Map#[]?`, `contains?` и `include?` нормализуют lookup key тем же правилом, что и литерал; unsupported key values дают `TypeError`, отсутствующие valid keys дают `KeyError` только для обязательного `Map#[]`.
+С ordinary `Map` operations используют normalized key semantics. Для name keys canonical export — `Str`: `keys`, `entries`, `each`, `map`, `filter_map`, `select`, `reject`, `transform`, `transform_values` и `merge` обязаны передавать/возвращать string key для `Symbol(:name)` / `Str("name")` entry. `Map#[]`, `Map#[]?`, `contains?` и `include?` нормализуют lookup key тем же правилом, что и литерал; unsupported key values дают `TypeError`, отсутствующие valid keys дают `KeyError` только для обязательного `Map#[]`.
+
+Изменяемые `Array` / `List` и `Set` дополнительно поддерживают
+`filter_map! |x|:`. Метод вычисляет block по snapshot receiver'а, удаляет
+`false` / `null` результаты, заменяет содержимое receiver truthy-результатами
+block и возвращает receiver. `Set#filter_map!` нормализует truthy-результаты как
+set elements и схлопывает дубликаты. `Tuple`, `Range` и `LazySeq` не имеют
+`filter_map!`, потому что не мутируются. `Map#filter_map!` намеренно отсутствует:
+`Map#filter_map` возвращает `Array`, а shape-preserving мутации `Map` остаются
+за `select!`, `reject!`, `transform_keys!` / `transform_values!` и related
+mutators.
 
 `StrictMap` / `StrictHashMap` предоставляют тот же operation surface, но используют exact-key semantics и экспортируют фактический stored key value. `Map#merge` с ordinary maps схлопывает name-key duplicates, а strict merge схлопывает только exact-key duplicates.
 
@@ -3356,7 +3371,7 @@ Richer matcher protocols, typed bindings-map и library-level combinators ост
  predicates, membership checks, collection operator methods, windowed
  `each`, `take_while`, `reverse`, `sort`, `uniq`, `permutation` и
  `combination`;
-- для `Map` зафиксированы `each/each_pair/map/select/reject/transform/transform_values/merge/keys/values/entries/contains?/include?`
+- для `Map` зафиксированы `each/each_pair/map/filter_map/select/reject/transform/transform_values/merge/keys/values/entries/contains?/include?`
  плюс `+` / `|` merge aliases;
 - для `reduce` зафиксированы формы с `init` и без `init`, включая `EmptyCollectionError` на пустой коллекции без `init`;
 - для обычного collection indexing зафиксированы `IndexError` и `KeyError`
@@ -16075,6 +16090,8 @@ collection.each |x|:...
 
 collection.map |x|:...
 
+collection.filter_map |x|:...
+
 collection.flat_map |x|:...
 
 collection.select |x|:...
@@ -16103,6 +16120,8 @@ collection.lazy()
 map.each |k, v|:...
 
 map.map |k, v|:...
+
+map.filter_map |k, v|:...
 
 map.select |k, v|:...
 
@@ -16665,15 +16684,15 @@ moved = move(value)
  `Range`, exclusive-end `Range`, and open-ended `Range` edge cases are
  covered by the VM collection dispatch and stdlib collection tests.
 - `STD-003` LazySeq pipeline and materialization. Done: lazy wrappers now
- defer `map` / `flat_map` / `select` / `reject`, terminal operations
+ defer `map` / `filter_map` / `flat_map` / `select` / `reject`, terminal operations
  materialize or short-circuit the pipeline, and open-ended `Range.lazy`
  supports bounded `first(count)` while rejecting unbounded materialization.
 - `STD-004` Map iteration and transform contract. Done: `Map` preserves
  insertion order for `keys` / `values` / `entries` / `to_a`, supports
  symbol/string key lookup, passes `k, v` to iteration/filter/map blocks,
- returns `Array` from `map`, returns `Map` from `select` / `reject`, supports
- key-changing `transform`, and lets `transform_values` blocks read `k` as an
- optional second argument while preserving keys.
+ returns `Array` from `map` / `filter_map`, returns `Map` from `select` /
+ `reject`, supports key-changing `transform`, and lets `transform_values`
+ blocks read `k` as an optional second argument while preserving keys.
 - `STD-005` Suitable collections operations. Done: eager finite
  collections now support `union`, `intersection`, `difference`,
  `left_difference`, `symmetric_difference`, subset/superset/disjoint
@@ -16752,7 +16771,7 @@ moved = move(value)
  methods. Done: `RuntimeThreadedCollection` provides the runtime-facing
  facade for `[1, 2, 3].threaded(3).map:...` style lowering, backed by
  `RuntimeFlowModule`; `.parallel(...)` is an alias for `.threaded(...)`.
- It supports ordered `each`, `map`, `select`, `reject`, `flat_map`,
+ It supports ordered `each`, `map`, `filter_map`, `select`, `reject`, `flat_map`,
  `combination(count)`, and `permutation(count)`, preserves checked isolation by
  default, supports explicit unchecked mode via `RuntimeFlowOptions`, surfaces
  worker failures through the existing flow failure policies, and records

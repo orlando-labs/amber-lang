@@ -1169,6 +1169,19 @@ void test_std016_threaded_collection_iteration_and_transforms() {
   expect_integer_values(mapped.values, {10, 21, 32, 43},
                         "threaded map ordered results");
 
+  const amber::runtime::RuntimeFlowGatherResult filter_mapped =
+      threaded.filter_map(
+          [](const amber::runtime::Value &value, std::size_t) {
+            if (value.as_integer() % 2 != 0) {
+              return amber::runtime::Value::null();
+            }
+            return amber::runtime::Value::integer(value.as_integer() * 10);
+          });
+  expect(filter_mapped.ok && !filter_mapped.failed,
+         "threaded filter_map should complete successfully");
+  expect_integer_values(filter_mapped.values, {20, 40},
+                        "threaded filter_map ordered results");
+
   const amber::runtime::RuntimeFlowGatherResult selected =
       threaded.select([](const amber::runtime::Value &value, std::size_t) {
         return value.as_integer() % 2 == 1;
@@ -1212,11 +1225,11 @@ void test_std016_threaded_collection_iteration_and_transforms() {
   expect(sum.get() == 10, "threaded each should visit every item once");
 
   const amber::runtime::RuntimeThreadedCollectionStats stats = threaded.stats();
-  expect(stats.operations == 5 && stats.map_operations == 1 &&
-             stats.filter_operations == 2 && stats.flat_map_operations == 1 &&
-             stats.each_operations == 1,
+  expect(stats.operations == 6 && stats.map_operations == 1 &&
+             stats.filter_map_operations == 1 && stats.filter_operations == 2 &&
+             stats.flat_map_operations == 1 && stats.each_operations == 1,
          "threaded collection stats should count iteration operations");
-  expect(stats.flow.gathers >= 5 && stats.flow.completed_workers >= 10,
+  expect(stats.flow.gathers >= 6 && stats.flow.completed_workers >= 12,
          "threaded collection stats should include flow stats");
 }
 
@@ -1416,29 +1429,36 @@ void test_std017_source_level_flow_and_threaded_collection_compile_and_run() {
       "\n"
       "flowed = Flow.new().scatter_map([1, 2, 3]): _1 * 10 + _2\n"
       "threaded = [1, 2, 3].threaded(2).map: _1 + 5\n"
+      "filtered = [1, 2, 3, 4].threaded(2).filter_map |x|:\n"
+      "  if x % 2 == 0:\n"
+      "    x * 5\n"
+      "  else:\n"
+      "    false\n"
       "atomic = [1, 2, 3, 4].threaded(2, scatter: :atomic).map: _1 * 2\n"
       "chunks = [1, 2, 3, 4].threaded(2, scatter: :chunks).map: _1 * 3\n"
       "parallel = [1, 2, 3, 4].parallel(2, scatter: :chunks).map: _1 * 4\n"
       "pairs = [1, 2, 3].threaded(2).combination(2)\n"
-      "[flowed, threaded, atomic, chunks, parallel, pairs]\n");
+      "[flowed, threaded, filtered, atomic, chunks, parallel, pairs]\n");
 
   expect(exec.ok(), "source-level flow/threaded stack should execute");
   expect(exec.value.is_list(), "source-level flow result should be list");
   const amber::runtime::IntrusivePtr<amber::runtime::ListValue> values =
       exec.value.as_list();
-  expect(values != nullptr && values->items.size() == 6,
+  expect(values != nullptr && values->items.size() == 7,
          "source-level flow result shape");
   expect_integer_list_value(values->items[0], {10, 21, 32},
                             "source-level Flow.scatter_map");
   expect_integer_list_value(values->items[1], {6, 7, 8},
                             "source-level threaded map");
-  expect_integer_list_value(values->items[2], {2, 4, 6, 8},
+  expect_integer_list_value(values->items[2], {10, 20},
+                            "source-level threaded filter_map");
+  expect_integer_list_value(values->items[3], {2, 4, 6, 8},
                             "source-level threaded atomic scatter");
-  expect_integer_list_value(values->items[3], {3, 6, 9, 12},
+  expect_integer_list_value(values->items[4], {3, 6, 9, 12},
                             "source-level threaded chunk scatter");
-  expect_integer_list_value(values->items[4], {4, 8, 12, 16},
+  expect_integer_list_value(values->items[5], {4, 8, 12, 16},
                             "source-level parallel chunk scatter");
-  expect_integer_list_values(values->items[5].as_list()->items,
+  expect_integer_list_values(values->items[6].as_list()->items,
                              {{1, 2}, {1, 3}, {2, 3}},
                              "source-level threaded combination");
 }
