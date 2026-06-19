@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -42,8 +43,8 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 FENCE_RE = re.compile(r"^```")
 SPEC_ANCHOR_RE = re.compile(r"^spec_anchor:\s*(\S+)\s*$")
-RUNTIME_ERROR_YAML_RE = re.compile(r"^\s*-\s*(\w+)\s*$")
-RUNTIME_ERROR_DEF_RE = re.compile(r"^AMBER_RUNTIME_ERROR\((\w+)\)\s*$")
+RUNTIME_ERROR_ENTRY_RE = re.compile(r"^\s{2}-\s+name:\s*(.+?)\s*$")
+RUNTIME_ERROR_PROPERTY_RE = re.compile(r"^\s{4}(\w+):\s*(.*?)\s*$")
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,15 @@ class Heading:
     level: int
     title: str
     anchor: str
+
+
+@dataclass(frozen=True)
+class RuntimeErrorSpec:
+    name: str
+    parent: str = ""
+    fields: tuple[str, ...] = ()
+    default_message: str = ""
+    default_exit_code: int | None = None
 
 
 def rel(path: Path) -> str:
@@ -273,47 +283,164 @@ def check_registry_anchors() -> list[str]:
     return errors
 
 
-def runtime_error_yaml_names() -> list[str]:
-    names: list[str] = []
+def parse_yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        if value[0] == '"':
+            return str(json.loads(value))
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def parse_inline_yaml_list(value: str) -> tuple[str, ...]:
+    value = value.strip()
+    if not value.startswith("[") or not value.endswith("]"):
+        raise ValueError(f"expected inline YAML list, got {value!r}")
+    body = value[1:-1].strip()
+    if not body:
+        return ()
+    return tuple(parse_yaml_scalar(item) for item in body.split(","))
+
+
+def runtime_error_yaml_specs() -> list[RuntimeErrorSpec]:
+    specs: list[RuntimeErrorSpec] = []
     in_errors = False
+    current: dict[str, object] | None = None
     for line in RUNTIME_ERRORS_YAML.read_text(encoding="utf-8").splitlines():
         if line.rstrip() == "errors:":
             in_errors = True
             continue
         if not in_errors:
             continue
-        match = RUNTIME_ERROR_YAML_RE.match(line)
-        if match:
-            names.append(match.group(1))
-        elif line.strip() and not line.startswith((" ", "\t")):
+        entry = RUNTIME_ERROR_ENTRY_RE.match(line)
+        if entry:
+            if current is not None:
+                specs.append(RuntimeErrorSpec(**current))
+            current = {"name": parse_yaml_scalar(entry.group(1))}
+            continue
+        prop = RUNTIME_ERROR_PROPERTY_RE.match(line)
+        if prop and current is not None:
+            key, raw = prop.groups()
+            if key == "fields":
+                current[key] = parse_inline_yaml_list(raw)
+            elif key == "default_exit_code":
+                current[key] = int(raw)
+            elif key in {"parent", "default_message"}:
+                current[key] = parse_yaml_scalar(raw)
+            else:
+                raise ValueError(f"unknown runtime error property {key!r}")
+            continue
+        if line.strip() and not line.startswith((" ", "\t")):
             break
-    return names
+        if line.strip():
+            raise ValueError(f"invalid runtime error registry line: {line}")
+    if current is not None:
+        specs.append(RuntimeErrorSpec(**current))
+    return specs
 
 
-def runtime_error_def_names() -> list[str]:
-    names: list[str] = []
-    for line in RUNTIME_ERRORS_DEF.read_text(encoding="utf-8").splitlines():
-        match = RUNTIME_ERROR_DEF_RE.match(line)
-        if match:
-            names.append(match.group(1))
-    return names
+RUNTIME_ERROR_FIELD_BITS = {
+    "option": 1 << 0,
+    "value": 1 << 1,
+    "exit_code": 1 << 2,
+    "usage": 1 << 3,
+    "help": 1 << 4,
+}
+
+
+def validate_runtime_error_specs(specs: list[RuntimeErrorSpec]) -> list[str]:
+    errors: list[str] = []
+    by_name = {spec.name: spec for spec in specs}
+    if len(by_name) != len(specs):
+        errors.append("runtime error registry contains duplicate names")
+    for spec in specs:
+        if spec.parent and spec.parent not in by_name:
+            errors.append(f"{spec.name}: unknown parent {spec.parent}")
+        unknown_fields = sorted(set(spec.fields) - RUNTIME_ERROR_FIELD_BITS.keys())
+        if unknown_fields:
+            errors.append(f"{spec.name}: unknown fields {unknown_fields}")
+        if spec.default_exit_code is not None and "exit_code" not in spec.fields:
+            errors.append(
+                f"{spec.name}: default_exit_code requires the exit_code field"
+            )
+        seen: set[str] = set()
+        current = spec
+        while current.parent:
+            if current.name in seen:
+                errors.append(f"{spec.name}: cycle in runtime error ancestry")
+                break
+            seen.add(current.name)
+            parent = by_name.get(current.parent)
+            if parent is None:
+                break
+            current = parent
+    return errors
+
+
+def generate_runtime_error_def() -> str:
+    specs = runtime_error_yaml_specs()
+    validation_errors = validate_runtime_error_specs(specs)
+    if validation_errors:
+        raise ValueError("; ".join(validation_errors))
+    lines = [
+        "// Generated from spec/registries/runtime_errors.yaml.",
+        "// Consumed by runtime/vm.cpp and frontend/binder/binder.cpp.",
+        "// Define AMBER_RUNTIME_ERROR(name, parent, default_message,",
+        "// default_exit_code, field_mask) before including.",
+    ]
+    for spec in specs:
+        field_mask = 0
+        for field in spec.fields:
+            field_mask |= RUNTIME_ERROR_FIELD_BITS[field]
+        default_exit_code = (
+            spec.default_exit_code if spec.default_exit_code is not None else -1
+        )
+        lines.append(
+            "AMBER_RUNTIME_ERROR("
+            + ", ".join(
+                [
+                    json.dumps(spec.name),
+                    json.dumps(spec.parent),
+                    json.dumps(spec.default_message),
+                    str(default_exit_code),
+                    str(field_mask),
+                ]
+            )
+            + ")"
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def check_runtime_error_def() -> list[str]:
     if not RUNTIME_ERRORS_DEF.exists():
         return [f"missing generated mirror: {rel(RUNTIME_ERRORS_DEF)}"]
-    expected = runtime_error_yaml_names()
-    actual = runtime_error_def_names()
+    try:
+        expected = generate_runtime_error_def()
+    except ValueError as error:
+        return [f"{rel(RUNTIME_ERRORS_YAML)}: {error}"]
+    actual = RUNTIME_ERRORS_DEF.read_text(encoding="utf-8")
     if actual != expected:
         return [
             f"{rel(RUNTIME_ERRORS_DEF)}: out of sync with "
-            f"{rel(RUNTIME_ERRORS_YAML)} (expected {expected}, found {actual})"
+            f"{rel(RUNTIME_ERRORS_YAML)}; run "
+            "`python3 tools/spec_sync.py runtime-errors-def > "
+            "spec/registries/runtime_errors.def`"
         ]
     return []
 
 
 def cmd_anchor_map(_: argparse.Namespace) -> int:
     sys.stdout.write(generate_anchor_map())
+    return 0
+
+
+def cmd_runtime_errors_def(_: argparse.Namespace) -> int:
+    try:
+        sys.stdout.write(generate_runtime_error_def())
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
     return 0
 
 
@@ -343,6 +470,8 @@ def main(argv: list[str]) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     anchor_parser = subparsers.add_parser("anchor-map")
     anchor_parser.set_defaults(func=cmd_anchor_map)
+    runtime_errors_parser = subparsers.add_parser("runtime-errors-def")
+    runtime_errors_parser.set_defaults(func=cmd_runtime_errors_def)
     check_parser = subparsers.add_parser("check")
     check_parser.set_defaults(func=cmd_check)
     args = parser.parse_args(argv)

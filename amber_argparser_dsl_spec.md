@@ -513,13 +513,20 @@ The result object should be immutable after parse completion.
 ```amber
 class ArgParser:
  class ParseError < Exception:
-  def init(@message, @option: null, @value: null, @exit_code: 2):
+  def init(@message, @option: null, @value: null, @exit_code: 2,
+           @usage: null, @help: null):
    pass
+
+ class UnknownOption < ParseError:
+   pass
+
+ class MissingValue < ParseError:
+  pass
 
  class MissingRequired < ParseError:
   pass
 
- class UnknownOption < ParseError:
+ class UnexpectedArgument < ParseError:
   pass
 
  class InvalidValue < ParseError:
@@ -529,7 +536,8 @@ class ArgParser:
   pass
 
  class HelpRequested < Exception:
-  def init(@message = "help requested", @exit_code: 0):
+  def init(@message = "help requested", @exit_code: 0,
+           @usage: null, @help: null):
    pass
 ```
 

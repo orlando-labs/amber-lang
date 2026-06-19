@@ -303,10 +303,7 @@ struct NativeErrorClassValue {
   std::uint16_t error_id = 0;
 };
 
-struct ErrorInstanceValue {
-  std::uint16_t error_id = 0;
-  std::string message;
-};
+struct ErrorInstanceValue;
 
 // Arbitrary-precision integer per amber.numeric-profile.v1: explicit BigInt
 // values only — fixed-width Int arithmetic never promotes into this type.
@@ -334,6 +331,8 @@ struct RuntimeTimePeriodValue {
 
 const char *runtime_error_name(std::uint16_t error_id);
 std::optional<std::uint16_t> runtime_error_id(const std::string &name);
+bool runtime_error_is_a(std::uint16_t error_id,
+                        std::uint16_t ancestor_error_id);
 std::string big_int_to_decimal_string(const BigIntValue &value);
 std::string runtime_uuid_to_string(const RuntimeUuidValue &value);
 std::string runtime_time_to_iso8601(const RuntimeTimeValue &value);
@@ -766,6 +765,12 @@ static_assert(sizeof(Value) <= 16, "tagged Value must fit in 16 bytes");
 struct ResultValue {
   bool is_ok = false;
   Value payload = Value::null();
+};
+
+struct ErrorInstanceValue {
+  std::uint16_t error_id = 0;
+  std::string message;
+  std::vector<std::pair<std::string, Value>> fields;
 };
 
 struct RuntimeArgParserValue {

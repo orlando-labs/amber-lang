@@ -43,6 +43,12 @@ struct MockHost : StdlibHost {
     fault_class = error_class;
     fault_message = message;
   }
+  void stdlib_raise_exception(const void * /*frame*/,
+                              Value /*exception*/) override {}
+  bool stdlib_write_output(const void * /*frame*/, bool /*stderr_stream*/,
+                           const std::string & /*text*/) override {
+    return true;
+  }
   std::optional<Value> stdlib_keyword_arg_value(
       const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
       const std::string & /*name*/) override {
@@ -308,6 +314,43 @@ void test_math_faults(const NativeRegistry &registry) {
   }
 }
 
+void test_runtime_error_registry() {
+  const auto exception = amber::runtime::runtime_error_id("Exception");
+  const auto parse_error =
+      amber::runtime::runtime_error_id("ArgParser.ParseError");
+  const auto invalid_value =
+      amber::runtime::runtime_error_id("ArgParser.InvalidValue");
+  const auto unknown_option =
+      amber::runtime::runtime_error_id("ArgParser.UnknownOption");
+  const auto help = amber::runtime::runtime_error_id("ArgParser.HelpRequested");
+  expect(exception.has_value() && parse_error.has_value() &&
+             invalid_value.has_value() && unknown_option.has_value() &&
+             help.has_value(),
+         "dotted ArgParser errors are registered");
+  expect(std::string(amber::runtime::runtime_error_name(*invalid_value)) ==
+             "ArgParser.InvalidValue",
+         "dotted runtime error name round-trips");
+  expect(amber::runtime::runtime_error_is_a(*invalid_value, *parse_error),
+         "ArgParser subclass inherits ParseError");
+  expect(amber::runtime::runtime_error_is_a(*invalid_value, *exception),
+         "ArgParser parse errors inherit Exception");
+  expect(amber::runtime::runtime_error_is_a(*help, *exception) &&
+             !amber::runtime::runtime_error_is_a(*help, *parse_error),
+         "HelpRequested inherits Exception but not ParseError");
+  expect(!amber::runtime::runtime_error_is_a(*invalid_value, *unknown_option),
+         "sibling ArgParser errors do not match");
+
+  const auto json_error = amber::runtime::runtime_error_id("JsonError");
+  const auto json_parse = amber::runtime::runtime_error_id("JsonParseError");
+  const auto type_error = amber::runtime::runtime_error_id("TypeError");
+  expect(json_error.has_value() && json_parse.has_value() &&
+             amber::runtime::runtime_error_is_a(*json_parse, *json_error),
+         "existing native error family keeps inherited matching");
+  expect(type_error.has_value() &&
+             amber::runtime::runtime_error_is_a(*type_error, *exception),
+         "existing native errors inherit Exception");
+}
+
 } // namespace
 
 int main() {
@@ -319,6 +362,7 @@ int main() {
   test_math_compute(registry);
   test_math_not_handled(registry);
   test_math_faults(registry);
+  test_runtime_error_registry();
 
   std::cout << "stdlib registry tests passed\n";
   return 0;

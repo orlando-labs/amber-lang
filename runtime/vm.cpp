@@ -8775,18 +8775,114 @@ std::int64_t shr_int64(std::int64_t lhs, std::int64_t rhs) {
   return static_cast<std::int64_t>(static_cast<std::uint64_t>(lhs) >> rhs);
 }
 
-// Registry-ordered name table. The single source of truth is the shared
-// X-macro list spec/registries/runtime_errors.def (mirrors
-// spec/registries/runtime_errors.yaml); the binder includes the same file so
-// these names also bind as prelude constants in expression position.
-constexpr const char *kRuntimeErrorNames[] = {
-#define AMBER_RUNTIME_ERROR(name) #name,
+struct RuntimeErrorSpec {
+  const char *name;
+  const char *parent;
+  const char *default_message;
+  std::int64_t default_exit_code;
+  std::uint32_t field_mask;
+};
+
+constexpr std::uint32_t kRuntimeErrorFieldOption = 1U << 0U;
+constexpr std::uint32_t kRuntimeErrorFieldValue = 1U << 1U;
+constexpr std::uint32_t kRuntimeErrorFieldExitCode = 1U << 2U;
+constexpr std::uint32_t kRuntimeErrorFieldUsage = 1U << 3U;
+constexpr std::uint32_t kRuntimeErrorFieldHelp = 1U << 4U;
+
+// Registry-ordered native error metadata. The single source of truth is the
+// generated X-macro list, shared with the binder so expression lookup and the
+// VM agree on dotted names, ancestry, and structured fields.
+constexpr RuntimeErrorSpec kRuntimeErrorSpecs[] = {
+#define AMBER_RUNTIME_ERROR(name, parent, default_message, default_exit_code,  \
+                            field_mask)                                        \
+  {name, parent, default_message, default_exit_code, field_mask},
 #include "spec/registries/runtime_errors.def"
 #undef AMBER_RUNTIME_ERROR
 };
 
 constexpr std::uint16_t kRuntimeErrorCount = static_cast<std::uint16_t>(
-    sizeof(kRuntimeErrorNames) / sizeof(kRuntimeErrorNames[0]));
+    sizeof(kRuntimeErrorSpecs) / sizeof(kRuntimeErrorSpecs[0]));
+
+std::optional<std::uint16_t> runtime_error_parent_id(std::uint16_t error_id) {
+  if (error_id >= kRuntimeErrorCount ||
+      kRuntimeErrorSpecs[error_id].parent[0] == '\0') {
+    return std::nullopt;
+  }
+  for (std::uint16_t i = 0; i < kRuntimeErrorCount; ++i) {
+    if (std::string_view(kRuntimeErrorSpecs[i].name) ==
+        kRuntimeErrorSpecs[error_id].parent) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+std::uint32_t runtime_error_effective_field_mask(std::uint16_t error_id) {
+  std::uint32_t mask = 0;
+  for (std::uint16_t depth = 0;
+       error_id < kRuntimeErrorCount && depth < kRuntimeErrorCount; ++depth) {
+    mask |= kRuntimeErrorSpecs[error_id].field_mask;
+    const std::optional<std::uint16_t> parent =
+        runtime_error_parent_id(error_id);
+    if (!parent.has_value()) {
+      break;
+    }
+    error_id = *parent;
+  }
+  return mask;
+}
+
+std::optional<std::int64_t>
+runtime_error_default_exit_code(std::uint16_t error_id) {
+  for (std::uint16_t depth = 0;
+       error_id < kRuntimeErrorCount && depth < kRuntimeErrorCount; ++depth) {
+    if (kRuntimeErrorSpecs[error_id].default_exit_code >= 0) {
+      return kRuntimeErrorSpecs[error_id].default_exit_code;
+    }
+    const std::optional<std::uint16_t> parent =
+        runtime_error_parent_id(error_id);
+    if (!parent.has_value()) {
+      break;
+    }
+    error_id = *parent;
+  }
+  return std::nullopt;
+}
+
+const char *runtime_error_default_message(std::uint16_t error_id) {
+  for (std::uint16_t depth = 0;
+       error_id < kRuntimeErrorCount && depth < kRuntimeErrorCount; ++depth) {
+    if (kRuntimeErrorSpecs[error_id].default_message[0] != '\0') {
+      return kRuntimeErrorSpecs[error_id].default_message;
+    }
+    const std::optional<std::uint16_t> parent =
+        runtime_error_parent_id(error_id);
+    if (!parent.has_value()) {
+      break;
+    }
+    error_id = *parent;
+  }
+  return "";
+}
+
+std::uint32_t runtime_error_field_bit(const std::string &name) {
+  if (name == "option") {
+    return kRuntimeErrorFieldOption;
+  }
+  if (name == "value") {
+    return kRuntimeErrorFieldValue;
+  }
+  if (name == "exit_code") {
+    return kRuntimeErrorFieldExitCode;
+  }
+  if (name == "usage") {
+    return kRuntimeErrorFieldUsage;
+  }
+  if (name == "help") {
+    return kRuntimeErrorFieldHelp;
+  }
+  return 0;
+}
 
 } // namespace
 
@@ -8794,16 +8890,33 @@ const char *runtime_error_name(std::uint16_t error_id) {
   if (error_id >= kRuntimeErrorCount) {
     return "Error";
   }
-  return kRuntimeErrorNames[error_id];
+  return kRuntimeErrorSpecs[error_id].name;
 }
 
 std::optional<std::uint16_t> runtime_error_id(const std::string &name) {
   for (std::uint16_t i = 0; i < kRuntimeErrorCount; ++i) {
-    if (name == kRuntimeErrorNames[i]) {
+    if (name == kRuntimeErrorSpecs[i].name) {
       return i;
     }
   }
   return std::nullopt;
+}
+
+bool runtime_error_is_a(std::uint16_t error_id,
+                        std::uint16_t ancestor_error_id) {
+  for (std::uint16_t depth = 0;
+       error_id < kRuntimeErrorCount && depth < kRuntimeErrorCount; ++depth) {
+    if (error_id == ancestor_error_id) {
+      return true;
+    }
+    const std::optional<std::uint16_t> parent =
+        runtime_error_parent_id(error_id);
+    if (!parent.has_value()) {
+      return false;
+    }
+    error_id = *parent;
+  }
+  return false;
 }
 
 std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
@@ -9744,6 +9857,16 @@ public:
                         const std::string &message) override {
     set_fault(*static_cast<const Frame *>(frame), error_class, message);
   }
+  void stdlib_raise_exception(const void *frame, Value exception) override {
+    raise_value(*static_cast<const Frame *>(frame), exception);
+  }
+  bool stdlib_write_output(const void *frame, bool stderr_stream,
+                           const std::string &text) override {
+    const Frame &active = *static_cast<const Frame *>(frame);
+    const std::shared_ptr<RuntimeTextWriter> writer =
+        stderr_stream ? current_runtime_stderr() : current_runtime_stdout();
+    return set_fault_from_text_write_result(active, writer->write_str(text));
+  }
   std::optional<Value> stdlib_keyword_arg_value(
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
       const std::string &name) override {
@@ -9931,16 +10054,8 @@ public:
   }
   StdlibBlockResult stdlib_call_block(const void *frame, const Value &block,
                                       std::vector<Value> args) override {
-    StdlibBlockResult result;
-    const std::optional<Value> value = call_block_to_value(
-        *static_cast<const Frame *>(frame), block, std::move(args));
-    if (!value.has_value()) {
-      result.status = StdlibBlockStatus::Faulted;
-      return result;
-    }
-    result.status = StdlibBlockStatus::Returned;
-    result.value = *value;
-    return result;
+    return call_block_to_stdlib_result(*static_cast<const Frame *>(frame),
+                                       block, args);
   }
   void stdlib_throw_json_stop(const void *frame,
                               std::optional<Value> value) override {
@@ -10551,6 +10666,60 @@ private:
                                            const Value &block,
                                            std::initializer_list<Value> args) {
     return call_block_to_value(frame, block, std::vector<Value>(args));
+  }
+
+  StdlibBlockResult
+  call_block_to_stdlib_result(const Frame &frame, const Value &block,
+                              const std::vector<Value> &args) {
+    StdlibBlockResult result;
+    if (block.is_null()) {
+      set_fault(frame, "TypeError", "native stdlib method requires block");
+      return result;
+    }
+    if (!block.is_closure()) {
+      set_fault(frame, "TypeError", "native stdlib block must be closure");
+      return result;
+    }
+    if (!ensure_lifecycle_access(frame, block)) {
+      return result;
+    }
+    const IntrusivePtr<ClosureValue> closure = block.as_closure();
+    if (closure == nullptr) {
+      set_fault(frame, "TypeError", "closure value is null");
+      return result;
+    }
+    const BcCode *code = find_code(module_, closure->code_id);
+    if (code == nullptr) {
+      set_fault(frame, "VMError", "closure code id is unknown");
+      return result;
+    }
+
+    BlockVmLease lease = acquire_block_vm();
+    Vm &nested = *lease.vm;
+    nested.push_frame_from_args(*code, args.data(), args.size(),
+                                closure->captures, closure->self, Value::null(),
+                                std::nullopt);
+    while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
+      nested.step();
+    }
+    merge_runtime_names_from(nested);
+    if (nested.escaped_throw_.has_value()) {
+      const PendingThrow escaped = *nested.escaped_throw_;
+      throw_value(frame, escaped.tag, escaped.value, escaped.value_present);
+      return result;
+    }
+    if (nested.escaped_exception_.has_value()) {
+      result.status = StdlibBlockStatus::Raised;
+      result.exception = *nested.escaped_exception_;
+      return result;
+    }
+    if (nested.fault_.has_value()) {
+      fault_ = nested.fault_;
+      return result;
+    }
+    result.status = StdlibBlockStatus::Returned;
+    result.value = std::move(nested.final_value_);
+    return result;
   }
 
   FastCallStatus try_evaluate_simple_stream_block(const Frame &caller,
@@ -17890,8 +18059,8 @@ private:
     if (matcher.is_native_error_class()) {
       *out = value.is_error_instance() &&
              value.as_error_instance() != nullptr &&
-             value.as_error_instance()->error_id ==
-                 matcher.as_native_error_class().error_id;
+             runtime_error_is_a(value.as_error_instance()->error_id,
+                                matcher.as_native_error_class().error_id);
       return true;
     }
     if (matcher.is_class_object()) {
@@ -18517,23 +18686,48 @@ private:
     return CoercedMapState{result, *result_entries};
   }
 
-  // Bare-call construction of a builtin runtime error class, e.g.
-  // `ValueError("bad")` or `Err(OverflowError("x"))`. Mirrors the `.new(msg)`
-  // SEND path: at most one positional argument (the message), no keyword args,
-  // and no block. Returns NotHandled when `callee` is not an error class so the
-  // caller falls through to its normal CALL dispatch.
-  SendStatus call_native_error_class(
-      Frame &frame, const Value &callee, const std::vector<Value> &pos_args,
+  void set_error_instance_field(ErrorInstanceValue *instance, std::string name,
+                                Value value) {
+    for (auto &[existing_name, existing_value] : instance->fields) {
+      if (existing_name == name) {
+        existing_value = std::move(value);
+        return;
+      }
+    }
+    instance->fields.push_back({std::move(name), std::move(value)});
+  }
+
+  std::shared_ptr<ErrorInstanceValue>
+  make_native_error_instance(std::uint16_t error_id) {
+    auto instance = std::make_shared<ErrorInstanceValue>();
+    instance->error_id = error_id;
+    instance->message = runtime_error_default_message(error_id);
+    const std::uint32_t field_mask =
+        runtime_error_effective_field_mask(error_id);
+    const auto add_null_field = [&](std::uint32_t bit, const char *name) {
+      if ((field_mask & bit) != 0U) {
+        instance->fields.push_back({name, Value::null()});
+      }
+    };
+    add_null_field(kRuntimeErrorFieldOption, "option");
+    add_null_field(kRuntimeErrorFieldValue, "value");
+    if ((field_mask & kRuntimeErrorFieldExitCode) != 0U) {
+      const std::optional<std::int64_t> exit_code =
+          runtime_error_default_exit_code(error_id);
+      instance->fields.push_back({"exit_code", exit_code.has_value()
+                                                   ? Value::integer(*exit_code)
+                                                   : Value::null()});
+    }
+    add_null_field(kRuntimeErrorFieldUsage, "usage");
+    add_null_field(kRuntimeErrorFieldHelp, "help");
+    return instance;
+  }
+
+  SendStatus construct_native_error_instance(
+      const Frame &frame, std::uint16_t error_id,
+      const std::vector<Value> &pos_args,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
-      const Value &block, std::uint32_t dst) {
-    if (!callee.is_native_error_class()) {
-      return SendStatus::NotHandled;
-    }
-    if (!kw_args.empty()) {
-      set_fault(frame, "TypeError",
-                "error class call does not accept keyword arguments");
-      return SendStatus::Faulted;
-    }
+      const Value &block, Value *out) {
     if (!block.is_null()) {
       set_fault(frame, "TypeError", "error class call does not accept block");
       return SendStatus::Faulted;
@@ -18543,8 +18737,7 @@ private:
                 "error class call accepts at most one positional argument");
       return SendStatus::Faulted;
     }
-    auto instance = std::make_shared<ErrorInstanceValue>();
-    instance->error_id = callee.as_native_error_class().error_id;
+    auto instance = make_native_error_instance(error_id);
     if (!pos_args.empty()) {
       if (pos_args[0].is_string()) {
         instance->message =
@@ -18553,7 +18746,63 @@ private:
         instance->message = value_to_debug_string(pos_args[0], &module_);
       }
     }
-    if (!write_reg(frame, dst, Value::error_instance(std::move(instance)))) {
+
+    const std::uint32_t field_mask =
+        runtime_error_effective_field_mask(error_id);
+    bool message_keyword_seen = false;
+    for (const auto &[name_id, value] : kw_args) {
+      if (name_id >= module_.symbols.size()) {
+        set_fault(frame, "VMError",
+                  "error class keyword symbol ref is out of range");
+        return SendStatus::Faulted;
+      }
+      const std::string &name = module_.symbols[name_id];
+      if (name == "message") {
+        if (!pos_args.empty() || message_keyword_seen) {
+          set_fault(frame, "KeywordArgumentError",
+                    "duplicate error message argument");
+          return SendStatus::Faulted;
+        }
+        message_keyword_seen = true;
+        if (value.is_string()) {
+          instance->message =
+              string_text_from_id(value.as_string().string_id).value_or("");
+        } else {
+          instance->message = value_to_debug_string(value, &module_);
+        }
+        continue;
+      }
+      const std::uint32_t field_bit = runtime_error_field_bit(name);
+      if (field_bit == 0U || (field_mask & field_bit) == 0U) {
+        set_fault(frame, "KeywordArgumentError",
+                  std::string(runtime_error_name(error_id)) +
+                      " does not accept keyword `" + name + "`");
+        return SendStatus::Faulted;
+      }
+      set_error_instance_field(instance.get(), name, value);
+    }
+    *out = Value::error_instance(std::move(instance));
+    return SendStatus::Matched;
+  }
+
+  // Bare-call construction of a builtin runtime error class, e.g.
+  // `ValueError("bad")` or `Err(OverflowError("x"))`. Returns NotHandled when
+  // `callee` is not an error class so normal CALL dispatch may continue.
+  SendStatus call_native_error_class(
+      Frame &frame, const Value &callee, const std::vector<Value> &pos_args,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const Value &block, std::uint32_t dst) {
+    if (!callee.is_native_error_class()) {
+      return SendStatus::NotHandled;
+    }
+    Value instance = Value::null();
+    const SendStatus status = construct_native_error_instance(
+        frame, callee.as_native_error_class().error_id, pos_args, kw_args,
+        block, &instance);
+    if (status != SendStatus::Matched) {
+      return status;
+    }
+    if (!write_reg(frame, dst, std::move(instance))) {
       return SendStatus::Faulted;
     }
     ++frame.pc;
@@ -20561,6 +20810,17 @@ private:
 
     if (receiver.is_native_type()) {
       const RuntimeNativeTypeKind kind = receiver.as_native_type().kind;
+      const std::string nested_error_path =
+          std::string(native_type_name(kind)) + "." + selector;
+      if (const std::optional<std::uint16_t> nested_error_id =
+              runtime_error_id(nested_error_path)) {
+        if (args.empty() && kw_args.empty() && block.is_null()) {
+          *out = Value::native_error_class(*nested_error_id);
+          return SendStatus::Matched;
+        }
+        return construct_native_error_instance(frame, *nested_error_id, args,
+                                               kw_args, block, out);
+      }
       if (selector == "===") {
         if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
           if (!kw_args.empty()) {
@@ -25575,24 +25835,8 @@ private:
     if (receiver.is_native_error_class()) {
       const std::uint16_t error_id = receiver.as_native_error_class().error_id;
       if (selector == "new") {
-        if (args.size() > 1U || !require_no_block()) {
-          if (args.size() > 1U) {
-            set_fault(frame, "TypeError", "wrong builtin SEND arity");
-          }
-          return SendStatus::Faulted;
-        }
-        auto instance = std::make_shared<ErrorInstanceValue>();
-        instance->error_id = error_id;
-        if (!args.empty()) {
-          if (args[0].is_string()) {
-            instance->message =
-                string_text_from_id(args[0].as_string().string_id).value_or("");
-          } else {
-            instance->message = value_to_debug_string(args[0], &module_);
-          }
-        }
-        *out = Value::error_instance(std::move(instance));
-        return SendStatus::Matched;
+        return construct_native_error_instance(frame, error_id, args, kw_args,
+                                               block, out);
       }
       if (selector == "name" || selector == "to_str" || selector == "inspect") {
         if (!require_arity(0) || !require_no_block()) {
@@ -25606,10 +25850,11 @@ private:
         if (!require_arity(1) || !require_no_block()) {
           return SendStatus::Faulted;
         }
-        *out =
-            Value::boolean(args[0].is_error_instance() &&
-                           args[0].as_error_instance() != nullptr &&
-                           args[0].as_error_instance()->error_id == error_id);
+        *out = Value::boolean(
+            args[0].is_error_instance() &&
+            args[0].as_error_instance() != nullptr &&
+            runtime_error_is_a(args[0].as_error_instance()->error_id,
+                               error_id));
         return SendStatus::Matched;
       }
     }
@@ -25650,6 +25895,21 @@ private:
           return SendStatus::Faulted;
         }
         *out = Value::native_error_class(instance->error_id);
+        return SendStatus::Matched;
+      }
+      if (runtime_error_field_bit(selector) != 0U &&
+          (runtime_error_effective_field_mask(instance->error_id) &
+           runtime_error_field_bit(selector)) != 0U) {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        for (const auto &[name, value] : instance->fields) {
+          if (name == selector) {
+            *out = value;
+            return SendStatus::Matched;
+          }
+        }
+        *out = Value::null();
         return SendStatus::Matched;
       }
     }
@@ -29112,6 +29372,25 @@ private:
       ++frame.pc;
       return true;
     }
+    if (!property_access && !property_assignment && receiver.is_native_type()) {
+      const std::string nested_error_path =
+          std::string(native_type_name(receiver.as_native_type().kind)) + "." +
+          *selector;
+      if (const std::optional<std::uint16_t> nested_error_id =
+              runtime_error_id(nested_error_path)) {
+        Value result = Value::null();
+        if (construct_native_error_instance(frame, *nested_error_id, args,
+                                            kw_args, block,
+                                            &result) != SendStatus::Matched) {
+          return false;
+        }
+        if (!write_reg(frame, dst, std::move(result))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
+    }
     if (!property_access && !property_assignment) {
       Value result = Value::null();
       const SendStatus scalar_status = try_apply_scalar_send(
@@ -29191,9 +29470,10 @@ private:
           return true;
         }
       }
-      if (receiver.is_result()) {
-        // Bare-nullary Result members (.or_raise, .ok?, .err?, .value, .error)
-        // route to the scalar Result handler just like a parenthesised call.
+      if (receiver.is_result() || receiver.is_error_instance() ||
+          receiver.is_native_error_class()) {
+        // Bare-nullary Result and native-error members route to the scalar
+        // handler just like parenthesised calls.
         Value result = Value::null();
         const SendStatus scalar_status = try_apply_scalar_send(
             frame, receiver, *selector, args, block, kw_args, &result);
@@ -29345,8 +29625,8 @@ private:
       class_index = receiver.as_class_object().class_index;
       dispatch_flags = kMethodFlagClass;
     } else {
-      std::string message =
-          "selector is not implemented in current runtime baseline";
+      std::string message = "selector `" + *selector +
+                            "` is not implemented in current runtime baseline";
       // RFC §11: when a bare collection method is used where the bang or the
       // pure copy-edit form is intended, point the caller at the right name.
       if (receiver.is_list() || receiver.is_map() || receiver.is_set()) {

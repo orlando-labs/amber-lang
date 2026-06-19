@@ -30,6 +30,7 @@ struct ParseResult {
 
   Status status = Status::Ok;
   Value value = Value::null();
+  Value exception = Value::null();
   ParseError error;
 };
 
@@ -243,21 +244,67 @@ bool parser_cmdline_from_keyword(NativeStdlibCall &call, const Parser &parser,
 }
 
 Value make_error_value(NativeStdlibCall &call, const ParseError &error) {
-  std::vector<std::pair<std::string, Value>> entries;
-  entries.push_back({"class", call.string_value(error.klass)});
-  entries.push_back({"message", call.string_value(error.message)});
-  entries.push_back({"exit_code", Value::integer(error.exit_code)});
-  if (!error.option.empty()) {
-    entries.push_back({"option", call.string_value(error.option)});
+  const std::optional<std::uint16_t> error_id = runtime_error_id(error.klass);
+  if (!error_id.has_value()) {
+    call.fault("VMError", "ArgParser error class is not registered");
+    return Value::null();
   }
-  if (!error.value.empty()) {
-    entries.push_back({"value", call.string_value(error.value)});
+  auto instance = std::make_shared<ErrorInstanceValue>();
+  instance->error_id = *error_id;
+  instance->message = error.message;
+  instance->fields.push_back({"exit_code", Value::integer(error.exit_code)});
+  if (error.klass != "ArgParser.HelpRequested") {
+    instance->fields.push_back(
+        {"option", error.option.empty() ? Value::null()
+                                        : call.string_value(error.option)});
+    instance->fields.push_back({"value", error.value.empty()
+                                             ? Value::null()
+                                             : call.string_value(error.value)});
   }
-  if (!error.help.empty()) {
-    entries.push_back({"help", call.string_value(error.help)});
-    entries.push_back({"usage", call.string_value(error.help)});
+  instance->fields.push_back({"usage", error.help.empty()
+                                           ? Value::null()
+                                           : call.string_value(error.help)});
+  instance->fields.push_back({"help", error.help.empty()
+                                          ? Value::null()
+                                          : call.string_value(error.help)});
+  return Value::error_instance(std::move(instance));
+}
+
+bool is_captured_parse_exception(const Value &value) {
+  if (!value.is_error_instance() || value.as_error_instance() == nullptr) {
+    return false;
   }
-  return call.make_object(std::move(entries));
+  const std::optional<std::uint16_t> parse_error_id =
+      runtime_error_id("ArgParser.ParseError");
+  const std::optional<std::uint16_t> help_requested_id =
+      runtime_error_id("ArgParser.HelpRequested");
+  const std::uint16_t error_id = value.as_error_instance()->error_id;
+  return (parse_error_id.has_value() &&
+          runtime_error_is_a(error_id, *parse_error_id)) ||
+         (help_requested_id.has_value() &&
+          runtime_error_is_a(error_id, *help_requested_id));
+}
+
+bool error_is_a(const Value &value, const std::string &class_name) {
+  if (!value.is_error_instance() || value.as_error_instance() == nullptr) {
+    return false;
+  }
+  const std::optional<std::uint16_t> class_id = runtime_error_id(class_name);
+  return class_id.has_value() &&
+         runtime_error_is_a(value.as_error_instance()->error_id, *class_id);
+}
+
+std::optional<Value> error_field(const Value &value, const std::string &name) {
+  if (!value.is_error_instance() || value.as_error_instance() == nullptr) {
+    return std::nullopt;
+  }
+  for (const auto &[field_name, field_value] :
+       value.as_error_instance()->fields) {
+    if (field_name == name) {
+      return field_value;
+    }
+  }
+  return std::nullopt;
 }
 
 ParseError parse_error(std::string klass, std::string message,
@@ -471,6 +518,17 @@ ParseResult apply_value(NativeStdlibCall &call, const Spec &spec,
   if (!spec.block.is_null()) {
     const StdlibBlockResult block_result =
         call.call_block(spec.block, {converted});
+    if (block_result.status == StdlibBlockStatus::Raised) {
+      ParseResult result;
+      if (is_captured_parse_exception(block_result.exception)) {
+        result.status = ParseResult::Status::Error;
+        result.exception = block_result.exception;
+        return result;
+      }
+      call.raise(block_result.exception);
+      result.status = ParseResult::Status::Faulted;
+      return result;
+    }
     if (block_result.status == StdlibBlockStatus::Faulted) {
       ParseResult result;
       result.status = ParseResult::Status::Faulted;
@@ -896,8 +954,9 @@ bool append_positional_spec(NativeStdlibCall &call, Parser *parser,
   return true;
 }
 
-SendStatus parse_mode(NativeStdlibCall &call, bool result_mode,
-                      bool strict_mode) {
+enum class ParseMode { Result, Strict, Cli };
+
+SendStatus parse_mode(NativeStdlibCall &call, ParseMode mode) {
   if (!call.require_arity(0) || !call.reject_unknown_keywords({"cmdline"}) ||
       !call.require_no_block()) {
     return SendStatus::Faulted;
@@ -915,16 +974,59 @@ SendStatus parse_mode(NativeStdlibCall &call, bool result_mode,
     return SendStatus::Faulted;
   }
   if (result.status == ParseResult::Status::Error) {
-    if (result_mode) {
-      *call.out =
-          make_result_value(false, make_error_value(call, result.error));
+    ParseError structured_error = result.error;
+    if (structured_error.help.empty()) {
+      structured_error.help = help_text(*parser);
+    }
+    Value exception = result.exception.is_null()
+                          ? make_error_value(call, structured_error)
+                          : result.exception;
+    if (exception.is_null()) {
+      return SendStatus::Faulted;
+    }
+    if (mode == ParseMode::Result) {
+      *call.out = make_result_value(false, std::move(exception));
       return SendStatus::Matched;
     }
-    return call.fault(result.error.klass, result.error.message);
+    if (mode == ParseMode::Cli) {
+      const std::shared_ptr<ErrorInstanceValue> instance =
+          exception.as_error_instance();
+      if (error_is_a(exception, "ArgParser.HelpRequested")) {
+        std::string rendered = help_text(*parser);
+        if (const std::optional<Value> help = error_field(exception, "help")) {
+          if (const std::optional<std::string> text = call.text_of(*help)) {
+            rendered = *text;
+          }
+        }
+        if (!call.write_stdout(rendered + "\n")) {
+          return SendStatus::Faulted;
+        }
+        *call.out = Value::null();
+        return SendStatus::Matched;
+      }
+      std::string usage = help_text(*parser);
+      if (const std::optional<Value> field = error_field(exception, "usage")) {
+        if (const std::optional<std::string> text = call.text_of(*field)) {
+          usage = *text;
+        }
+      }
+      const std::string program =
+          parser->name.empty() ? "program" : parser->name;
+      const std::string message =
+          instance == nullptr ? "argument parsing failed" : instance->message;
+      if (!call.write_stderr(usage + "\n\n" + program + ": error: " + message +
+                             "\n")) {
+        return SendStatus::Faulted;
+      }
+      return call.fault(instance == nullptr
+                            ? "ArgParser.ParseError"
+                            : runtime_error_name(instance->error_id),
+                        message);
+    }
+    return call.raise(std::move(exception));
   }
-  *call.out =
-      result_mode ? make_result_value(true, result.value) : result.value;
-  (void)strict_mode;
+  *call.out = mode == ParseMode::Result ? make_result_value(true, result.value)
+                                        : result.value;
   return SendStatus::Matched;
 }
 
@@ -986,13 +1088,13 @@ SendStatus parser_dispatch(NativeStdlibCall &call) {
                : SendStatus::Faulted;
   }
   if (call.selector == "try_parse") {
-    return parse_mode(call, true, false);
+    return parse_mode(call, ParseMode::Result);
   }
   if (call.selector == "parse_or_raise") {
-    return parse_mode(call, false, true);
+    return parse_mode(call, ParseMode::Strict);
   }
   if (call.selector == "parse") {
-    return parse_mode(call, false, false);
+    return parse_mode(call, ParseMode::Cli);
   }
   return SendStatus::NotHandled;
 }

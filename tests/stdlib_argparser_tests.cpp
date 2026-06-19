@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -119,11 +121,10 @@ void test_result_mode_choices_and_help() {
       "help = help_parser.try_parse()\n"
       "bad_error = bad.error()\n"
       "help_error = help.error()\n"
-      "if bad.err?() and bad_error[\"class\"] == "
-      "\"ArgParser.InvalidChoice\" and bad_error[\"option\"] == "
-      "\"--mode\" and help.err?() and help_error[\"class\"] == "
-      "\"ArgParser.HelpRequested\" and help_error[\"exit_code\"] == 0 and "
-      "help_error[\"help\"].contains?(\"usage: copy\"):\n"
+      "if bad.err?() and ArgParser.InvalidChoice === bad_error and "
+      "bad_error.option == \"--mode\" and help.err?() and "
+      "ArgParser.HelpRequested === help_error and help_error.exit_code == 0 "
+      "and help_error.help.contains?(\"usage: copy\"):\n"
       "  42\n"
       "else:\n"
       "  0\n");
@@ -181,6 +182,198 @@ void test_parse_or_raise_faults() {
                "ArgParser.HelpRequested", "strict help request");
 }
 
+void test_first_class_errors_and_strict_equivalence() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "parser = ArgParser(cmdline: [\"--count\", \"bad\"])\n"
+      "parser.arg(\"--count\", type: Int)\n"
+      "result = parser.try_parse()\n"
+      "error = result.error()\n"
+      "from_result = result.err?() and ArgParser.InvalidValue === error and "
+      "error.message == \"--count expects Int\" and "
+      "error.option == \"--count\" and error.value == \"bad\" and "
+      "error.exit_code == 2 and error.usage.contains?(\"usage: program\") "
+      "and error.help == error.usage\n"
+      "from_bridge = false\n"
+      "try:\n"
+      "  parser.try_parse().or_raise\n"
+      "rescue ArgParser.InvalidValue |e|:\n"
+      "  from_bridge = e.message == error.message and "
+      "e.option == error.option and e.value == error.value and "
+      "e.exit_code == error.exit_code\n"
+      "from_shorthand = false\n"
+      "try:\n"
+      "  parser.parse_or_raise()\n"
+      "rescue ArgParser.InvalidValue |e|:\n"
+      "  from_shorthand = e.message == error.message and "
+      "e.option == error.option and e.value == error.value and "
+      "e.exit_code == error.exit_code\n"
+      "if from_result and from_bridge and from_shorthand:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "ArgParser first-class strict equivalence");
+}
+
+void test_dotted_error_construction_and_matching() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "one = ArgParser.InvalidValue.new(\"bad\", option: \"--port\", "
+      "value: \"nope\")\n"
+      "two = ArgParser.InvalidValue(\"worse\", option: \"--count\", "
+      "value: \"nah\", exit_code: 7)\n"
+      "base = ArgParser.ParseError(\"base\", usage: \"usage: app\")\n"
+      "help = ArgParser.HelpRequested()\n"
+      "bridged = false\n"
+      "try:\n"
+      "  Err(two).or_raise\n"
+      "rescue ArgParser.InvalidValue |e|:\n"
+      "  bridged = e.exit_code == 7 and e.option == \"--count\"\n"
+      "if ArgParser.InvalidValue === one and "
+      "ArgParser.ParseError === one and "
+      "(ArgParser.UnknownOption === one) == false and "
+      "one.option == \"--port\" and "
+      "one.value == \"nope\" and one.exit_code == 2 and "
+      "ArgParser.InvalidValue === two and two.exit_code == 7 and "
+      "ArgParser.ParseError === base and base.usage == \"usage: app\" and "
+      "bridged and "
+      "ArgParser.HelpRequested === help and help.message == "
+      "\"help requested\" and help.exit_code == 0 and help.help == null and "
+      "(ArgParser.ParseError === help) == false:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "ArgParser dotted error construction");
+}
+
+void test_parse_error_rescue_hierarchy() {
+  const std::vector<std::string> cases = {
+      "candidate = ArgParser(cmdline: [\"--wat\"])",
+      "candidate = ArgParser(cmdline: [\"--port\"])\n"
+      "candidate.arg(\"--port\")",
+      "candidate = ArgParser(cmdline: [])\n"
+      "candidate.arg(\"--token\", required: true)",
+      "candidate = ArgParser(cmdline: [\"extra\"])",
+      "candidate = ArgParser(cmdline: [\"--count\", \"bad\"])\n"
+      "candidate.arg(\"--count\", type: Int)",
+      "candidate = ArgParser(cmdline: [\"--mode\", \"bad\"])\n"
+      "candidate.arg(\"--mode\", choices: [\"dev\"])",
+  };
+  for (const std::string &parser_source : cases) {
+    const amber::runtime::ExecutionResult result =
+        execute_source(parser_source + "\n"
+                                       "try:\n"
+                                       "  candidate.try_parse().or_raise\n"
+                                       "rescue ArgParser.ParseError:\n"
+                                       "  42\n");
+    expect_ok_integer(result, 42,
+                      "ArgParser.ParseError catches parse subclass");
+  }
+
+  const amber::runtime::ExecutionResult help = execute_source(
+      "try:\n"
+      "  try:\n"
+      "    ArgParser(cmdline: [\"--help\"]).try_parse().or_raise\n"
+      "  rescue ArgParser.ParseError:\n"
+      "    0\n"
+      "rescue ArgParser.HelpRequested:\n"
+      "  42\n");
+  expect_ok_integer(help, 42, "ArgParser.ParseError excludes HelpRequested");
+
+  const amber::runtime::ExecutionResult sibling = execute_source(
+      "try:\n"
+      "  try:\n"
+      "    ArgParser(cmdline: [\"--wat\"]).try_parse().or_raise\n"
+      "  rescue ArgParser.InvalidValue:\n"
+      "    0\n"
+      "rescue ArgParser.UnknownOption:\n"
+      "  42\n");
+  expect_ok_integer(sibling, 42,
+                    "ArgParser.InvalidValue excludes sibling errors");
+}
+
+void test_converter_exception_boundaries() {
+  const amber::runtime::ExecutionResult parse_error = execute_source(
+      "parser = ArgParser(cmdline: [\"--port\", \"9\"])\n"
+      "parser.arg(\"--port\", type: Int) |value|:\n"
+      "  raise ArgParser.InvalidValue(\"out of range\", option: \"--port\", "
+      "value: value)\n"
+      "result = parser.try_parse()\n"
+      "error = result.error()\n"
+      "if result.err?() and ArgParser.InvalidValue === error and "
+      "error.message == \"out of range\" and error.option == \"--port\" and "
+      "error.value == 9:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(parse_error, 42,
+                    "ArgParser captures explicit converter parse errors");
+
+  const amber::runtime::ExecutionResult arbitrary =
+      execute_source("parser = ArgParser(cmdline: [\"--port\", \"9\"])\n"
+                     "parser.arg(\"--port\", type: Int) |value|:\n"
+                     "  raise ValueError(\"converter exploded\")\n"
+                     "try:\n"
+                     "  parser.try_parse()\n"
+                     "rescue ValueError |e|:\n"
+                     "  if e.message == \"converter exploded\":\n"
+                     "    42\n"
+                     "  else:\n"
+                     "    0\n");
+  expect_ok_integer(arbitrary, 42,
+                    "ArgParser preserves arbitrary converter exceptions");
+}
+
+void test_unhandled_error_name_and_trace() {
+  const amber::runtime::ExecutionResult result =
+      execute_source("parser = ArgParser(cmdline: [\"--count\", \"bad\"])\n"
+                     "parser.arg(\"--count\", type: Int)\n"
+                     "parser.try_parse().or_raise\n");
+  expect(!result.ok() && result.fault.has_value(),
+         "unhandled ArgParser error should fault");
+  expect(result.fault->error_name == "ArgParser.InvalidValue",
+         "unhandled ArgParser error keeps dotted name");
+  expect(!result.fault->trace.empty(),
+         "unhandled ArgParser error keeps source trace");
+  expect(result.fault->trace_text.find("ArgParser.InvalidValue:") !=
+             std::string::npos,
+         "unhandled ArgParser error trace text keeps dotted name");
+}
+
+void test_parse_cli_behavior() {
+  const std::shared_ptr<amber::runtime::RuntimeTextWriter> stderr_buffer =
+      amber::runtime::RuntimeTextWriter::buffer();
+  amber::runtime::ExecutionResult parse_error;
+  {
+    amber::runtime::RuntimeOutputScope scope({}, stderr_buffer);
+    parse_error = execute_source(
+        "parser = ArgParser(cmdline: [\"--wat\"], name: \"tool\")\n"
+        "parser.parse()\n");
+  }
+  expect(!parse_error.ok() && parse_error.fault.has_value() &&
+             parse_error.fault->error_name == "ArgParser.UnknownOption",
+         "ArgParser.parse parse errors terminate without becoming results");
+  expect(stderr_buffer->to_string().find("usage: tool") != std::string::npos &&
+             stderr_buffer->to_string().find(
+                 "tool: error: unknown option --wat") != std::string::npos,
+         "ArgParser.parse renders parse diagnostics to stderr");
+
+  const std::shared_ptr<amber::runtime::RuntimeTextWriter> stdout_buffer =
+      amber::runtime::RuntimeTextWriter::buffer();
+  amber::runtime::ExecutionResult help;
+  {
+    amber::runtime::RuntimeOutputScope scope(stdout_buffer, {});
+    help = execute_source(
+        "parser = ArgParser(cmdline: [\"--help\"], name: \"tool\", "
+        "about: \"A useful tool\")\n"
+        "parser.parse()\n");
+  }
+  expect(help.ok() && help.value.is_null(),
+         "ArgParser.parse handles help without an error fault");
+  expect(stdout_buffer->to_string().find("usage: tool") != std::string::npos &&
+             stdout_buffer->to_string().find("A useful tool") !=
+                 std::string::npos,
+         "ArgParser.parse renders help to stdout");
+}
+
 void test_declaration_validation() {
   expect_fault("ArgParser(cmdline: []).flag(\"verbose\")\n", "ArgumentError",
                "invalid option spelling");
@@ -201,6 +394,12 @@ int main() {
   test_env_multiple_negatable_and_defaults();
   test_cmdline_override_and_local_converter();
   test_parse_or_raise_faults();
+  test_first_class_errors_and_strict_equivalence();
+  test_dotted_error_construction_and_matching();
+  test_parse_error_rescue_hierarchy();
+  test_converter_exception_boundaries();
+  test_unhandled_error_name_and_trace();
+  test_parse_cli_behavior();
   test_declaration_validation();
 
   std::cout << "stdlib_argparser_tests: ok\n";

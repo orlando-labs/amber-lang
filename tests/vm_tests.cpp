@@ -8283,6 +8283,41 @@ void test_source_try_rescue_ensure_execution() {
          "ensure must run before break exits protected body");
 }
 
+void test_native_error_inherited_rescue_execution() {
+  amber::runtime::ExecutionResult inherited = execute_emitted_init(
+      "try:\n"
+      "  raise JsonParseError(\"bad json\")\n"
+      "rescue JsonError |e|:\n"
+      "  if JsonError === e and JsonParseError === e:\n"
+      "    7\n"
+      "  else:\n"
+      "    0\n");
+  expect(inherited.ok() && inherited.value.is_integer() &&
+             inherited.value.as_integer() == 7,
+         "native parent error class should catch registered subclass");
+
+  amber::runtime::ExecutionResult sibling = execute_emitted_init(
+      "try:\n"
+      "  try:\n"
+      "    raise JsonParseError(\"bad json\")\n"
+      "  rescue JsonGenerateError:\n"
+      "    0\n"
+      "rescue JsonError:\n"
+      "  7\n");
+  expect(sibling.ok() && sibling.value.is_integer() &&
+             sibling.value.as_integer() == 7,
+         "native sibling error class should not catch");
+
+  amber::runtime::ExecutionResult root = execute_emitted_init(
+      "try:\n"
+      "  raise TypeError(\"bad type\")\n"
+      "rescue Exception:\n"
+      "  7\n");
+  expect(root.ok() && root.value.is_integer() &&
+             root.value.as_integer() == 7,
+         "Exception should catch existing native error classes");
+}
+
 void test_source_throw_catch_execution() {
   amber::runtime::ExecutionResult deep =
       execute_emitted_init("def deep_nested_code():\n"
@@ -8815,6 +8850,7 @@ int main() {
   test_manual_pattern_deconstruct_protocol_sequence();
   test_manual_pattern_deconstruct_protocol_map();
   test_source_try_rescue_ensure_execution();
+  test_native_error_inherited_rescue_execution();
   test_source_throw_catch_execution();
   test_manual_raise_handler_table_recovers();
   test_manual_raise_unwinds_closure_to_outer_handler();

@@ -1373,7 +1373,9 @@ bool is_native_prelude_name(const std::string &name) {
   // may be referenced in expression position too -- e.g. ValueError.new(msg)
   // or Err(OverflowError.new(msg)). Shared X-macro list keeps the binder and
   // the VM's kRuntimeErrorNames in lockstep with the spec registry.
-#define AMBER_RUNTIME_ERROR(error_name) #error_name,
+#define AMBER_RUNTIME_ERROR(error_name, parent, default_message,                 \
+                            default_exit_code, field_mask)                       \
+  error_name,
 #include "spec/registries/runtime_errors.def"
 #undef AMBER_RUNTIME_ERROR
   };

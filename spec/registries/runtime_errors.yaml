@@ -1,62 +1,143 @@
-schema: amber.runtime_errors.registry.v1
+schema: amber.runtime_errors.registry.v2
 spec_anchor: amber_unified_final_spec.md
 errors:
-  - NameError
-  - ArgumentError
-  - KeywordArgumentError
-  - MatchError
-  - UncaughtThrowError
-  - TypeError
-  - ValueError
-  - NoMethodError
-  - ImportError
-  - ModuleInitError
-  - WatchTargetError
-  - EmptyCollectionError
-  - InfiniteCollectionError
-  - IndexError
-  - KeyError
-  - ZeroDivisionError
-  - OverflowError
-  - IsolationError
-  - DestroyedAccessError
-  - UseAfterFreeError
-  - PinnedObjectError
-  - LifetimeError
-  - TaskError
-  - TaskNotDoneError
-  - TaskFailedError
-  - IncludeCycleError
-  - WorldFrozenError
-  - SuperclassMismatchError
-  - TimeoutError
-  - CancelledError
-  - ChannelClosedError
-  - DeadlockError
-  - OwnershipError
-  - AtomicError
-  - AtomicCompatibilityError
-  - FlowError
-  - FlowCancelledError
-  - FlowPartitionError
-  - FlowGatherError
-  - MoveError
-  - MovedValueError
-  - CapabilityError
-  - UnsupportedProfileError
-  - EffectViolationError
-  - DeterminismError
-  - ReplayDivergenceError
-  - ReadOnlyPropertyError
-  - WriteOnlyPropertyError
-  - JsonError
-  - JsonParseError
-  - JsonGenerateError
-  - CodecError
-  - CodecDecodeError
-  - RandomError
-  - EntropyError
-  - TimeError
-  - TimeParseError
-  - UuidError
-  - UuidParseError
+  - name: NameError
+    parent: Exception
+  - name: ArgumentError
+    parent: Exception
+  - name: KeywordArgumentError
+    parent: ArgumentError
+  - name: MatchError
+    parent: Exception
+  - name: UncaughtThrowError
+    parent: Exception
+  - name: TypeError
+    parent: Exception
+  - name: ValueError
+    parent: Exception
+  - name: NoMethodError
+    parent: Exception
+  - name: ImportError
+    parent: Exception
+  - name: ModuleInitError
+    parent: Exception
+  - name: WatchTargetError
+    parent: Exception
+  - name: EmptyCollectionError
+    parent: Exception
+  - name: InfiniteCollectionError
+    parent: Exception
+  - name: IndexError
+    parent: Exception
+  - name: KeyError
+    parent: Exception
+  - name: ZeroDivisionError
+    parent: Exception
+  - name: OverflowError
+    parent: Exception
+  - name: IsolationError
+    parent: Exception
+  - name: DestroyedAccessError
+    parent: LifetimeError
+  - name: UseAfterFreeError
+    parent: LifetimeError
+  - name: PinnedObjectError
+    parent: LifetimeError
+  - name: LifetimeError
+    parent: Exception
+  - name: TaskError
+    parent: Exception
+  - name: TaskNotDoneError
+    parent: TaskError
+  - name: TaskFailedError
+    parent: TaskError
+  - name: IncludeCycleError
+    parent: Exception
+  - name: WorldFrozenError
+    parent: Exception
+  - name: SuperclassMismatchError
+    parent: Exception
+  - name: TimeoutError
+    parent: Exception
+  - name: CancelledError
+    parent: Exception
+  - name: ChannelClosedError
+    parent: Exception
+  - name: DeadlockError
+    parent: Exception
+  - name: OwnershipError
+    parent: Exception
+  - name: AtomicError
+    parent: Exception
+  - name: AtomicCompatibilityError
+    parent: AtomicError
+  - name: FlowError
+    parent: Exception
+  - name: FlowCancelledError
+    parent: FlowError
+  - name: FlowPartitionError
+    parent: FlowError
+  - name: FlowGatherError
+    parent: FlowError
+  - name: MoveError
+    parent: Exception
+  - name: MovedValueError
+    parent: MoveError
+  - name: CapabilityError
+    parent: Exception
+  - name: UnsupportedProfileError
+    parent: Exception
+  - name: EffectViolationError
+    parent: Exception
+  - name: DeterminismError
+    parent: Exception
+  - name: ReplayDivergenceError
+    parent: DeterminismError
+  - name: ReadOnlyPropertyError
+    parent: Exception
+  - name: WriteOnlyPropertyError
+    parent: Exception
+  - name: JsonError
+    parent: Exception
+  - name: JsonParseError
+    parent: JsonError
+  - name: JsonGenerateError
+    parent: JsonError
+  - name: CodecError
+    parent: Exception
+  - name: CodecDecodeError
+    parent: CodecError
+  - name: RandomError
+    parent: Exception
+  - name: EntropyError
+    parent: RandomError
+  - name: TimeError
+    parent: Exception
+  - name: TimeParseError
+    parent: TimeError
+  - name: UuidError
+    parent: Exception
+  - name: UuidParseError
+    parent: UuidError
+  - name: Exception
+  - name: ArgParser.ParseError
+    parent: Exception
+    fields: [option, value, exit_code, usage, help]
+    default_exit_code: 2
+  - name: ArgParser.UnknownOption
+    parent: ArgParser.ParseError
+  - name: ArgParser.MissingValue
+    parent: ArgParser.ParseError
+  - name: ArgParser.MissingRequired
+    parent: ArgParser.ParseError
+  - name: ArgParser.UnexpectedArgument
+    parent: ArgParser.ParseError
+  - name: ArgParser.InvalidValue
+    parent: ArgParser.ParseError
+  - name: ArgParser.InvalidChoice
+    parent: ArgParser.ParseError
+  - name: ArgParser.HelpRequested
+    parent: Exception
+    fields: [exit_code, usage, help]
+    default_message: help requested
+    default_exit_code: 0

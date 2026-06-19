@@ -31,11 +31,12 @@ namespace amber::runtime {
 // unknown selector for a migrated kind returns `NotHandled` and falls through.
 enum class SendStatus { Matched, NotHandled, Faulted };
 
-enum class StdlibBlockStatus { Returned, Stopped, Faulted };
+enum class StdlibBlockStatus { Returned, Stopped, Raised, Faulted };
 
 struct StdlibBlockResult {
   StdlibBlockStatus status = StdlibBlockStatus::Faulted;
   Value value = Value::null();
+  Value exception = Value::null();
   bool stop_value_present = false;
 };
 
@@ -56,6 +57,13 @@ public:
   virtual void stdlib_set_fault(const void *frame,
                                 const std::string &error_class,
                                 const std::string &message) = 0;
+
+  // Raise an existing exception value through ordinary VM unwinding.
+  virtual void stdlib_raise_exception(const void *frame, Value exception) = 0;
+
+  // Write CLI-facing output through the runtime's logical stdout/stderr.
+  virtual bool stdlib_write_output(const void *frame, bool stderr_stream,
+                                   const std::string &text) = 0;
 
   // Look up a keyword argument by name; `nullopt` when absent.
   virtual std::optional<Value> stdlib_keyword_arg_value(
@@ -178,6 +186,19 @@ struct NativeStdlibCall {
                    const std::string &message) const {
     host.stdlib_set_fault(frame, error_class, message);
     return SendStatus::Faulted;
+  }
+
+  SendStatus raise(Value exception) const {
+    host.stdlib_raise_exception(frame, std::move(exception));
+    return SendStatus::Faulted;
+  }
+
+  bool write_stdout(const std::string &text) const {
+    return host.stdlib_write_output(frame, false, text);
+  }
+
+  bool write_stderr(const std::string &text) const {
+    return host.stdlib_write_output(frame, true, text);
   }
 
   bool require_arity(std::size_t expected) const {

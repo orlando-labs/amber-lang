@@ -67,6 +67,11 @@ entries:
     intrinsic_id: amber.prelude.TimePeriod.v1
     dispatch: constant_lookup
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser
+    kind: prelude_class
+    intrinsic_id: amber.prelude.ArgParser.v1
+    dispatch: constructor
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: Amber
     kind: prelude_module
     intrinsic_id: amber.prelude.Amber.v1
@@ -226,6 +231,51 @@ entries:
     kind: prelude_class
     intrinsic_id: amber.prelude.ThreadedCollection.v1
     dispatch: type_object
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: Exception
+    kind: error_class
+    intrinsic_id: amber.error.Exception.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser.ParseError
+    kind: error_class
+    intrinsic_id: amber.error.ArgParser.ParseError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser.UnknownOption
+    kind: error_class
+    intrinsic_id: amber.error.ArgParser.UnknownOption.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser.MissingValue
+    kind: error_class
+    intrinsic_id: amber.error.ArgParser.MissingValue.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser.MissingRequired
+    kind: error_class
+    intrinsic_id: amber.error.ArgParser.MissingRequired.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser.UnexpectedArgument
+    kind: error_class
+    intrinsic_id: amber.error.ArgParser.UnexpectedArgument.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser.InvalidValue
+    kind: error_class
+    intrinsic_id: amber.error.ArgParser.InvalidValue.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser.InvalidChoice
+    kind: error_class
+    intrinsic_id: amber.error.ArgParser.InvalidChoice.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
+  - name: ArgParser.HelpRequested
+    kind: error_class
+    intrinsic_id: amber.error.ArgParser.HelpRequested.v1
+    dispatch: exception_class
     shadowing: local_binding_disables_intrinsic_lowering
   - name: MatchError
     kind: error_class
