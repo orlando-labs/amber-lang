@@ -153,6 +153,7 @@ class RuntimeThreadedCollection;
 class RuntimeWatchCell;
 class RuntimeWatchObjectState;
 class RuntimeWatchHandle;
+struct RuntimeArgParserValue;
 
 enum class HeapObjectKind { Instance, List, Tuple, Set, Map, Closure };
 
@@ -245,6 +246,7 @@ enum class RuntimeNativeTypeKind {
   Digest,
   Url,
   SecureRandom,
+  ArgParser,
   Time,
   TimePeriod,
   Io,
@@ -403,9 +405,11 @@ std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
   X(watch_handle, is_watch_handle, as_watch_handle, RuntimeWatchHandle,        \
     WatchHandle)                                                               \
   X(result, is_result, as_result, ResultValue, Result)                         \
+  X(arg_parser, is_arg_parser, as_arg_parser, RuntimeArgParserValue,           \
+    ArgParser)                                                                 \
   X(time, is_time, as_time, RuntimeTimeValue, Time)                            \
   X(time_period, is_time_period, as_time_period, RuntimeTimePeriodValue,       \
-    TimePeriod)                                                               \
+    TimePeriod)                                                                \
   X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)
 
 #ifndef AMBER_VALUE_REPR_TAGGED
@@ -425,7 +429,7 @@ struct Value {
       std::shared_ptr<RuntimeTextWriter>, std::shared_ptr<RuntimeLogger>,
       std::shared_ptr<RuntimeIoValue>, std::shared_ptr<RuntimeWatchCell>,
       std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>,
-      std::shared_ptr<RuntimeTimeValue>,
+      std::shared_ptr<RuntimeArgParserValue>, std::shared_ptr<RuntimeTimeValue>,
       std::shared_ptr<RuntimeTimePeriodValue>,
       std::shared_ptr<RuntimeUuidValue>>;
 
@@ -464,6 +468,7 @@ struct Value {
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
   static Value result(std::shared_ptr<ResultValue> value);
+  static Value arg_parser(std::shared_ptr<RuntimeArgParserValue> value);
   static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
   static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
@@ -500,6 +505,7 @@ struct Value {
   bool is_watch_cell() const;
   bool is_watch_handle() const;
   bool is_result() const;
+  bool is_arg_parser() const;
   bool is_uuid() const;
   bool is_time() const;
   bool is_time_period() const;
@@ -535,6 +541,7 @@ struct Value {
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
   std::shared_ptr<ResultValue> as_result() const;
+  std::shared_ptr<RuntimeArgParserValue> as_arg_parser() const;
   std::shared_ptr<RuntimeUuidValue> as_uuid() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
   std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
@@ -595,6 +602,7 @@ enum class ValueTailKind : std::uint8_t {
   WatchCell,
   WatchHandle,
   Result,
+  ArgParser,
   Time,
   TimePeriod,
   Uuid,
@@ -643,6 +651,7 @@ struct Value {
   static Value watch_cell(std::shared_ptr<RuntimeWatchCell> value);
   static Value watch_handle(std::shared_ptr<RuntimeWatchHandle> value);
   static Value result(std::shared_ptr<ResultValue> value);
+  static Value arg_parser(std::shared_ptr<RuntimeArgParserValue> value);
   static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
   static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
@@ -679,6 +688,7 @@ struct Value {
   bool is_watch_cell() const;
   bool is_watch_handle() const;
   bool is_result() const;
+  bool is_arg_parser() const;
   bool is_uuid() const;
   bool is_time() const;
   bool is_time_period() const;
@@ -714,6 +724,7 @@ struct Value {
   std::shared_ptr<RuntimeWatchCell> as_watch_cell() const;
   std::shared_ptr<RuntimeWatchHandle> as_watch_handle() const;
   std::shared_ptr<ResultValue> as_result() const;
+  std::shared_ptr<RuntimeArgParserValue> as_arg_parser() const;
   std::shared_ptr<RuntimeUuidValue> as_uuid() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
   std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
@@ -755,6 +766,33 @@ static_assert(sizeof(Value) <= 16, "tagged Value must fit in 16 bytes");
 struct ResultValue {
   bool is_ok = false;
   Value payload = Value::null();
+};
+
+struct RuntimeArgParserValue {
+  enum class SpecKind { Option, Flag, Positional, Rest };
+
+  struct Spec {
+    SpecKind kind = SpecKind::Option;
+    std::vector<std::string> spellings;
+    std::string name;
+    RuntimeNativeTypeKind type = RuntimeNativeTypeKind::Str;
+    bool required = false;
+    bool multiple = false;
+    bool negatable = false;
+    bool has_default = false;
+    Value default_value = Value::null();
+    bool has_choices = false;
+    std::vector<Value> choices;
+    std::string env;
+    Value block = Value::null();
+  };
+
+  std::string name;
+  std::string about;
+  std::vector<std::string> cmdline;
+  std::vector<std::pair<std::string, std::string>> env;
+  bool add_help = true;
+  std::vector<Spec> specs;
 };
 
 struct RuntimeTextWriteResult {

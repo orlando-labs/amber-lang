@@ -35,6 +35,7 @@ void register_builtin_stdlib(NativeRegistry &registry) {
   register_codecs(registry);
   register_digest(registry);
   register_secure_random(registry);
+  register_argparser(registry);
   register_uuid(registry);
   register_time(registry);
   register_url(registry);

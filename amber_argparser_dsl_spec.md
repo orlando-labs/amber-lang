@@ -84,7 +84,7 @@ An explicit `cmdline:` is used for tests and embedding.
 ```amber
 args = ArgParser(cmdline: ["--output", "out.txt"])
  .arg("-o", "--output", type: Path)
- .parse!()
+ .parse_or_raise()
 ```
 
 ---
@@ -527,17 +527,37 @@ class ArgParser:
 
  class InvalidChoice < ParseError:
   pass
+
+ class HelpRequested < Exception:
+  def init(@message = "help requested", @exit_code: 0):
+   pass
 ```
 
 Only `ArgParser.ParseError` and its subclasses are considered ordinary user CLI errors.
+`ArgParser.HelpRequested` is a non-error control value for `-h` / `--help`.
 
 Other exceptions are programmer errors, runtime errors, or application errors and must not be swallowed by default.
 
 ---
 
-## 16. `.parse`, `.parse!`, and `.try_parse`
+## 16. `.parse`, `.try_parse`, and `.parse_or_raise`
 
-The parser exposes three parse modes.
+The parser exposes two primitive parse entrypoints and one shorthand:
+`.parse()`, `.try_parse()`, and `.parse_or_raise()`.
+
+There is intentionally no `.parse!()` method. In Amber, a `!` suffix denotes a
+method that mutates its receiver; strict parsing is an error-handling mode, not
+a parser mutation. The canonical strict forms are therefore:
+
+```amber
+args = parser.try_parse(cmdline: ["--port", "99999"]).or_raise
+args = parser.parse_or_raise(cmdline: ["--port", "99999"])
+```
+
+The first form uses the standard `Result.or_raise` bridge directly: an
+`Ok(args)` returns `args`, and an `Err(error)` raises `error` exactly as
+`raise error` would. `.parse_or_raise(...)` is a standard-library shorthand for
+that chain.
 
 ### 16.1. `.parse()`
 
@@ -550,47 +570,29 @@ args = parser.parse()
 Behavior:
 
 - parses the command line;
-- catches `ArgParser.ParseError` only;
-- prints usage and error diagnostics to `stderr`;
-- exits with `error.exit_code`, default `2`;
+- handles `ArgParser.ParseError` and `ArgParser.HelpRequested` only;
+- on parse errors, prints usage and error diagnostics to `stderr`;
+- on help requests, prints help to `stdout`;
+- exits with `error.exit_code`, default `2` for parse errors and `0` for help;
 - does not print a stack trace for parse errors.
 
 Equivalent conceptual lowering:
 
 ```amber
 def parse(cmdline: null):
- try:
-  parse_internal(cmdline or @cmdline)
- rescue ArgParser.ParseError |e|:
-  render_error(e, stderr)
-  Process.exit(e.exit_code)
+ result = try_parse(cmdline: cmdline)
+ if result.ok?:
+  result.value
+ else:
+  error = result.error
+  if ArgParser.HelpRequested === error:
+   render_help(stdout)
+   Process.exit(0)
+  render_error(error, stderr)
+  Process.exit(error.exit_code)
 ```
 
-### 16.2. `.parse!()`
-
-`.parse!()` is strict mode.
-
-```amber
-args = parser.parse!(cmdline: ["--port", "99999"])
-```
-
-Behavior:
-
-- parses the command line;
-- raises `ArgParser.ParseError` on CLI input errors;
-- never catches parse errors internally;
-- useful for tests, libraries, embedding, and custom error handling.
-
-Example:
-
-```amber
-try:
- parser.parse!(cmdline: ["--port", "99999"])
-rescue ArgParser.InvalidValue |e|:
- assert e.option == "--port"
-```
-
-### 16.3. `.try_parse()`
+### 16.2. `.try_parse()`
 
 `.try_parse()` is result mode.
 
@@ -601,16 +603,63 @@ result = parser.try_parse(cmdline: ["--port", "99999"])
 It returns either:
 
 ```amber
-ArgParser.Ok(args: args)
+Ok(args)
 ```
 
 or:
 
 ```amber
-ArgParser.Err(error: error)
+Err(error)
 ```
 
-This mode is optional for the minimal profile but recommended for embedding.
+The return type is the standard prelude `Result[ArgParser.Args,
+ArgParser.ParseError | ArgParser.HelpRequested]`.
+
+Behavior:
+
+- parses the command line;
+- returns `Ok(args)` on success;
+- returns `Err(error)` for ordinary CLI parse errors;
+- returns `Err(help)` for help requests, where `help` is an
+  `ArgParser.HelpRequested` control value;
+- never catches arbitrary application exceptions.
+
+### 16.3. `.parse_or_raise()`
+
+`.parse_or_raise()` is the strict shorthand.
+
+```amber
+args = parser.parse_or_raise(cmdline: ["--port", "99999"])
+```
+
+It is exactly equivalent to:
+
+```amber
+args = parser.try_parse(cmdline: ["--port", "99999"]).or_raise
+```
+
+Behavior:
+
+- delegates to `.try_parse()` with the same command-line override rules;
+- returns `ArgParser.Args` on success;
+- raises the `Err` payload on parse errors or help requests;
+- never renders diagnostics or exits internally.
+
+This is useful for tests, libraries, embedding, and custom error handling.
+
+Example:
+
+```amber
+try:
+ parser.parse_or_raise(cmdline: ["--port", "99999"])
+rescue ArgParser.InvalidValue |e|:
+ assert e.option == "--port"
+```
+
+Because this shorthand lowers through the standard `Result.or_raise` method, it
+preserves ordinary Amber exception semantics:
+`Err(ArgParser.InvalidValue(...)).or_raise` is equivalent to
+`raise ArgParser.InvalidValue(...)`.
 
 ---
 
@@ -619,10 +668,14 @@ This mode is optional for the minimal profile but recommended for embedding.
 The central rule is:
 
 ```text
-ArgParser.parse() catches only ArgParser.ParseError.
+ArgParser.try_parse() captures only ArgParser.ParseError and
+ArgParser.HelpRequested.
 ```
 
-It must not catch arbitrary `Exception`.
+It must not catch arbitrary `Exception`. `.parse()` is layered on top of
+`.try_parse()` for CLI entrypoints: it renders `ParseError` diagnostics to
+`stderr`, renders help requests to `stdout`, and exits with the appropriate
+code.
 
 Valid parse error from a local `.arg` block:
 
@@ -717,7 +770,9 @@ Recommended behavior:
 - exit with code `0`;
 - do not return an `Args` object.
 
-In strict mode, help may raise a distinct `ArgParser.HelpRequested` control exception or return a structured result, depending on the embedding profile.
+In result mode, help returns `Err(ArgParser.HelpRequested(...))`. Chaining
+`.or_raise` raises that control value so embedded callers can handle it with
+ordinary `rescue` logic.
 
 ---
 
@@ -859,8 +914,9 @@ server: error: --port: must be between 1 and 65535
 - A local block attached to `.arg` is the canonical validation/transformation site.
 - The local `.arg` block receives `|value|` or `|value, arg|`.
 - `arg.invalid(...)` and related helpers raise `ArgParser.ParseError` subclasses.
-- `.parse()` catches only `ArgParser.ParseError`.
+- `.try_parse()` captures only `ArgParser.ParseError` and `ArgParser.HelpRequested`.
 - `.parse()` renders Unix-style usage/error diagnostics and exits with code `2` by default.
-- `.parse!()` raises parse errors for tests and embedding.
-- `.try_parse()` returns a structured result and is recommended for embedding.
+- `.parse()` renders help to `stdout` and exits with code `0`.
+- `.try_parse()` returns the standard `Result` type and is required for embedding.
+- Strict parsing is spelled `.try_parse(...).or_raise` or the shorthand `.parse_or_raise(...)`; `.parse!()` is not part of the API.
 - Ordinary runtime exceptions are not swallowed by the parser.

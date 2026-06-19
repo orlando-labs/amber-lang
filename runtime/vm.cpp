@@ -6757,6 +6757,10 @@ Value Value::result(std::shared_ptr<ResultValue> value) {
   return {std::move(value)};
 }
 
+Value Value::arg_parser(std::shared_ptr<RuntimeArgParserValue> value) {
+  return {std::move(value)};
+}
+
 Value Value::uuid(std::shared_ptr<RuntimeUuidValue> value) {
   return {std::move(value)};
 }
@@ -6894,6 +6898,11 @@ bool Value::is_result() const {
   return std::holds_alternative<std::shared_ptr<ResultValue>>(payload);
 }
 
+bool Value::is_arg_parser() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeArgParserValue>>(
+      payload);
+}
+
 bool Value::is_uuid() const {
   return std::holds_alternative<std::shared_ptr<RuntimeUuidValue>>(payload);
 }
@@ -7022,6 +7031,10 @@ std::shared_ptr<RuntimeWatchHandle> Value::as_watch_handle() const {
 
 std::shared_ptr<ResultValue> Value::as_result() const {
   return std::get<std::shared_ptr<ResultValue>>(payload);
+}
+
+std::shared_ptr<RuntimeArgParserValue> Value::as_arg_parser() const {
+  return std::get<std::shared_ptr<RuntimeArgParserValue>>(payload);
 }
 
 std::shared_ptr<RuntimeUuidValue> Value::as_uuid() const {
@@ -7421,6 +7434,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Url";
   case RuntimeNativeTypeKind::SecureRandom:
     return "SecureRandom";
+  case RuntimeNativeTypeKind::ArgParser:
+    return "ArgParser";
   case RuntimeNativeTypeKind::Uuid:
     return "Uuid";
   case RuntimeNativeTypeKind::Time:
@@ -7775,6 +7790,10 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_big_int()) {
     const std::shared_ptr<BigIntValue> big = value.as_big_int();
     return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
+  }
+  if (value.is_arg_parser()) {
+    return value.as_arg_parser() == nullptr ? "<ArgParser null>"
+                                            : "<ArgParser>";
   }
   if (value.is_uuid()) {
     const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
@@ -9740,6 +9759,9 @@ public:
   Value stdlib_string_value_from_text(std::string text) override {
     return string_value_from_text(std::move(text));
   }
+  Value stdlib_symbol_value_from_text(std::string text) override {
+    return Value::symbol(intern_runtime_symbol(text));
+  }
   std::optional<std::string> stdlib_text_of(const Value &value) override {
     if (value.is_string()) {
       return string_text_from_id(value.as_string().string_id);
@@ -9905,8 +9927,20 @@ public:
                                            const Value &block, Value value,
                                            Value accumulator) override {
     return call_path_block_to_result(*static_cast<const Frame *>(frame), block,
-                                     std::move(value),
-                                     std::move(accumulator));
+                                     std::move(value), std::move(accumulator));
+  }
+  StdlibBlockResult stdlib_call_block(const void *frame, const Value &block,
+                                      std::vector<Value> args) override {
+    StdlibBlockResult result;
+    const std::optional<Value> value = call_block_to_value(
+        *static_cast<const Frame *>(frame), block, std::move(args));
+    if (!value.has_value()) {
+      result.status = StdlibBlockStatus::Faulted;
+      return result;
+    }
+    result.status = StdlibBlockStatus::Returned;
+    result.value = *value;
+    return result;
   }
   void stdlib_throw_json_stop(const void *frame,
                               std::optional<Value> value) override {
@@ -10460,7 +10494,7 @@ private:
 
   std::optional<Value> call_block_to_value(const Frame &frame,
                                            const Value &block,
-                                           std::initializer_list<Value> args) {
+                                           std::vector<Value> args) {
     if (block.is_null()) {
       set_fault(frame, "TypeError", "builtin collection SEND requires block");
       return std::nullopt;
@@ -10485,7 +10519,7 @@ private:
 
     BlockVmLease lease = acquire_block_vm();
     Vm &nested = *lease.vm;
-    nested.push_frame_from_args(*code, args.begin(), args.size(),
+    nested.push_frame_from_args(*code, args.data(), args.size(),
                                 closure->captures, closure->self, Value::null(),
                                 std::nullopt);
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
@@ -10511,6 +10545,12 @@ private:
       return std::nullopt;
     }
     return std::move(nested.final_value_);
+  }
+
+  std::optional<Value> call_block_to_value(const Frame &frame,
+                                           const Value &block,
+                                           std::initializer_list<Value> args) {
+    return call_block_to_value(frame, block, std::vector<Value>(args));
   }
 
   FastCallStatus try_evaluate_simple_stream_block(const Frame &caller,
@@ -10956,8 +10996,8 @@ private:
     BlockVmLease lease = acquire_block_vm();
     Vm &nested = *lease.vm;
     nested.push_frame_from_args(*code, args.data(), args.size(),
-                                closure->captures, closure->self,
-                                Value::null(), std::nullopt);
+                                closure->captures, closure->self, Value::null(),
+                                std::nullopt);
     while (nested.fault_ == std::nullopt && !nested.frames_.empty()) {
       nested.step();
     }
@@ -15972,6 +16012,8 @@ private:
       return true;
     case RuntimeNativeTypeKind::Range:
       return value_is_range_instance(value);
+    case RuntimeNativeTypeKind::ArgParser:
+      return value.is_arg_parser();
     case RuntimeNativeTypeKind::Uuid:
       return value.is_uuid();
     case RuntimeNativeTypeKind::Time:
@@ -20496,12 +20538,16 @@ private:
       return true;
     };
 
-    if (receiver.is_uuid() || receiver.is_time() || receiver.is_time_period()) {
+    if (receiver.is_arg_parser() || receiver.is_uuid() || receiver.is_time() ||
+        receiver.is_time_period()) {
       const RuntimeNativeTypeKind kind =
-          receiver.is_uuid()
-              ? RuntimeNativeTypeKind::Uuid
-              : (receiver.is_time() ? RuntimeNativeTypeKind::Time
-                                    : RuntimeNativeTypeKind::TimePeriod);
+          receiver.is_arg_parser()
+              ? RuntimeNativeTypeKind::ArgParser
+              : (receiver.is_uuid()
+                     ? RuntimeNativeTypeKind::Uuid
+                     : (receiver.is_time()
+                            ? RuntimeNativeTypeKind::Time
+                            : RuntimeNativeTypeKind::TimePeriod));
       if (const NativeStdlibHandler handler =
               native_registry_.handler_for(kind)) {
         NativeStdlibCall call{*this, &frame, receiver, kind, selector,
@@ -26053,10 +26099,10 @@ private:
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
          collection_selector_in(
-             {"empty?", "[]",       "[]?",    "has_index?", "deconstruct",
-              "first",  "count",    "to_a",   "lazy",       "each",
-              "map",    "filter_map", "flat_map", "select", "reject",
-              "find",   "group",      "any?",     "all?",   "none?",
+             {"empty?", "[]",         "[]?",      "has_index?", "deconstruct",
+              "first",  "count",      "to_a",     "lazy",       "each",
+              "map",    "filter_map", "flat_map", "select",     "reject",
+              "find",   "group",      "any?",     "all?",       "none?",
               "reduce"})) ||
         sequence_set_operation_selector || sequence_extra_operation_selector;
     const bool range_collection_selector =
@@ -26071,11 +26117,11 @@ private:
         receiver.is_integer() && selector == "times";
     const bool list_mutation_selector =
         receiver.is_list() &&
-        collection_selector_in({"push!", "append!", "unshift!", "prepend!",
-                                "insert!", "pop!", "shift!", "delete_at!",
-                                "delete!", "delete_if!", "keep_if!", "select!",
-                                "reject!", "map!", "filter_map!", "sort!",
-                                "uniq!", "reverse!", "clear!", "replace!"});
+        collection_selector_in(
+            {"push!",    "append!", "unshift!",   "prepend!", "insert!",
+             "pop!",     "shift!",  "delete_at!", "delete!",  "delete_if!",
+             "keep_if!", "select!", "reject!",    "map!",     "filter_map!",
+             "sort!",    "uniq!",   "reverse!",   "clear!",   "replace!"});
     const bool map_mutation_selector =
         receiver.is_map() &&
         collection_selector_in({"store!", "delete!", "delete_if!", "keep_if!",
@@ -26087,9 +26133,8 @@ private:
         collection_selector_in({"add!", "delete!", "merge!", "subtract!",
                                 "delete_if!", "keep_if!", "select!", "reject!",
                                 "filter_map!", "clear!", "replace!"});
-    const bool data_path_selector =
-        (receiver.is_list() || receiver.is_map()) &&
-        collection_selector_in({"path", "paths"});
+    const bool data_path_selector = (receiver.is_list() || receiver.is_map()) &&
+                                    collection_selector_in({"path", "paths"});
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
@@ -26154,7 +26199,8 @@ private:
       path_args.reserve(args.size() + 1U);
       path_args.push_back(receiver);
       path_args.insert(path_args.end(), args.begin(), args.end());
-      const Value json_receiver = Value::native_type(RuntimeNativeTypeKind::Json);
+      const Value json_receiver =
+          Value::native_type(RuntimeNativeTypeKind::Json);
       NativeStdlibCall call{*this,
                             &frame,
                             json_receiver,
@@ -30626,7 +30672,8 @@ private:
             kind == RuntimeNativeTypeKind::ByteBuffer ||
             kind == RuntimeNativeTypeKind::IoPipe ||
             kind == RuntimeNativeTypeKind::FsPath ||
-            kind == RuntimeNativeTypeKind::NetEndpoint) {
+            kind == RuntimeNativeTypeKind::NetEndpoint ||
+            kind == RuntimeNativeTypeKind::ArgParser) {
           Value result = Value::null();
           const std::string constructor_selector =
               kind == RuntimeNativeTypeKind::IoPipe ? "__call__" : "new";
@@ -33571,6 +33618,10 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_big_int()) {
     const std::shared_ptr<BigIntValue> big = value.as_big_int();
     return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
+  }
+  if (value.is_arg_parser()) {
+    return value.as_arg_parser() == nullptr ? "<ArgParser null>"
+                                            : "<ArgParser>";
   }
   if (value.is_uuid()) {
     const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();

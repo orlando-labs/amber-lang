@@ -57,6 +57,9 @@ struct MockHost : StdlibHost {
   Value stdlib_string_value_from_text(std::string /*text*/) override {
     return Value::null();
   }
+  Value stdlib_symbol_value_from_text(std::string /*text*/) override {
+    return Value::null();
+  }
   std::optional<std::string> stdlib_text_of(const Value & /*value*/) override {
     return std::nullopt;
   }
@@ -101,6 +104,11 @@ struct MockHost : StdlibHost {
   amber::runtime::StdlibBlockResult
   stdlib_call_path_block(const void * /*frame*/, const Value & /*block*/,
                          Value /*value*/, Value /*accumulator*/) override {
+    return {};
+  }
+  amber::runtime::StdlibBlockResult
+  stdlib_call_block(const void * /*frame*/, const Value & /*block*/,
+                    std::vector<Value> /*args*/) override {
     return {};
   }
   void stdlib_throw_json_stop(const void * /*frame*/,
@@ -170,6 +178,11 @@ void test_path_resolution(const NativeRegistry &registry) {
   expect(secure_random.has_value() &&
              *secure_random == RuntimeNativeTypeKind::SecureRandom,
          "kind_for_path(\"SecureRandom\") resolves to SecureRandom");
+  const std::optional<RuntimeNativeTypeKind> argparser =
+      registry.kind_for_path("ArgParser");
+  expect(argparser.has_value() &&
+             *argparser == RuntimeNativeTypeKind::ArgParser,
+         "kind_for_path(\"ArgParser\") resolves to ArgParser");
   const std::optional<RuntimeNativeTypeKind> digest =
       registry.kind_for_path("Digest");
   expect(digest.has_value() && *digest == RuntimeNativeTypeKind::Digest,

@@ -5854,6 +5854,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/stdlib_codecs.cpp",
       "runtime/stdlib_digest.cpp",
       "runtime/stdlib_secure_random.cpp",
+      "runtime/stdlib_argparser.cpp",
       "runtime/stdlib_uuid.cpp",
       "runtime/stdlib_time.cpp",
       "runtime/stdlib_url.cpp",

@@ -72,6 +72,9 @@ public:
   // Intern `text` into the module string table and wrap it as a String value.
   virtual Value stdlib_string_value_from_text(std::string text) = 0;
 
+  // Intern `text` into the module symbol table and wrap it as a Symbol value.
+  virtual Value stdlib_symbol_value_from_text(std::string text) = 0;
+
   // --- value introspection (used by generators) -----------------------------
   // The text of a String or Symbol value (a Symbol yields its name); nullopt
   // for any other kind. Lets a stdlib unit read string/key text without
@@ -121,6 +124,9 @@ public:
                                                    const Value &block,
                                                    Value value,
                                                    Value accumulator) = 0;
+  virtual StdlibBlockResult stdlib_call_block(const void *frame,
+                                              const Value &block,
+                                              std::vector<Value> args) = 0;
 
   // Raise the host-owned non-local stop used by Json stream/path APIs.
   virtual void stdlib_throw_json_stop(const void *frame,
@@ -220,6 +226,10 @@ struct NativeStdlibCall {
     return host.stdlib_string_value_from_text(std::move(text));
   }
 
+  Value symbol_value(std::string text) const {
+    return host.stdlib_symbol_value_from_text(std::move(text));
+  }
+
   std::optional<std::string> text_of(const Value &value) const {
     return host.stdlib_text_of(value);
   }
@@ -241,9 +251,9 @@ struct NativeStdlibCall {
     return host.stdlib_make_object(std::move(entries), strict);
   }
 
-  bool string_keyed_entries(
-      const Value &value,
-      std::vector<std::pair<std::string, Value>> *out) const {
+  bool
+  string_keyed_entries(const Value &value,
+                       std::vector<std::pair<std::string, Value>> *out) const {
     return host.stdlib_string_keyed_entries(frame, value, out);
   }
 
@@ -267,6 +277,11 @@ struct NativeStdlibCall {
   StdlibBlockResult call_path_block(Value value, Value accumulator) const {
     return host.stdlib_call_path_block(frame, block, std::move(value),
                                        std::move(accumulator));
+  }
+
+  StdlibBlockResult call_block(const Value &target,
+                               std::vector<Value> block_args) const {
+    return host.stdlib_call_block(frame, target, std::move(block_args));
   }
 
   void throw_json_stop(std::optional<Value> value = std::nullopt) const {
@@ -343,6 +358,7 @@ void register_json(NativeRegistry &registry);
 void register_codecs(NativeRegistry &registry);
 void register_digest(NativeRegistry &registry);
 void register_secure_random(NativeRegistry &registry);
+void register_argparser(NativeRegistry &registry);
 void register_uuid(NativeRegistry &registry);
 void register_time(NativeRegistry &registry);
 void register_url(NativeRegistry &registry);
