@@ -214,6 +214,49 @@ bool is_contextual_token(const lexer::Token &token, const char *text) {
   return token.kind == lexer::TokenKind::Identifier && token.lexeme == text;
 }
 
+// The lexeme of a String token retains its surrounding quotes (the lexer stores
+// the raw source slice). A native `from "binding"` clause carries a plain
+// logical name with no escapes/interpolation, so dropping the matched quote
+// pair recovers the binding text.
+std::string strip_binding_quotes(const std::string &lexeme) {
+  if (lexeme.size() >= 2 && (lexeme.front() == '"' || lexeme.front() == '\'') &&
+      lexeme.back() == lexeme.front()) {
+    return lexeme.substr(1, lexeme.size() - 2);
+  }
+  return lexeme;
+}
+
+// Ownership markers on a `native class` header are contextual: ordinary
+// identifiers everywhere except this one slot (see the native-packages design).
+bool is_ownership_marker_text(const std::string &text) {
+  return text == "owned" || text == "borrowed" || text == "collected";
+}
+
+// A native-only leaf has no Amber implementation. In a bytecode build, calling
+// it must fail closed, so we synthesize a fallback body that raises
+// NativeRequiredError (the same body-synthesis approach the attr accessors use).
+// A native build instead routes `binding` to its symbol and ignores this body.
+std::vector<std::unique_ptr<ast::Expr>>
+synthesize_native_required_body(const std::string &def_name,
+                                const std::string &binding) {
+  const std::string message = "native binding '" + binding + "' for '" +
+                              def_name + "' requires a native build";
+  std::string escaped;
+  for (const char c : message) {
+    if (c == '"' || c == '\\') {
+      escaped.push_back('\\');
+    }
+    escaped.push_back(c);
+  }
+  const std::string snippet =
+      "raise NativeRequiredError(\"" + escaped + "\")\n";
+  amber::lexer::Lexer lexer(snippet, "<native-leaf>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  Parser sub_parser(lex_result.tokens);
+  ParseModuleResult module = sub_parser.parse_module_unit();
+  return std::move(module.items);
+}
+
 bool starts_property_arm_label(const lexer::Token &label,
                                const lexer::Token &after_label) {
   if (is_contextual_token(label, "get")) {
@@ -844,6 +887,23 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     }
   }
 
+  // `native` is a contextual definition modifier: it leads a `native def` or
+  // `native class` only when immediately followed by `def`/`class`. Anywhere
+  // else (`native = 3`, `obj.native`, `def native()`) it stays an identifier.
+  if (current().kind == lexer::TokenKind::Identifier &&
+      current().lexeme == "native") {
+    const lexer::TokenKind after = peek(1).kind;
+    if (after == lexer::TokenKind::KeywordDef) {
+      const lexer::Token start = advance();
+      consume(lexer::TokenKind::KeywordDef, "expected 'def' after native");
+      return parse_def_stmt(false, &start, /*is_native=*/true);
+    }
+    if (after == lexer::TokenKind::KeywordClass) {
+      const lexer::Token start = advance();
+      return parse_class_def(&start);
+    }
+  }
+
   switch (current().kind) {
   case lexer::TokenKind::KeywordPackage:
     return parse_package_decl();
@@ -1087,13 +1147,14 @@ std::unique_ptr<ast::Expr> Parser::parse_export_stmt() {
 }
 
 std::unique_ptr<ast::Expr>
-Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
+Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
+                       bool is_native) {
   const lexer::Token start =
       start_override != nullptr ? *start_override : advance();
   const std::string name_text =
       consume_method_name_text("expected function name");
   std::unique_ptr<ast::Expr> signature;
-  if (!class_method && is_simple_many_def_header()) {
+  if (!class_method && !is_native && is_simple_many_def_header()) {
     lexer::Span signature_span{};
     std::vector<std::string> patterns =
         parse_many_def_patterns(&signature_span);
@@ -1157,8 +1218,43 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
     signature->string_field("effect_row_expr", effect_row);
     signature->span = ast::join_spans(signature->span, previous().span);
   }
+
+  // Optional native binding clause: `from "logical.name"`. Permitted on any
+  // `def` (a plain `def ... from` is a native-class method binding; a `native
+  // def ... from` is an accelerated free function). A binding with no body is a
+  // native-only leaf.
+  std::string native_binding;
+  bool has_binding = false;
+  if (match(lexer::TokenKind::KeywordFrom)) {
+    has_binding = true;
+    if (check(lexer::TokenKind::String)) {
+      native_binding = strip_binding_quotes(advance().lexeme);
+    } else {
+      error(current(), "expected \"binding\" string after 'from'");
+    }
+  }
+  // A `from` binding is only meaningful on a `native def` or on a method inside
+  // a `native class`. A plain `def ... from` anywhere else is malformed.
+  if (has_binding && !is_native && !in_native_class_body_) {
+    error_code(start, "E_NATIVE_BINDING_CONTEXT",
+               "a `from \"...\"` native binding requires `native def` or a "
+               "method inside a `native class`");
+  }
+  if (has_binding && !check(lexer::TokenKind::Colon)) {
+    auto node = ast::make_expr(class_method ? "AstClassMethodDef" : "AstDefStmt",
+                               ast::join_spans(start.span, previous().span));
+    node->string_field("name", name_text);
+    node->node_field("signature", std::move(signature));
+    node->list_field("body",
+                     synthesize_native_required_body(name_text, native_binding));
+    node->bool_field("is_native", is_native);
+    node->bool_field("native_only", true);
+    node->string_field("native_binding", native_binding);
+    return node;
+  }
+
   consume(lexer::TokenKind::Colon, "expected ':' after function signature");
-  if (!class_method && starts_clause_body()) {
+  if (!class_method && !is_native && starts_clause_body()) {
     ClauseBody clause_body = parse_clause_body();
     lexer::Span end_span = signature->span;
     if (!clause_body.else_body.empty()) {
@@ -1195,6 +1291,11 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override) {
   if (handlers.has_ensure) {
     node->bool_field("has_ensure", true);
     node->list_field("ensure_body", std::move(handlers.ensure_body));
+  }
+  if (is_native || has_binding) {
+    node->bool_field("is_native", is_native);
+    node->bool_field("native_only", false);
+    node->string_field("native_binding", native_binding);
   }
   return node;
 }
@@ -1490,24 +1591,88 @@ void Parser::parse_property_arm(PropertySuite *suite) {
   }
 }
 
-std::unique_ptr<ast::Expr> Parser::parse_class_def() {
-  const lexer::Token start = advance();
+std::unique_ptr<ast::Expr> Parser::parse_class_def(
+    const lexer::Token *native_start) {
+  const lexer::Token class_kw = advance();
+  const lexer::Token start =
+      native_start != nullptr ? *native_start : class_kw;
+  const bool is_native = native_start != nullptr;
   const lexer::Token name =
       consume(lexer::TokenKind::Identifier, "expected class name");
   std::string superclass;
   if (match(lexer::TokenKind::Less)) {
     superclass = parse_module_path();
   }
+
+  std::string native_binding;
+  std::string ownership;
+  if (is_native) {
+    if (match(lexer::TokenKind::KeywordFrom)) {
+      if (check(lexer::TokenKind::String)) {
+        native_binding = strip_binding_quotes(advance().lexeme);
+      } else {
+        error(current(), "expected \"binding\" string after 'from'");
+      }
+    } else {
+      error(current(), "native class requires a `from \"binding\"` clause");
+    }
+    // The ownership marker is required; foreign-resource ownership is never
+    // decided by omission (native-packages design §4.4).
+    if (check(lexer::TokenKind::Identifier) &&
+        is_ownership_marker_text(current().lexeme)) {
+      ownership = advance().lexeme;
+    } else {
+      error_code(current(), "E_NATIVE_CLASS_OWNERSHIP_REQUIRED",
+                 "native class requires an ownership marker: owned, borrowed, "
+                 "or collected");
+    }
+  }
+
   consume(lexer::TokenKind::Colon, "expected ':' after class header");
+  const bool prev_in_native_class = in_native_class_body_;
+  in_native_class_body_ = is_native;
   std::vector<std::unique_ptr<ast::Expr>> body = parse_body(BodyContext::Class);
+  in_native_class_body_ = prev_in_native_class;
   const lexer::Span end_span =
       body.empty() ? previous().span : body.back()->span;
+
+  if (is_native) {
+    // Ownership and the destructor binding must agree: `owned`/`collected` own
+    // the foreign handle and require a `destroy!` reclaim; `borrowed` never
+    // frees it and must not declare one (native-packages design §7.1).
+    bool has_destroy_binding = false;
+    for (const std::unique_ptr<ast::Expr> &member : body) {
+      const std::string *member_name = find_string_field(*member, "name");
+      if (member_name != nullptr && *member_name == "destroy!" &&
+          find_string_field(*member, "native_binding") != nullptr) {
+        has_destroy_binding = true;
+        break;
+      }
+    }
+    if ((ownership == "owned" || ownership == "collected") &&
+        !has_destroy_binding) {
+      error_code(name, "E_NATIVE_OWNED_REQUIRES_DESTRUCTOR",
+                 "a `" + ownership +
+                     "` native class requires a `def destroy!() from \"...\"` "
+                     "reclaim binding");
+    }
+    if (ownership == "borrowed" && has_destroy_binding) {
+      error_code(name, "E_NATIVE_BORROWED_FORBIDS_DESTRUCTOR",
+                 "a `borrowed` native class must not declare a `destroy!` "
+                 "binding; the provider owns the lifetime");
+    }
+  }
 
   auto node =
       ast::make_expr("AstClassDef", ast::join_spans(start.span, end_span));
   node->string_field("name", name.lexeme);
   node->string_field("superclass", superclass);
   node->list_field("body", std::move(body));
+  if (is_native) {
+    node->bool_field("is_native", true);
+    node->string_field("native_binding", native_binding);
+    node->string_field("ownership", ownership);
+  }
   return node;
 }
 
@@ -1866,6 +2031,7 @@ std::string Parser::parse_type_term_text_until_return_boundary() {
     const lexer::TokenKind kind = current().kind;
     if (depth == 0 &&
         (kind == lexer::TokenKind::Bang || kind == lexer::TokenKind::Colon ||
+         kind == lexer::TokenKind::KeywordFrom ||
          kind == lexer::TokenKind::Newline || kind == lexer::TokenKind::Eof)) {
       break;
     }

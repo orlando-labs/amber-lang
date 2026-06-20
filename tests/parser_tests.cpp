@@ -1282,6 +1282,129 @@ void test_typed_signature_surface() {
          "generic keyword param TypeTerm preserved");
 }
 
+bool has_bool_field(const Expr &expr, const std::string &name) {
+  for (const amber::ast::BoolField &field : expr.bool_fields) {
+    if (field.name == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void test_native_packages() {
+  // Accelerated free function: `native def ... from "..."` with a fallback body.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "native def hash(data: Bytes) -> Bytes from \"blake3.hash\":\n"
+        "  data\n");
+    expect(module.ok(), "native def parses");
+    expect(module.items.size() == 1, "native def yields one item");
+    const Expr &def = *module.items[0];
+    expect(def.kind == "AstDefStmt", "native def is AstDefStmt");
+    expect(string_field(def, "name") == "hash", "native def name");
+    expect(bool_field(def, "is_native"), "native def is_native");
+    expect(!bool_field(def, "native_only"), "accelerated def is not leaf");
+    expect(string_field(def, "native_binding") == "blake3.hash",
+           "native def binding text");
+    expect(!list_field(def, "body").values.empty(), "native def keeps body");
+  }
+
+  // Native class with required ownership marker + bodiless native-only methods.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "native class Hasher from \"blake3.Hasher\" owned:\n"
+        "  def init() from \"blake3.hasher_new\"\n"
+        "  def update!(data: Bytes) -> self from \"blake3.hasher_update\"\n"
+        "  def destroy!() from \"blake3.hasher_free\"\n");
+    expect(module.ok(), "native class parses");
+    const Expr &cls = *module.items[0];
+    expect(cls.kind == "AstClassDef", "native class is AstClassDef");
+    expect(bool_field(cls, "is_native"), "native class is_native");
+    expect(string_field(cls, "ownership") == "owned", "ownership marker owned");
+    expect(string_field(cls, "native_binding") == "blake3.Hasher",
+           "native class binding");
+    const amber::ast::ListField &body = list_field(cls, "body");
+    expect(body.values.size() == 3, "native class has three methods");
+    const Expr &init = *body.values[0];
+    expect(init.kind == "AstDefStmt", "method is AstDefStmt");
+    expect(string_field(init, "name") == "init", "first method name");
+    expect(bool_field(init, "native_only"), "bodiless method is native-only");
+    expect(string_field(init, "native_binding") == "blake3.hasher_new",
+           "method binding text");
+    expect(!list_field(init, "body").values.empty(),
+           "leaf method gets a synthesized NativeRequiredError fallback body");
+    const Expr &update = *body.values[1];
+    expect(string_field(update, "native_binding") == "blake3.hasher_update",
+           "-> self return type does not swallow the from clause");
+  }
+
+  // borrowed / collected markers parse.
+  {
+    amber::parser::ParseModuleResult borrowed = parse_module_raw(
+        "native class B from \"z.B\" borrowed:\n  pass\n");
+    expect(borrowed.ok() &&
+               string_field(*borrowed.items[0], "ownership") == "borrowed",
+           "borrowed marker");
+    amber::parser::ParseModuleResult collected = parse_module_raw(
+        "native class C from \"z.C\" collected:\n"
+        "  def destroy!() from \"z.free\"\n");
+    expect(collected.ok() &&
+               string_field(*collected.items[0], "ownership") == "collected",
+           "collected marker");
+  }
+
+  // Missing ownership marker is rejected.
+  {
+    amber::parser::ParseModuleResult module =
+        parse_module_raw("native class C from \"z.C\":\n  pass\n");
+    expect(has_diagnostic(module, "E_NATIVE_CLASS_OWNERSHIP_REQUIRED"),
+           "native class without ownership marker is rejected");
+  }
+
+  // A `from` binding outside `native def` / a native class is rejected.
+  {
+    amber::parser::ParseModuleResult module =
+        parse_module_raw("def f() from \"x.y\"\n");
+    expect(has_diagnostic(module, "E_NATIVE_BINDING_CONTEXT"),
+           "plain def with a from-binding outside a native class is rejected");
+  }
+
+  // `owned` without a destroy! reclaim is rejected.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "native class C from \"z.C\" owned:\n  def init() from \"z.new\"\n");
+    expect(has_diagnostic(module, "E_NATIVE_OWNED_REQUIRES_DESTRUCTOR"),
+           "owned native class without destroy! is rejected");
+  }
+
+  // `borrowed` with a destroy! reclaim is rejected.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "native class B from \"z.B\" borrowed:\n"
+        "  def destroy!() from \"z.free\"\n");
+    expect(has_diagnostic(module, "E_NATIVE_BORROWED_FORBIDS_DESTRUCTOR"),
+           "borrowed native class with destroy! is rejected");
+  }
+
+  // `native`, `owned`, `collected` remain ordinary identifiers off the slot.
+  {
+    amber::parser::ParseModuleResult assign = parse_module_raw("native = 3\n");
+    expect(assign.ok() && assign.items[0]->kind != "AstDefStmt",
+           "native is an ordinary identifier when assigned");
+    amber::parser::ParseModuleResult owned_assign =
+        parse_module_raw("owned = 1\n");
+    expect(owned_assign.ok(), "owned is an ordinary identifier");
+    amber::parser::ParseModuleResult def_named_native =
+        parse_module_raw("def native():\n  1\n");
+    expect(def_named_native.ok(), "def named native parses");
+    const Expr &def = *def_named_native.items[0];
+    expect(def.kind == "AstDefStmt" && string_field(def, "name") == "native",
+           "def native() is a plain def named native");
+    expect(!has_bool_field(def, "is_native"),
+           "a plain def carries no is_native marker");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -1321,6 +1444,7 @@ int main() {
   test_try_rescue_ensure_forms();
   test_throw_catch_forms();
   test_typed_signature_surface();
+  test_native_packages();
   std::cout << "parser_tests: ok\n";
   return 0;
 }

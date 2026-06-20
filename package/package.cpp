@@ -395,6 +395,46 @@ std::string canonical_manifest_text(const PackageManifest &manifest) {
         << ".reason=" << line_escape(capabilities[i].reason) << "\n";
     out << "capability." << i << ".flags=" << capabilities[i].flags << "\n";
   }
+  out << "native.count=" << manifest.native_extensions.size() << "\n";
+  for (std::size_t i = 0; i < manifest.native_extensions.size(); ++i) {
+    const PackageNativeExtension &native = manifest.native_extensions[i];
+    const std::string prefix = "native." + std::to_string(i);
+    out << prefix << ".name=" << line_escape(native.name) << "\n";
+    out << prefix << ".language=" << line_escape(native.language) << "\n";
+    const auto emit_array = [&](const char *field,
+                                const std::vector<std::string> &values) {
+      out << prefix << "." << field << ".count=" << values.size() << "\n";
+      for (std::size_t j = 0; j < values.size(); ++j) {
+        out << prefix << "." << field << "." << j << "="
+            << line_escape(values[j]) << "\n";
+      }
+    };
+    emit_array("sources", native.sources);
+    emit_array("headers", native.headers);
+    emit_array("include_dirs", native.include_dirs);
+    emit_array("defines", native.defines);
+    emit_array("cxxflags", native.cxxflags);
+    emit_array("link_libraries", native.link_libraries);
+    emit_array("capabilities", native.capabilities);
+    out << prefix << ".symbol.count=" << native.symbols.size() << "\n";
+    for (std::size_t j = 0; j < native.symbols.size(); ++j) {
+      out << prefix << ".symbol." << j
+          << ".logical=" << line_escape(native.symbols[j].logical) << "\n";
+      out << prefix << ".symbol." << j
+          << ".symbol=" << line_escape(native.symbols[j].symbol) << "\n";
+    }
+    out << prefix << ".type.count=" << native.types.size() << "\n";
+    for (std::size_t j = 0; j < native.types.size(); ++j) {
+      out << prefix << ".type." << j
+          << ".amber=" << line_escape(native.types[j].amber) << "\n";
+      out << prefix << ".type." << j
+          << ".tag=" << line_escape(native.types[j].tag) << "\n";
+      out << prefix << ".type." << j
+          << ".ownership=" << line_escape(native.types[j].ownership) << "\n";
+      out << prefix << ".type." << j
+          << ".destructor=" << line_escape(native.types[j].destructor) << "\n";
+    }
+  }
   return out.str();
 }
 
@@ -614,11 +654,22 @@ PackageRegistryResult registry_write(const std::string &serialized,
 
 PackageManifestResult parse_manifest_toml(const std::string &source,
                                           const std::string &path) {
-  enum class Section { None, Package, Modules, Dependencies, Capabilities };
+  enum class Section {
+    None,
+    Package,
+    Modules,
+    Dependencies,
+    Capabilities,
+    Native,
+    NativeSymbols,
+    NativeTypes
+  };
 
   PackageManifestResult result;
   Section section = Section::None;
   PackageModule *current_module = nullptr;
+  PackageNativeExtension *current_native = nullptr;
+  PackageNativeType *current_native_type = nullptr;
 
   std::istringstream input(source);
   std::string raw_line;
@@ -632,22 +683,63 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
     if (line == "[package]") {
       section = Section::Package;
       current_module = nullptr;
+      current_native = nullptr;
+      current_native_type = nullptr;
       continue;
     }
     if (line == "[dependencies]") {
       section = Section::Dependencies;
       current_module = nullptr;
+      current_native = nullptr;
+      current_native_type = nullptr;
       continue;
     }
     if (line == "[capabilities]") {
       section = Section::Capabilities;
       current_module = nullptr;
+      current_native = nullptr;
+      current_native_type = nullptr;
       continue;
     }
     if (line == "[[modules]]" || line == "[[module]]") {
       result.manifest.modules.push_back({});
       current_module = &result.manifest.modules.back();
+      current_native = nullptr;
+      current_native_type = nullptr;
       section = Section::Modules;
+      continue;
+    }
+    if (line == "[[native]]" || line == "[[native_extensions]]") {
+      result.manifest.native_extensions.push_back({});
+      current_native = &result.manifest.native_extensions.back();
+      current_native_type = nullptr;
+      current_module = nullptr;
+      section = Section::Native;
+      continue;
+    }
+    if (line == "[native.symbols]") {
+      current_module = nullptr;
+      current_native_type = nullptr;
+      if (current_native == nullptr) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "[native.symbols] must follow a [[native]] section", path));
+      }
+      section = Section::NativeSymbols;
+      continue;
+    }
+    if (line == "[[native.types]]") {
+      current_module = nullptr;
+      if (current_native == nullptr) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "[[native.types]] must follow a [[native]] section", path));
+        current_native_type = nullptr;
+      } else {
+        current_native->types.push_back({});
+        current_native_type = &current_native->types.back();
+      }
+      section = Section::NativeTypes;
       continue;
     }
     if (!line.empty() && line.front() == '[') {
@@ -756,6 +848,83 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
                      path));
       break;
     }
+    case Section::Native: {
+      if (current_native == nullptr) {
+        break;
+      }
+      if (key == "name") {
+        current_native->name = value;
+        break;
+      }
+      if (key == "language") {
+        current_native->language = value;
+        break;
+      }
+      std::vector<std::string> *array_target = nullptr;
+      if (key == "sources") {
+        array_target = &current_native->sources;
+      } else if (key == "headers") {
+        array_target = &current_native->headers;
+      } else if (key == "include_dirs") {
+        array_target = &current_native->include_dirs;
+      } else if (key == "defines") {
+        array_target = &current_native->defines;
+      } else if (key == "cxxflags") {
+        array_target = &current_native->cxxflags;
+      } else if (key == "link_libraries") {
+        array_target = &current_native->link_libraries;
+      } else if (key == "capabilities") {
+        array_target = &current_native->capabilities;
+      }
+      if (array_target == nullptr) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "unsupported [[native]] key at line " + std::to_string(line_no) +
+                ": " + key,
+            path));
+        break;
+      }
+      // unquote_toml_string left the raw `["a", "b"]` text in `value`.
+      if (!parse_toml_string_array(value, array_target)) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "[[native]] '" + key + "' must be a string array at line " +
+                std::to_string(line_no),
+            path));
+      }
+      break;
+    }
+    case Section::NativeSymbols: {
+      if (current_native == nullptr) {
+        break;
+      }
+      std::string logical;
+      if (!unquote_toml_string(key, &logical)) {
+        logical = key;
+      }
+      current_native->symbols.push_back({logical, value});
+      break;
+    }
+    case Section::NativeTypes:
+      if (current_native_type == nullptr) {
+        break;
+      }
+      if (key == "amber") {
+        current_native_type->amber = value;
+      } else if (key == "tag") {
+        current_native_type->tag = value;
+      } else if (key == "ownership") {
+        current_native_type->ownership = value;
+      } else if (key == "destructor") {
+        current_native_type->destructor = value;
+      } else {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "unsupported [[native.types]] key at line " +
+                std::to_string(line_no) + ": " + key,
+            path));
+      }
+      break;
     case Section::None:
       result.diagnostics.push_back(diagnostic(
           "PackageManifestError",
@@ -820,6 +989,51 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
     }
   }
 
+  std::set<std::string> native_names;
+  for (const PackageNativeExtension &native : result.manifest.native_extensions) {
+    if (native.name.empty()) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageManifestError", "[[native]] entries require a name", path));
+    } else if (!native_names.insert(native.name).second) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageManifestError",
+          "duplicate [[native]] extension: " + native.name, path));
+    }
+    for (const PackageNativeSymbol &symbol : native.symbols) {
+      if (symbol.logical.empty() || symbol.symbol.empty()) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "[native.symbols] entries require a logical name and a symbol",
+            path));
+      }
+    }
+    for (const PackageNativeType &type : native.types) {
+      if (type.amber.empty() || type.tag.empty()) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "[[native.types]] entries require 'amber' and 'tag'", path));
+      }
+      if (type.ownership != "owned" && type.ownership != "borrowed" &&
+          type.ownership != "collected") {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "[[native.types]] ownership must be owned, borrowed, or collected",
+            path));
+      }
+      if ((type.ownership == "owned" || type.ownership == "collected") &&
+          type.destructor.empty()) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "owned/collected [[native.types]] require a destructor", path));
+      }
+      if (type.ownership == "borrowed" && !type.destructor.empty()) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "borrowed [[native.types]] must not declare a destructor", path));
+      }
+    }
+  }
+
   result.manifest.modules = sorted_modules(result.manifest.modules);
   result.manifest.dependencies =
       sorted_dependencies(result.manifest.dependencies);
@@ -869,6 +1083,61 @@ std::string manifest_to_json(const PackageManifest &manifest) {
         << "\",\"target\":\"" << json_escape(capabilities[i].target)
         << "\",\"reason\":\"" << json_escape(capabilities[i].reason)
         << "\",\"flags\":" << capabilities[i].flags << "}";
+  }
+  out << "\n  ],\n";
+  out << "  \"native_extensions\": [";
+  const auto json_string_array = [&](const std::vector<std::string> &values) {
+    out << "[";
+    for (std::size_t j = 0; j < values.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "\"" << json_escape(values[j]) << "\"";
+    }
+    out << "]";
+  };
+  for (std::size_t i = 0; i < manifest.native_extensions.size(); ++i) {
+    const PackageNativeExtension &native = manifest.native_extensions[i];
+    if (i != 0U) {
+      out << ",";
+    }
+    out << "\n    {\"name\":\"" << json_escape(native.name)
+        << "\",\"language\":\"" << json_escape(native.language)
+        << "\",\"sources\":";
+    json_string_array(native.sources);
+    out << ",\"headers\":";
+    json_string_array(native.headers);
+    out << ",\"include_dirs\":";
+    json_string_array(native.include_dirs);
+    out << ",\"defines\":";
+    json_string_array(native.defines);
+    out << ",\"cxxflags\":";
+    json_string_array(native.cxxflags);
+    out << ",\"link_libraries\":";
+    json_string_array(native.link_libraries);
+    out << ",\"capabilities\":";
+    json_string_array(native.capabilities);
+    out << ",\"symbols\":[";
+    for (std::size_t j = 0; j < native.symbols.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"logical\":\"" << json_escape(native.symbols[j].logical)
+          << "\",\"symbol\":\"" << json_escape(native.symbols[j].symbol)
+          << "\"}";
+    }
+    out << "],\"types\":[";
+    for (std::size_t j = 0; j < native.types.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"amber\":\"" << json_escape(native.types[j].amber)
+          << "\",\"tag\":\"" << json_escape(native.types[j].tag)
+          << "\",\"ownership\":\"" << json_escape(native.types[j].ownership)
+          << "\",\"destructor\":\"" << json_escape(native.types[j].destructor)
+          << "\"}";
+    }
+    out << "]}";
   }
   out << "\n  ]\n";
   out << "}\n";

@@ -26,6 +26,40 @@ struct PackageModule {
   std::string path;
 };
 
+// A `[native.symbols]` entry: the logical name a `native def`/`native class`
+// declares in source (`from "logical"`), mapped to the physical C symbol.
+struct PackageNativeSymbol {
+  std::string logical;
+  std::string symbol;
+};
+
+// A `[[native.types]]` entry: the foreign-handle dispatch identity for a
+// `native class` (the per-(package,type) tag) plus its ownership and reclaim.
+struct PackageNativeType {
+  std::string amber;
+  std::string tag;
+  std::string ownership;
+  std::string destructor;
+};
+
+// A `[[native]]` extension unit: the build facts behind a package's native
+// bindings (sources/flags/libs), the logical-name->symbol map, and the
+// foreign-handle type table. The Amber surface declares which defs are native;
+// this carries only how to build the native side (native-packages design §5).
+struct PackageNativeExtension {
+  std::string name;
+  std::string language;
+  std::vector<std::string> sources;
+  std::vector<std::string> headers;
+  std::vector<std::string> include_dirs;
+  std::vector<std::string> defines;
+  std::vector<std::string> cxxflags;
+  std::vector<std::string> link_libraries;
+  std::vector<std::string> capabilities;
+  std::vector<PackageNativeSymbol> symbols;
+  std::vector<PackageNativeType> types;
+};
+
 struct PackageManifest {
   std::string name;
   std::string version;
@@ -33,6 +67,7 @@ struct PackageManifest {
   std::vector<PackageModule> modules;
   std::vector<PackageDependency> dependencies;
   std::vector<capability::CapabilityRequest> capabilities;
+  std::vector<PackageNativeExtension> native_extensions;
 };
 
 struct PackageManifestResult {

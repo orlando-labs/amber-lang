@@ -45,6 +45,10 @@ errors:
     parent: LifetimeError
   - name: LifetimeError
     parent: Exception
+  - name: NativeError
+    parent: Exception
+  - name: NativeRequiredError
+    parent: NativeError
   - name: TaskError
     parent: Exception
   - name: TaskNotDoneError

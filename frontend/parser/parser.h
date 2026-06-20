@@ -83,13 +83,15 @@ private:
   std::unique_ptr<ast::Expr> parse_export_stmt();
   std::unique_ptr<ast::Expr>
   parse_def_stmt(bool class_method,
-                 const lexer::Token *start_override = nullptr);
+                 const lexer::Token *start_override = nullptr,
+                 bool is_native = false);
   std::unique_ptr<ast::Expr> parse_prop_def(bool class_property);
   std::unique_ptr<ast::Expr> parse_attr_def();
   PropertySuite parse_property_suite(const lexer::Span &fallback_span);
   PropertySuite parse_grouped_property_suite(const lexer::Span &fallback_span);
   void parse_property_arm(PropertySuite *suite);
-  std::unique_ptr<ast::Expr> parse_class_def();
+  std::unique_ptr<ast::Expr>
+  parse_class_def(const lexer::Token *native_start = nullptr);
   std::unique_ptr<ast::Expr> parse_mixin_def();
   std::unique_ptr<ast::Expr> parse_include_stmt(bool extend);
   std::unique_ptr<ast::Expr> parse_pass_like_stmt(const char *kind);
@@ -213,6 +215,9 @@ private:
   const std::vector<lexer::Token> &tokens_;
   std::size_t current_ = 0;
   std::vector<lexer::Diagnostic> diagnostics_;
+  // True while parsing the body of a `native class`; a plain `def ... from`
+  // binding is only valid in that context (otherwise use `native def`).
+  bool in_native_class_body_ = false;
   lexer::Token synthetic_error_token_;
 };
 

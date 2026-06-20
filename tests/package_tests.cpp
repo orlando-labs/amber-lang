@@ -196,7 +196,97 @@ void test_registry_publish_and_install_smoke() {
 
 } // namespace
 
+void test_native_extension_manifest() {
+  const std::string source =
+      "[package]\n"
+      "name = \"crypto.blake3\"\n"
+      "version = \"0.1.0\"\n"
+      "root = \"crypto.blake3\"\n"
+      "\n"
+      "[[modules]]\n"
+      "name = \"crypto.blake3\"\n"
+      "path = \"src/blake3.am\"\n"
+      "\n"
+      "[[native]]\n"
+      "name = \"blake3\"\n"
+      "language = \"c\"\n"
+      "sources = [\"native/blake3.c\", \"native/amber_blake3.c\"]\n"
+      "include_dirs = [\"native/include\"]\n"
+      "cxxflags = [\"-O3\"]\n"
+      "capabilities = [\"ffi\"]\n"
+      "\n"
+      "[native.symbols]\n"
+      "\"blake3.hash\" = \"amber_blake3_hash\"\n"
+      "\"blake3.hasher_free\" = \"amber_blake3_hasher_free\"\n"
+      "\n"
+      "[[native.types]]\n"
+      "amber = \"crypto.blake3.Hasher\"\n"
+      "tag = \"blake3.Hasher\"\n"
+      "ownership = \"owned\"\n"
+      "destructor = \"blake3.hasher_free\"\n";
+
+  amber::pkg::PackageManifestResult parsed =
+      amber::pkg::parse_manifest_toml(source, "amber.toml");
+  expect(parsed.ok(), "native manifest should parse");
+  expect(parsed.manifest.native_extensions.size() == 1,
+         "one native extension parsed");
+  const amber::pkg::PackageNativeExtension &ext =
+      parsed.manifest.native_extensions[0];
+  expect(ext.name == "blake3" && ext.language == "c", "native ext name/lang");
+  expect(ext.sources.size() == 2 && ext.sources[0] == "native/blake3.c",
+         "native sources string array");
+  expect(ext.include_dirs.size() == 1 && ext.cxxflags.size() == 1 &&
+             ext.cxxflags[0] == "-O3",
+         "native include_dirs/cxxflags arrays");
+  expect(ext.capabilities.size() == 1 && ext.capabilities[0] == "ffi",
+         "native capabilities array");
+  expect(ext.symbols.size() == 2 && ext.symbols[0].logical == "blake3.hash" &&
+             ext.symbols[0].symbol == "amber_blake3_hash",
+         "symbol map unquotes the logical key");
+  expect(ext.types.size() == 1 && ext.types[0].tag == "blake3.Hasher" &&
+             ext.types[0].ownership == "owned" &&
+             ext.types[0].destructor == "blake3.hasher_free",
+         "native type fields");
+
+  const std::string json = amber::pkg::manifest_to_json(parsed.manifest);
+  expect(json.find("\"native_extensions\"") != std::string::npos &&
+             json.find("amber_blake3_hash") != std::string::npos &&
+             json.find("\"tag\":\"blake3.Hasher\"") != std::string::npos,
+         "manifest json includes native sections");
+
+  // Native content folds deterministically into the package digest.
+  amber::pkg::PackageModuleBlob blob;
+  blob.name = "crypto.blake3";
+  blob.path = "src/blake3.am";
+  blob.bytes = {0x01, 0x02, 0x03};
+  const amber::pkg::PackageBuildResult first =
+      amber::pkg::build_package_artifact(parsed.manifest, {blob});
+  const amber::pkg::PackageBuildResult second =
+      amber::pkg::build_package_artifact(parsed.manifest, {blob});
+  expect(first.ok && second.ok, "native package builds");
+  expect(first.artifact.manifest_digest == second.artifact.manifest_digest,
+         "native manifest digest is deterministic");
+
+  const std::string base =
+      "[package]\nname = \"p\"\nversion = \"0.1.0\"\nroot = \"p\"\n"
+      "[[modules]]\nname = \"p\"\npath = \"p.am\"\n";
+  amber::pkg::PackageManifestResult bad_owner = amber::pkg::parse_manifest_toml(
+      base + "[[native]]\nname = \"x\"\n[[native.types]]\namber = \"P.T\"\n"
+             "tag = \"x.T\"\nownership = \"weird\"\n",
+      "amber.toml");
+  expect(!bad_owner.ok(), "invalid native ownership is rejected");
+  amber::pkg::PackageManifestResult no_dtor = amber::pkg::parse_manifest_toml(
+      base + "[[native]]\nname = \"x\"\n[[native.types]]\namber = \"P.T\"\n"
+             "tag = \"x.T\"\nownership = \"owned\"\n",
+      "amber.toml");
+  expect(!no_dtor.ok(), "owned native type without destructor is rejected");
+  amber::pkg::PackageManifestResult orphan = amber::pkg::parse_manifest_toml(
+      base + "[native.symbols]\n\"a\" = \"b\"\n", "amber.toml");
+  expect(!orphan.ok(), "native.symbols before [[native]] is rejected");
+}
+
 int main() {
+  test_native_extension_manifest();
   test_manifest_and_lock_are_deterministic();
   test_capability_manifest_and_policy_resolution();
   test_package_artifact_is_reproducible_and_signed();
