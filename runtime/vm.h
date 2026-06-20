@@ -453,7 +453,9 @@ std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
   X(time, is_time, as_time, RuntimeTimeValue, Time)                            \
   X(time_period, is_time_period, as_time_period, RuntimeTimePeriodValue,       \
     TimePeriod)                                                                \
-  X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)
+  X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)                             \
+  X(foreign_handle, is_foreign_handle, as_foreign_handle, RuntimeForeignHandle, \
+    ForeignHandle)
 
 #ifndef AMBER_VALUE_REPR_TAGGED
 // ---- Variant representation (default, 24 bytes) ---------------------------
@@ -474,7 +476,8 @@ struct Value {
       std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>,
       std::shared_ptr<RuntimeArgParserValue>, std::shared_ptr<RuntimeTimeValue>,
       std::shared_ptr<RuntimeTimePeriodValue>,
-      std::shared_ptr<RuntimeUuidValue>>;
+      std::shared_ptr<RuntimeUuidValue>,
+      std::shared_ptr<RuntimeForeignHandle>>;
 
   Payload payload;
 
@@ -513,6 +516,7 @@ struct Value {
   static Value result(std::shared_ptr<ResultValue> value);
   static Value arg_parser(std::shared_ptr<RuntimeArgParserValue> value);
   static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
+  static Value foreign_handle(std::shared_ptr<RuntimeForeignHandle> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
   static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
 
@@ -550,6 +554,7 @@ struct Value {
   bool is_result() const;
   bool is_arg_parser() const;
   bool is_uuid() const;
+  bool is_foreign_handle() const;
   bool is_time() const;
   bool is_time_period() const;
 
@@ -586,6 +591,7 @@ struct Value {
   std::shared_ptr<ResultValue> as_result() const;
   std::shared_ptr<RuntimeArgParserValue> as_arg_parser() const;
   std::shared_ptr<RuntimeUuidValue> as_uuid() const;
+  std::shared_ptr<RuntimeForeignHandle> as_foreign_handle() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
   std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
 
@@ -649,6 +655,7 @@ enum class ValueTailKind : std::uint8_t {
   Time,
   TimePeriod,
   Uuid,
+  ForeignHandle,
 };
 
 struct ValueTailBox; // refcounted tail box; defined in vm.cpp
@@ -696,6 +703,7 @@ struct Value {
   static Value result(std::shared_ptr<ResultValue> value);
   static Value arg_parser(std::shared_ptr<RuntimeArgParserValue> value);
   static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
+  static Value foreign_handle(std::shared_ptr<RuntimeForeignHandle> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
   static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
 
@@ -733,6 +741,7 @@ struct Value {
   bool is_result() const;
   bool is_arg_parser() const;
   bool is_uuid() const;
+  bool is_foreign_handle() const;
   bool is_time() const;
   bool is_time_period() const;
 
@@ -769,6 +778,7 @@ struct Value {
   std::shared_ptr<ResultValue> as_result() const;
   std::shared_ptr<RuntimeArgParserValue> as_arg_parser() const;
   std::shared_ptr<RuntimeUuidValue> as_uuid() const;
+  std::shared_ptr<RuntimeForeignHandle> as_foreign_handle() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
   std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
 

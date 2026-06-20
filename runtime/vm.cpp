@@ -2686,6 +2686,9 @@ private:
       }
       return left != nullptr && right != nullptr && left->bytes == right->bytes;
     }
+    if (lhs.is_foreign_handle()) {
+      return lhs.as_foreign_handle() == rhs.as_foreign_handle();
+    }
     if (lhs.is_time()) {
       const std::shared_ptr<RuntimeTimeValue> left = lhs.as_time();
       const std::shared_ptr<RuntimeTimeValue> right = rhs.as_time();
@@ -6765,6 +6768,10 @@ Value Value::uuid(std::shared_ptr<RuntimeUuidValue> value) {
   return {std::move(value)};
 }
 
+Value Value::foreign_handle(std::shared_ptr<RuntimeForeignHandle> value) {
+  return {std::move(value)};
+}
+
 Value Value::time(std::shared_ptr<RuntimeTimeValue> value) {
   return {std::move(value)};
 }
@@ -6907,6 +6914,10 @@ bool Value::is_uuid() const {
   return std::holds_alternative<std::shared_ptr<RuntimeUuidValue>>(payload);
 }
 
+bool Value::is_foreign_handle() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeForeignHandle>>(payload);
+}
+
 bool Value::is_time() const {
   return std::holds_alternative<std::shared_ptr<RuntimeTimeValue>>(payload);
 }
@@ -7039,6 +7050,10 @@ std::shared_ptr<RuntimeArgParserValue> Value::as_arg_parser() const {
 
 std::shared_ptr<RuntimeUuidValue> Value::as_uuid() const {
   return std::get<std::shared_ptr<RuntimeUuidValue>>(payload);
+}
+
+std::shared_ptr<RuntimeForeignHandle> Value::as_foreign_handle() const {
+  return std::get<std::shared_ptr<RuntimeForeignHandle>>(payload);
 }
 
 std::shared_ptr<RuntimeTimeValue> Value::as_time() const {
@@ -7798,6 +7813,14 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_uuid()) {
     const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
     return uuid == nullptr ? "<uuid null>" : runtime_uuid_to_string(*uuid);
+  }
+  if (value.is_foreign_handle()) {
+    const std::shared_ptr<RuntimeForeignHandle> handle =
+        value.as_foreign_handle();
+    if (handle == nullptr) {
+      return "<native handle null>";
+    }
+    return "#<native " + handle->tag + (handle->live ? ">" : " destroyed>");
   }
   if (value.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> time = value.as_time();
@@ -9597,6 +9620,9 @@ bool value_equals(const Value &lhs, const Value &rhs) {
       return true;
     }
     return left != nullptr && right != nullptr && left->bytes == right->bytes;
+  }
+  if (lhs.is_foreign_handle()) {
+    return lhs.as_foreign_handle() == rhs.as_foreign_handle();
   }
   if (lhs.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> left = lhs.as_time();
@@ -33906,6 +33932,14 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_uuid()) {
     const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
     return uuid == nullptr ? "<uuid null>" : runtime_uuid_to_string(*uuid);
+  }
+  if (value.is_foreign_handle()) {
+    const std::shared_ptr<RuntimeForeignHandle> handle =
+        value.as_foreign_handle();
+    if (handle == nullptr) {
+      return "<native handle null>";
+    }
+    return "#<native " + handle->tag + (handle->live ? ">" : " destroyed>");
   }
   if (value.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> time = value.as_time();

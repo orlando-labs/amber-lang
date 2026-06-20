@@ -8739,6 +8739,23 @@ void test_foreign_handle_lifetime() {
     }
     expect(freed == 0, "borrowed handle is never freed by Amber");
   }
+  // The handle round-trips as a Value tail kind (exercised on both reps).
+  {
+    auto handle = std::make_shared<RuntimeForeignHandle>();
+    handle->tag = "pkg.Box";
+    handle->ownership = Ownership::Borrowed;
+    amber::runtime::Value value =
+        amber::runtime::Value::foreign_handle(handle);
+    expect(value.is_foreign_handle(),
+           "Value::foreign_handle round-trips as a handle kind");
+    expect(!value.is_null() && !value.is_uuid(),
+           "a foreign handle Value is distinct from other kinds");
+    expect(value.as_foreign_handle() == handle,
+           "as_foreign_handle recovers the same underlying object");
+    amber::runtime::Value copy = value;
+    expect(copy.is_foreign_handle() && copy.as_foreign_handle() == handle,
+           "copying a foreign handle Value shares the underlying handle");
+  }
 }
 
 } // namespace
