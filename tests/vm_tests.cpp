@@ -8679,6 +8679,68 @@ void test_runtime_io_v2_low_level_wait_trace() {
          "low-level pipe read should emit io.wait enter and exit events");
 }
 
+void test_foreign_handle_lifetime() {
+  using amber::runtime::RuntimeForeignHandle;
+  using Ownership = RuntimeForeignHandle::Ownership;
+
+  // owned: deterministic destroy! runs teardown exactly once; the GC never does.
+  {
+    int freed = 0;
+    auto handle = std::make_shared<RuntimeForeignHandle>();
+    handle->tag = "pkg.Owned";
+    handle->ownership = Ownership::Owned;
+    handle->teardown = [&freed](void *) { ++freed; };
+    expect(handle->destroy(), "owned destroy! reports it destroyed the handle");
+    expect(freed == 1, "owned destroy! runs teardown once");
+    expect(!handle->destroy(), "second destroy! is a no-op");
+    expect(freed == 1, "owned teardown does not run twice");
+    handle.reset();
+    expect(freed == 1, "destroyed owned handle does not re-run teardown on GC");
+  }
+  // owned, never destroyed: the GC must NOT run the destructor.
+  {
+    int freed = 0;
+    {
+      auto handle = std::make_shared<RuntimeForeignHandle>();
+      handle->ownership = Ownership::Owned;
+      handle->teardown = [&freed](void *) { ++freed; };
+    }
+    expect(freed == 0,
+           "GC never runs an owned destructor (no implicit finalizer)");
+  }
+  // collected, never destroyed: the GC reclaims it.
+  {
+    int freed = 0;
+    {
+      auto handle = std::make_shared<RuntimeForeignHandle>();
+      handle->ownership = Ownership::Collected;
+      handle->teardown = [&freed](void *) { ++freed; };
+    }
+    expect(freed == 1, "collected handle is reclaimed by the GC");
+  }
+  // collected, explicitly destroyed: teardown runs once, not again on GC.
+  {
+    int freed = 0;
+    auto handle = std::make_shared<RuntimeForeignHandle>();
+    handle->ownership = Ownership::Collected;
+    handle->teardown = [&freed](void *) { ++freed; };
+    expect(handle->destroy() && freed == 1, "collected destroy! runs teardown");
+    handle.reset();
+    expect(freed == 1, "collected handle is not double-freed after destroy!");
+  }
+  // borrowed: never freed, whether via destroy! or GC.
+  {
+    int freed = 0;
+    {
+      auto handle = std::make_shared<RuntimeForeignHandle>();
+      handle->ownership = Ownership::Borrowed;
+      handle->teardown = [&freed](void *) { ++freed; };
+      expect(handle->destroy(), "borrowed destroy! flips the tombstone");
+    }
+    expect(freed == 0, "borrowed handle is never freed by Amber");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -8857,6 +8919,7 @@ int main() {
   test_manual_raise_unwinds_method_send_to_outer_handler();
   test_manual_ensure_suppresses_pending_exception();
   test_manual_raise_unhandled_fault_trace();
+  test_foreign_handle_lifetime();
   std::cout << "vm_tests: ok\n";
   return 0;
 }

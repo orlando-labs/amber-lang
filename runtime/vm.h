@@ -329,6 +329,50 @@ struct RuntimeTimePeriodValue {
   std::int64_t nanoseconds = 0;
 };
 
+// Backs a `native class` instance: an opaque host pointer plus the deterministic
+// lifetime model from the native-packages design (§7). Teardown runs through
+// destroy!/memory.dealloc; the GC never runs an `owned` destructor (no implicit
+// finalizer), and only a `collected` handle opts into GC reclamation. Held only
+// via shared_ptr (single owner), so copying is disabled to prevent double-free.
+struct RuntimeForeignHandle {
+  enum class Ownership { Owned, Borrowed, Collected };
+
+  std::string tag;       // per-(package,type) dispatch identity
+  void *ptr = nullptr;   // the wrapped foreign resource
+  Ownership ownership = Ownership::Borrowed;
+  // Reclaim callback: the context-free reclaim for `collected`, a ctx-bound
+  // closure supplied by the ABI layer for `owned`, and empty for `borrowed`.
+  std::function<void(void *)> teardown;
+  bool live = true;      // tombstone: cleared once destroyed
+
+  RuntimeForeignHandle() = default;
+  RuntimeForeignHandle(const RuntimeForeignHandle &) = delete;
+  RuntimeForeignHandle &operator=(const RuntimeForeignHandle &) = delete;
+
+  // Deterministic destroy! / memory.dealloc: runs teardown once for an owning
+  // handle, flips the tombstone, and reports whether this call destroyed it.
+  bool destroy() {
+    if (!live) {
+      return false;
+    }
+    live = false;
+    if (ownership != Ownership::Borrowed && teardown) {
+      teardown(ptr);
+    }
+    return true;
+  }
+
+  // GC reclamation: only a `collected` handle runs teardown here (the opt-in
+  // finalizer). An `owned` handle never runs its destructor from the collector
+  // (the leak is surfaced by a backstop diagnostic elsewhere); `borrowed` never
+  // frees.
+  ~RuntimeForeignHandle() {
+    if (live && ownership == Ownership::Collected && teardown) {
+      teardown(ptr);
+    }
+  }
+};
+
 const char *runtime_error_name(std::uint16_t error_id);
 std::optional<std::uint16_t> runtime_error_id(const std::string &name);
 bool runtime_error_is_a(std::uint16_t error_id,
