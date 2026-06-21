@@ -1,4 +1,5 @@
 #include "runtime/vm.h"
+#include "runtime/amber_ext_runtime.h"
 #include "runtime/context.h"
 #include "runtime/io.h"
 #include "runtime/stdlib_registry.h"
@@ -9875,6 +9876,7 @@ public:
     // Layer 0 stdlib substrate: populate the registry once here rather than via
     // static initializers, to avoid static-init-order fiascos.
     register_builtin_stdlib(native_registry_);
+    resolve_native_bindings();
   }
 
   // --- StdlibHost: the native stdlib facade, forwarding to VM helpers. The
@@ -9972,8 +9974,8 @@ public:
       *keepalive = value;
       return true;
     }
-    // A slice exposes its content as a RuntimeBytes; retaining that shared Bytes
-    // keeps the viewed storage alive for the duration of the call.
+    // A slice exposes its content as a RuntimeBytes; retaining that shared
+    // Bytes keeps the viewed storage alive for the duration of the call.
     if (const auto slice =
             std::dynamic_pointer_cast<RuntimeByteSlice>(io_value)) {
       const std::shared_ptr<RuntimeBytes> snapshot = slice->bytes();
@@ -10205,6 +10207,23 @@ public:
     }
     push_frame(*entry, args, std::move(entry_captures), std::move(self),
                std::move(block), std::nullopt);
+    // Native-extension entry: when the native lane's per-function VM bridge
+    // calls execute() for a native-bound code object, route it straight to the
+    // registered thunk instead of running the Amber fallback body (5c-ii).
+    {
+      Value native_out = Value::null();
+      bool native_faulted = false;
+      if (try_dispatch_native_extension_code(frames_.back(), code_id, args,
+                                             frames_.back().self, &native_out,
+                                             &native_faulted)) {
+        frames_.pop_back();
+        state_->heap.drain_remote_frees();
+        if (native_faulted) {
+          return with_runtime_names({Value::null(), fault_});
+        }
+        return with_runtime_names({std::move(native_out), std::nullopt});
+      }
+    }
     // Text output events resolve their source location on demand through
     // this provider; computing the location eagerly per step costs a frame
     // walk, a span search, and a string copy on every instruction.
@@ -10509,7 +10528,35 @@ private:
     return destructors_ok && !fault_.has_value();
   }
 
+  // A `native class` instance is a foreign-handle Value, not a heap object, so
+  // its deterministic teardown runs the manifest-declared destructor through
+  // the ABI rather than the ObjHeader lifecycle. destroy! and memory.dealloc
+  // both route here: teardown runs at most once (the tombstone), and the
+  // destructor receives a live AmberCtx so an `owned` teardown has full runtime
+  // context.
+  bool foreign_handle_lifecycle_teardown(Frame &frame, const Value &value,
+                                         bool *changed) {
+    *changed = false;
+    const std::shared_ptr<RuntimeForeignHandle> handle =
+        value.as_foreign_handle();
+    if (handle == nullptr) {
+      set_fault(frame, "TypeError", "native handle is null");
+      return false;
+    }
+    if (!handle->live) {
+      return true; // already torn down: a no-op, matching heap idempotence.
+    }
+    AmberCtx *ctx =
+        amber_ext_ctx_open(*this, &frame, NativeExtRegistry::global().tags());
+    *changed = handle->destroy(ctx);
+    amber_ext_ctx_close(ctx);
+    return !fault_.has_value();
+  }
+
   bool lifecycle_destroy(Frame &frame, const Value &value, bool *changed) {
+    if (value.is_foreign_handle()) {
+      return foreign_handle_lifecycle_teardown(frame, value, changed);
+    }
     ObjHeader *header = nullptr;
     const std::optional<LifecycleTargetStatus> target =
         lifecycle_target_header(frame, value, &header);
@@ -10598,6 +10645,9 @@ private:
   }
 
   bool lifecycle_dealloc(Frame &frame, const Value &value, bool *changed) {
+    if (value.is_foreign_handle()) {
+      return foreign_handle_lifecycle_teardown(frame, value, changed);
+    }
     ObjHeader *header = nullptr;
     const std::optional<LifecycleTargetStatus> target =
         lifecycle_target_header(frame, value, &header);
@@ -13378,6 +13428,32 @@ private:
     if (code == nullptr) {
       set_fault(frame, "VMError", "closure code id is unknown");
       return FastCallStatus::Faulted;
+    }
+
+    // Native-extension dispatch: a closure over a native-bound code object
+    // (e.g. a top-level `native def` invoked as `hash(data)`) routes to its
+    // registered C thunk before any fast/direct body evaluation (5c-ii).
+    if (native_binding_for_code(closure->code_id) != nullptr) {
+      std::vector<Value> pos_args;
+      pos_args.reserve(pos_count);
+      for (std::uint32_t i = 0; i < pos_count; ++i) {
+        pos_args.push_back(args[i].int_valid ? Value::integer(args[i].int_value)
+                                             : args[i].value);
+      }
+      Value native_out = Value::null();
+      bool native_faulted = false;
+      if (try_dispatch_native_extension_code(frame, closure->code_id, pos_args,
+                                             closure->self, &native_out,
+                                             &native_faulted)) {
+        if (native_faulted) {
+          return FastCallStatus::Faulted;
+        }
+        if (!write_reg_fast_plain(frame, dst, std::move(native_out))) {
+          return FastCallStatus::Faulted;
+        }
+        ++frame.pc;
+        return FastCallStatus::Matched;
+      }
     }
 
     Value direct_value = Value::null();
@@ -18527,12 +18603,108 @@ private:
     return out;
   }
 
+  // Lower the `amber.native.bind:<code_id>` module attrs into a fast lookup
+  // table (native-packages 5c-ii). Runs once at construction.
+  void resolve_native_bindings() {
+    static const std::string kPrefix = "amber.native.bind:";
+    for (const bytecode::AttrEntry &attr : module_.attrs) {
+      const std::string key = string_or_empty(attr.key_str_id);
+      if (key.compare(0, kPrefix.size(), kPrefix) != 0) {
+        continue;
+      }
+      std::uint32_t code_id = 0;
+      bool parsed = !key.empty();
+      for (std::size_t i = kPrefix.size(); i < key.size(); ++i) {
+        const char digit = key[i];
+        if (digit < '0' || digit > '9') {
+          parsed = false;
+          break;
+        }
+        code_id = code_id * 10U + static_cast<std::uint32_t>(digit - '0');
+      }
+      const std::string value = string_or_empty(attr.value_str_id);
+      if (!parsed || code_id == 0U || value.size() < 2U || value[1] != ':') {
+        continue;
+      }
+      native_bindings_[code_id] = {value[0] == 'M', value.substr(2)};
+    }
+  }
+
+  const std::pair<bool, std::string> *
+  native_binding_for_code(std::uint32_t code_id) const {
+    if (native_bindings_.empty()) {
+      return nullptr;
+    }
+    const auto found = native_bindings_.find(code_id);
+    return found == native_bindings_.end() ? nullptr : &found->second;
+  }
+
+  // If `method` is native-bound and a thunk is registered for its logical
+  // symbol, bridge the call across the amber_ext.h ABI to that C thunk and
+  // report the result in `*out`. Returns true when handled natively (the caller
+  // must not run the Amber body), with `*faulted` set if the thunk faulted;
+  // returns false when no thunk is registered, i.e. a bytecode build that
+  // should run the fallback body. The frame is the boundary: an effectful
+  // native-only leaf is a direct call here, never replayed (design §10.2).
+  bool try_dispatch_native_extension(Frame &caller,
+                                     const bytecode::BcMethod &method,
+                                     const std::vector<Value> &pos_args,
+                                     const Value &self, Value *out,
+                                     bool *faulted) {
+    return try_dispatch_native_extension_code(caller, method.entry_code_id,
+                                              pos_args, self, out, faulted);
+  }
+
+  // Same dispatch keyed directly on an entry code object, used by the
+  // public execute() entry so the native lane's per-function VM bridge
+  // (amber_vm_fallback_call -> execute(code_id, args)) routes native-bound code
+  // objects to their thunk too.
+  bool try_dispatch_native_extension_code(Frame &caller, std::uint32_t code_id,
+                                          const std::vector<Value> &pos_args,
+                                          const Value &self, Value *out,
+                                          bool *faulted) {
+    *faulted = false;
+    const std::pair<bool, std::string> *binding =
+        native_binding_for_code(code_id);
+    if (binding == nullptr) {
+      return false;
+    }
+    NativeExtRegistry &registry = NativeExtRegistry::global();
+    void *fn = registry.lookup(binding->second);
+    if (fn == nullptr) {
+      return false; // bytecode build: fall back to the Amber body.
+    }
+    NativeExtCallOutcome outcome =
+        binding->first
+            ? amber_ext_invoke_method(*this, &caller, registry.tags(),
+                                      reinterpret_cast<AmberMethodFn>(fn), self,
+                                      pos_args)
+            : amber_ext_invoke_free(*this, &caller, registry.tags(),
+                                    reinterpret_cast<AmberFreeFn>(fn),
+                                    pos_args);
+    if (!outcome.ok || fault_.has_value()) {
+      *faulted = true;
+      return true;
+    }
+    *out = std::move(outcome.value);
+    return true;
+  }
+
   std::optional<Value> execute_method_to_value(
       Frame &caller, const bytecode::BcMethod &method,
       const std::vector<Value> &pos_args,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
       const Value &self, const Value &block,
       const std::string &no_suspend_label = {}) {
+    {
+      Value native_out = Value::null();
+      bool native_faulted = false;
+      if (try_dispatch_native_extension(caller, method, pos_args, self,
+                                        &native_out, &native_faulted)) {
+        return native_faulted ? std::nullopt
+                              : std::optional<Value>(std::move(native_out));
+      }
+    }
     std::vector<bytecode::MethodParamEntry> params;
     std::vector<BoundMethodArg> slots;
     if (!shape_method_call(caller, method, pos_args, kw_args, &params,
@@ -19110,6 +19282,22 @@ private:
                 std::optional<std::uint32_t> caller_result_reg,
                 std::optional<Value> return_override = std::nullopt,
                 const std::string &no_suspend_label = {}) {
+    {
+      Value native_out = Value::null();
+      bool native_faulted = false;
+      if (try_dispatch_native_extension(caller, method, pos_args, self,
+                                        &native_out, &native_faulted)) {
+        if (native_faulted) {
+          return false;
+        }
+        if (caller_result_reg.has_value() &&
+            !write_reg(caller, *caller_result_reg, std::move(native_out))) {
+          return false;
+        }
+        ++caller.pc;
+        return true;
+      }
+    }
     std::vector<bytecode::MethodParamEntry> params;
     std::vector<BoundMethodArg> slots;
     if (!shape_method_call(caller, method, pos_args, kw_args, &params,
@@ -30995,6 +31183,23 @@ private:
           set_fault(frame, "VMError", "closure code id is unknown");
           return;
         }
+        // Native-extension dispatch for a native-bound closure (5c-ii).
+        if (native_binding_for_code(closure->code_id) != nullptr) {
+          Value native_out = Value::null();
+          bool native_faulted = false;
+          if (try_dispatch_native_extension_code(
+                  frame, closure->code_id, packet.pos_args, closure->self,
+                  &native_out, &native_faulted)) {
+            if (native_faulted) {
+              return;
+            }
+            if (!write_reg(frame, packet.dst, std::move(native_out))) {
+              return;
+            }
+            ++frame.pc;
+            return;
+          }
+        }
         const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
         ++frame.pc;
         frame.active_call_pc = call_pc;
@@ -31773,6 +31978,12 @@ private:
   // Layer 0 stdlib substrate: kind->handler and path->kind tables for native
   // libraries that have migrated off the legacy inline chains.
   NativeRegistry native_registry_;
+  // Native-extension dispatch (native-packages 5c-ii): entry code object ->
+  // {is_method, logical-symbol}, lowered from `amber.native.bind:<code_id>`
+  // module attrs. A registered thunk for the logical name (native build) runs
+  // instead of the Amber body; with no thunk (bytecode build) the body runs.
+  std::unordered_map<std::uint32_t, std::pair<bool, std::string>>
+      native_bindings_;
 };
 
 } // namespace

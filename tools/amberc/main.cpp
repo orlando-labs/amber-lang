@@ -1426,12 +1426,12 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         codec_send = true;
       }
       const bool digest_send =
-          (((selector == "crc32" || selector == "md5" ||
-             selector == "sha1" || selector == "sha256" ||
-             selector == "streebog256" || selector == "streebog512" ||
-             selector == "gost256" || selector == "gost512" ||
-             selector == "гост256" || selector == "гост512" ||
-             selector == "стрибог256" || selector == "стрибог512") &&
+          (((selector == "crc32" || selector == "md5" || selector == "sha1" ||
+             selector == "sha256" || selector == "streebog256" ||
+             selector == "streebog512" || selector == "gost256" ||
+             selector == "gost512" || selector == "гост256" ||
+             selector == "гост512" || selector == "стрибог256" ||
+             selector == "стрибог512") &&
             pos_count == 1U) ||
            (selector == "hmac_sha256" && pos_count == 2U)) &&
           kw_count == 0U && no_block;
@@ -1519,17 +1519,17 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                  pos_count == 1U && kw_count == 0U && no_block) {
         uuid_send = true;
       }
-      const bool url_send =
-          native_cpp_url_selector(selector, pos_count) && kw_count == 0U &&
-          no_block;
+      const bool url_send = native_cpp_url_selector(selector, pos_count) &&
+                            kw_count == 0U && no_block;
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
-          !json_send && !codec_send && !digest_send && !range_send && !random_send &&
-          !time_send && !uuid_send && !url_send) {
+          !json_send && !codec_send && !digest_send && !range_send &&
+          !random_send && !time_send && !uuid_send && !url_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
-      if (!json_send && !codec_send && !digest_send && !range_send && !random_send &&
-          !time_send && !uuid_send && !url_send && (kw_count != 0U || !no_block)) {
+      if (!json_send && !codec_send && !digest_send && !range_send &&
+          !random_send && !time_send && !uuid_send && !url_send &&
+          (kw_count != 0U || !no_block)) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
       }
@@ -2464,13 +2464,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_url_build(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
       } else if (selector == "percent_encode") {
-        write_reg_stmt(dst, "native_url_percent_encode(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_url_percent_encode(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "percent_decode") {
-        write_reg_stmt(dst, "native_url_percent_decode(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_url_percent_decode(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "parse_query") {
         write_reg_stmt(dst, "native_url_parse_query(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
@@ -2559,18 +2557,17 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 ", " + (kw_count == 1U ? "true" : "false") +
                                 ")");
       } else if (selector == "hmac_sha256") {
-        write_reg_stmt(dst,
-                       "native_digest_hmac_sha256(" + read_reg_expr(recv) +
-                           ", " + read_reg_expr(arg) + ", " +
-                           read_reg_expr(arg2) + ")");
+        write_reg_stmt(dst, "native_digest_hmac_sha256(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", " +
+                                read_reg_expr(arg2) + ")");
       } else if (selector == "crc32" || selector == "md5" ||
                  selector == "sha1" || selector == "sha256" ||
                  selector == "streebog256" || selector == "streebog512" ||
                  selector == "gost256" || selector == "gost512" ||
                  selector == "гост256" || selector == "гост512" ||
                  selector == "стрибог256" || selector == "стрибог512") {
-        write_reg_stmt(dst, "native_digest_one(" + read_reg_expr(recv) +
-                                ", " + read_reg_expr(arg) +
+        write_reg_stmt(dst, "native_digest_one(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) +
                                 ", native_hex_to_string(\"" +
                                 string_to_hex_text(selector) + "\"))");
       } else if (selector == "hex") {
@@ -2982,7 +2979,9 @@ std::string emit_module_strings_cpp(const amber::bytecode::BcModule &module) {
 
 NativeCppBuildPlan
 build_native_cpp_plan(const RunnableModuleArtifact &artifact,
-                      const amber::bytecode::BcModule &module) {
+                      const amber::bytecode::BcModule &module,
+                      const std::vector<amber::pkg::PackageNativeExtension>
+                          &native_extensions = {}) {
   NativeCppBuildPlan plan;
   std::string first_reason;
   // The generated C++ implements only the default numeric profile
@@ -3016,6 +3015,39 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
       if (first_reason.empty()) {
         first_reason = "c" + std::to_string(code.code_id) + ": " + reason;
       }
+    }
+  }
+
+  // A native-bound code object (a `native def` / native class method) must
+  // reach the VM so the SEND path can route it to its registered C thunk
+  // (5c-ii); pull it onto the per-function VM bridge instead of
+  // native-compiling the Amber body. The bridge calls execute(code_id, args),
+  // which dispatches to the thunk before the body would run, so even a
+  // native-only leaf's NativeRequiredError body is never executed in a native
+  // build.
+  if (!native_extensions.empty()) {
+    const std::string prefix = "amber.native.bind:";
+    for (const amber::bytecode::AttrEntry &attr : module.attrs) {
+      const std::string key = attr.key_str_id < module.strings.size()
+                                  ? module.strings[attr.key_str_id]
+                                  : std::string();
+      if (key.compare(0, prefix.size(), prefix) != 0) {
+        continue;
+      }
+      std::uint32_t code_id = 0;
+      bool parsed = true;
+      for (std::size_t i = prefix.size(); i < key.size(); ++i) {
+        if (key[i] < '0' || key[i] > '9') {
+          parsed = false;
+          break;
+        }
+        code_id = code_id * 10U + static_cast<std::uint32_t>(key[i] - '0');
+      }
+      if (!parsed || code_id == 0U) {
+        continue;
+      }
+      plan.native_code_ids.erase(code_id);
+      plan.vm_callable_code_ids.insert(code_id);
     }
   }
 
@@ -3073,6 +3105,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
 
   std::ostringstream out;
   out << "#include \"bytecode/format.h\"\n";
+  out << "#include \"runtime/amber_ext.h\"\n";
+  out << "#include \"runtime/amber_ext_runtime.h\"\n";
   out << "#include \"runtime/digest.h\"\n";
   out << "#include \"runtime/stdlib_url.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
@@ -3123,7 +3157,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
          "JsonModule, BytesModule, Base64Module, Base64UrlModule, HexModule, "
-         "DigestModule, UrlModule, SecureRandomModule, UuidModule, RangeModule, TimeModule, "
+         "DigestModule, UrlModule, SecureRandomModule, UuidModule, "
+         "RangeModule, TimeModule, "
          "TimePeriodModule, Bytes, List, Map, Range, Uuid, Time, TimePeriod, "
          "Closure };\n";
   out << "  Tag tag;\n";
@@ -5744,8 +5779,93 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "value.tag == NativeValue::Tag::Closure) return;\n";
   out << "  std::cout << native_value_to_debug_string(value) << \"\\n\";\n";
   out << "}\n\n";
+
+  // Native-extension registration table (native-packages 5c-ii). The build
+  // manifest names the logical->symbol bindings and foreign-handle types; emit
+  // a startup function that fills the process-global NativeExtRegistry the VM
+  // SEND path consults. Bytecode builds never run this, so a `native def` there
+  // falls back to its Amber body. Symbols are declared with the free-thunk
+  // prototype and reinterpret_cast at registration: C linkage matches by name,
+  // and the VM casts back to the method/destructor shape it knows from the
+  // bytecode binding.
+  const bool has_native_extensions = !native_extensions.empty();
+  if (has_native_extensions) {
+    const auto cpp_string = [](const std::string &text) {
+      std::string escaped;
+      for (const char c : text) {
+        if (c == '\\' || c == '"') {
+          escaped.push_back('\\');
+        }
+        escaped.push_back(c);
+      }
+      return escaped;
+    };
+    std::vector<std::string> declared_symbols;
+    const auto declare_once = [&](const std::string &symbol) {
+      if (std::find(declared_symbols.begin(), declared_symbols.end(), symbol) !=
+          declared_symbols.end()) {
+        return;
+      }
+      declared_symbols.push_back(symbol);
+      out << "extern \"C\" AmberStatus " << symbol
+          << "(AmberCtx *, const AmberValue *, std::size_t, AmberValue *);\n";
+    };
+    for (const amber::pkg::PackageNativeExtension &extension :
+         native_extensions) {
+      for (const amber::pkg::PackageNativeSymbol &symbol : extension.symbols) {
+        declare_once(symbol.symbol);
+      }
+    }
+    out << "\nstatic void amber_register_native_extensions() {\n";
+    out << "  auto &registry = amber::runtime::NativeExtRegistry::global();\n";
+    for (const amber::pkg::PackageNativeExtension &extension :
+         native_extensions) {
+      std::unordered_map<std::string, std::string> logical_to_symbol;
+      for (const amber::pkg::PackageNativeSymbol &symbol : extension.symbols) {
+        logical_to_symbol[symbol.logical] = symbol.symbol;
+        out << "  registry.register_thunk(\"" << cpp_string(symbol.logical)
+            << "\", reinterpret_cast<void *>(&" << symbol.symbol << "));\n";
+      }
+      for (const amber::pkg::PackageNativeType &type : extension.types) {
+        out << "  {\n";
+        out << "    amber::runtime::NativeTypeDescriptor descriptor;\n";
+        out << "    descriptor.tag = \"" << cpp_string(type.tag) << "\";\n";
+        const std::string destructor_symbol =
+            logical_to_symbol.count(type.destructor) != 0U
+                ? logical_to_symbol[type.destructor]
+                : std::string();
+        if (type.ownership == "owned") {
+          out << "    descriptor.ownership = amber::runtime::"
+                 "RuntimeForeignHandle::Ownership::Owned;\n";
+          if (!destructor_symbol.empty()) {
+            out << "    descriptor.owned_destructor = reinterpret_cast<void "
+                   "(*)(void *, void *)>(&"
+                << destructor_symbol << ");\n";
+          }
+        } else if (type.ownership == "collected") {
+          out << "    descriptor.ownership = amber::runtime::"
+                 "RuntimeForeignHandle::Ownership::Collected;\n";
+          if (!destructor_symbol.empty()) {
+            out << "    descriptor.collected_reclaim = reinterpret_cast<void "
+                   "(*)(void *)>(&"
+                << destructor_symbol << ");\n";
+          }
+        } else {
+          out << "    descriptor.ownership = amber::runtime::"
+                 "RuntimeForeignHandle::Ownership::Borrowed;\n";
+        }
+        out << "    registry.register_type(descriptor);\n";
+        out << "  }\n";
+      }
+    }
+    out << "}\n\n";
+  }
+
   out << "} // namespace\n\n";
   out << "int main() {\n";
+  if (has_native_extensions) {
+    out << "  amber_register_native_extensions();\n";
+  }
   out << "  try {\n";
   if (artifact.entry_mode != EntryExecutionMode::MainOnly &&
       module.init.has_entry_code_id) {
@@ -5858,6 +5978,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/stdlib_uuid.cpp",
       "runtime/stdlib_time.cpp",
       "runtime/stdlib_url.cpp",
+      "runtime/amber_ext.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());
@@ -6023,7 +6144,7 @@ ensure_native_runtime_archive(const std::string &cxx,
 // (native-packages design §9: constrain flags, fold them into the digest.)
 bool native_cxxflag_rejected(const std::string &flag) {
   static const std::vector<std::string> kRejectedPrefixes = {
-      "-I", "-D",        "-L",       "-l",       "-include", "-imacros",
+      "-I",       "-D",       "-L", "-l",     "-include", "-imacros",
       "-isystem", "-fplugin", "-B", "-specs", "-Xclang"};
   for (const std::string &prefix : kRejectedPrefixes) {
     if (flag.rfind(prefix, 0) == 0) {
@@ -6040,7 +6161,8 @@ NativeExecutableBuildResult build_native_executable(
     const std::vector<amber::pkg::PackageNativeExtension> &native_extensions =
         {},
     const std::filesystem::path &native_base_dir = {}) {
-  NativeCppBuildPlan plan = build_native_cpp_plan(artifact, artifact.module);
+  NativeCppBuildPlan plan =
+      build_native_cpp_plan(artifact, artifact.module, native_extensions);
   const std::filesystem::path parent = output_path.parent_path();
   if (!parent.empty()) {
     std::filesystem::create_directories(parent);
@@ -6074,30 +6196,64 @@ NativeExecutableBuildResult build_native_executable(
   command.push_back(runtime_root.string());
   command.push_back(native_source_path.string());
 
-  // Native extension sources, search paths, defines, and flags, resolved
-  // against the package root. Declared symbols and link libraries are gathered
-  // for the post-link check and the link line below.
+  // Native extension sources are pre-compiled to object files in their own
+  // invocations so each unit gets correct language/standard flags: a
+  // `language = "c"` unit must compile as C (so its `extern "C"` thunks keep C
+  // linkage), which cannot share the launcher link command's `-std=c++17`.
+  // Declared symbols and link libraries are gathered for the post-link check
+  // and the link line below.
   std::vector<std::string> link_libraries;
   std::vector<std::string> declared_symbols;
-  for (const amber::pkg::PackageNativeExtension &extension : native_extensions) {
+  std::vector<std::string> extension_objects;
+  std::size_t extension_object_index = 0;
+  for (const amber::pkg::PackageNativeExtension &extension :
+       native_extensions) {
+    std::vector<std::string> unit_flags;
     for (const std::string &flag : extension.cxxflags) {
       if (native_cxxflag_rejected(flag)) {
         throw std::runtime_error(
             "native extension '" + extension.name +
             "' uses a disallowed cxxflag (use the include_dirs/defines/"
-            "link_libraries fields instead): " + flag);
+            "link_libraries fields instead): " +
+            flag);
       }
-      command.push_back(flag);
+      unit_flags.push_back(flag);
     }
     for (const std::string &include_dir : extension.include_dirs) {
-      command.push_back("-I");
-      command.push_back((native_base_dir / include_dir).string());
+      unit_flags.push_back("-I");
+      unit_flags.push_back((native_base_dir / include_dir).string());
     }
     for (const std::string &define : extension.defines) {
-      command.push_back("-D" + define);
+      unit_flags.push_back("-D" + define);
     }
+    const bool compile_as_c =
+        extension.language == "c" || extension.language == "C";
     for (const std::string &source : extension.sources) {
-      command.push_back((native_base_dir / source).string());
+      const std::filesystem::path object_path =
+          source_parent /
+          ("amber_ext_" + std::to_string(extension_object_index++) + ".o");
+      std::vector<std::string> compile = {cxx};
+      if (compile_as_c) {
+        compile.push_back("-x");
+        compile.push_back("c");
+        compile.push_back("-std=c11");
+      } else {
+        compile.push_back("-std=c++17");
+      }
+      compile.push_back("-O3");
+      compile.push_back("-I");
+      compile.push_back(runtime_root.string());
+      compile.insert(compile.end(), unit_flags.begin(), unit_flags.end());
+      compile.push_back("-c");
+      compile.push_back((native_base_dir / source).string());
+      compile.push_back("-o");
+      compile.push_back(object_path.string());
+      const std::string rendered_compile = shell_command(compile);
+      if (std::system(rendered_compile.c_str()) != 0) {
+        throw std::runtime_error("native extension compile failed: " +
+                                 rendered_compile);
+      }
+      extension_objects.push_back(object_path.string());
     }
     for (const std::string &library : extension.link_libraries) {
       link_libraries.push_back(library);
@@ -6106,6 +6262,8 @@ NativeExecutableBuildResult build_native_executable(
       declared_symbols.push_back(symbol.symbol);
     }
   }
+  command.insert(command.end(), extension_objects.begin(),
+                 extension_objects.end());
 
   if (!runtime_archive.empty()) {
 #if defined(__APPLE__)
@@ -6134,13 +6292,12 @@ NativeExecutableBuildResult build_native_executable(
 
   // Symbol-presence check: every declared native symbol must be defined in the
   // linked executable, caught here with a clear diagnostic rather than as an
-  // undefined-reference once the Amber bindings start calling them. Best-effort:
-  // skipped when `nm` is unavailable.
+  // undefined-reference once the Amber bindings start calling them.
+  // Best-effort: skipped when `nm` is unavailable.
   if (!declared_symbols.empty()) {
     const std::filesystem::path nm_dump = output_path.string() + ".nm.txt";
     const std::string nm_command = shell_command({"nm", output_path.string()}) +
-                                   " > " +
-                                   shell_command({nm_dump.string()}) +
+                                   " > " + shell_command({nm_dump.string()}) +
                                    " 2>/dev/null";
     const int nm_exit = std::system(nm_command.c_str());
     if (nm_exit == 0 && std::filesystem::exists(nm_dump)) {

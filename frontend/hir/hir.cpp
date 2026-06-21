@@ -687,10 +687,10 @@ private:
       capture_bindings_for_scope(scope_index);
       capture_plans = build_capture_plans(scope_index);
     }
-    const std::string procedure_id = lower_procedure(
-        scope_index, string_value(item, "name"), "property",
-        procedure_name_for_owner(string_value(item, "name")), signature,
-        body_items, item.span, capture_plans);
+    const std::string procedure_id =
+        lower_procedure(scope_index, string_value(item, "name"), "property",
+                        procedure_name_for_owner(string_value(item, "name")),
+                        signature, body_items, item.span, capture_plans);
     const std::string slot = current_local_slot_for_decl(item);
     auto seq = make_node("HSeq", item.span);
     std::vector<std::unique_ptr<Node>> items;
@@ -923,14 +923,12 @@ private:
 
   std::unique_ptr<Node>
   lower_property_accessor_decl(const ast::Expr &item,
-                               const std::string &dispatch_side,
-                               bool setter) {
+                               const std::string &dispatch_side, bool setter) {
     const bool class_property = ast_is_class_property_decl(item);
     const std::string base_name = string_value(item, "name");
     const std::string selector = setter ? base_name + "=" : base_name;
     const std::string scope_kind =
-        setter ? (class_property ? "class_property_setter"
-                                 : "property_setter")
+        setter ? (class_property ? "class_property_setter" : "property_setter")
                : (class_property ? "class_property" : "property");
     const int scope_index = find_scope_index(scope_kind, item.span, selector);
     const binder::Signature *signature = signature_for_scope(scope_index);
@@ -982,10 +980,10 @@ private:
     const std::string scope_kind =
         item.kind == "AstClassMethodDef"
             ? "class_method"
-            : (property_getter ? (item.kind == "AstClassPropDef"
-                                      ? "class_property"
-                                      : "property")
-                               : "function");
+            : (property_getter
+                   ? (item.kind == "AstClassPropDef" ? "class_property"
+                                                     : "property")
+                   : "function");
     const int scope_index =
         find_scope_index(scope_kind, item.span, string_value(item, "name"));
     const binder::Signature *signature = signature_for_scope(scope_index);
@@ -994,6 +992,17 @@ private:
     node->string_field("dispatch_side", dispatch_side);
     if (property_getter) {
       node->bool_field("property_getter", true);
+    }
+    // Carry the `native def`/`native class` binding through to the emitter so
+    // it can record a code-object -> logical-symbol mapping for native dispatch
+    // (native-packages 5c-ii). The Amber fallback body is lowered exactly as a
+    // normal method; the binding only adds metadata.
+    if (bool_value(item, "is_native") ||
+        !string_value(item, "native_binding").empty()) {
+      node->bool_field("is_native", bool_value(item, "is_native"));
+      node->bool_field("native_only", bool_value(item, "native_only"));
+      node->string_field("native_binding",
+                         string_value(item, "native_binding"));
     }
     node->list_field("auto_assign", build_auto_assign_nodes(signature));
     std::unique_ptr<Node> signature_node =
@@ -1501,14 +1510,13 @@ private:
     if (const ast::ListField *list = list_field(clause, "matchers")) {
       for (const std::unique_ptr<ast::Expr> &matcher : list->values) {
         auto lowered = make_node("HRescueMatcher", matcher->span);
-        lowered->string_field("type_expr",
-                              string_value(*matcher, "type_expr"));
+        lowered->string_field("type_expr", string_value(*matcher, "type_expr"));
         matchers.push_back(std::move(lowered));
       }
     }
     node->list_field("matchers", std::move(matchers));
-    node->node_field("body", lower_body(list_field(clause, "body"),
-                                        clause.span));
+    node->node_field("body",
+                     lower_body(list_field(clause, "body"), clause.span));
     return node;
   }
 
@@ -1753,7 +1761,8 @@ private:
     }
     if (expr.kind == "AstCompareChain") {
       auto node = make_node("HCompareChain", expr.span);
-      node->node_field("first", lower_expr(*node_field_required(expr, "first")));
+      node->node_field("first",
+                       lower_expr(*node_field_required(expr, "first")));
       std::vector<std::unique_ptr<Node>> links;
       if (const ast::ListField *list = list_field(expr, "links")) {
         for (const std::unique_ptr<ast::Expr> &link : list->values) {
@@ -1802,8 +1811,7 @@ private:
         std::vector<std::unique_ptr<Node>> kw_args;
         auto inclusive = make_node("HKeywordArg", expr.span);
         inclusive->string_field("name", "inclusive_end");
-        inclusive->node_field("value",
-                              make_bool_const(op == "..", expr.span));
+        inclusive->node_field("value", make_bool_const(op == "..", expr.span));
         kw_args.push_back(std::move(inclusive));
         if (const ast::Expr *step = node_field(expr, "step")) {
           auto step_arg = make_node("HKeywordArg", step->span);
@@ -2173,11 +2181,9 @@ private:
         const ast::Expr &last_tail = *tails->values.back();
         if (last_tail.kind == "AstTailDotMember") {
           auto node = make_node("HSend", expr.span);
-          node->node_field(
-              "receiver",
-              lower_postfix_chain_with_limit(*left, tails->values.size() - 1U));
-          node->string_field("selector",
-                             string_value(last_tail, "name") + "=");
+          node->node_field("receiver", lower_postfix_chain_with_limit(
+                                           *left, tails->values.size() - 1U));
+          node->string_field("selector", string_value(last_tail, "name") + "=");
           node->bool_field("property_assignment", true);
           std::vector<std::unique_ptr<Node>> pos_args;
           pos_args.push_back(lower_expr(*right));
@@ -2194,9 +2200,8 @@ private:
             return node;
           }
           auto node = make_node("HSend", expr.span);
-          node->node_field(
-              "receiver",
-              lower_postfix_chain_with_limit(*left, tails->values.size() - 1U));
+          node->node_field("receiver", lower_postfix_chain_with_limit(
+                                           *left, tails->values.size() - 1U));
           node->string_field("selector", "[]=");
           std::vector<std::unique_ptr<Node>> pos_args;
           pos_args.push_back(lower_expr(*index_expr));
@@ -2233,9 +2238,8 @@ private:
         expr, tails == nullptr ? 0U : tails->values.size());
   }
 
-  std::unique_ptr<Node>
-  lower_postfix_chain_with_limit(const ast::Expr &expr,
-                                 std::size_t tail_limit) {
+  std::unique_ptr<Node> lower_postfix_chain_with_limit(const ast::Expr &expr,
+                                                       std::size_t tail_limit) {
     const ast::Expr *base = node_field(expr, "base");
     const ast::ListField *tails = list_field(expr, "tails");
     if (base == nullptr) {
@@ -2275,8 +2279,7 @@ private:
         std::unique_ptr<Node> block;
         bool has_explicit_call = false;
         bool has_block_suffix = false;
-        if (i + 1 < tail_count &&
-            tails->values[i + 1]->kind == "AstTailCall") {
+        if (i + 1 < tail_count && tails->values[i + 1]->kind == "AstTailCall") {
           collect_call_args(*tails->values[i + 1], &pos_args, &kw_args, &block);
           has_explicit_call = true;
           ++i;

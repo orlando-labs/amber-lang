@@ -1,14 +1,15 @@
 // Implementation of the native-extension ABI (runtime/amber_ext.h) and its
 // in-tree driver surface (runtime/amber_ext_runtime.h).
 //
-// Decision 1 (DESIGN-native-packages-5c-dispatch-2026-06-21): an `AmberValue` is
-// an opaque handle into a per-call arena of runtime `Value`s owned by an
+// Decision 1 (DESIGN-native-packages-5c-dispatch-2026-06-21): an `AmberValue`
+// is an opaque handle into a per-call arena of runtime `Value`s owned by an
 // `AmberCtx`. The ctx wraps the active VM frame (type-erased), the `StdlibHost`
-// facade, and the foreign-handle `NativeTagRegistry`. Every amber_ext.h function
-// is a thin shim over those: builders push a `Value`, readers read one, faults
-// and block calls forward to the host. Extension calls therefore execute in the
-// VM lane on runtime `Value`s; the emitted native lane reaches them through the
-// existing per-function VM bridge, so `NativeValue` is never involved.
+// facade, and the foreign-handle `NativeTagRegistry`. Every amber_ext.h
+// function is a thin shim over those: builders push a `Value`, readers read
+// one, faults and block calls forward to the host. Extension calls therefore
+// execute in the VM lane on runtime `Value`s; the emitted native lane reaches
+// them through the existing per-function VM bridge, so `NativeValue` is never
+// involved.
 
 #include "runtime/amber_ext_runtime.h"
 
@@ -23,8 +24,8 @@
 
 namespace {
 
-using amber::runtime::RuntimeBytes;
 using amber::runtime::RuntimeByteBuffer;
+using amber::runtime::RuntimeBytes;
 using amber::runtime::RuntimeByteSlice;
 using amber::runtime::Value;
 
@@ -35,7 +36,8 @@ bool value_is_bytes(const Value &value) {
   if (!value.is_io_value()) {
     return false;
   }
-  const std::shared_ptr<amber::runtime::RuntimeIoValue> io = value.as_io_value();
+  const std::shared_ptr<amber::runtime::RuntimeIoValue> io =
+      value.as_io_value();
   return std::dynamic_pointer_cast<RuntimeBytes>(io) != nullptr ||
          std::dynamic_pointer_cast<RuntimeByteSlice>(io) != nullptr ||
          std::dynamic_pointer_cast<RuntimeByteBuffer>(io) != nullptr;
@@ -53,10 +55,11 @@ struct AmberCtx {
   // pointer, so reallocation here never invalidates a handle.
   std::vector<Value> arena;
   // Stable backing for borrowed string views (`stdlib_text_of` returns a copy);
-  // a deque keeps element addresses valid across pushes for the call's duration.
+  // a deque keeps element addresses valid across pushes for the call's
+  // duration.
   std::deque<std::string> str_keep;
-  // Keepalives for borrowed bytes views, retained so the viewed storage outlives
-  // the thunk.
+  // Keepalives for borrowed bytes views, retained so the viewed storage
+  // outlives the thunk.
   std::vector<Value> keepalives;
 
   AmberValue push(Value value) {
@@ -195,8 +198,7 @@ int amber_handle_ptr(AmberCtx *cx, AmberValue value, const char *tag,
   const std::shared_ptr<amber::runtime::RuntimeForeignHandle> handle =
       v.as_foreign_handle();
   if (handle == nullptr) {
-    cx->host->stdlib_set_fault(cx->frame, "TypeError",
-                               "native handle is null");
+    cx->host->stdlib_set_fault(cx->frame, "TypeError", "native handle is null");
     return 0;
   }
   if (tag != nullptr && handle->tag != tag) {
@@ -230,9 +232,8 @@ AmberValue amber_make_str(AmberCtx *cx, const char *ptr, size_t len) {
       std::string(ptr == nullptr ? "" : ptr, ptr == nullptr ? 0 : len)));
 }
 AmberValue amber_make_bytes(AmberCtx *cx, const uint8_t *ptr, size_t len) {
-  return cx->push(cx->host->stdlib_bytes_value_from_bytes(
-      std::string(reinterpret_cast<const char *>(ptr), ptr == nullptr ? 0
-                                                                       : len)));
+  return cx->push(cx->host->stdlib_bytes_value_from_bytes(std::string(
+      reinterpret_cast<const char *>(ptr), ptr == nullptr ? 0 : len)));
 }
 AmberValue amber_make_list(AmberCtx *cx, const AmberValue *items,
                            size_t count) {
@@ -326,23 +327,15 @@ namespace amber::runtime {
 
 // ---- process-global registration ---------------------------------------
 
-void NativeExtRegistry::register_free(const std::string &logical,
-                                      AmberFreeFn fn) {
-  bindings_[logical] =
-      NativeExtBinding{NativeExtBinding::Kind::Free, reinterpret_cast<void *>(fn)};
-}
-void NativeExtRegistry::register_method(const std::string &logical,
-                                        AmberMethodFn fn) {
-  bindings_[logical] = NativeExtBinding{NativeExtBinding::Kind::Method,
-                                        reinterpret_cast<void *>(fn)};
+void NativeExtRegistry::register_thunk(const std::string &logical, void *fn) {
+  thunks_[logical] = fn;
 }
 void NativeExtRegistry::register_type(NativeTypeDescriptor descriptor) {
   tags_.register_type(std::move(descriptor));
 }
-const NativeExtBinding *
-NativeExtRegistry::lookup(const std::string &logical) const {
-  const auto found = bindings_.find(logical);
-  return found == bindings_.end() ? nullptr : &found->second;
+void *NativeExtRegistry::lookup(const std::string &logical) const {
+  const auto found = thunks_.find(logical);
+  return found == thunks_.end() ? nullptr : found->second;
 }
 NativeExtRegistry &NativeExtRegistry::global() {
   static NativeExtRegistry registry;
@@ -374,11 +367,10 @@ NativeExtCallOutcome amber_ext_invoke_free(StdlibHost &host, const void *frame,
   return outcome;
 }
 
-NativeExtCallOutcome amber_ext_invoke_method(StdlibHost &host,
-                                             const void *frame,
-                                             NativeTagRegistry &tags,
-                                             AmberMethodFn fn, const Value &self,
-                                             const std::vector<Value> &args) {
+NativeExtCallOutcome
+amber_ext_invoke_method(StdlibHost &host, const void *frame,
+                        NativeTagRegistry &tags, AmberMethodFn fn,
+                        const Value &self, const std::vector<Value> &args) {
   AmberCtx ctx;
   ctx.host = &host;
   ctx.frame = frame;

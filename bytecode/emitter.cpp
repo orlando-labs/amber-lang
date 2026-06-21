@@ -1,8 +1,8 @@
 #include "bytecode/emitter.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -276,8 +276,7 @@ bool is_integer_result_selector(const std::string &selector) {
   return selector == "+" || selector == "-" || selector == "*" ||
          selector == "/" || selector == "%" || selector == "//" ||
          selector == "<=>" || selector == "&" || selector == "|" ||
-         selector == "^" || selector == "<<" ||
-         selector == ">>";
+         selector == "^" || selector == "<<" || selector == ">>";
 }
 
 bool is_integer_comparison_selector(const std::string &selector) {
@@ -472,8 +471,7 @@ private:
   void record_line(const lexer::Span &span);
   void record_last_value(std::uint32_t reg, const lexer::Span &span,
                          bool want_result);
-  void emit_value_to_reg(std::uint32_t dst,
-                         std::optional<std::uint32_t> src,
+  void emit_value_to_reg(std::uint32_t dst, std::optional<std::uint32_t> src,
                          const lexer::Span &span);
   void compile_seq(const ast::Expr &seq, bool want_result = true);
   void compile_seq_to_reg(const ast::Expr &seq, std::uint32_t dst,
@@ -537,9 +535,10 @@ private:
   void emit_make_map_from_entries(std::uint32_t dst,
                                   const std::vector<CompiledMapEntry> &entries,
                                   const lexer::Span &span, bool strict);
-  void emit_make_map_dyn_from_entries(
-      std::uint32_t dst, const std::vector<CompiledMapEntry> &entries,
-      const lexer::Span &span, bool strict);
+  void
+  emit_make_map_dyn_from_entries(std::uint32_t dst,
+                                 const std::vector<CompiledMapEntry> &entries,
+                                 const lexer::Span &span, bool strict);
   void emit_make_map_spread_from_entries(
       std::uint32_t dst, const std::vector<CompiledMapSpreadEntry> &entries,
       const lexer::Span &span, bool strict);
@@ -649,7 +648,23 @@ public:
     build_items(root);
     build_exports(root);
     build_init(root);
+    emit_native_binding_attrs();
     return {std::move(module_), std::move(diagnostics_)};
+  }
+
+  // Mirror each native binding into a module attr the VM reads at startup to
+  // build a code-object -> logical-symbol map (native-packages 5c-ii). One attr
+  // per binding: key `amber.native.bind:<code_id>`, value `F:<logical>` for a
+  // free function or `M:<logical>` for a handle method. A module with no native
+  // defs emits nothing, so non-native bytecode is byte-identical to before.
+  void emit_native_binding_attrs() {
+    for (const NativeBindingRecord &record : native_bindings_) {
+      const std::string key =
+          "amber.native.bind:" + std::to_string(record.code_id);
+      const std::string value =
+          (record.is_method ? "M:" : "F:") + record.logical;
+      module_.attrs.push_back({intern_string(key), intern_string(value)});
+    }
   }
 
   // amber.numeric-profile.v1: resolve the module numeric profile before any
@@ -948,8 +963,7 @@ private:
                                     const std::string &name,
                                     const std::string &type_expr) {
     const std::uint32_t code_id = allocate_code_id();
-    const std::uint32_t hook_const_id =
-        intern_type_hook(mode, name, type_expr);
+    const std::uint32_t hook_const_id = intern_type_hook(mode, name, type_expr);
 
     BcCode code;
     code.code_id = code_id;
@@ -1264,8 +1278,7 @@ private:
           string_field(*signature, "return_type_expr");
       if (!return_type_expr.empty()) {
         method.type_hook_ids.push_back(emit_type_hook_code(
-            item.span, "return", string_field(item, "name"),
-            return_type_expr));
+            item.span, "return", string_field(item, "name"), return_type_expr));
       }
     }
 
@@ -1285,6 +1298,16 @@ private:
     }
     if (has_clause_fallback) {
       method.flags |= kMethodFlagClauseFallback;
+    }
+    // Native dispatch metadata (native-packages 5c-ii): a `native def` / native
+    // class method records its code object -> logical-symbol binding so the VM
+    // can route the call to a registered C thunk in a native build (and fall
+    // back to this very body in a bytecode build). `owner_class` distinguishes
+    // a handle method (has self) from a free function.
+    const std::string native_binding = string_field(item, "native_binding");
+    if (!native_binding.empty() && method.entry_code_id != 0U) {
+      native_bindings_.push_back(
+          {method.entry_code_id, owner_class.has_value(), native_binding});
     }
     return method;
   }
@@ -1341,6 +1364,13 @@ private:
   std::uint32_t next_code_id_ = 1;
   std::string numeric_int_type_ = "Int64";
   std::string numeric_overflow_ = "checked";
+
+  struct NativeBindingRecord {
+    std::uint32_t code_id = 0;
+    bool is_method = false;
+    std::string logical;
+  };
+  std::vector<NativeBindingRecord> native_bindings_;
 
   friend class CodeEmitter;
 };
@@ -1883,7 +1913,8 @@ void CodeEmitter::compile_seq(const ast::Expr &seq, bool want_result) {
   }
   for (std::size_t i = 0; i < items->values.size(); ++i) {
     const bool item_wants_result =
-        preserve_last_result_ || (want_result && i + 1U == items->values.size());
+        preserve_last_result_ ||
+        (want_result && i + 1U == items->values.size());
     compile_stmt(*items->values[i], item_wants_result);
   }
 }
@@ -1893,9 +1924,8 @@ void CodeEmitter::compile_seq_to_reg(const ast::Expr &seq, std::uint32_t dst,
   const std::optional<std::uint32_t> saved_last = last_value_reg_;
   last_value_reg_.reset();
   compile_seq(seq, true);
-  emit_value_to_reg(dst, last_value_reg_.has_value() ? last_value_reg_
-                                                     : saved_last,
-                    span);
+  emit_value_to_reg(
+      dst, last_value_reg_.has_value() ? last_value_reg_ : saved_last, span);
   last_value_reg_ = saved_last;
 }
 
@@ -1955,8 +1985,7 @@ void CodeEmitter::compile_expr_for_effect(const ast::Expr &expr) {
   compile_expr(expr);
 }
 
-void CodeEmitter::compile_const_into(const ast::Expr &expr,
-                                     std::uint32_t dst) {
+void CodeEmitter::compile_const_into(const ast::Expr &expr, std::uint32_t dst) {
   const std::string token = string_field(expr, "token");
   const std::string value = string_field(expr, "value");
   if (token == "KEYWORD_NULL") {
@@ -2066,11 +2095,11 @@ std::uint32_t CodeEmitter::compile_sequence_literal(const ast::Expr &expr,
   }
   if (has_spread) {
     const std::uint32_t dst = alloc_temp();
-    const Opcode spread_opcode =
-        opcode == Opcode::MakeSet ? Opcode::MakeSetSpread
-                                  : Opcode::MakeListSpread;
-    compile_sequence_spread_literal_suffix(elements, 0, {}, dst,
-                                           spread_opcode, expr.span);
+    const Opcode spread_opcode = opcode == Opcode::MakeSet
+                                     ? Opcode::MakeSetSpread
+                                     : Opcode::MakeListSpread;
+    compile_sequence_spread_literal_suffix(elements, 0, {}, dst, spread_opcode,
+                                           expr.span);
     return dst;
   }
   if (has_conditional) {
@@ -2252,15 +2281,13 @@ void CodeEmitter::compile_sequence_spread_literal_suffix(
   if (compiled.has_value()) {
     with_item.push_back(*compiled);
   }
-  compile_sequence_spread_literal_suffix(elements, index + 1,
-                                         std::move(with_item), dst, opcode,
-                                         span);
+  compile_sequence_spread_literal_suffix(
+      elements, index + 1, std::move(with_item), dst, opcode, span);
   const std::size_t jump_end =
       emit_instruction(Opcode::Jump, {{-1, true}}, element.span);
   patch_operand(jump_skip, 1, current_pc(), false);
-  compile_sequence_spread_literal_suffix(elements, index + 1,
-                                         std::move(prefix_items), dst, opcode,
-                                         span);
+  compile_sequence_spread_literal_suffix(
+      elements, index + 1, std::move(prefix_items), dst, opcode, span);
   patch_operand(jump_end, 0, current_pc(), false);
 }
 
@@ -2301,9 +2328,9 @@ std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
         continue;
       }
       if (string_field(*entry, "key_kind") == "symbol") {
-        compiled_entries.push_back(CompiledMapEntry{
-            owner_->intern_symbol(string_field(*entry, "key")), 0,
-            compile_expr(*value), true});
+        compiled_entries.push_back(
+            CompiledMapEntry{owner_->intern_symbol(string_field(*entry, "key")),
+                             0, compile_expr(*value), true});
       } else if (const ast::Expr *key_expr = node_field(*entry, "key_expr")) {
         const std::uint32_t key_reg = compile_expr(*key_expr);
         const std::uint32_t value_reg = compile_expr(*value);
@@ -2315,11 +2342,9 @@ std::uint32_t CodeEmitter::compile_map_literal(const ast::Expr &expr) {
     }
   }
 
-  const bool needs_dynamic =
-      std::any_of(compiled_entries.begin(), compiled_entries.end(),
-                  [](const CompiledMapEntry &entry) {
-                    return !entry.symbol_immediate;
-                  });
+  const bool needs_dynamic = std::any_of(
+      compiled_entries.begin(), compiled_entries.end(),
+      [](const CompiledMapEntry &entry) { return !entry.symbol_immediate; });
   if (needs_dynamic) {
     emit_make_map_dyn_from_entries(dst, compiled_entries, expr.span, strict);
   } else {
@@ -2341,8 +2366,8 @@ bool CodeEmitter::map_literal_has_spread(const ast::ListField *entries) const {
 }
 
 // The strictness of a StrictMap / StrictHashMap literal is carried in the high
-// bit of the `count` operand (bytecode::kMapStrictCountFlag), leaving the opcode
-// signature unchanged; ordinary maps leave it clear.
+// bit of the `count` operand (bytecode::kMapStrictCountFlag), leaving the
+// opcode signature unchanged; ordinary maps leave it clear.
 namespace {
 std::int64_t map_count_operand(std::size_t count, bool strict) {
   std::uint32_t encoded = static_cast<std::uint32_t>(count);
@@ -2408,11 +2433,9 @@ void CodeEmitter::compile_map_literal_suffix(
     std::vector<CompiledMapEntry> prefix_entries, std::uint32_t dst,
     const lexer::Span &span, bool strict) {
   if (entries == nullptr || index >= entries->values.size()) {
-    const bool needs_dynamic =
-        std::any_of(prefix_entries.begin(), prefix_entries.end(),
-                    [](const CompiledMapEntry &entry) {
-                      return !entry.symbol_immediate;
-                    });
+    const bool needs_dynamic = std::any_of(
+        prefix_entries.begin(), prefix_entries.end(),
+        [](const CompiledMapEntry &entry) { return !entry.symbol_immediate; });
     if (needs_dynamic) {
       emit_make_map_dyn_from_entries(dst, prefix_entries, span, strict);
     } else {
@@ -3089,8 +3112,9 @@ std::uint32_t CodeEmitter::block_reg_operand(const ast::Expr &expr) {
   return compile_expr(*block);
 }
 
-std::optional<std::uint32_t> CodeEmitter::try_compile_integer_send(
-    const ast::Expr &expr, std::optional<std::uint32_t> target_reg) {
+std::optional<std::uint32_t>
+CodeEmitter::try_compile_integer_send(const ast::Expr &expr,
+                                      std::optional<std::uint32_t> target_reg) {
   if (expr.kind != "HSend") {
     return std::nullopt;
   }
@@ -3218,9 +3242,9 @@ std::uint32_t CodeEmitter::compile_send_like(const ast::Expr &expr,
         diag(arg->span, "BC2001", "invalid keyword arg in bytecode emitter");
         continue;
       }
-      kw_regs.push_back(
-          {false, owner_->intern_symbol(string_field(*arg, "name")),
-          compile_expr(*value)});
+      kw_regs.push_back({false,
+                         owner_->intern_symbol(string_field(*arg, "name")),
+                         compile_expr(*value)});
     }
   }
 
@@ -3262,7 +3286,7 @@ std::uint32_t CodeEmitter::compile_send_like(const ast::Expr &expr,
   if (has_spread_arg) {
     emit_opcode = opcode == Opcode::Send      ? Opcode::SendSpread
                   : opcode == Opcode::SendDyn ? Opcode::SendDynSpread
-                                               : Opcode::CallSpread;
+                                              : Opcode::CallSpread;
   }
   emit_instruction(emit_opcode, std::move(operands), expr.span);
   return dst;
@@ -3350,8 +3374,8 @@ void CodeEmitter::compile_if_for_effect(const ast::Expr &expr) {
     return;
   }
 
-  const std::size_t jump_else = emit_instruction(
-      cond_jump, {{cond_reg, false}, {-1, true}}, cond->span);
+  const std::size_t jump_else =
+      emit_instruction(cond_jump, {{cond_reg, false}, {-1, true}}, cond->span);
   compile_seq(*then_body, false);
   const std::size_t jump_end =
       emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
@@ -3459,8 +3483,7 @@ std::uint32_t CodeEmitter::compile_try(const ast::Expr &expr) {
 
   const std::optional<std::size_t> break_snapshot =
       ensure_body != nullptr && !loops_.empty()
-          ? std::optional<std::size_t>{
-                loops_.back().break_jump_indices.size()}
+          ? std::optional<std::size_t>{loops_.back().break_jump_indices.size()}
           : std::nullopt;
   const std::optional<std::size_t> return_snapshot =
       ensure_body != nullptr
@@ -3473,8 +3496,7 @@ std::uint32_t CodeEmitter::compile_try(const ast::Expr &expr) {
 
   const std::size_t normal_jump =
       emit_instruction(Opcode::Jump, {{-1, true}}, expr.span);
-  if (ensure_body != nullptr && break_snapshot.has_value() &&
-      !loops_.empty() &&
+  if (ensure_body != nullptr && break_snapshot.has_value() && !loops_.empty() &&
       loops_.back().break_jump_indices.size() > *break_snapshot) {
     std::vector<std::size_t> break_jumps(
         loops_.back().break_jump_indices.begin() +
@@ -3593,19 +3615,17 @@ bool CodeEmitter::compile_rescue_matchers(
       continue;
     }
     const std::uint32_t matcher_reg = alloc_temp();
-    emit_instruction(Opcode::LookupConst,
-                     {{matcher_reg, false},
-                      {owner_->intern_lookup_path(type_expr), false}},
-                     matcher->span);
+    emit_instruction(
+        Opcode::LookupConst,
+        {{matcher_reg, false}, {owner_->intern_lookup_path(type_expr), false}},
+        matcher->span);
     const std::uint32_t matched_reg = alloc_temp();
-    emit_instruction(Opcode::TripleEq,
-                     {{matched_reg, false},
-                      {matcher_reg, false},
-                      {exception_reg, false}},
-                     matcher->span);
-    matched_jumps->push_back(
-        emit_instruction(Opcode::JumpIfTrue,
-                         {{matched_reg, false}, {-1, true}}, matcher->span));
+    emit_instruction(
+        Opcode::TripleEq,
+        {{matched_reg, false}, {matcher_reg, false}, {exception_reg, false}},
+        matcher->span);
+    matched_jumps->push_back(emit_instruction(
+        Opcode::JumpIfTrue, {{matched_reg, false}, {-1, true}}, matcher->span));
   }
   return false;
 }
@@ -3675,8 +3695,7 @@ BcCode CodeEmitter::emit_rescue_handler(const ast::Expr &try_expr,
       const std::uint32_t body_from = current_pc();
       if (body == nullptr) {
         diag(clause->span, "BC2001", "rescue clause is missing body");
-        emit_instruction(Opcode::LoadNull, {{result_reg, false}},
-                         clause->span);
+        emit_instruction(Opcode::LoadNull, {{result_reg, false}}, clause->span);
       } else {
         compile_seq_to_reg(*body, result_reg, body->span);
       }
@@ -3771,9 +3790,8 @@ std::uint32_t CodeEmitter::compile_compare_chain(const ast::Expr &expr) {
       continue;
     }
     const std::uint32_t rhs_reg = compile_expr(*right);
-    const std::uint32_t cmp_reg =
-        emit_simple_send(link->span, lhs_reg, string_field(*link, "op"),
-                         {rhs_reg});
+    const std::uint32_t cmp_reg = emit_simple_send(
+        link->span, lhs_reg, string_field(*link, "op"), {rhs_reg});
     const std::size_t jump_false = emit_instruction(
         Opcode::JumpIfFalse, {{cmp_reg, false}, {-1, true}}, link->span);
     add_fail_patch(&false_patches, jump_false, 1);
@@ -4399,11 +4417,12 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
   if (expr.kind == "HBreak") {
     if (loops_.empty()) {
       if (code_.kind == CodeKind::Block) {
-        diag(expr.span, "BC2001",
-             "`break` is not allowed in an iterator block; use a short-circuit "
-             "combinator (find / any? / take_while / take / .lazy...first) or a "
-             "`while`/`loop` for imperative iteration. (`next` is allowed and "
-             "finishes the current block invocation.)");
+        diag(
+            expr.span, "BC2001",
+            "`break` is not allowed in an iterator block; use a short-circuit "
+            "combinator (find / any? / take_while / take / .lazy...first) or a "
+            "`while`/`loop` for imperative iteration. (`next` is allowed and "
+            "finishes the current block invocation.)");
       } else {
         diag(expr.span, "BC2001", "break outside loop in bytecode emitter");
       }

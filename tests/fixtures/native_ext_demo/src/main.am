@@ -1,0 +1,12 @@
+package nat.demo
+
+export main
+
+# A `native def` whose Amber body is the portable fallback. A bytecode run
+# executes this body (returns n * 10); a native build calls the C thunk
+# `amber_demo_doubled` (returns n * 2) instead, proving dispatch routing.
+native def doubled(n: Int) -> Int from "demo.doubled":
+  n * 10
+
+def main():
+  doubled(21)

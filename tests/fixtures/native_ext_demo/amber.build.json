@@ -1,0 +1,24 @@
+{
+  "schema": "amber.build.v1",
+  "name": "nat.demo",
+  "root": "nat.demo",
+  "profiles": {
+    "required": ["core.v1", "ffi.v1"],
+    "optional": [],
+    "forbidden": []
+  },
+  "modules": [
+    {"name": "nat.demo", "path": "src/main.am"}
+  ],
+  "native_extensions": [
+    {
+      "name": "demo",
+      "language": "c",
+      "sources": ["native/demo.c"],
+      "capabilities": ["ffi"],
+      "symbols": [
+        {"logical": "demo.doubled", "symbol": "amber_demo_doubled"}
+      ]
+    }
+  ]
+}

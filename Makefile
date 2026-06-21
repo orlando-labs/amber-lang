@@ -448,6 +448,13 @@ test: build
 	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/time-flow-native-build.json
 	$(BUILD_DIR)/time-flow-native > $(BUILD_DIR)/time-flow-native.out
 	grep -q '^110397732$$' $(BUILD_DIR)/time-flow-native.out
+	rm -rf $(BUILD_DIR)/native_ext_demo
+	$(BUILD_DIR)/amberc build tests/fixtures/native_ext_demo/amber.build.json --target native --out-dir $(BUILD_DIR)/native_ext_demo/out --cache-dir $(BUILD_DIR)/native_ext_demo/cache > $(BUILD_DIR)/native-ext-demo-build.json
+	grep -q '"status": "ok"' $(BUILD_DIR)/native-ext-demo-build.json
+	$(BUILD_DIR)/native_ext_demo/out/nat.demo > $(BUILD_DIR)/native-ext-demo-native.out
+	grep -q '^42$$' $(BUILD_DIR)/native-ext-demo-native.out
+	$(BUILD_DIR)/amberc tests/fixtures/native_ext_demo/src/main.am > $(BUILD_DIR)/native-ext-demo-bytecode.out
+	grep -q '^210$$' $(BUILD_DIR)/native-ext-demo-bytecode.out
 	$(BUILD_DIR)/ambertest run corpus
 
 conformance: $(BUILD_DIR)/ambertest
