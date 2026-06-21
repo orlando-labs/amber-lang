@@ -6017,11 +6017,29 @@ ensure_native_runtime_archive(const std::string &cxx,
   return final_path;
 }
 
-NativeExecutableBuildResult
-build_native_executable(const std::string &argv0,
-                        const RunnableModuleArtifact &artifact,
-                        const std::filesystem::path &output_path,
-                        const std::filesystem::path &native_source_path) {
+// A conservative guard on author-supplied cxxflags: includes, defines, search
+// paths, and libraries have dedicated manifest fields, and a few flags load
+// arbitrary code into the compiler. Reject those; pass everything else through.
+// (native-packages design §9: constrain flags, fold them into the digest.)
+bool native_cxxflag_rejected(const std::string &flag) {
+  static const std::vector<std::string> kRejectedPrefixes = {
+      "-I", "-D",        "-L",       "-l",       "-include", "-imacros",
+      "-isystem", "-fplugin", "-B", "-specs", "-Xclang"};
+  for (const std::string &prefix : kRejectedPrefixes) {
+    if (flag.rfind(prefix, 0) == 0) {
+      return true;
+    }
+  }
+  return flag.find('/') != std::string::npos;
+}
+
+NativeExecutableBuildResult build_native_executable(
+    const std::string &argv0, const RunnableModuleArtifact &artifact,
+    const std::filesystem::path &output_path,
+    const std::filesystem::path &native_source_path,
+    const std::vector<amber::pkg::PackageNativeExtension> &native_extensions =
+        {},
+    const std::filesystem::path &native_base_dir = {}) {
   NativeCppBuildPlan plan = build_native_cpp_plan(artifact, artifact.module);
   const std::filesystem::path parent = output_path.parent_path();
   if (!parent.empty()) {
@@ -6055,6 +6073,40 @@ build_native_executable(const std::string &argv0,
   command.push_back("-I");
   command.push_back(runtime_root.string());
   command.push_back(native_source_path.string());
+
+  // Native extension sources, search paths, defines, and flags, resolved
+  // against the package root. Declared symbols and link libraries are gathered
+  // for the post-link check and the link line below.
+  std::vector<std::string> link_libraries;
+  std::vector<std::string> declared_symbols;
+  for (const amber::pkg::PackageNativeExtension &extension : native_extensions) {
+    for (const std::string &flag : extension.cxxflags) {
+      if (native_cxxflag_rejected(flag)) {
+        throw std::runtime_error(
+            "native extension '" + extension.name +
+            "' uses a disallowed cxxflag (use the include_dirs/defines/"
+            "link_libraries fields instead): " + flag);
+      }
+      command.push_back(flag);
+    }
+    for (const std::string &include_dir : extension.include_dirs) {
+      command.push_back("-I");
+      command.push_back((native_base_dir / include_dir).string());
+    }
+    for (const std::string &define : extension.defines) {
+      command.push_back("-D" + define);
+    }
+    for (const std::string &source : extension.sources) {
+      command.push_back((native_base_dir / source).string());
+    }
+    for (const std::string &library : extension.link_libraries) {
+      link_libraries.push_back(library);
+    }
+    for (const amber::pkg::PackageNativeSymbol &symbol : extension.symbols) {
+      declared_symbols.push_back(symbol.symbol);
+    }
+  }
+
   if (!runtime_archive.empty()) {
 #if defined(__APPLE__)
     command.push_back("-Wl,-force_load," + runtime_archive.string());
@@ -6067,6 +6119,9 @@ build_native_executable(const std::string &argv0,
     command.insert(command.end(), runtime_sources.begin(),
                    runtime_sources.end());
   }
+  for (const std::string &library : link_libraries) {
+    command.push_back("-l" + library);
+  }
   command.push_back("-pthread");
   command.push_back("-o");
   command.push_back(output_path.string());
@@ -6075,6 +6130,40 @@ build_native_executable(const std::string &argv0,
   const int exit_code = std::system(rendered.c_str());
   if (exit_code != 0) {
     throw std::runtime_error("native C++ build failed: " + rendered);
+  }
+
+  // Symbol-presence check: every declared native symbol must be defined in the
+  // linked executable, caught here with a clear diagnostic rather than as an
+  // undefined-reference once the Amber bindings start calling them. Best-effort:
+  // skipped when `nm` is unavailable.
+  if (!declared_symbols.empty()) {
+    const std::filesystem::path nm_dump = output_path.string() + ".nm.txt";
+    const std::string nm_command = shell_command({"nm", output_path.string()}) +
+                                   " > " +
+                                   shell_command({nm_dump.string()}) +
+                                   " 2>/dev/null";
+    const int nm_exit = std::system(nm_command.c_str());
+    if (nm_exit == 0 && std::filesystem::exists(nm_dump)) {
+      const std::string symbols_text = read_file(nm_dump.string());
+      std::filesystem::remove(nm_dump);
+      std::vector<std::string> missing;
+      for (const std::string &symbol : declared_symbols) {
+        if (symbols_text.find(symbol) == std::string::npos) {
+          missing.push_back(symbol);
+        }
+      }
+      if (!missing.empty()) {
+        std::string joined;
+        for (std::size_t i = 0; i < missing.size(); ++i) {
+          joined += (i == 0U ? "" : ", ") + missing[i];
+        }
+        throw std::runtime_error(
+            "declared native symbols missing from the linked executable: " +
+            joined);
+      }
+    } else {
+      std::filesystem::remove(nm_dump);
+    }
   }
 
   NativeExecutableBuildResult result;
@@ -6748,7 +6837,8 @@ int run_build_command(int argc, char **argv) {
           out_dir /
           (safe_artifact_name(parsed.manifest.root_module) + ".native.cpp");
       const NativeExecutableBuildResult native_result = build_native_executable(
-          argv[0], root_artifact, native_output_path, native_source_path);
+          argv[0], root_artifact, native_output_path, native_source_path,
+          parsed.manifest.native_extensions, manifest_dir);
       summary.native_output_path = native_result.output_path;
       summary.native_backend = native_result.backend;
       summary.native_hash = native_result.hash;
