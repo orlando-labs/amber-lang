@@ -96,6 +96,19 @@ public:
                                                      const Value &value) = 0;
   virtual Value stdlib_bytes_value_from_bytes(std::string bytes) = 0;
 
+  // Borrowed zero-copy view of an immutable byte sequence (Bytes/ByteSlice/
+  // ByteBuffer). On success sets `*ptr`/`*len` to storage that stays valid for
+  // as long as `*keepalive` is retained, and returns true. For an
+  // already-immutable input the keepalive is the input value; for a ByteBuffer
+  // it is a frozen snapshot. Faults and returns false on the wrong kind. This is
+  // the zero-copy counterpart to `stdlib_bytes_of`, backing the ABI's
+  // `amber_bytes_view` (native-packages design §6); the borrowed view is the
+  // RuntimePinViewKind::ValueBuffer model -- a pointer into runtime-owned buffer
+  // storage that the caller must not outlive the keepalive.
+  virtual bool stdlib_bytes_view(const void *frame, const Value &value,
+                                 const std::uint8_t **ptr, std::size_t *len,
+                                 Value *keepalive) = 0;
+
   // --- value construction (used by parsers) ----------------------------------
   // Build a List value from `items`.
   virtual Value stdlib_make_list(std::vector<Value> items) = 0;
@@ -257,6 +270,11 @@ struct NativeStdlibCall {
 
   std::optional<std::string> bytes_of(const Value &value) const {
     return host.stdlib_bytes_of(frame, value);
+  }
+
+  bool bytes_view(const Value &value, const std::uint8_t **ptr,
+                  std::size_t *len, Value *keepalive) const {
+    return host.stdlib_bytes_view(frame, value, ptr, len, keepalive);
   }
 
   Value bytes_value(std::string bytes) const {

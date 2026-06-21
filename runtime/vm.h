@@ -342,7 +342,11 @@ struct RuntimeForeignHandle {
   Ownership ownership = Ownership::Borrowed;
   // Reclaim callback: the context-free reclaim for `collected`, a ctx-bound
   // closure supplied by the ABI layer for `owned`, and empty for `borrowed`.
-  std::function<void(void *)> teardown;
+  // The ctx is the AmberCtx supplied at deterministic destroy!-time, type-erased
+  // to void* so this header stays free of the amber_ext.h C ABI types; an
+  // `owned` destructor uses it, a `collected` reclaim ignores it. The GC reclaim
+  // path passes nullptr (collected only, context-free by construction).
+  std::function<void(void *ctx, void *ptr)> teardown;
   bool live = true;      // tombstone: cleared once destroyed
 
   RuntimeForeignHandle() = default;
@@ -351,13 +355,16 @@ struct RuntimeForeignHandle {
 
   // Deterministic destroy! / memory.dealloc: runs teardown once for an owning
   // handle, flips the tombstone, and reports whether this call destroyed it.
-  bool destroy() {
+  // `ctx` is the live AmberCtx the destructor may use (owned); a collected
+  // reclaim ignores it. A bytecode-only destroy! with no extension context
+  // passes nullptr.
+  bool destroy(void *ctx = nullptr) {
     if (!live) {
       return false;
     }
     live = false;
     if (ownership != Ownership::Borrowed && teardown) {
-      teardown(ptr);
+      teardown(ctx, ptr);
     }
     return true;
   }
@@ -365,10 +372,11 @@ struct RuntimeForeignHandle {
   // GC reclamation: only a `collected` handle runs teardown here (the opt-in
   // finalizer). An `owned` handle never runs its destructor from the collector
   // (the leak is surfaced by a backstop diagnostic elsewhere); `borrowed` never
-  // frees.
+  // frees. The collector has no AmberCtx, so it passes nullptr — sound because
+  // a `collected` reclaim is context-free by construction (design §7.4).
   ~RuntimeForeignHandle() {
     if (live && ownership == Ownership::Collected && teardown) {
-      teardown(ptr);
+      teardown(nullptr, ptr);
     }
   }
 };

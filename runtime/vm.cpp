@@ -9953,6 +9953,54 @@ public:
   Value stdlib_bytes_value_from_bytes(std::string bytes) override {
     return Value::io_value(std::make_shared<RuntimeBytes>(std::move(bytes)));
   }
+  bool stdlib_bytes_view(const void *frame, const Value &value,
+                         const std::uint8_t **ptr, std::size_t *len,
+                         Value *keepalive) override {
+    const Frame &active = *static_cast<const Frame *>(frame);
+    if (!value.is_io_value()) {
+      set_fault(active, "TypeError",
+                "expected Bytes, ByteSlice, or ByteBuffer");
+      return false;
+    }
+    const std::shared_ptr<RuntimeIoValue> io_value = value.as_io_value();
+    // An immutable Bytes already holds shared, stable storage; the input value
+    // is its own keepalive and the view is truly zero-copy.
+    if (const auto bytes = std::dynamic_pointer_cast<RuntimeBytes>(io_value)) {
+      const std::string &storage = bytes->string();
+      *ptr = reinterpret_cast<const std::uint8_t *>(storage.data());
+      *len = storage.size();
+      *keepalive = value;
+      return true;
+    }
+    // A slice exposes its content as a RuntimeBytes; retaining that shared Bytes
+    // keeps the viewed storage alive for the duration of the call.
+    if (const auto slice =
+            std::dynamic_pointer_cast<RuntimeByteSlice>(io_value)) {
+      const std::shared_ptr<RuntimeBytes> snapshot = slice->bytes();
+      const std::string &storage = snapshot->string();
+      *ptr = reinterpret_cast<const std::uint8_t *>(storage.data());
+      *len = storage.size();
+      *keepalive = Value::io_value(snapshot);
+      return true;
+    }
+    // A ByteBuffer is mutable, so there is no stable pointer into its live
+    // storage; freeze a snapshot and view that, retained via the keepalive.
+    if (const auto buffer =
+            std::dynamic_pointer_cast<RuntimeByteBuffer>(io_value)) {
+      const RuntimeIoStatus access = buffer->access_status();
+      if (!set_fault_from_io_status(active, access)) {
+        return false;
+      }
+      const std::shared_ptr<RuntimeBytes> snapshot = buffer->freeze_bytes();
+      const std::string &storage = snapshot->string();
+      *ptr = reinterpret_cast<const std::uint8_t *>(storage.data());
+      *len = storage.size();
+      *keepalive = Value::io_value(snapshot);
+      return true;
+    }
+    set_fault(active, "TypeError", "expected Bytes, ByteSlice, or ByteBuffer");
+    return false;
+  }
   Value stdlib_make_list(std::vector<Value> items) override {
     return make_list_value(std::move(items));
   }

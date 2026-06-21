@@ -8683,16 +8683,25 @@ void test_foreign_handle_lifetime() {
   using amber::runtime::RuntimeForeignHandle;
   using Ownership = RuntimeForeignHandle::Ownership;
 
-  // owned: deterministic destroy! runs teardown exactly once; the GC never does.
+  // owned: deterministic destroy! runs teardown exactly once with the supplied
+  // ctx; the GC never does.
   {
     int freed = 0;
+    void *seen_ctx = nullptr;
+    int ctx_marker = 7;
     auto handle = std::make_shared<RuntimeForeignHandle>();
     handle->tag = "pkg.Owned";
     handle->ownership = Ownership::Owned;
-    handle->teardown = [&freed](void *) { ++freed; };
-    expect(handle->destroy(), "owned destroy! reports it destroyed the handle");
+    handle->teardown = [&freed, &seen_ctx](void *ctx, void *) {
+      ++freed;
+      seen_ctx = ctx;
+    };
+    expect(handle->destroy(&ctx_marker),
+           "owned destroy! reports it destroyed the handle");
     expect(freed == 1, "owned destroy! runs teardown once");
-    expect(!handle->destroy(), "second destroy! is a no-op");
+    expect(seen_ctx == &ctx_marker,
+           "owned teardown receives the destroy!-time ctx");
+    expect(!handle->destroy(&ctx_marker), "second destroy! is a no-op");
     expect(freed == 1, "owned teardown does not run twice");
     handle.reset();
     expect(freed == 1, "destroyed owned handle does not re-run teardown on GC");
@@ -8703,27 +8712,32 @@ void test_foreign_handle_lifetime() {
     {
       auto handle = std::make_shared<RuntimeForeignHandle>();
       handle->ownership = Ownership::Owned;
-      handle->teardown = [&freed](void *) { ++freed; };
+      handle->teardown = [&freed](void *, void *) { ++freed; };
     }
     expect(freed == 0,
            "GC never runs an owned destructor (no implicit finalizer)");
   }
-  // collected, never destroyed: the GC reclaims it.
+  // collected, never destroyed: the GC reclaims it with a null ctx.
   {
     int freed = 0;
+    bool null_ctx = false;
     {
       auto handle = std::make_shared<RuntimeForeignHandle>();
       handle->ownership = Ownership::Collected;
-      handle->teardown = [&freed](void *) { ++freed; };
+      handle->teardown = [&freed, &null_ctx](void *ctx, void *) {
+        ++freed;
+        null_ctx = ctx == nullptr;
+      };
     }
     expect(freed == 1, "collected handle is reclaimed by the GC");
+    expect(null_ctx, "GC reclaim passes a null ctx (context-free reclaim)");
   }
   // collected, explicitly destroyed: teardown runs once, not again on GC.
   {
     int freed = 0;
     auto handle = std::make_shared<RuntimeForeignHandle>();
     handle->ownership = Ownership::Collected;
-    handle->teardown = [&freed](void *) { ++freed; };
+    handle->teardown = [&freed](void *, void *) { ++freed; };
     expect(handle->destroy() && freed == 1, "collected destroy! runs teardown");
     handle.reset();
     expect(freed == 1, "collected handle is not double-freed after destroy!");
@@ -8734,7 +8748,7 @@ void test_foreign_handle_lifetime() {
     {
       auto handle = std::make_shared<RuntimeForeignHandle>();
       handle->ownership = Ownership::Borrowed;
-      handle->teardown = [&freed](void *) { ++freed; };
+      handle->teardown = [&freed](void *, void *) { ++freed; };
       expect(handle->destroy(), "borrowed destroy! flips the tombstone");
     }
     expect(freed == 0, "borrowed handle is never freed by Amber");

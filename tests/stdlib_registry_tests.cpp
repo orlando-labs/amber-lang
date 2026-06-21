@@ -76,6 +76,11 @@ struct MockHost : StdlibHost {
   Value stdlib_bytes_value_from_bytes(std::string /*bytes*/) override {
     return Value::null();
   }
+  bool stdlib_bytes_view(const void * /*frame*/, const Value & /*value*/,
+                         const std::uint8_t ** /*ptr*/, std::size_t * /*len*/,
+                         Value * /*keepalive*/) override {
+    return false;
+  }
   Value stdlib_make_list(std::vector<Value> /*items*/) override {
     return Value::null();
   }
