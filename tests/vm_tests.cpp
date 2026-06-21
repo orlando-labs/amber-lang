@@ -8758,6 +8758,42 @@ void test_foreign_handle_lifetime() {
   }
 }
 
+void test_native_tag_registry() {
+  using amber::runtime::NativeTagRegistry;
+  using amber::runtime::NativeTypeDescriptor;
+  using Ownership = amber::runtime::RuntimeForeignHandle::Ownership;
+
+  NativeTagRegistry registry;
+  expect(registry.lookup("absent") == nullptr,
+         "an unknown tag resolves to nullptr");
+
+  NativeTypeDescriptor owned;
+  owned.tag = "pkg.Owned";
+  owned.ownership = Ownership::Owned;
+  owned.owned_destructor = [](void *, void *) {};
+  registry.register_type(owned);
+
+  NativeTypeDescriptor collected;
+  collected.tag = "pkg.Collected";
+  collected.ownership = Ownership::Collected;
+  collected.collected_reclaim = [](void *) {};
+  registry.register_type(collected);
+
+  expect(registry.size() == 2, "registry holds both descriptors");
+  const NativeTypeDescriptor *owned_lookup = registry.lookup("pkg.Owned");
+  expect(owned_lookup != nullptr && owned_lookup->ownership == Ownership::Owned &&
+             owned_lookup->owned_destructor != nullptr &&
+             owned_lookup->collected_reclaim == nullptr,
+         "owned descriptor resolves with a destructor and no reclaim");
+  const NativeTypeDescriptor *collected_lookup =
+      registry.lookup("pkg.Collected");
+  expect(collected_lookup != nullptr &&
+             collected_lookup->ownership == Ownership::Collected &&
+             collected_lookup->collected_reclaim != nullptr &&
+             collected_lookup->owned_destructor == nullptr,
+         "collected descriptor resolves with a reclaim and no destructor");
+}
+
 } // namespace
 
 int main() {
@@ -8937,6 +8973,7 @@ int main() {
   test_manual_ensure_suppresses_pending_exception();
   test_manual_raise_unhandled_fault_trace();
   test_foreign_handle_lifetime();
+  test_native_tag_registry();
   std::cout << "vm_tests: ok\n";
   return 0;
 }
