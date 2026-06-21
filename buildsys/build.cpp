@@ -408,6 +408,64 @@ void emit_module_array(std::ostringstream &out, const char *name,
   out << "]";
 }
 
+bool read_native_extensions(
+    const JsonValue &root, const std::string &path,
+    std::vector<amber::pkg::PackageNativeExtension> *out,
+    std::vector<BuildDiagnostic> *diagnostics) {
+  const JsonValue *value = member(root, "native_extensions");
+  if (value == nullptr) {
+    return true;
+  }
+  if (value->kind != JsonValue::Kind::Array) {
+    diagnostics->push_back(diagnostic(
+        "BuildManifestError", "'native_extensions' must be an array", path));
+    return false;
+  }
+  for (const JsonValue &item : value->array_value) {
+    if (item.kind != JsonValue::Kind::Object) {
+      diagnostics->push_back(diagnostic(
+          "BuildManifestError", "'native_extensions' entries must be objects",
+          path));
+      return false;
+    }
+    amber::pkg::PackageNativeExtension extension;
+    read_string_member(item, "name", &extension.name);
+    read_string_member(item, "language", &extension.language);
+    read_string_array_member(item, "sources", &extension.sources);
+    read_string_array_member(item, "headers", &extension.headers);
+    read_string_array_member(item, "include_dirs", &extension.include_dirs);
+    read_string_array_member(item, "defines", &extension.defines);
+    read_string_array_member(item, "cxxflags", &extension.cxxflags);
+    read_string_array_member(item, "link_libraries", &extension.link_libraries);
+    read_string_array_member(item, "capabilities", &extension.capabilities);
+    if (const JsonValue *symbols = member(item, "symbols")) {
+      for (const JsonValue &entry : symbols->array_value) {
+        amber::pkg::PackageNativeSymbol symbol;
+        read_string_member(entry, "logical", &symbol.logical);
+        read_string_member(entry, "symbol", &symbol.symbol);
+        extension.symbols.push_back(std::move(symbol));
+      }
+    }
+    if (const JsonValue *types = member(item, "types")) {
+      for (const JsonValue &entry : types->array_value) {
+        amber::pkg::PackageNativeType type;
+        read_string_member(entry, "amber", &type.amber);
+        read_string_member(entry, "tag", &type.tag);
+        read_string_member(entry, "ownership", &type.ownership);
+        read_string_member(entry, "destructor", &type.destructor);
+        extension.types.push_back(std::move(type));
+      }
+    }
+    if (extension.name.empty()) {
+      diagnostics->push_back(diagnostic(
+          "BuildManifestError", "native extension entries require a name",
+          path));
+    }
+    out->push_back(std::move(extension));
+  }
+  return true;
+}
+
 } // namespace
 
 BuildManifestResult parse_build_manifest_json(const std::string &source,
@@ -507,6 +565,29 @@ BuildManifestResult parse_build_manifest_json(const std::string &source,
                &result.diagnostics);
   read_modules(root, "modules", false, path, &result.manifest.modules,
                &result.diagnostics);
+  read_native_extensions(root, path, &result.manifest.native_extensions,
+                         &result.diagnostics);
+
+  // Native extensions execute foreign code, so a build that declares any must
+  // opt into FFI by enabling the `ffi.v1` profile feature (native-packages
+  // design §2.3/§6). Bytecode runtimes do not support ffi.v1, so this also
+  // ensures such builds target the native backend.
+  if (!result.manifest.native_extensions.empty()) {
+    bool declares_ffi = false;
+    for (const std::string &feature :
+         result.manifest.profiles.required_features) {
+      declares_ffi = declares_ffi || feature == "ffi.v1";
+    }
+    for (const std::string &feature :
+         result.manifest.profiles.optional_features) {
+      declares_ffi = declares_ffi || feature == "ffi.v1";
+    }
+    if (!declares_ffi) {
+      result.diagnostics.push_back(diagnostic(
+          "BuildManifestError",
+          "native extensions require the 'ffi.v1' profile feature", path));
+    }
+  }
 
   if (result.manifest.modules.empty()) {
     result.diagnostics.push_back(diagnostic(

@@ -74,11 +74,65 @@ void test_runtime_feature_support_surface() {
          "runtime should not support ffi.v1 by default");
 }
 
+void test_native_extensions_parse_and_gate() {
+  const std::string source =
+      "{\"schema\":\"amber.build.v1\",\"name\":\"crypto\","
+      "\"root\":\"crypto.blake3\","
+      "\"profiles\":{\"required\":[\"core.v1\",\"ffi.v1\"]},"
+      "\"modules\":[{\"name\":\"crypto.blake3\",\"path\":\"src/blake3.am\"}],"
+      "\"native_extensions\":[{"
+      "\"name\":\"blake3\",\"language\":\"c\","
+      "\"sources\":[\"native/blake3.c\"],"
+      "\"capabilities\":[\"ffi\"],"
+      "\"symbols\":[{\"logical\":\"blake3.hash\","
+      "\"symbol\":\"amber_blake3_hash\"}],"
+      "\"types\":[{\"amber\":\"crypto.blake3.Hasher\",\"tag\":\"blake3.Hasher\","
+      "\"ownership\":\"owned\",\"destructor\":\"blake3.hasher_free\"}]"
+      "}]}";
+  const amber::build::BuildManifestResult parsed =
+      amber::build::parse_build_manifest_json(source, "amber.build.json");
+  expect(parsed.ok(), amber::build::diagnostics_to_string(parsed.diagnostics));
+  expect(parsed.manifest.native_extensions.size() == 1,
+         "one native extension should parse");
+  const amber::pkg::PackageNativeExtension &extension =
+      parsed.manifest.native_extensions[0];
+  expect(extension.name == "blake3" && extension.language == "c",
+         "native extension name/language");
+  expect(extension.sources.size() == 1 &&
+             extension.sources[0] == "native/blake3.c",
+         "native extension sources");
+  expect(extension.symbols.size() == 1 &&
+             extension.symbols[0].symbol == "amber_blake3_hash",
+         "native extension symbol map");
+  expect(extension.types.size() == 1 &&
+             extension.types[0].tag == "blake3.Hasher" &&
+             extension.types[0].ownership == "owned",
+         "native extension type tag/ownership");
+
+  // Without ffi.v1 the same manifest is rejected.
+  const std::string ungated =
+      "{\"schema\":\"amber.build.v1\",\"name\":\"crypto\","
+      "\"root\":\"crypto.blake3\","
+      "\"profiles\":{\"required\":[\"core.v1\"]},"
+      "\"modules\":[{\"name\":\"crypto.blake3\",\"path\":\"src/blake3.am\"}],"
+      "\"native_extensions\":[{\"name\":\"blake3\",\"language\":\"c\"}]}";
+  const amber::build::BuildManifestResult gated =
+      amber::build::parse_build_manifest_json(ungated, "amber.build.json");
+  expect(!gated.ok(), "native extensions without ffi.v1 should be rejected");
+  bool mentions_ffi = false;
+  for (const amber::build::BuildDiagnostic &diagnostic : gated.diagnostics) {
+    mentions_ffi =
+        mentions_ffi || diagnostic.message.find("ffi.v1") != std::string::npos;
+  }
+  expect(mentions_ffi, "gating diagnostic should name the ffi.v1 requirement");
+}
+
 } // namespace
 
 int main() {
   test_manifest_parses_and_normalizes();
   test_manifest_rejects_profile_conflict();
   test_runtime_feature_support_surface();
+  test_native_extensions_parse_and_gate();
   return 0;
 }

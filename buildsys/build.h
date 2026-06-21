@@ -1,5 +1,7 @@
 #pragma once
 
+#include "package/package.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -36,6 +38,10 @@ struct BuildManifest {
   BuildProfileSet profiles;
   std::vector<BuildModule> stdlib_modules;
   std::vector<BuildModule> modules;
+  // Native extension units, lowered from the package manifest's [[native]]
+  // sections. Reuses the package shape so there is one schema for the build to
+  // compile/link against (native-packages design §5).
+  std::vector<amber::pkg::PackageNativeExtension> native_extensions;
 };
 
 struct BuildManifestResult {
