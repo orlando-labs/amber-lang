@@ -665,6 +665,15 @@ public:
           (record.is_method ? "M:" : "F:") + record.logical;
       module_.attrs.push_back({intern_string(key), intern_string(value)});
     }
+    // Foreign-handle method dispatch table: key `amber.native.method:<tag>\t
+    // <selector>`, value `<logical>`. The tab separates tag (dotted, no tabs)
+    // from selector. A module with no native classes emits nothing.
+    for (const NativeMethodBinding &record : native_method_bindings_) {
+      const std::string key =
+          "amber.native.method:" + record.tag + "\t" + record.selector;
+      module_.attrs.push_back(
+          {intern_string(key), intern_string(record.logical)});
+    }
   }
 
   // amber.numeric-profile.v1: resolve the module numeric profile before any
@@ -1125,10 +1134,25 @@ private:
       klass.superclass_ref = intern_path_ref(superclass);
     }
 
+    // A `native class` tag (`from "tag"`) keys foreign-handle method dispatch:
+    // the VM maps (tag, selector) -> logical symbol so a send on a handle finds
+    // its thunk (native-packages 5c-ii). Empty for ordinary classes.
+    const std::string native_tag = bool_field(item, "is_native")
+                                       ? string_field(item, "native_binding")
+                                       : std::string();
+
     const ast::ListField *body = list_field(item, "body");
     if (body != nullptr) {
       for (const std::unique_ptr<ast::Expr> &member : body->values) {
         if (member->kind == "HMethod") {
+          if (!native_tag.empty()) {
+            const std::string logical = string_field(*member, "native_binding");
+            const std::string selector = string_field(*member, "name");
+            if (!logical.empty() && !selector.empty()) {
+              native_method_bindings_.push_back(
+                  {native_tag, selector, logical});
+            }
+          }
           module_.methods.push_back(build_method(*member, class_index));
         } else if (member->kind == "HInclude") {
           append_path_refs(*member, "paths", klass.direct_include_refs);
@@ -1371,6 +1395,13 @@ private:
     std::string logical;
   };
   std::vector<NativeBindingRecord> native_bindings_;
+
+  struct NativeMethodBinding {
+    std::string tag;
+    std::string selector;
+    std::string logical;
+  };
+  std::vector<NativeMethodBinding> native_method_bindings_;
 
   friend class CodeEmitter;
 };

@@ -18606,28 +18606,82 @@ private:
   // Lower the `amber.native.bind:<code_id>` module attrs into a fast lookup
   // table (native-packages 5c-ii). Runs once at construction.
   void resolve_native_bindings() {
-    static const std::string kPrefix = "amber.native.bind:";
+    static const std::string kBindPrefix = "amber.native.bind:";
+    static const std::string kMethodPrefix = "amber.native.method:";
     for (const bytecode::AttrEntry &attr : module_.attrs) {
       const std::string key = string_or_empty(attr.key_str_id);
-      if (key.compare(0, kPrefix.size(), kPrefix) != 0) {
-        continue;
-      }
-      std::uint32_t code_id = 0;
-      bool parsed = !key.empty();
-      for (std::size_t i = kPrefix.size(); i < key.size(); ++i) {
-        const char digit = key[i];
-        if (digit < '0' || digit > '9') {
-          parsed = false;
-          break;
+      if (key.compare(0, kBindPrefix.size(), kBindPrefix) == 0) {
+        std::uint32_t code_id = 0;
+        bool parsed = key.size() > kBindPrefix.size();
+        for (std::size_t i = kBindPrefix.size(); i < key.size(); ++i) {
+          const char digit = key[i];
+          if (digit < '0' || digit > '9') {
+            parsed = false;
+            break;
+          }
+          code_id = code_id * 10U + static_cast<std::uint32_t>(digit - '0');
         }
-        code_id = code_id * 10U + static_cast<std::uint32_t>(digit - '0');
+        const std::string value = string_or_empty(attr.value_str_id);
+        if (!parsed || code_id == 0U || value.size() < 2U || value[1] != ':') {
+          continue;
+        }
+        native_bindings_[code_id] = {value[0] == 'M', value.substr(2)};
+      } else if (key.compare(0, kMethodPrefix.size(), kMethodPrefix) == 0) {
+        // Re-key from `amber.native.method:<tag>\t<selector>` to the runtime's
+        // "<tag>\t<selector>" lookup key.
+        native_method_bindings_[key.substr(kMethodPrefix.size())] =
+            string_or_empty(attr.value_str_id);
       }
-      const std::string value = string_or_empty(attr.value_str_id);
-      if (!parsed || code_id == 0U || value.size() < 2U || value[1] != ':') {
-        continue;
-      }
-      native_bindings_[code_id] = {value[0] == 'M', value.substr(2)};
     }
+  }
+
+  // The thunk registered for a foreign-handle send (tag + selector), or
+  // nullptr.
+  void *native_method_thunk(const std::string &tag,
+                            const std::string &selector) const {
+    if (native_method_bindings_.empty()) {
+      return nullptr;
+    }
+    const auto found = native_method_bindings_.find(tag + "\t" + selector);
+    if (found == native_method_bindings_.end()) {
+      return nullptr;
+    }
+    return NativeExtRegistry::global().lookup(found->second);
+  }
+
+  // Construction of a `native class`: when the resolved `init` is native-bound
+  // and a thunk is registered, run it (a constructor thunk has the free shape
+  // and returns a freshly built foreign handle) and store the handle in `dst`,
+  // bypassing instance allocation. Returns true when it handled construction;
+  // `*ok` is false if the thunk faulted (caller should stop).
+  bool try_construct_native_handle(Frame &frame, const bytecode::BcMethod &init,
+                                   const std::vector<Value> &pos_args,
+                                   std::uint32_t dst, bool *ok) {
+    *ok = true;
+    const std::pair<bool, std::string> *binding =
+        native_binding_for_code(init.entry_code_id);
+    if (binding == nullptr) {
+      return false;
+    }
+    NativeExtRegistry &registry = NativeExtRegistry::global();
+    void *fn = registry.lookup(binding->second);
+    if (fn == nullptr) {
+      return false; // bytecode build: a native-only ctor falls through and the
+                    // synthesized NativeRequiredError body runs.
+    }
+    NativeExtCallOutcome outcome =
+        amber_ext_invoke_free(*this, &frame, registry.tags(),
+                              reinterpret_cast<AmberFreeFn>(fn), pos_args);
+    if (!outcome.ok || fault_.has_value()) {
+      *ok = false;
+      return true;
+    }
+    if (!write_reg(frame, dst, std::move(outcome.value))) {
+      *ok = false;
+      return true;
+    }
+    ++frame.pc;
+    return true;
   }
 
   const std::pair<bool, std::string> *
@@ -19104,16 +19158,24 @@ private:
 
     if (callee.is_class_object()) {
       const std::uint32_t class_index = callee.as_class_object().class_index;
-      auto instance = make_instance_value(class_index);
-      if (!ensure_instance_layout(frame, instance)) {
-        return false;
-      }
-      const Value instance_value = Value::instance(instance);
       const bytecode::BcMethod *init = find_method_for_dispatch(
           frame, class_index, "init", kMethodFlagInstance);
       if (fault_.has_value()) {
         return false;
       }
+      // A `native class` constructs via its init thunk, returning the foreign
+      // handle directly with no InstanceValue allocated (5c-ii).
+      if (init != nullptr) {
+        bool ok = true;
+        if (try_construct_native_handle(frame, *init, pos_args, dst, &ok)) {
+          return ok;
+        }
+      }
+      auto instance = make_instance_value(class_index);
+      if (!ensure_instance_layout(frame, instance)) {
+        return false;
+      }
+      const Value instance_value = Value::instance(instance);
       if (init == nullptr) {
         if (!pos_args.empty()) {
           set_fault(frame, "TypeError",
@@ -29634,6 +29696,44 @@ private:
       ++frame.pc;
       return true;
     }
+    // A send on a `native class` foreign handle (other than destroy!, handled
+    // above by the lifecycle path) dispatches by the handle's tag + selector to
+    // the registered method thunk (native-packages 5c-ii). Use-after-destroy is
+    // a LifetimeError, checked before the thunk so a missing tombstone check in
+    // a thunk cannot read freed memory.
+    if (!property_assignment && receiver.is_foreign_handle()) {
+      const std::shared_ptr<RuntimeForeignHandle> handle =
+          receiver.as_foreign_handle();
+      if (handle == nullptr) {
+        set_fault(frame, "TypeError", "native handle is null");
+        return false;
+      }
+      void *fn = native_method_thunk(handle->tag, *selector);
+      if (fn != nullptr) {
+        if (!handle->live) {
+          // Rescuable: a use-after-destroy! unwinds to the nearest handler.
+          raise_runtime_error(frame, "LifetimeError",
+                              "native handle `" + handle->tag +
+                                  "` used after destroy!");
+          return false;
+        }
+        const NativeExtCallOutcome outcome = amber_ext_invoke_method(
+            *this, &frame, NativeExtRegistry::global().tags(),
+            reinterpret_cast<AmberMethodFn>(fn), receiver, args);
+        if (!outcome.ok || fault_.has_value()) {
+          return false;
+        }
+        if (!write_reg(frame, dst, outcome.value)) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
+      raise_runtime_error(frame, "NoMethodError",
+                          "native handle `" + handle->tag +
+                              "` has no method `" + *selector + "`");
+      return false;
+    }
     if (!property_access && !property_assignment && receiver.is_native_type()) {
       const std::string nested_error_path =
           std::string(native_type_name(receiver.as_native_type().kind)) + "." +
@@ -31283,16 +31383,26 @@ private:
       if (packet.callee.is_class_object()) {
         const std::uint32_t class_index =
             packet.callee.as_class_object().class_index;
+        const bytecode::BcMethod *native_init = find_method_for_dispatch(
+            frame, class_index, "init", kMethodFlagInstance);
+        if (fault_.has_value()) {
+          return;
+        }
+        // A `native class` constructs via its init thunk, which returns the
+        // foreign handle directly -- no InstanceValue is allocated (5c-ii).
+        if (native_init != nullptr) {
+          bool ok = true;
+          if (try_construct_native_handle(frame, *native_init, packet.pos_args,
+                                          packet.dst, &ok)) {
+            return;
+          }
+        }
         auto instance = make_instance_value(class_index);
         if (!ensure_instance_layout(frame, instance)) {
           return;
         }
         const Value instance_value = Value::instance(instance);
-        const bytecode::BcMethod *init = find_method_for_dispatch(
-            frame, class_index, "init", kMethodFlagInstance);
-        if (fault_.has_value()) {
-          return;
-        }
+        const bytecode::BcMethod *init = native_init;
         if (init == nullptr) {
           if (!packet.pos_args.empty()) {
             set_fault(
@@ -31984,6 +32094,10 @@ private:
   // instead of the Amber body; with no thunk (bytecode build) the body runs.
   std::unordered_map<std::uint32_t, std::pair<bool, std::string>>
       native_bindings_;
+  // Foreign-handle method dispatch (native-packages 5c-ii): "<tag>\t<selector>"
+  // -> logical symbol, lowered from `amber.native.method:` attrs. A send on a
+  // foreign handle resolves the thunk by the handle's tag + selector.
+  std::unordered_map<std::string, std::string> native_method_bindings_;
 };
 
 } // namespace

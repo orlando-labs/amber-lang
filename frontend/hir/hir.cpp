@@ -894,6 +894,15 @@ private:
     if (!string_value(item, "superclass").empty()) {
       node->string_field("superclass", string_value(item, "superclass"));
     }
+    // Carry the `native class` tag + ownership to the emitter so it can map
+    // (tag, selector) -> logical symbol for foreign-handle method dispatch and
+    // construction routing (native-packages 5c-ii).
+    if (bool_value(item, "is_native")) {
+      node->bool_field("is_native", true);
+      node->string_field("native_binding",
+                         string_value(item, "native_binding"));
+      node->string_field("ownership", string_value(item, "ownership"));
+    }
     std::vector<std::unique_ptr<Node>> body;
     if (const ast::ListField *items = list_field(item, "body")) {
       const std::string dispatch_side =
