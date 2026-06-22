@@ -268,28 +268,28 @@ void test_execute_return_keyword() {
 }
 
 void test_execute_return_runs_nested_ensure_inner_to_outer() {
-  const amber::runtime::ExecutionResult exec = execute_emitted_init(
-      "cell = [\"\"]\n"
-      "\n"
-      "def record(t):\n"
-      "  cell[0] = cell[0] + t\n"
-      "\n"
-      "def inner(v):\n"
-      "  try:\n"
-      "    try:\n"
-      "      if v > 0:\n"
-      "        return \"deep\"\n"
-      "      \"shallow\"\n"
-      "    ensure:\n"
-      "      record(\"I\")\n"
-      "  ensure:\n"
-      "    record(\"O\")\n"
-      "\n"
-      "r = inner(1)\n"
-      "r + \":\" + cell[0]\n");
+  const amber::runtime::ExecutionResult exec =
+      execute_emitted_init("cell = [\"\"]\n"
+                           "\n"
+                           "def record(t):\n"
+                           "  cell[0] = cell[0] + t\n"
+                           "\n"
+                           "def inner(v):\n"
+                           "  try:\n"
+                           "    try:\n"
+                           "      if v > 0:\n"
+                           "        return \"deep\"\n"
+                           "      \"shallow\"\n"
+                           "    ensure:\n"
+                           "      record(\"I\")\n"
+                           "  ensure:\n"
+                           "    record(\"O\")\n"
+                           "\n"
+                           "r = inner(1)\n"
+                           "r + \":\" + cell[0]\n");
   expect(exec.ok(), "return-through-ensure probe should execute");
-  const std::string text = string_value_text_or_die(
-      exec.value, amber::bytecode::BcModule{}, exec);
+  const std::string text =
+      string_value_text_or_die(exec.value, amber::bytecode::BcModule{}, exec);
   expect(text == "deep:IO",
          "return must run nested ensure bodies inner-to-outer");
 }
@@ -301,14 +301,14 @@ void test_execute_zero_division_error() {
              fault_exec.fault->error_name == "ZeroDivisionError",
          "unhandled division by zero should fault as ZeroDivisionError");
 
-  const amber::runtime::ExecutionResult rescued = execute_emitted_init(
-      "def f():\n"
-      "  try:\n"
-      "    1 / 0\n"
-      "  rescue ZeroDivisionError |e|:\n"
-      "    e.message()\n"
-      "\n"
-      "f()\n");
+  const amber::runtime::ExecutionResult rescued =
+      execute_emitted_init("def f():\n"
+                           "  try:\n"
+                           "    1 / 0\n"
+                           "  rescue ZeroDivisionError |e|:\n"
+                           "    e.message()\n"
+                           "\n"
+                           "f()\n");
   expect(rescued.ok(), "rescued division by zero should execute");
   const std::string text = string_value_text_or_die(
       rescued.value, amber::bytecode::BcModule{}, rescued);
@@ -335,10 +335,10 @@ void test_execute_checked_int_overflow() {
              mul_overflow.fault->error_name == "OverflowError",
          "checked Int64 mul overflow should raise OverflowError");
 
-  const amber::runtime::ExecutionResult div_overflow = execute_emitted_init(
-      "a = 0 - 9223372036854775807\n"
-      "b = a - 1\n"
-      "b / (0 - 1)\n");
+  const amber::runtime::ExecutionResult div_overflow =
+      execute_emitted_init("a = 0 - 9223372036854775807\n"
+                           "b = a - 1\n"
+                           "b / (0 - 1)\n");
   expect(!div_overflow.ok() && div_overflow.fault.has_value() &&
              div_overflow.fault->error_name == "OverflowError",
          "INT64_MIN / -1 should raise OverflowError");
@@ -355,78 +355,78 @@ void test_execute_checked_int_overflow() {
              pow_overflow.fault->error_name == "OverflowError",
          "checked Int64 pow overflow should raise OverflowError");
 
-  const amber::runtime::ExecutionResult rescued = execute_emitted_init(
-      "def f():\n"
-      "  try:\n"
-      "    9223372036854775807 + 1\n"
-      "  rescue OverflowError |e|:\n"
-      "    \"caught: \" + e.message()\n"
-      "\n"
-      "f()\n");
+  const amber::runtime::ExecutionResult rescued =
+      execute_emitted_init("def f():\n"
+                           "  try:\n"
+                           "    9223372036854775807 + 1\n"
+                           "  rescue OverflowError |e|:\n"
+                           "    \"caught: \" + e.message()\n"
+                           "\n"
+                           "f()\n");
   expect(rescued.ok(), "rescued overflow should execute");
   const std::string text = string_value_text_or_die(
       rescued.value, amber::bytecode::BcModule{}, rescued);
   expect(text == "caught: Int overflow in `+`",
          "OverflowError should be rescuable");
 
-  const amber::runtime::ExecutionResult in_loop = execute_emitted_init(
-      "x = 9223372036854775800\n"
-      "i = 0\n"
-      "while i < 100:\n"
-      "  x = x + 1\n"
-      "  i = i + 1\n"
-      "x\n");
+  const amber::runtime::ExecutionResult in_loop =
+      execute_emitted_init("x = 9223372036854775800\n"
+                           "i = 0\n"
+                           "while i < 100:\n"
+                           "  x = x + 1\n"
+                           "  i = i + 1\n"
+                           "x\n");
   expect(!in_loop.ok() && in_loop.fault.has_value() &&
              in_loop.fault->error_name == "OverflowError",
          "quickened loop add overflow should raise OverflowError");
 }
 
 void test_execute_numeric_profile_modes() {
-  const amber::runtime::ExecutionResult wrap = execute_emitted_init(
-      "numeric:\n"
-      "  int: Int64\n"
-      "  overflow: wrapping\n"
-      "\n"
-      "9223372036854775807 + 1\n");
+  const amber::runtime::ExecutionResult wrap =
+      execute_emitted_init("numeric:\n"
+                           "  int: Int64\n"
+                           "  overflow: wrapping\n"
+                           "\n"
+                           "9223372036854775807 + 1\n");
   expect(wrap.ok(), "wrapping profile should execute");
   expect(wrap.value.is_integer() &&
              wrap.value.as_integer() ==
                  std::numeric_limits<std::int64_t>::min(),
          "wrapping Int64 overflow wraps to INT64_MIN");
 
-  const amber::runtime::ExecutionResult saturate = execute_emitted_init(
-      "numeric:\n"
-      "  int: Int8\n"
-      "  overflow: saturating\n"
-      "\n"
-      "a = 100 + 100\n"
-      "b = 0 - 100 - 100\n"
-      "a * 3 + b\n");
+  const amber::runtime::ExecutionResult saturate =
+      execute_emitted_init("numeric:\n"
+                           "  int: Int8\n"
+                           "  overflow: saturating\n"
+                           "\n"
+                           "a = 100 + 100\n"
+                           "b = 0 - 100 - 100\n"
+                           "a * 3 + b\n");
   expect(saturate.ok(), "saturating profile should execute");
   expect(saturate.value.is_integer() && saturate.value.as_integer() == -1,
          "saturating Int8: a==127, b==-128, 127*3 clamps to 127, "
          "127 + -128 == -1");
 
-  const amber::runtime::ExecutionResult narrow_checked = execute_emitted_init(
-      "numeric:\n"
-      "  int: Int8\n"
-      "\n"
-      "100 + 100\n");
+  const amber::runtime::ExecutionResult narrow_checked =
+      execute_emitted_init("numeric:\n"
+                           "  int: Int8\n"
+                           "\n"
+                           "100 + 100\n");
   expect(!narrow_checked.ok() && narrow_checked.fault.has_value() &&
              narrow_checked.fault->error_name == "OverflowError",
          "checked Int8 overflow raises OverflowError");
 }
 
 void test_execute_big_int_explicit_type() {
-  const amber::runtime::ExecutionResult exec = execute_emitted_init(
-      "big = BigInt(9223372036854775807)\n"
-      "square = big * big\n"
-      "mixed = 5 + BigInt(10)\n"
-      "back = BigInt(42).to_int()\n"
-      "\"#{square}:#{mixed}:#{back}\"\n");
+  const amber::runtime::ExecutionResult exec =
+      execute_emitted_init("big = BigInt(9223372036854775807)\n"
+                           "square = big * big\n"
+                           "mixed = 5 + BigInt(10)\n"
+                           "back = BigInt(42).to_int()\n"
+                           "\"#{square}:#{mixed}:#{back}\"\n");
   expect(exec.ok(), "BigInt probe should execute");
-  const std::string text = string_value_text_or_die(
-      exec.value, amber::bytecode::BcModule{}, exec);
+  const std::string text =
+      string_value_text_or_die(exec.value, amber::bytecode::BcModule{}, exec);
   expect(text == "85070591730234615847396907784232501249:15:42",
          "explicit BigInt arithmetic is exact and mixes with Int");
 
@@ -444,17 +444,17 @@ void test_execute_big_int_explicit_type() {
 }
 
 void test_execute_mixed_sign_division_semantics() {
-  const amber::runtime::ExecutionResult exec = execute_emitted_init(
-      "a = 7 / (0 - 2)\n"
-      "b = 7 % (0 - 2)\n"
-      "c = 7 // (0 - 2)\n"
-      "d = (0 - 7) / 2\n"
-      "e = (0 - 7) % 2\n"
-      "f = (0 - 7) // 2\n"
-      "\"#{a}:#{b}:#{c}:#{d}:#{e}:#{f}\"\n");
+  const amber::runtime::ExecutionResult exec =
+      execute_emitted_init("a = 7 / (0 - 2)\n"
+                           "b = 7 % (0 - 2)\n"
+                           "c = 7 // (0 - 2)\n"
+                           "d = (0 - 7) / 2\n"
+                           "e = (0 - 7) % 2\n"
+                           "f = (0 - 7) // 2\n"
+                           "\"#{a}:#{b}:#{c}:#{d}:#{e}:#{f}\"\n");
   expect(exec.ok(), "mixed-sign division probe should execute");
-  const std::string text = string_value_text_or_die(
-      exec.value, amber::bytecode::BcModule{}, exec);
+  const std::string text =
+      string_value_text_or_die(exec.value, amber::bytecode::BcModule{}, exec);
   expect(text == "-3:-1:-4:-3:1:-4",
          "`/` truncates while `%` and `//` floor (pinned semantics)");
 }
@@ -484,7 +484,8 @@ void test_execute_native_range_literal() {
       emit_result.module, emit_result.module.init.entry_code_id);
   expect(exec.ok(), "native Range prelude literal execution failed");
   expect(exec.value.is_list(), "native Range literal should materialize");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> items = exec.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> items =
+      exec.value.as_list();
   expect(items != nullptr && items->items.size() == 6,
          "native Range literal materialized item count");
   for (std::size_t i = 0; i < items->items.size(); ++i) {
@@ -498,8 +499,8 @@ void test_execute_native_range_literal() {
       amber::runtime::execute_code(emit_result.module,
                                    emit_result.module.init.entry_code_id);
   expect(descending.ok(), "native descending Range literal execution failed");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> descending_items =
-      descending.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue>
+      descending_items = descending.value.as_list();
   expect(descending_items != nullptr && descending_items->items.size() == 3,
          "native descending Range materialized item count");
   expect(descending_items->items[0].as_integer() == 5 &&
@@ -552,7 +553,8 @@ void test_execute_emitted_collection_literals() {
       set_decoded.module, set_decoded.module.init.entry_code_id);
   expect(set_exec.ok(), "set literal execution failed");
   expect(set_exec.value.is_set(), "set literal should return set");
-  const amber::runtime::IntrusivePtr<amber::runtime::SetValue> set = set_exec.value.as_set();
+  const amber::runtime::IntrusivePtr<amber::runtime::SetValue> set =
+      set_exec.value.as_set();
   expect(set != nullptr && set->items.size() == 2,
          "set literal collapses duplicate values");
   expect(set->items[0].is_integer() && set->items[0].as_integer() == 1,
@@ -566,7 +568,8 @@ void test_execute_emitted_collection_literals() {
       map_result.module, map_result.module.init.entry_code_id);
   expect(map_exec.ok(), "map literal execution failed");
   expect(map_exec.value.is_map(), "map literal should return map");
-  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> map = map_exec.value.as_map();
+  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> map =
+      map_exec.value.as_map();
   expect(map != nullptr && map->entries.size() == 2,
          "duplicate map key is replaced");
   expect(map->entries[0].symbol_id == symbol_id_or_die(map_result.module, "id"),
@@ -594,8 +597,8 @@ void test_execute_emitted_collection_literals() {
           index_store_result.module,
           index_store_result.module.init.entry_code_id);
   expect(index_store_exec.ok(), "index assignment execution failed");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> index_store_items =
-      index_store_exec.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue>
+      index_store_items = index_store_exec.value.as_list();
   expect(index_store_items != nullptr && index_store_items->items.size() == 3,
          "index assignment result shape");
   expect(index_store_items->items[0].as_integer() == 1 &&
@@ -681,8 +684,8 @@ void test_execute_emitted_collection_literals() {
           conditional_list_result.module.init.entry_code_id);
   expect(conditional_list_exec.ok(),
          "conditional list literal execution failed");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> conditional_list =
-      conditional_list_exec.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue>
+      conditional_list = conditional_list_exec.value.as_list();
   expect(conditional_list != nullptr && conditional_list->items.size() == 3,
          "conditional list skips false element");
   expect(conditional_list->items[0].is_integer() &&
@@ -715,8 +718,8 @@ void test_execute_emitted_collection_literals() {
           conditional_map_result.module,
           conditional_map_result.module.init.entry_code_id);
   expect(conditional_map_exec.ok(), "conditional map literal execution failed");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> conditional_map_pair =
-      conditional_map_exec.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue>
+      conditional_map_pair = conditional_map_exec.value.as_list();
   expect(conditional_map_pair != nullptr &&
              conditional_map_pair->items.size() == 2,
          "conditional map result pair");
@@ -1028,9 +1031,8 @@ void test_top_level_clause_function_self_recursion_base_one_orders() {
               "def fact(1): 1\n"
               "\n"
               "fact(5)\n");
-  amber::bytecode::DecodeResult decoded =
-      amber::bytecode::deserialize_module(
-          amber::bytecode::serialize_module(recursive_first.module));
+  amber::bytecode::DecodeResult decoded = amber::bytecode::deserialize_module(
+      amber::bytecode::serialize_module(recursive_first.module));
   expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
 
   amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
@@ -1814,7 +1816,8 @@ void test_manual_call_invokes_object_call_method() {
   body.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const amber::runtime::ExecutionResult exec =
       amber::runtime::execute_code(module, 1,
@@ -2715,7 +2718,8 @@ void test_runtime_duplicate_keyword_values_are_read_before_duplicate_check() {
   body.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   instance->header.class_index = 0;
   amber::runtime::RuntimeWorld world(module);
@@ -2771,7 +2775,8 @@ void test_runtime_keyword_shape_cache_canonicalizes_keyword_order() {
   body.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   instance->header.class_index = 0;
   amber::runtime::RuntimeWorld world(module);
@@ -2836,7 +2841,8 @@ void test_runtime_call_cache_distinguishes_block_presence() {
   block.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body, block};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   instance->header.class_index = 0;
   amber::runtime::RuntimeWorld world(module);
@@ -2906,7 +2912,8 @@ void test_runtime_keyword_call_cache_invalidates_on_world_epoch() {
   body_two.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body_one, body_two};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   instance->header.class_index = 0;
   amber::runtime::RuntimeWorld world(module);
@@ -3303,7 +3310,8 @@ void test_execute_emitted_case_const_class() {
   expect(method != nullptr, "const class case method exists");
   expect(!emit_result.module.classes.empty(), "marker class emitted");
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const amber::runtime::ExecutionResult hit =
       amber::runtime::execute_code(emit_result.module, method->entry_code_id,
@@ -3359,7 +3367,8 @@ void test_execute_emitted_pattern_assign_list_rest() {
                                         amber::runtime::Value::integer(5)})});
   expect(exec.ok(), "pattern assignment execution failed");
   expect(exec.value.is_list(), "pattern assignment tail should be a list");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> tail = exec.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> tail =
+      exec.value.as_list();
   expect(tail != nullptr && tail->items.size() == 2,
          "pattern assignment tail should have two items");
   expect(tail->items[0].is_integer() && tail->items[0].as_integer() == 4 &&
@@ -3386,7 +3395,8 @@ void test_execute_emitted_case_map_rest() {
                         {"b", amber::runtime::Value::integer(7)}})});
   expect(exec.ok(), "map-rest case execution failed");
   expect(exec.value.is_map(), "map-rest case should return rest map");
-  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> rest = exec.value.as_map();
+  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> rest =
+      exec.value.as_map();
   expect(rest != nullptr && rest->entries.size() == 1,
          "map-rest case should keep one extra key");
   expect(rest->entries[0].symbol_id ==
@@ -3504,7 +3514,8 @@ void test_manual_make_map() {
       amber::runtime::execute_code(module, 1);
   expect(exec.ok(), "MAKE_MAP execution failed");
   expect(exec.value.is_map(), "MAKE_MAP should materialize map value");
-  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> map = exec.value.as_map();
+  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> map =
+      exec.value.as_map();
   expect(map != nullptr && map->entries.size() == 2,
          "MAKE_MAP should preserve two entries");
   expect(map->entries[0].symbol_id == 0 && map->entries[0].value.is_integer() &&
@@ -3519,7 +3530,8 @@ void expect_integer_list(const amber::runtime::Value &value,
                          const std::vector<std::int64_t> &expected,
                          const std::string &message) {
   expect(value.is_list(), message + " should be a list");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list =
+      value.as_list();
   expect(list != nullptr && list->items.size() == expected.size(),
          message + " list size");
   for (std::size_t i = 0; i < expected.size(); ++i) {
@@ -3982,7 +3994,8 @@ void test_runtime_watch_ivar_records_object_revision_events() {
   failed.instructions.push_back({Opcode::Return, {{0, false}}});
   failed_module.code_objects.push_back(failed);
 
-  auto failed_instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto failed_instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   failed_instance->class_index = 0;
   amber::runtime::RuntimeWorld failed_world(failed_module);
   const amber::runtime::ExecutionResult failed_exec = failed_world.execute(
@@ -4129,9 +4142,9 @@ void test_runtime_sequence_collections_contract() {
   using namespace amber::bytecode;
 
   BcModule module;
-  module.symbols = {"lazy",     "map",      "select", "reduce", "+",     ">",
+  module.symbols = {"lazy",     "map",   "select", "reduce", "+",     ">",
                     "flat_map", "group", "count",  "find",   "first", "to_a",
-                    "any?",     "all?",     "none?",  "low",    "high"};
+                    "any?",     "all?",  "none?",  "low",    "high"};
 
   Constant one;
   one.kind = ConstantKind::Integer;
@@ -4448,7 +4461,8 @@ void test_runtime_map_collections_contract() {
        make_closure_value(22)});
   expect(exec.ok(), "map collections probe should execute");
   expect(exec.value.is_list(), "map collections probe should return list");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> parts = exec.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> parts =
+      exec.value.as_list();
   expect(parts != nullptr && parts->items.size() == 7,
          "map collections probe should return seven parts");
   expect(parts->items[0].is_list() &&
@@ -4532,7 +4546,8 @@ void test_manual_instance_send_dispatch() {
   body.instructions.push_back({Opcode::Return, {{1, false}}});
   module.code_objects = {caller, body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   instance->ivars["mass"] = amber::runtime::Value::integer(11);
 
@@ -4561,7 +4576,8 @@ void test_manual_store_and_load_ivar() {
   code.instructions.push_back({Opcode::Return, {{2, false}}});
   module.code_objects.push_back(code);
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
 
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
@@ -4699,7 +4715,8 @@ void test_manual_multi_segment_superclass_dispatch() {
   body.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 1;
 
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
@@ -4848,7 +4865,8 @@ void test_manual_ivar_cache_shape_guard() {
   code.instructions.push_back({Opcode::Return, {{2, false}}});
   module.code_objects.push_back(code);
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
 
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
@@ -4954,7 +4972,8 @@ void test_runtime_dead_shape_rejects_ivar_access() {
 
   auto dead_shape = std::make_shared<amber::runtime::ShapeDescriptor>();
   dead_shape->dead = true;
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   instance->header.shape = dead_shape;
   instance->header.flags = amber::runtime::kObjectFlagDead;
@@ -4984,7 +5003,8 @@ void test_runtime_heap_worker_arena_headers() {
     closure = heap.make_closure_value();
   }
 
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list_ptr = list.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list_ptr =
+      list.as_list();
   expect(list_ptr->header.allocation_id != 0,
          "list should carry heap allocation id");
   expect(list_ptr->header.arena_worker_id == 7,
@@ -5073,7 +5093,8 @@ void test_runtime_gc_full_cycle_preserves_root_address() {
   amber::runtime::RuntimeHeap heap;
   amber::runtime::Value root =
       heap.make_list_value({amber::runtime::Value::integer(1)});
-  amber::runtime::IntrusivePtr<amber::runtime::ListValue> root_ptr = root.as_list();
+  amber::runtime::IntrusivePtr<amber::runtime::ListValue> root_ptr =
+      root.as_list();
   const amber::runtime::ListValue *address = root_ptr.get();
 
   const amber::runtime::RuntimeGcResult result =
@@ -5094,8 +5115,10 @@ void test_runtime_gc_reclaims_unrooted_reference_cycle() {
   amber::runtime::RuntimeHeap heap;
   amber::runtime::Value left = heap.make_list_value({});
   amber::runtime::Value right = heap.make_list_value({});
-  amber::runtime::IntrusivePtr<amber::runtime::ListValue> left_ptr = left.as_list();
-  amber::runtime::IntrusivePtr<amber::runtime::ListValue> right_ptr = right.as_list();
+  amber::runtime::IntrusivePtr<amber::runtime::ListValue> left_ptr =
+      left.as_list();
+  amber::runtime::IntrusivePtr<amber::runtime::ListValue> right_ptr =
+      right.as_list();
   left_ptr->items.push_back(right);
   right_ptr->items.push_back(left);
 
@@ -5118,7 +5141,8 @@ void test_runtime_gc_reclaims_unrooted_reference_cycle() {
 void test_runtime_gc_write_barrier_remembers_mature_to_young_edge() {
   amber::runtime::RuntimeHeap heap;
   amber::runtime::Value parent = heap.make_list_value({});
-  amber::runtime::IntrusivePtr<amber::runtime::ListValue> parent_ptr = parent.as_list();
+  amber::runtime::IntrusivePtr<amber::runtime::ListValue> parent_ptr =
+      parent.as_list();
 
   heap.collect_garbage({parent}, amber::runtime::RuntimeGcCycle::Full);
   expect(parent_ptr->header.generation ==
@@ -5422,7 +5446,8 @@ void test_runtime_pin_roots_gc_and_rejects_stale_unpin() {
   amber::runtime::RuntimeHeap heap;
   amber::runtime::Value value =
       heap.make_list_value({amber::runtime::Value::integer(1)});
-  amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = value.as_list();
+  amber::runtime::IntrusivePtr<amber::runtime::ListValue> list =
+      value.as_list();
 
   amber::runtime::RuntimePinResult pin = heap.pin(value);
   expect(pin.ok && pin.token.active, "pin should create active token");
@@ -5457,7 +5482,8 @@ void test_runtime_pin_roots_gc_and_rejects_stale_unpin() {
 void test_runtime_pin_scope_nesting_counts_and_releases() {
   amber::runtime::RuntimeHeap heap;
   amber::runtime::Value value = heap.make_list_value({});
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list =
+      value.as_list();
 
   {
     amber::runtime::RuntimePinScope outer(heap, value);
@@ -5484,7 +5510,8 @@ void test_runtime_pin_scope_nesting_counts_and_releases() {
 void test_runtime_pin_scope_releases_during_exception_unwind() {
   amber::runtime::RuntimeHeap heap;
   const amber::runtime::Value value = heap.make_list_value({});
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list =
+      value.as_list();
 
   bool caught = false;
   try {
@@ -5607,7 +5634,8 @@ void test_runtime_pin_dealloc_after_pin_violation() {
   amber::runtime::ExecutionResult made = world.execute(1);
   expect(made.ok() && made.value.is_list(),
          "pin dealloc probe should make list");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list = made.value.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list =
+      made.value.as_list();
 
   amber::runtime::RuntimePinResult pin = world.pin(made.value);
   expect(pin.ok, "world pin should succeed");
@@ -6824,7 +6852,8 @@ void test_runtime_lifecycle_destroy_opcode_is_idempotent() {
   destroy_body.instructions.push_back({Opcode::Return, {{1, false}}});
   module.code_objects = {destroy, send_after_destroy, body, destroy_body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   instance->header.class_index = 0;
 
@@ -6881,7 +6910,8 @@ void test_runtime_lifecycle_dealloc_opcode_tombstones_instance_payload() {
   load_ivar.instructions.push_back({Opcode::Return, {{1, false}}});
   module.code_objects = {dealloc, load_ivar};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   instance->header.class_index = 0;
   instance->ivar_storage.push_back(amber::runtime::Value::integer(7));
@@ -6947,7 +6977,8 @@ void test_runtime_lifecycle_dealloc_clears_collection_payload() {
 
   amber::runtime::Value list = amber::runtime::make_list_value(
       {amber::runtime::Value::integer(1), amber::runtime::Value::integer(2)});
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list_ptr = list.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list_ptr =
+      list.as_list();
 
   const amber::runtime::ExecutionResult dealloc_result =
       amber::runtime::execute_code(module, 1, {list});
@@ -7030,7 +7061,8 @@ void test_runtime_world_define_method_invalidates_send_cache() {
   body_two.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body_one, body_two};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   amber::runtime::RuntimeWorld world(module);
   expect(world.method_table_size(
@@ -7156,7 +7188,8 @@ void test_runtime_world_include_invalidates_send_cache() {
   new_body.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, old_body, new_body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   amber::runtime::RuntimeWorld world(module);
 
@@ -7230,7 +7263,8 @@ void test_runtime_world_transaction_replaces_mixin_method_for_cached_class() {
   body_two.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body_one, body_two};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   amber::runtime::RuntimeWorld world(module);
 
@@ -7316,7 +7350,8 @@ void test_runtime_world_transaction_rolls_back_on_invalid_include() {
   expect(world.world_epoch() == epoch_before,
          "failed transaction should not bump world epoch");
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const amber::runtime::ExecutionResult send =
       world.execute(1, {amber::runtime::Value::instance(instance)});
@@ -7371,7 +7406,8 @@ void test_runtime_world_freeze_rejects_world_mutation_but_keeps_send() {
   body_two.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {caller, body_one, body_two};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   amber::runtime::RuntimeWorld world(module);
   const amber::runtime::ExecutionResult before =
@@ -7724,7 +7760,8 @@ void test_runtime_package_reload_swaps_compatible_package_atomically() {
       make_reload_artifact(make_reload_module(2));
   amber::runtime::RuntimeWorld world(original);
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const amber::runtime::ExecutionResult before =
       world.execute(1, {amber::runtime::Value::instance(instance)});
@@ -7756,7 +7793,8 @@ void test_runtime_package_reload_rejects_incompatible_surface_without_swap() {
       make_reload_artifact(make_reload_module(3, true, true));
   amber::runtime::RuntimeWorld world(original);
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const std::uint64_t epoch_before = world.world_epoch();
   const amber::runtime::RuntimePackageReloadResult rejected_export =
@@ -7805,7 +7843,8 @@ void test_runtime_package_reload_rejects_frozen_world_without_swap() {
   expect(world.world_epoch() == epoch_before,
          "frozen reload rejection should not bump epoch");
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const amber::runtime::ExecutionResult after =
       world.execute(1, {amber::runtime::Value::instance(instance)});
@@ -7833,7 +7872,8 @@ void test_runtime_package_reload_rolls_back_failed_decode() {
   expect(world.world_epoch() == epoch_before,
          "broken reload should not bump epoch");
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const amber::runtime::ExecutionResult after =
       world.execute(1, {amber::runtime::Value::instance(instance)});
@@ -7910,7 +7950,8 @@ void test_manual_pattern_deconstruct_protocol_sequence() {
   body.instructions.push_back({Opcode::Return, {{2, false}}});
   module.code_objects = {probe, body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       module, 1, {amber::runtime::Value::instance(instance)});
@@ -7984,7 +8025,8 @@ void test_manual_pattern_deconstruct_protocol_map() {
   body.instructions.push_back({Opcode::Return, {{2, false}}});
   module.code_objects = {probe, body};
 
-  auto instance = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto instance =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   instance->class_index = 0;
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       module, 1, {amber::runtime::Value::instance(instance)});
@@ -8024,7 +8066,8 @@ void test_manual_raise_handler_table_recovers() {
   handler.instructions.push_back({Opcode::Return, {{1, false}}});
   module.code_objects = {code, handler};
 
-  auto exception = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto exception =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   exception->class_index = 0;
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       module, 1, {amber::runtime::Value::instance(exception)});
@@ -8081,7 +8124,8 @@ void test_manual_raise_unwinds_closure_to_outer_handler() {
   handler.instructions.push_back({Opcode::Return, {{1, false}}});
   module.code_objects = {outer, inner, handler};
 
-  auto exception = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto exception =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   exception->class_index = 0;
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       module, 1, {amber::runtime::Value::instance(exception)});
@@ -8151,7 +8195,8 @@ void test_manual_raise_unwinds_method_send_to_outer_handler() {
   handler.instructions.push_back({Opcode::Return, {{1, false}}});
   module.code_objects = {caller, body, handler};
 
-  auto receiver = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto receiver =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   receiver->class_index = 0;
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       module, 1, {amber::runtime::Value::instance(receiver)});
@@ -8178,7 +8223,8 @@ void test_manual_raise_unhandled_fault_trace() {
   code.source_spans.push_back({0, 1, {"raise.am", {3, 5, 10}, {3, 15, 20}}});
   module.code_objects.push_back(code);
 
-  auto exception = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto exception =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   exception->class_index = 0;
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
       module, 1, {amber::runtime::Value::instance(exception)});
@@ -8284,37 +8330,36 @@ void test_source_try_rescue_ensure_execution() {
 }
 
 void test_native_error_inherited_rescue_execution() {
-  amber::runtime::ExecutionResult inherited = execute_emitted_init(
-      "try:\n"
-      "  raise JsonParseError(\"bad json\")\n"
-      "rescue JsonError |e|:\n"
-      "  if JsonError === e and JsonParseError === e:\n"
-      "    7\n"
-      "  else:\n"
-      "    0\n");
+  amber::runtime::ExecutionResult inherited =
+      execute_emitted_init("try:\n"
+                           "  raise JsonParseError(\"bad json\")\n"
+                           "rescue JsonError |e|:\n"
+                           "  if JsonError === e and JsonParseError === e:\n"
+                           "    7\n"
+                           "  else:\n"
+                           "    0\n");
   expect(inherited.ok() && inherited.value.is_integer() &&
              inherited.value.as_integer() == 7,
          "native parent error class should catch registered subclass");
 
-  amber::runtime::ExecutionResult sibling = execute_emitted_init(
-      "try:\n"
-      "  try:\n"
-      "    raise JsonParseError(\"bad json\")\n"
-      "  rescue JsonGenerateError:\n"
-      "    0\n"
-      "rescue JsonError:\n"
-      "  7\n");
+  amber::runtime::ExecutionResult sibling =
+      execute_emitted_init("try:\n"
+                           "  try:\n"
+                           "    raise JsonParseError(\"bad json\")\n"
+                           "  rescue JsonGenerateError:\n"
+                           "    0\n"
+                           "rescue JsonError:\n"
+                           "  7\n");
   expect(sibling.ok() && sibling.value.is_integer() &&
              sibling.value.as_integer() == 7,
          "native sibling error class should not catch");
 
-  amber::runtime::ExecutionResult root = execute_emitted_init(
-      "try:\n"
-      "  raise TypeError(\"bad type\")\n"
-      "rescue Exception:\n"
-      "  7\n");
-  expect(root.ok() && root.value.is_integer() &&
-             root.value.as_integer() == 7,
+  amber::runtime::ExecutionResult root =
+      execute_emitted_init("try:\n"
+                           "  raise TypeError(\"bad type\")\n"
+                           "rescue Exception:\n"
+                           "  7\n");
+  expect(root.ok() && root.value.is_integer() && root.value.as_integer() == 7,
          "Exception should catch existing native error classes");
 }
 
@@ -8426,9 +8471,11 @@ void test_manual_ensure_suppresses_pending_exception() {
   ensure.instructions.push_back({Opcode::Return, {{0, false}}});
   module.code_objects = {code, ensure};
 
-  auto primary = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto primary =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   primary->class_index = 0;
-  auto cleanup = amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
+  auto cleanup =
+      amber::runtime::make_intrusive<amber::runtime::InstanceValue>();
   cleanup->class_index = 1;
   const amber::runtime::ExecutionResult exec =
       amber::runtime::execute_code(module, 1,
@@ -8441,8 +8488,8 @@ void test_manual_ensure_suppresses_pending_exception() {
   const auto suppressed = cleanup->ivars.find("suppressed_exceptions");
   expect(suppressed != cleanup->ivars.end() && suppressed->second.is_list(),
          "cleanup exception should keep suppressed exceptions");
-  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> suppressed_list =
-      suppressed->second.as_list();
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue>
+      suppressed_list = suppressed->second.as_list();
   expect(suppressed_list != nullptr && suppressed_list->items.size() == 1,
          "one pending exception should be suppressed");
   expect(suppressed_list->items[0].is_instance_object() &&
@@ -8758,8 +8805,7 @@ void test_foreign_handle_lifetime() {
     auto handle = std::make_shared<RuntimeForeignHandle>();
     handle->tag = "pkg.Box";
     handle->ownership = Ownership::Borrowed;
-    amber::runtime::Value value =
-        amber::runtime::Value::foreign_handle(handle);
+    amber::runtime::Value value = amber::runtime::Value::foreign_handle(handle);
     expect(value.is_foreign_handle(),
            "Value::foreign_handle round-trips as a handle kind");
     expect(!value.is_null() && !value.is_uuid(),
@@ -8795,7 +8841,8 @@ void test_native_tag_registry() {
 
   expect(registry.size() == 2, "registry holds both descriptors");
   const NativeTypeDescriptor *owned_lookup = registry.lookup("pkg.Owned");
-  expect(owned_lookup != nullptr && owned_lookup->ownership == Ownership::Owned &&
+  expect(owned_lookup != nullptr &&
+             owned_lookup->ownership == Ownership::Owned &&
              owned_lookup->owned_destructor != nullptr &&
              owned_lookup->collected_reclaim == nullptr,
          "owned descriptor resolves with a destructor and no reclaim");

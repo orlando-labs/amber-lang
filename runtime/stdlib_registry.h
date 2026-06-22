@@ -100,11 +100,11 @@ public:
   // ByteBuffer). On success sets `*ptr`/`*len` to storage that stays valid for
   // as long as `*keepalive` is retained, and returns true. For an
   // already-immutable input the keepalive is the input value; for a ByteBuffer
-  // it is a frozen snapshot. Faults and returns false on the wrong kind. This is
-  // the zero-copy counterpart to `stdlib_bytes_of`, backing the ABI's
+  // it is a frozen snapshot. Faults and returns false on the wrong kind. This
+  // is the zero-copy counterpart to `stdlib_bytes_of`, backing the ABI's
   // `amber_bytes_view` (native-packages design §6); the borrowed view is the
-  // RuntimePinViewKind::ValueBuffer model -- a pointer into runtime-owned buffer
-  // storage that the caller must not outlive the keepalive.
+  // RuntimePinViewKind::ValueBuffer model -- a pointer into runtime-owned
+  // buffer storage that the caller must not outlive the keepalive.
   virtual bool stdlib_bytes_view(const void *frame, const Value &value,
                                  const std::uint8_t **ptr, std::size_t *len,
                                  Value *keepalive) = 0;

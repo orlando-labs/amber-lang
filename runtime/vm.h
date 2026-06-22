@@ -329,25 +329,27 @@ struct RuntimeTimePeriodValue {
   std::int64_t nanoseconds = 0;
 };
 
-// Backs a `native class` instance: an opaque host pointer plus the deterministic
-// lifetime model from the native-packages design (§7). Teardown runs through
-// destroy!/memory.dealloc; the GC never runs an `owned` destructor (no implicit
-// finalizer), and only a `collected` handle opts into GC reclamation. Held only
-// via shared_ptr (single owner), so copying is disabled to prevent double-free.
+// Backs a `native class` instance: an opaque host pointer plus the
+// deterministic lifetime model from the native-packages design (§7). Teardown
+// runs through destroy!/memory.dealloc; the GC never runs an `owned` destructor
+// (no implicit finalizer), and only a `collected` handle opts into GC
+// reclamation. Held only via shared_ptr (single owner), so copying is disabled
+// to prevent double-free.
 struct RuntimeForeignHandle {
   enum class Ownership { Owned, Borrowed, Collected };
 
-  std::string tag;       // per-(package,type) dispatch identity
-  void *ptr = nullptr;   // the wrapped foreign resource
+  std::string tag;     // per-(package,type) dispatch identity
+  void *ptr = nullptr; // the wrapped foreign resource
   Ownership ownership = Ownership::Borrowed;
   // Reclaim callback: the context-free reclaim for `collected`, a ctx-bound
   // closure supplied by the ABI layer for `owned`, and empty for `borrowed`.
-  // The ctx is the AmberCtx supplied at deterministic destroy!-time, type-erased
-  // to void* so this header stays free of the amber_ext.h C ABI types; an
-  // `owned` destructor uses it, a `collected` reclaim ignores it. The GC reclaim
-  // path passes nullptr (collected only, context-free by construction).
+  // The ctx is the AmberCtx supplied at deterministic destroy!-time,
+  // type-erased to void* so this header stays free of the amber_ext.h C ABI
+  // types; an `owned` destructor uses it, a `collected` reclaim ignores it. The
+  // GC reclaim path passes nullptr (collected only, context-free by
+  // construction).
   std::function<void(void *ctx, void *ptr)> teardown;
-  bool live = true;      // tombstone: cleared once destroyed
+  bool live = true; // tombstone: cleared once destroyed
 
   RuntimeForeignHandle() = default;
   RuntimeForeignHandle(const RuntimeForeignHandle &) = delete;
@@ -383,10 +385,10 @@ struct RuntimeForeignHandle {
 
 // Per-(package,type) descriptor for a `native class`: the dispatch tag plus the
 // ownership and reclaim resolved from the manifest [[native.types]] and the
-// linked extension symbols. The native binary registers one per type at startup;
-// amber_make_handle(cx, tag, ptr) looks it up by tag to build a correctly-owned
-// RuntimeForeignHandle. The ctx is type-erased to void* so this stays free of
-// the amber_ext.h C ABI types.
+// linked extension symbols. The native binary registers one per type at
+// startup; amber_make_handle(cx, tag, ptr) looks it up by tag to build a
+// correctly-owned RuntimeForeignHandle. The ctx is type-erased to void* so this
+// stays free of the amber_ext.h C ABI types.
 struct NativeTypeDescriptor {
   std::string tag;
   RuntimeForeignHandle::Ownership ownership =
@@ -494,9 +496,9 @@ std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
   X(time, is_time, as_time, RuntimeTimeValue, Time)                            \
   X(time_period, is_time_period, as_time_period, RuntimeTimePeriodValue,       \
     TimePeriod)                                                                \
-  X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)                             \
-  X(foreign_handle, is_foreign_handle, as_foreign_handle, RuntimeForeignHandle, \
-    ForeignHandle)
+  X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)                            \
+  X(foreign_handle, is_foreign_handle, as_foreign_handle,                      \
+    RuntimeForeignHandle, ForeignHandle)
 
 #ifndef AMBER_VALUE_REPR_TAGGED
 // ---- Variant representation (default, 24 bytes) ---------------------------
@@ -517,8 +519,7 @@ struct Value {
       std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>,
       std::shared_ptr<RuntimeArgParserValue>, std::shared_ptr<RuntimeTimeValue>,
       std::shared_ptr<RuntimeTimePeriodValue>,
-      std::shared_ptr<RuntimeUuidValue>,
-      std::shared_ptr<RuntimeForeignHandle>>;
+      std::shared_ptr<RuntimeUuidValue>, std::shared_ptr<RuntimeForeignHandle>>;
 
   Payload payload;
 

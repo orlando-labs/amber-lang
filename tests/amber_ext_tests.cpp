@@ -157,7 +157,8 @@ struct RecordingHost : StdlibHost {
                            std::string * /*out*/) override {
     return false;
   }
-  bool stdlib_fs_write_text(const void * /*frame*/, const std::string & /*path*/,
+  bool stdlib_fs_write_text(const void * /*frame*/,
+                            const std::string & /*path*/,
                             const std::string & /*text*/) override {
     return false;
   }
@@ -288,7 +289,8 @@ void test_amber_ext_handle_lifecycle() {
 
   // Deterministic destroy! threads the destroy-time ctx into the destructor.
   Value handle_value = amber::runtime::amber_ext_ctx_export(cx, handle_v);
-  expect(handle_value.is_foreign_handle(), "exported value is a foreign handle");
+  expect(handle_value.is_foreign_handle(),
+         "exported value is a foreign handle");
   int destroy_ctx_marker = 0;
   expect(handle_value.as_foreign_handle()->destroy(&destroy_ctx_marker),
          "owned destroy! reports it ran");
