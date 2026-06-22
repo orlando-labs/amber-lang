@@ -9888,6 +9888,12 @@ public:
   void stdlib_raise_exception(const void *frame, Value exception) override {
     raise_value(*static_cast<const Frame *>(frame), exception);
   }
+  void stdlib_raise_runtime_error(const void *frame,
+                                  const std::string &error_class,
+                                  const std::string &message) override {
+    raise_runtime_error(*static_cast<const Frame *>(frame), error_class,
+                        message);
+  }
   bool stdlib_write_output(const void *frame, bool stderr_stream,
                            const std::string &text) override {
     const Frame &active = *static_cast<const Frame *>(frame);

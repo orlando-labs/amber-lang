@@ -61,6 +61,15 @@ public:
   // Raise an existing exception value through ordinary VM unwinding.
   virtual void stdlib_raise_exception(const void *frame, Value exception) = 0;
 
+  // Raise a builtin runtime error by class name as a *rescuable* exception that
+  // unwinds to the nearest handler (degrading to a terminal fault only when the
+  // name is unknown or no handler exists). This is the rescuable counterpart to
+  // stdlib_set_fault, used by the native-extension ABI's amber_fault so a thunk
+  // fault is catchable by `rescue` (native-packages design §6).
+  virtual void stdlib_raise_runtime_error(const void *frame,
+                                          const std::string &error_class,
+                                          const std::string &message) = 0;
+
   // Write CLI-facing output through the runtime's logical stdout/stderr.
   virtual bool stdlib_write_output(const void *frame, bool stderr_stream,
                                    const std::string &text) = 0;

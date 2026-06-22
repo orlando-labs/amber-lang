@@ -52,6 +52,15 @@ struct RecordingHost : StdlibHost {
   }
   void stdlib_raise_exception(const void * /*frame*/,
                               Value /*exception*/) override {}
+  void stdlib_raise_runtime_error(const void * /*frame*/,
+                                  const std::string &error_class,
+                                  const std::string &message) override {
+    // The ABI's amber_fault / amber_handle_ptr now raise rescuable errors; the
+    // recording host treats them like a recorded fault for assertions.
+    faulted = true;
+    fault_class = error_class;
+    fault_message = message;
+  }
   bool stdlib_write_output(const void * /*frame*/, bool /*stderr_stream*/,
                            const std::string & /*text*/) override {
     return true;

@@ -191,24 +191,25 @@ int amber_handle_ptr(AmberCtx *cx, AmberValue value, const char *tag,
                      void **out) {
   const Value &v = cx->resolve(value);
   if (!v.is_foreign_handle()) {
-    cx->host->stdlib_set_fault(cx->frame, "TypeError",
-                               "expected a native handle");
+    cx->host->stdlib_raise_runtime_error(cx->frame, "TypeError",
+                                         "expected a native handle");
     return 0;
   }
   const std::shared_ptr<amber::runtime::RuntimeForeignHandle> handle =
       v.as_foreign_handle();
   if (handle == nullptr) {
-    cx->host->stdlib_set_fault(cx->frame, "TypeError", "native handle is null");
+    cx->host->stdlib_raise_runtime_error(cx->frame, "TypeError",
+                                         "native handle is null");
     return 0;
   }
   if (tag != nullptr && handle->tag != tag) {
-    cx->host->stdlib_set_fault(cx->frame, "TypeError",
-                               "native handle tag mismatch");
+    cx->host->stdlib_raise_runtime_error(cx->frame, "TypeError",
+                                         "native handle tag mismatch");
     return 0;
   }
   if (!handle->live) {
-    cx->host->stdlib_set_fault(cx->frame, "LifetimeError",
-                               "native handle used after destroy!");
+    cx->host->stdlib_raise_runtime_error(cx->frame, "LifetimeError",
+                                         "native handle used after destroy!");
     return 0;
   }
   *out = handle->ptr;
@@ -250,8 +251,8 @@ AmberValue amber_make_handle(AmberCtx *cx, const char *tag, void *ptr) {
   const amber::runtime::NativeTypeDescriptor *descriptor =
       cx->tags == nullptr ? nullptr : cx->tags->lookup(tag_str);
   if (descriptor == nullptr) {
-    cx->host->stdlib_set_fault(cx->frame, "TypeError",
-                               "unknown native handle tag '" + tag_str + "'");
+    cx->host->stdlib_raise_runtime_error(
+        cx->frame, "TypeError", "unknown native handle tag '" + tag_str + "'");
     return cx->push(Value::null());
   }
   auto handle = std::make_shared<amber::runtime::RuntimeForeignHandle>();
@@ -289,7 +290,9 @@ AmberValue amber_make_handle(AmberCtx *cx, const char *tag, void *ptr) {
 
 AmberStatus amber_fault(AmberCtx *cx, const char *error_class,
                         const char *message) {
-  cx->host->stdlib_set_fault(
+  // Rescuable: maps to an Amber error class an enclosing `rescue` can catch
+  // (native-packages design §6), not a terminal fault.
+  cx->host->stdlib_raise_runtime_error(
       cx->frame, error_class == nullptr ? "RuntimeError" : error_class,
       message == nullptr ? "" : message);
   return AMBER_ERR;

@@ -37,6 +37,11 @@ AmberStatus box_box_bump(AmberCtx *cx, AmberValue self, const AmberValue *args,
   if (argc != 1 || !amber_as_int(cx, args[0], &by)) {
     return amber_fault(cx, "TypeError", "bump! expects one Int");
   }
+  if (by == 0) {
+    /* A thunk-raised, rescuable error (amber_fault maps to a `rescue`-able
+     * class), exercised by the fixture's `rescue ValueError`. */
+    return amber_fault(cx, "ValueError", "bump! by zero");
+  }
   ((Box *)handle)->value += by;
   *out = self;
   return AMBER_OK;

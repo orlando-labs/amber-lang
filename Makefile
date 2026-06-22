@@ -459,8 +459,9 @@ test: build
 	$(BUILD_DIR)/amberc build tests/fixtures/native_class_demo/amber.build.json --target native --out-dir $(BUILD_DIR)/native_class_demo/out --cache-dir $(BUILD_DIR)/native_class_demo/cache > $(BUILD_DIR)/native-class-demo-build.json
 	grep -q '"status": "ok"' $(BUILD_DIR)/native-class-demo-build.json
 	$(BUILD_DIR)/native_class_demo/out/nat.box > $(BUILD_DIR)/native-class-demo-native.out
-	grep -q '^23$$' $(BUILD_DIR)/native-class-demo-native.out
+	grep -q '^24$$' $(BUILD_DIR)/native-class-demo-native.out
 	! $(BUILD_DIR)/amberc tests/fixtures/native_class_demo/src/main.am > $(BUILD_DIR)/native-class-demo-bytecode.out 2>&1
+	grep -q 'NativeRequiredError' $(BUILD_DIR)/native-class-demo-bytecode.out
 	$(BUILD_DIR)/ambertest run corpus
 
 conformance: $(BUILD_DIR)/ambertest

@@ -6,22 +6,30 @@ export main
 # deterministic teardown through destroy!. The methods are native-only leaves
 # (no Amber body): in a bytecode build constructing one raises
 # NativeRequiredError; a native build routes new/bump!/value/destroy! to the C
-# thunks, and a use-after-destroy! raises LifetimeError.
+# thunks. Two rescuable errors are exercised: a thunk-raised ValueError
+# (amber_fault) and a use-after-destroy! LifetimeError.
 native class Box from "box.Box" owned:
-  def init(start: Int)        from "box.box_new"
-  def bump!(by: Int) -> self  from "box.box_bump"
-  def value() -> Int          from "box.box_value"
-  def destroy!()              from "box.box_free"
+  def init(start as Int)        from "box.box_new"
+  def bump!(by as Int) -> self  from "box.box_bump"
+  def value() -> Int            from "box.box_value"
+  def destroy!()                from "box.box_free"
 
 def main():
   b = Box(10)
   b.bump!(5)
   b.bump!(7)
   total = b.value()
+  # A thunk that calls amber_fault raises a rescuable error (bump! by 0).
+  caught_value = 0
+  try:
+    b.bump!(0)
+  rescue ValueError |e|:
+    caught_value = 1
   b.destroy!()
-  caught = 0
+  # Use-after-destroy! is a rescuable LifetimeError.
+  caught_lifetime = 0
   try:
     b.value()
   rescue LifetimeError |e|:
-    caught = 1
-  total + caught
+    caught_lifetime = 1
+  total + caught_value + caught_lifetime
