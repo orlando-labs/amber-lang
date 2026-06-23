@@ -274,6 +274,7 @@ enum class RuntimeNativeTypeKind {
   Fs,
   FsPath,
   FsFile,
+  Net,
   NetEndpoint,
   NetTcp,
   NetUdp,
@@ -1494,6 +1495,11 @@ struct RuntimeSchedulerStats {
   std::uint64_t task_join_timeouts = 0;
   std::uint64_t task_cancellation_requests = 0;
   std::uint64_t task_wait_state_entries = 0;
+  // Layer B cooperative suspension: a running strand parked itself (releasing
+  // its worker) rather than blocking it. park_resumes counts re-dispatches of a
+  // previously parked strand.
+  std::uint64_t parks = 0;
+  std::uint64_t park_resumes = 0;
   std::uint64_t structured_child_tasks = 0;
   std::uint64_t first_failure_cancellations = 0;
   std::uint64_t supervisor_one_for_one_failures = 0;
@@ -1879,6 +1885,19 @@ public:
                                     RuntimeTaskOptions options,
                                     StrandFunction function);
   bool wake_strand(std::uint64_t strand_id);
+
+  // Layer B cooperative suspension. Called by the currently-running strand
+  // (from within its strand function) to request that, when the function
+  // returns, the strand be parked and its worker released to run other strands,
+  // rather than finalized. The same strand function is re-invoked when the
+  // strand is woken, so it must resume its work (e.g. continue a persisted VM)
+  // rather than restart it. With `wake_after` a timer wake is scheduled;
+  // otherwise the strand stays parked until an explicit wake_strand(). Returns
+  // false when there is no current scheduler strand, in which case the caller
+  // must fall back to blocking.
+  bool park_current(
+      std::optional<std::chrono::milliseconds> wake_after = std::nullopt);
+
   bool cancel_task(std::uint64_t task_id);
   bool task_cancel_requested(std::uint64_t task_id) const;
   RuntimeTaskJoinResult join_task(
@@ -2643,6 +2662,12 @@ ExecutionResult execute_code(const bytecode::BcModule &module,
                              const std::vector<Value> &args = {},
                              Value self = Value::null(),
                              Value block = Value::null());
+
+// Layer B observability/test hook: process-wide count of cooperative task
+// parks (a task body suspended at a suspension point such as task.sleep,
+// releasing its worker, rather than blocking it). Monotonic; snapshot it before
+// and after a run to assert the cooperative path was taken.
+std::uint64_t runtime_cooperative_task_park_count();
 
 std::string value_to_debug_string(
     const Value &value, const bytecode::BcModule *module = nullptr,

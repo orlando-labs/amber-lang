@@ -26,6 +26,10 @@ struct RuntimeIoStatus {
   bool would_block = false;
   bool timed_out = false;
   bool cancelled = false;
+  // Layer B cooperative IO yield: set by wait_fd when parking is enabled
+  // (tls_runtime_io_park_enabled) instead of blocking. The VM turns this into a
+  // strand park + reactor wait_async; the blocking op is retried on resume.
+  bool park = false;
   std::size_t count = 0;
   std::string bytes;
   std::string error_name;
@@ -126,6 +130,9 @@ public:
   bool full() const;
   bool read_mode() const;
   RuntimeIoStatus access_status() const;
+  // Re-binds this buffer's confinement owner to the current strand, so a buffer
+  // created on one strand can be explicitly handed to a task and used there.
+  void adopt_to_current_owner();
   RuntimeIoStatus clear();
   RuntimeIoStatus flip();
   RuntimeIoStatus rewind();
@@ -159,7 +166,9 @@ private:
   std::size_t position_ = 0;
   std::size_t limit_ = 0;
   bool read_mode_ = false;
-  std::uint64_t owner_strand_id_ = 0;
+  // Atomic so an explicit adopt_to_current_owner() handoff can re-stamp the
+  // owner while another strand concurrently observes it in check_owner().
+  std::atomic<std::uint64_t> owner_strand_id_{0};
 
   friend class RuntimeFile;
   friend class RuntimePipeReader;
@@ -224,6 +233,10 @@ public:
   std::uint64_t owner_strand_id() const;
   void allow_unchecked_sharing(bool allow = true);
   bool unchecked_sharing_allowed() const;
+  // Re-binds this resource's confinement owner to the current strand. This is
+  // the explicit handoff primitive: an accept-on-one-strand socket can be moved
+  // into a worker task, which adopts it before use.
+  void adopt_to_current_owner();
   std::uint64_t resource_id() const;
   RuntimeIoStatus access_status() const;
   virtual RuntimeIoStatus close();
@@ -233,7 +246,9 @@ protected:
   void mark_closed();
 
 private:
-  std::uint64_t owner_strand_id_ = 0;
+  // Atomic so adopt_to_current_owner() can re-stamp the owner while another
+  // strand concurrently observes it in check_access().
+  std::atomic<std::uint64_t> owner_strand_id_{0};
   std::uint64_t resource_id_ = 0;
   std::atomic<bool> closed_{false};
   std::atomic<bool> unchecked_sharing_{false};

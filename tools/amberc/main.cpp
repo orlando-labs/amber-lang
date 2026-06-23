@@ -5966,6 +5966,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/context.cpp",
       "runtime/text.cpp",
       "runtime/io.cpp",
+      "runtime/reactor.cpp",
       "runtime/digest.cpp",
       "runtime/vm.cpp",
       "runtime/stdlib_registry.cpp",

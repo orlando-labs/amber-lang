@@ -1,0 +1,20 @@
+package conformance.run
+import net
+from io import ByteBuffer
+
+# Loopback TCP round-trip on a single strand: listen on an ephemeral port,
+# connect, write, accept, and read the payload back. Exercises the net.tcp
+# namespace (listen/connect), the listener (accept!/local_endpoint), and the
+# stream reader/writer (write_all!/read!) end to end from Amber source.
+def probe():
+  listener = net.tcp.listen("127.0.0.1", 0)
+  port = listener.local_endpoint().port()
+  client = net.tcp.connect("127.0.0.1", port)
+  client.write_all!("ping".bytes())
+  server = listener.accept!()
+  buf = ByteBuffer.new(4)
+  n = server.read!(buf)
+  client.close!()
+  server.close!()
+  listener.close!()
+  "#{port > 0}:#{n}:#{buf.bytes().to_str()}"

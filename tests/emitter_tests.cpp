@@ -262,6 +262,69 @@ void test_closure_capture_emission() {
   expect(saw_upval_load, "closure body emits LOAD_UPVAL");
 }
 
+// Regression: a closure that references an imported module by name (e.g.
+// `task` inside `task.spawn: task.sleep(5)`) must not capture the import alias
+// as an upvalue. The alias resolves to a runtime constant and is loaded via
+// LOOKUP_CONST everywhere, so its import-alias local slot is never stored;
+// capturing it emitted a MAKE_CLOSURE that read an uninitialized register,
+// tripping the bytecode verifier with BC1313.
+void test_closure_module_import_reference_verifies() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("import task\n"
+              "h = task.spawn: task.sleep(5)\n"
+              "h.wait()\n");
+
+  // The module is well-formed only if it survives verification (deserialize
+  // re-runs the verifier); before the fix this failed with BC1313.
+  const std::vector<std::uint8_t> bytes =
+      amber::bytecode::serialize_module(emit_result.module);
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(bytes);
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  // The closure body should reach the module import through LOOKUP_CONST and
+  // must not capture it as an upvalue.
+  const amber::bytecode::BcCode *block_code =
+      code_by_kind(emit_result.module, amber::bytecode::CodeKind::Block);
+  expect(block_code != nullptr, "closure block code exists");
+  expect(contains_opcode(*block_code, amber::bytecode::Opcode::LookupConst),
+         "closure body loads the module import via LOOKUP_CONST");
+  expect(!contains_opcode(*block_code, amber::bytecode::Opcode::LoadUpval),
+         "closure body must not load the module import via LOAD_UPVAL");
+  expect(block_code->capture_layout.empty(),
+         "closure must not capture the module import alias");
+}
+
+// Regression: top-level references to the net/io stdlib namespaces and their
+// nested types resolve to runtime constant paths (e.g. "net.tcp",
+// "io.ByteBuffer") via LOOKUP_CONST. Their import-alias local slot is never
+// stored, so an `import net` / `from io import ByteBuffer` reference that
+// lowered to a plain local read tripped the bytecode verifier with BC1313.
+void test_net_io_stdlib_alias_references_verify() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("import net\n"
+              "from io import ByteBuffer\n"
+              "l = net.tcp.listen(\"127.0.0.1\", 0)\n"
+              "b = ByteBuffer.new(8)\n"
+              "n = \"hi\".bytes().count()\n");
+
+  // The module is well-formed only if it survives verification (deserialize
+  // re-runs the verifier); before the fix this failed with BC1313.
+  const std::vector<std::uint8_t> bytes =
+      amber::bytecode::serialize_module(emit_result.module);
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(bytes);
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+
+  // The stdlib aliases reach the runtime through LOOKUP_CONST rather than a
+  // read of their (never-stored) import-alias slot.
+  const amber::bytecode::BcCode *init_code =
+      code_by_kind(emit_result.module, amber::bytecode::CodeKind::Module);
+  expect(init_code != nullptr, "module init code exists");
+  expect(contains_opcode(*init_code, amber::bytecode::Opcode::LookupConst),
+         "net/io aliases load via LOOKUP_CONST");
+}
+
 void test_default_thunk_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("def configure(x, y = x + 1):\n"
@@ -967,6 +1030,8 @@ int main() {
   test_if_and_round_trip();
   test_loop_and_safepoint();
   test_closure_capture_emission();
+  test_closure_module_import_reference_verifies();
+  test_net_io_stdlib_alias_references_verify();
   test_default_thunk_emission();
   test_type_hook_emission();
   test_keyword_param_emission();

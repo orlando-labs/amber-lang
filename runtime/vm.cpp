@@ -2,6 +2,7 @@
 #include "runtime/amber_ext_runtime.h"
 #include "runtime/context.h"
 #include "runtime/io.h"
+#include "runtime/reactor.h"
 #include "runtime/stdlib_registry.h"
 
 #include <algorithm>
@@ -2984,6 +2985,14 @@ public:
     if (is_terminal_state(strand.state)) {
       return false;
     }
+    if (strand.state == RuntimeStrandState::Running && strand.park_pending) {
+      // The strand asked to park (park_current) but worker_loop has not yet
+      // transitioned it to Sleeping. Record the wake; the park transition will
+      // re-enqueue it immediately rather than sleeping. mutex_ serializes this
+      // against the park transition, so the wake cannot be lost either way.
+      strand.park_wake_pending = true;
+      return true;
+    }
     if (strand.state != RuntimeStrandState::Sleeping || strand.wake_pending ||
         strand.queued) {
       ++stats_.coalesced_wakes;
@@ -3000,10 +3009,40 @@ public:
     return true;
   }
 
-  bool cancel_task(std::uint64_t task_id) {
+  bool park_current(std::optional<std::chrono::milliseconds> wake_after) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const bool cancelled = request_cancel_locked(task_id);
-    cv_.notify_all();
+    const std::uint64_t id = current_runtime_task_id();
+    if (id == 0) {
+      return false;
+    }
+    auto found = strands_.find(id);
+    if (found == strands_.end() ||
+        found->second.state != RuntimeStrandState::Running) {
+      return false;
+    }
+    found->second.park_pending = true;
+    if (wake_after.has_value()) {
+      found->second.park_wake_deadline =
+          std::chrono::steady_clock::now() + *wake_after;
+    } else {
+      found->second.park_wake_deadline.reset();
+    }
+    return true;
+  }
+
+  bool cancel_task(std::uint64_t task_id) {
+    bool cancelled;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      cancelled = request_cancel_locked(task_id);
+      cv_.notify_all();
+    }
+    // Wake the reactor so a strand parked on a blocking IO wait observes its
+    // (or an ancestor's) freshly-set cancel flag now, rather than at the next
+    // safety re-scan.
+    if (cancelled) {
+      RuntimeReactor::instance().kick();
+    }
     return cancelled;
   }
 
@@ -3187,6 +3226,18 @@ private:
     std::uint64_t wake_generation = 0;
     bool wake_pending = false;
     bool queued = false;
+    // Layer B: set by park_current() while the strand is Running; consumed by
+    // worker_loop after the strand function returns to park (free the worker)
+    // instead of finalizing. An optional deadline schedules a timer wake.
+    bool park_pending = false;
+    std::optional<std::chrono::steady_clock::time_point> park_wake_deadline;
+    // A wake (wake_strand) that arrived after park_current() but before
+    // worker_loop transitioned the strand to Sleeping. The park transition
+    // honors it by re-enqueueing immediately instead of sleeping, so an
+    // external wake (e.g. a reactor IO-readiness completion) racing the park
+    // is never lost.
+    bool park_wake_pending = false;
+    bool parked_once = false;
     std::uint64_t explicit_wakes = 0;
     std::uint64_t timer_wakes = 0;
     std::uint64_t parent_task_id = 0;
@@ -3354,6 +3405,9 @@ private:
         first_worker_id_ + static_cast<std::uint64_t>(worker_index);
     ++running_count_;
     ++stats_.worker_dequeues;
+    if (strand.parked_once) {
+      ++stats_.park_resumes;
+    }
     if (running_count_ > stats_.max_parallel_running) {
       stats_.max_parallel_running = running_count_;
     }
@@ -3644,13 +3698,41 @@ private:
       {
         std::lock_guard<std::mutex> lock(mutex_);
         auto found = strands_.find(strand_id);
-        if (found != strands_.end()) {
-          found->second.worker_id = 0;
+        if (found != strands_.end() && found->second.park_pending) {
+          // Layer B: the strand parked itself. Release the worker without
+          // finalizing; the strand's function is re-invoked (resumed) when the
+          // strand is woken by its timer or an explicit wake_strand().
+          StrandRecord &strand = found->second;
+          strand.park_pending = false;
+          strand.parked_once = true;
+          strand.worker_id = 0;
+          strand.state = RuntimeStrandState::Sleeping;
+          strand.wake_pending = false;
+          strand.queued = false;
+          ++strand.wake_generation;
+          ++stats_.parks;
+          if (running_count_ > 0) {
+            --running_count_;
+          }
+          if (strand.park_wake_pending) {
+            // A wake raced the park (e.g. reactor IO readiness fired before we
+            // got here). Resume immediately instead of sleeping.
+            strand.park_wake_pending = false;
+            enqueue_runnable_locked(strand_id, std::nullopt);
+          } else if (strand.park_wake_deadline.has_value()) {
+            timers_.push(TimerEntry{*strand.park_wake_deadline, strand_id,
+                                    strand.wake_generation});
+            strand.park_wake_deadline.reset();
+          }
+        } else {
+          if (found != strands_.end()) {
+            found->second.worker_id = 0;
+          }
+          if (running_count_ > 0) {
+            --running_count_;
+          }
+          finish_or_wait_locked(strand_id, completion);
         }
-        if (running_count_ > 0) {
-          --running_count_;
-        }
-        finish_or_wait_locked(strand_id, completion);
       }
       cv_.notify_all();
     }
@@ -3726,6 +3808,11 @@ RuntimeScheduler::spawn_sleeping_strand(std::chrono::milliseconds delay,
 
 bool RuntimeScheduler::wake_strand(std::uint64_t strand_id) {
   return impl_->wake_strand(strand_id);
+}
+
+bool RuntimeScheduler::park_current(
+    std::optional<std::chrono::milliseconds> wake_after) {
+  return impl_->park_current(wake_after);
 }
 
 std::uint64_t RuntimeScheduler::spawn_task(StrandFunction function) {
@@ -4035,6 +4122,49 @@ bool RuntimeTaskHandle::failed() const {
   return snapshot.has_value() && snapshot->state == RuntimeStrandState::Failed;
 }
 
+namespace {
+// Layer B cooperative suspension. g_amber_task_parked is a same-thread
+// handshake set by a parked task driver and observed by its task_body so the
+// body returns without recording completion (the scheduler re-invokes it to
+// resume). g_amber_cooperative_parks is the monotonic observability counter
+// exposed by runtime_cooperative_task_park_count().
+thread_local bool g_amber_task_parked = false;
+std::atomic<std::uint64_t> g_amber_cooperative_parks{0};
+
+// What a task driver's parked step loop is waiting for. Timer = task.sleep
+// (resume after a delay and continue past the suspension point). Io = a
+// blocking socket op parked via wait_fd (resume on reactor
+// readiness/deadline/cancel and retry the op, so the Send's PC is NOT
+// advanced).
+struct ParkRequest {
+  enum class Kind { Timer, Io };
+  Kind kind = Kind::Timer;
+  std::chrono::milliseconds wake_after{0};
+  int fd = -1;
+  ReactorInterest interest = ReactorInterest::Read;
+  std::optional<std::chrono::steady_clock::time_point> deadline;
+};
+
+// RAII: enable cooperative IO parking for the dynamic extent of one blocking io
+// op (clearing the per-op "requested" flag on entry), and restore on exit.
+// While enabled, io.cpp's wait_fd reports the fd via the thread-local park
+// channel instead of blocking.
+struct IoParkGuard {
+  bool previous;
+  explicit IoParkGuard(bool enable) : previous(tls_runtime_io_park_enabled) {
+    tls_runtime_io_park_enabled = enable;
+    tls_runtime_io_park_requested = false;
+  }
+  ~IoParkGuard() { tls_runtime_io_park_enabled = previous; }
+  IoParkGuard(const IoParkGuard &) = delete;
+  IoParkGuard &operator=(const IoParkGuard &) = delete;
+};
+} // namespace
+
+std::uint64_t runtime_cooperative_task_park_count() {
+  return g_amber_cooperative_parks.load();
+}
+
 RuntimeTaskModule::RuntimeTaskModule(std::size_t worker_count)
     : RuntimeTaskModule(RuntimeSchedulerConfig{worker_count, 1}) {}
 
@@ -4094,8 +4224,16 @@ RuntimeTaskHandle RuntimeTaskModule::spawn_with_kind(SpawnKind kind,
   auto task_body = [state, function = std::move(function),
                     inherited_annotation]() mutable {
     RuntimeTaskAnnotationScope annotation_scope(inherited_annotation);
+    g_amber_task_parked = false;
     try {
       const Value value = function ? function() : Value::null();
+      if (g_amber_task_parked) {
+        // Layer B: the task body parked itself at a suspension point. Do not
+        // record completion; worker_loop leaves the strand parked and the
+        // scheduler re-invokes this body (resuming the same VM) when woken.
+        g_amber_task_parked = false;
+        return;
+      }
       std::lock_guard<std::mutex> lock(state->mutex);
       state->value = value;
       state->has_value = true;
@@ -7508,6 +7646,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "fs.Path";
   case RuntimeNativeTypeKind::FsFile:
     return "fs.File";
+  case RuntimeNativeTypeKind::Net:
+    return "net";
   case RuntimeNativeTypeKind::NetEndpoint:
     return "net.Endpoint";
   case RuntimeNativeTypeKind::NetTcp:
@@ -14276,6 +14416,9 @@ private:
     if (path == "fs.File") {
       return Value::native_type(RuntimeNativeTypeKind::FsFile);
     }
+    if (path == "net") {
+      return Value::native_type(RuntimeNativeTypeKind::Net);
+    }
     if (path == "net.Endpoint") {
       return Value::native_type(RuntimeNativeTypeKind::NetEndpoint);
     }
@@ -20189,6 +20332,112 @@ private:
         };
   }
 
+  // Layer B: build a resumable driver for a task body (task.async/spawn).
+  // Unlike make_native_block_invoker (one-shot: fresh VM run to completion),
+  // this holds a persistent *parkable* VM with the block's entry frame pushed
+  // once, and drives it until done, fault, or a suspension point (task.sleep)
+  // requests a park. On park it parks the current scheduler strand (releasing
+  // the worker) and returns; the scheduler re-invokes the returned function,
+  // which resumes the same VM and continues past the suspension point.
+  std::optional<std::function<Value()>>
+  make_resumable_task_function(const Frame &frame, const Value &block,
+                               std::shared_ptr<RuntimeTaskModule> task,
+                               const std::string &context) {
+    if (block.is_null()) {
+      set_fault(frame, "TypeError", context + " requires block");
+      return std::nullopt;
+    }
+    if (!block.is_closure()) {
+      set_fault(frame, "TypeError", context + " block must be closure");
+      return std::nullopt;
+    }
+    if (!ensure_lifecycle_access(frame, block)) {
+      return std::nullopt;
+    }
+    const IntrusivePtr<ClosureValue> closure = block.as_closure();
+    if (closure == nullptr) {
+      set_fault(frame, "TypeError", "closure value is null");
+      return std::nullopt;
+    }
+
+    // The persistent VM owns its own copy of the module, so the entry frame's
+    // code pointer (into vm->module_) stays valid for the task's whole life,
+    // independent of the spawning VM.
+    std::shared_ptr<Vm> vm(new Vm(module_, state_, module_id_, world_options_,
+                                  capabilities_, effects_, trace_recorder_));
+    vm->parkable_ = true;
+    const BcCode *code = find_code(vm->module_, closure->code_id);
+    if (code == nullptr) {
+      set_fault(frame, "VMError", "closure code id is unknown");
+      return std::nullopt;
+    }
+    vm->push_frame(*code, std::vector<Value>{}, closure->captures,
+                   closure->self, Value::null(), std::nullopt);
+
+    const std::shared_ptr<RuntimeTextWriter> inherited_stdout =
+        current_runtime_stdout();
+    const std::shared_ptr<RuntimeTextWriter> inherited_stderr =
+        current_runtime_stderr();
+    return [vm, task, inherited_stdout, inherited_stderr]() mutable -> Value {
+      RuntimeOutputScope output_scope(inherited_stdout, inherited_stderr);
+      vm->park_request_.reset();
+      while (vm->fault_ == std::nullopt && !vm->park_request_.has_value() &&
+             !vm->frames_.empty()) {
+        vm->step();
+      }
+      if (vm->fault_.has_value()) {
+        throw RuntimeTaskFailure(vm->fault_->error_name, vm->fault_->message);
+      }
+      if (vm->park_request_.has_value()) {
+        const ParkRequest req = *vm->park_request_;
+        vm->park_request_.reset();
+        if (req.kind == ParkRequest::Kind::Timer) {
+          if (task->scheduler().park_current(req.wake_after)) {
+            g_amber_task_parked = true;
+            g_amber_cooperative_parks.fetch_add(1, std::memory_order_relaxed);
+          }
+        } else {
+          // Io park: park the strand with no timer (external wake), then
+          // register reactor interest whose completion wakes it. Order matters:
+          // park_current() sets park_pending FIRST, so a reactor completion
+          // that races the park is recorded (park_wake_pending) rather than
+          // lost.
+          const std::uint64_t self_id = current_runtime_strand_id();
+          if (task->scheduler().park_current(std::nullopt)) {
+            g_amber_task_parked = true;
+            g_amber_cooperative_parks.fetch_add(1, std::memory_order_relaxed);
+            RuntimeReactor::instance().wait_async(
+                req.fd, req.interest, req.deadline,
+                tls_runtime_task_cancel_flag, [task, self_id](ReactorOutcome) {
+                  task->scheduler().wake_strand(self_id);
+                });
+          }
+        }
+        return Value::null();
+      }
+      return vm->final_value_;
+    };
+  }
+
+  // Translate an io.cpp park request (recorded in the thread-local park channel
+  // by wait_fd) into a VM Io park: the task driver's step loop stops and this
+  // Send is retried on resume. Faults (returns false) if suspension is
+  // disallowed here (inside a property arm).
+  bool begin_io_park(const Frame &frame) {
+    if (block_suspension_in_property_arm(frame, "io")) {
+      return false;
+    }
+    ParkRequest park;
+    park.kind = ParkRequest::Kind::Io;
+    park.fd = tls_runtime_io_park_request.fd;
+    park.interest = tls_runtime_io_park_request.want_write
+                        ? ReactorInterest::Write
+                        : ReactorInterest::Read;
+    park.deadline = tls_runtime_io_park_request.deadline;
+    park_request_ = park;
+    return true;
+  }
+
   std::optional<Value>
   keyword_arg_value(const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
                     const std::string &name) {
@@ -22061,6 +22310,24 @@ private:
         }
         return SendStatus::NotHandled;
       }
+      if (kind == RuntimeNativeTypeKind::Net) {
+        // The `net` namespace exposes its transport/address sub-types as
+        // selectors, mirroring the `io` and `fs` namespaces (e.g. `net.tcp`,
+        // `net.udp`, `net.Endpoint`). Each yields the corresponding native
+        // type, so `net.tcp.listen(...)` is a plain selector chain.
+        if (selector == "tcp" || selector == "udp" || selector == "Endpoint") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const RuntimeNativeTypeKind member_kind =
+              selector == "tcp"   ? RuntimeNativeTypeKind::NetTcp
+              : selector == "udp" ? RuntimeNativeTypeKind::NetUdp
+                                  : RuntimeNativeTypeKind::NetEndpoint;
+          *out = Value::native_type(member_kind);
+          return SendStatus::Matched;
+        }
+        return SendStatus::NotHandled;
+      }
       if (kind == RuntimeNativeTypeKind::NetTcp) {
         if (selector != "connect" && selector != "listen") {
           return SendStatus::NotHandled;
@@ -22494,6 +22761,28 @@ private:
       if (io_value == nullptr) {
         set_fault(frame, "TypeError", "IO value is null");
         return SendStatus::Faulted;
+      }
+
+      // Explicit strand-confinement handoff. `adopt!` re-binds a confined
+      // resource's owner to the current strand, so a buffer or socket created
+      // (or accepted) on one strand can be handed to a task and used there by
+      // design rather than by an id-collision coincidence. It must run before
+      // the per-type owner gates below -- adoption is precisely the operation
+      // that changes the owner, so it cannot itself require ownership. On
+      // shareable leaf values (Bytes/Path/Metadata/ByteSlice) it is a no-op.
+      if (selector == "adopt!") {
+        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (const auto resource =
+                std::dynamic_pointer_cast<RuntimeIoResource>(io_value)) {
+          resource->adopt_to_current_owner();
+        } else if (const auto buffer =
+                       std::dynamic_pointer_cast<RuntimeByteBuffer>(io_value)) {
+          buffer->adopt_to_current_owner();
+        }
+        *out = receiver;
+        return SendStatus::Matched;
       }
 
       if (const auto bytes =
@@ -22984,7 +23273,24 @@ private:
         if (!nonblocking) {
           record_io_wait("reader.read", io_value->type_name());
         }
-        RuntimeIoStatus result = read_once(*buffer, timeout, nonblocking);
+        RuntimeIoStatus result;
+        {
+          // Cooperative IO yield for the single-shot blocking read: if it would
+          // block, the strand parks and retries on resume (idempotent: no bytes
+          // are consumed before the park). try_read! and the accumulating
+          // variants (read_exact!/read_all!/read_line!) keep blocking. v1 parks
+          // only infinite-timeout reads: under park-and-retry a finite relative
+          // timeout would reset on each resume (re-running the Send recomputes
+          // now+timeout), so a finite-timeout read keeps blocking until the
+          // deadline is carried across retries (a follow-up).
+          IoParkGuard park_guard(parkable_ && !nonblocking &&
+                                 timeout == std::chrono::milliseconds::max());
+          result = read_once(*buffer, timeout, nonblocking);
+        }
+        if (result.park) {
+          return begin_io_park(frame) ? SendStatus::Matched
+                                      : SendStatus::Faulted;
+        }
         if (!set_fault_from_io_status(frame, result)) {
           return SendStatus::Faulted;
         }
@@ -23278,7 +23584,21 @@ private:
           *out = Value::null();
           return SendStatus::Matched;
         }
-        RuntimeIoStatus result = write_once(*bytes, *timeout, nonblocking);
+        RuntimeIoStatus result;
+        {
+          // Cooperative IO yield for the single-shot blocking write (write!):
+          // park-and-retry is idempotent because no bytes are written before
+          // the park. write_all!/puts! (the accumulating loop above) keep
+          // blocking, as do finite-timeout writes (see read! for why v1 parks
+          // only infinite-timeout ops).
+          IoParkGuard park_guard(parkable_ && !nonblocking &&
+                                 *timeout == std::chrono::milliseconds::max());
+          result = write_once(*bytes, *timeout, nonblocking);
+        }
+        if (result.park) {
+          return begin_io_park(frame) ? SendStatus::Matched
+                                      : SendStatus::Faulted;
+        }
         if (!set_fault_from_io_status(frame, result)) {
           return SendStatus::Faulted;
         }
@@ -24323,25 +24643,20 @@ private:
           }
           return SendStatus::Faulted;
         }
-        std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "task " + selector);
-        if (!invoker.has_value()) {
+        // Layer B: spawn the block on a persistent parkable VM so a suspension
+        // point (task.sleep) yields the worker cooperatively instead of
+        // blocking it. The driver applies the inherited output scope itself.
+        std::optional<std::function<Value()>> task_function =
+            make_resumable_task_function(frame, block, task,
+                                         "task " + selector);
+        if (!task_function.has_value()) {
           return SendStatus::Faulted;
         }
-        const std::shared_ptr<RuntimeTextWriter> inherited_stdout =
-            current_runtime_stdout();
-        const std::shared_ptr<RuntimeTextWriter> inherited_stderr =
-            current_runtime_stderr();
-        auto task_function = [invoker = *invoker, inherited_stdout,
-                              inherited_stderr]() mutable {
-          RuntimeOutputScope output_scope(inherited_stdout, inherited_stderr);
-          return invoker(std::vector<Value>{});
-        };
         RuntimeTaskHandle handle;
         if (selector == "async") {
-          handle = task->async(std::move(task_function));
+          handle = task->async(std::move(*task_function));
         } else {
-          handle = task->spawn(std::move(task_function));
+          handle = task->spawn(std::move(*task_function));
         }
         *out = Value::task_handle(
             std::make_shared<RuntimeTaskHandle>(std::move(handle)));
@@ -24361,6 +24676,23 @@ private:
         }
         if (block_suspension_in_property_arm(frame, "task.sleep")) {
           return SendStatus::Faulted;
+        }
+        // Layer B: inside a parkable task VM, cooperatively park (releasing the
+        // worker) instead of blocking it. Sync blocks suppress cooperative
+        // yielding, and a zero/negative duration is a plain yield, so both fall
+        // through to the blocking path below.
+        if (parkable_ && duration.count() > 0 &&
+            !current_runtime_task_sync_active()) {
+          if (current_runtime_task_cancel_requested()) {
+            set_fault(frame, "CancelledError", "task cancelled");
+            return SendStatus::Faulted;
+          }
+          ParkRequest park;
+          park.kind = ParkRequest::Kind::Timer;
+          park.wake_after = duration;
+          park_request_ = park;
+          *out = Value::null();
+          return SendStatus::Matched;
         }
         try {
           task->sleep(duration);
@@ -26466,6 +26798,16 @@ private:
             return SendStatus::Faulted;
           }
           *out = Value::integer(static_cast<std::int64_t>(self.size()));
+          return SendStatus::Matched;
+        }
+        if (selector == "bytes") {
+          // `Str#bytes` exposes the string's raw UTF-8 octets as an immutable
+          // `io.Bytes` value (the spec's io.Bytes type), so callers can index,
+          // slice, count, or hand the octets to byte-oriented IO.
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = io_bytes_value(self);
           return SendStatus::Matched;
         }
         if (selector == "empty?") {
@@ -29766,6 +30108,15 @@ private:
       if (scalar_status == SendStatus::Faulted) {
         return false;
       }
+      // Layer B Io park: a blocking socket op parked the strand. Do not write a
+      // result or advance the PC -- the task driver unwinds and, on resume,
+      // re-executes this same Send to retry the op. (A Timer park, by contrast,
+      // falls through to Matched below: task.sleep already produced its null
+      // result and the PC advances so resume continues past it.)
+      if (park_request_.has_value() &&
+          park_request_->kind == ParkRequest::Kind::Io) {
+        return true;
+      }
       if (scalar_status == SendStatus::Matched) {
         if (!write_reg(frame, dst, std::move(result))) {
           return false;
@@ -32068,6 +32419,13 @@ private:
   std::unordered_map<std::uint32_t, std::vector<Frame>> frame_pool_;
   std::vector<std::unique_ptr<Vm>> block_vm_pool_;
   std::vector<Frame> frames_;
+  // Layer B cooperative suspension. `parkable_` is true only for the persistent
+  // VM that drives a task body (task.async/spawn); it gates whether a
+  // suspension point (e.g. task.sleep or a blocking socket op) parks the strand
+  // or falls back to blocking. `park_request_` is set by such a suspension
+  // point to stop the task driver's step loop and describe the wake source.
+  bool parkable_ = false;
+  std::optional<ParkRequest> park_request_;
   // Set when this Vm executes inside a property arm of an outer Vm (nested
   // executions inherit the non-suspendable dynamic extent).
   std::optional<std::string> inherited_no_suspend_label_;

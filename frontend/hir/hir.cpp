@@ -459,6 +459,16 @@ private:
       if (binding == nullptr || !binding_has_slot(*binding)) {
         return;
       }
+      // Import aliases that resolve to a runtime constant path (e.g. `task`,
+      // `sync.Channel`) are loaded via HLoadConst everywhere, including inside
+      // closures, so they never need to be captured as upvalues. Their
+      // import-alias local slot is never stored, so capturing one would emit a
+      // MakeClosure that reads an uninitialized register and trip the bytecode
+      // verifier (BC1313).
+      if (binding->kind == "import_alias" &&
+          !stdlib_import_alias_constant_path(*binding).empty()) {
+        return;
+      }
       if (scope_is_within(binding->scope_index, scope_index)) {
         return;
       }
@@ -2742,6 +2752,15 @@ private:
     if (binding.role == "module_import" && binding.source == "task.flow") {
       return "task.flow";
     }
+    // The `io` and `net` stdlib namespaces resolve to native prelude constants
+    // (RuntimeNativeTypeKind::Io / ::Net) that answer the nested-type selectors
+    // (`io.ByteBuffer`, `net.tcp`, ...). They have no stored alias slot, so a
+    // bare `import io` / `import net` reference must lower to HLoadConst rather
+    // than reading an uninitialized local (verifier BC1313).
+    if (binding.role == "module_import" &&
+        (binding.source == "io" || binding.source == "net")) {
+      return binding.source;
+    }
     if (binding.role != "from_import") {
       return "";
     }
@@ -2762,6 +2781,34 @@ private:
     }
     if (binding.source == "task.flow:ThreadedCollection") {
       return "ThreadedCollection";
+    }
+    // `from io import ByteBuffer` / `from net import tcp` and their siblings
+    // name a nested stdlib type whose runtime constant path is `module.member`
+    // (e.g. "io.ByteBuffer", "net.tcp"). These all resolve in
+    // lookup_native_prelude_constant, so the alias loads via HLoadConst.
+    if (binding.source == "io:ByteBuffer") {
+      return "io.ByteBuffer";
+    }
+    if (binding.source == "io:ByteSlice") {
+      return "io.ByteSlice";
+    }
+    if (binding.source == "io:Pipe") {
+      return "io.Pipe";
+    }
+    if (binding.source == "io:Buffer") {
+      return "io.Buffer";
+    }
+    if (binding.source == "io:Logger") {
+      return "io.Logger";
+    }
+    if (binding.source == "net:tcp") {
+      return "net.tcp";
+    }
+    if (binding.source == "net:udp") {
+      return "net.udp";
+    }
+    if (binding.source == "net:Endpoint") {
+      return "net.Endpoint";
     }
     return "";
   }

@@ -1,0 +1,7 @@
+{
+  "schema": "amber.run.v1",
+  "entry": "probe",
+  "status": "fault",
+  "error_name": "IsolationError",
+  "message": "ByteBuffer accessed from a non-owner strand"
+}

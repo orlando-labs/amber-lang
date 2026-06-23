@@ -21,6 +21,9 @@ thread_local const void *tls_runtime_text_source_location_provider_ctx =
 thread_local const RuntimeIoWaitObserver *tls_runtime_io_wait_observer =
     nullptr;
 thread_local std::uint32_t tls_runtime_io_wait_depth = 0;
+thread_local bool tls_runtime_io_park_enabled = false;
+thread_local bool tls_runtime_io_park_requested = false;
+thread_local RuntimeIoParkRequest tls_runtime_io_park_request{};
 
 std::atomic<std::uint64_t> g_runtime_output_order{1};
 std::atomic<std::uint64_t> g_runtime_native_thread_ids{1};
@@ -131,6 +134,31 @@ RuntimeIoWaitScope::~RuntimeIoWaitScope() {
 std::uint64_t current_runtime_owner_strand_id() {
   return tls_runtime_strand_id != 0 ? tls_runtime_strand_id
                                     : tls_runtime_worker_id;
+}
+
+namespace {
+// Low-bit namespace tags for current_runtime_resource_owner_id(). Any non-zero,
+// pairwise-distinct tags work: they exist only to keep ids minted by the three
+// independent counters (strand / worker / native thread) out of one another's
+// numeric range. Every minted id is therefore non-zero, leaving 0 free as a
+// "no owner" sentinel for the checks.
+constexpr unsigned kResourceOwnerTagBits = 2;
+constexpr std::uint64_t kResourceOwnerTagNative = 1;
+constexpr std::uint64_t kResourceOwnerTagWorker = 2;
+constexpr std::uint64_t kResourceOwnerTagStrand = 3;
+} // namespace
+
+std::uint64_t current_runtime_resource_owner_id() {
+  if (tls_runtime_strand_id != 0) {
+    return (tls_runtime_strand_id << kResourceOwnerTagBits) |
+           kResourceOwnerTagStrand;
+  }
+  if (tls_runtime_worker_id != 0) {
+    return (tls_runtime_worker_id << kResourceOwnerTagBits) |
+           kResourceOwnerTagWorker;
+  }
+  return (current_runtime_native_thread_id() << kResourceOwnerTagBits) |
+         kResourceOwnerTagNative;
 }
 
 std::uint32_t current_runtime_io_wait_depth() {

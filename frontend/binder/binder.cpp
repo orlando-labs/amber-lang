@@ -1364,6 +1364,7 @@ bool is_native_prelude_name(const std::string &name) {
       "Uuid",
       "desc",
       "io",
+      "net",
       "p",
       "pp",
       "print",

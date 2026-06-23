@@ -3,6 +3,7 @@
 #include "runtime/vm.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -22,6 +23,21 @@ extern thread_local std::uint64_t tls_runtime_native_thread_id;
 extern thread_local RuntimeTextSourceLocation tls_runtime_text_source_location;
 extern thread_local const RuntimeIoWaitObserver *tls_runtime_io_wait_observer;
 extern thread_local std::uint32_t tls_runtime_io_wait_depth;
+
+// Layer B cooperative IO yield. When the VM drives a parkable task body it sets
+// tls_runtime_io_park_enabled; io.cpp's wait_fd then, instead of blocking on
+// the reactor, records the fd it would have waited on into
+// tls_runtime_io_park_request and returns a RuntimeIoStatus with park=true. The
+// VM turns that into a strand park plus a reactor wait_async registration that
+// resumes the strand.
+struct RuntimeIoParkRequest {
+  int fd = -1;
+  bool want_write = false;
+  std::optional<std::chrono::steady_clock::time_point> deadline;
+};
+extern thread_local bool tls_runtime_io_park_enabled;
+extern thread_local bool tls_runtime_io_park_requested;
+extern thread_local RuntimeIoParkRequest tls_runtime_io_park_request;
 
 extern std::atomic<std::uint64_t> g_runtime_output_order;
 extern std::atomic<std::uint64_t> g_runtime_native_thread_ids;
@@ -119,6 +135,20 @@ private:
 };
 
 std::uint64_t current_runtime_owner_strand_id();
+
+// Strand-confinement owner identity for IO resources and byte buffers.
+//
+// Unlike current_runtime_owner_strand_id() -- which returns a bare strand id, a
+// bare worker id, or 0, three values drawn from independent counters that all
+// start at 1 -- this returns a single id whose low bits tag the namespace it
+// came from (strand / worker / native thread). Tagging makes the id collision-
+// free across namespaces, so a resource confined to strand N is never confused
+// with one confined to worker N (or native thread N) just because the raw
+// counters happen to coincide. Resource constructors stamp this value and the
+// access checks compare against it, so a comparison can never put, say, a
+// worker id on one side and a native-thread id on the other.
+std::uint64_t current_runtime_resource_owner_id();
+
 std::uint32_t current_runtime_io_wait_depth();
 
 } // namespace amber::runtime

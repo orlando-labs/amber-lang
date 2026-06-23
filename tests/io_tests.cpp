@@ -1,17 +1,23 @@
 #include "runtime/context.h"
 #include "runtime/io.h"
+#include "runtime/reactor.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 
 namespace {
 
 using namespace std::chrono_literals;
+using amber::runtime::ReactorInterest;
+using amber::runtime::ReactorOutcome;
 using amber::runtime::RuntimeByteBuffer;
 using amber::runtime::RuntimeBytes;
 using amber::runtime::RuntimeEndpoint;
@@ -20,6 +26,7 @@ using amber::runtime::RuntimeFileMode;
 using amber::runtime::RuntimeFileOpenOptions;
 using amber::runtime::RuntimePath;
 using amber::runtime::RuntimePipe;
+using amber::runtime::RuntimeReactor;
 using amber::runtime::RuntimeTaskScope;
 using amber::runtime::RuntimeTcpListener;
 using amber::runtime::RuntimeTcpStream;
@@ -271,6 +278,79 @@ void test_checked_and_unchecked_sharing() {
   ::unlink(path.string().c_str());
 }
 
+// Soundness of the strand-confinement owner identity across namespaces, and the
+// explicit adopt handoff. These run entirely on one OS thread, toggling the
+// worker/strand TLS via the scopes, so the result is fixed regardless of how a
+// scheduler would have interleaved real workers.
+void test_strand_confinement_owner_namespaces() {
+  using amber::runtime::RuntimeStrandScope;
+  using amber::runtime::RuntimeWorkerScope;
+
+  // Regression for the cross-namespace owner-id collision. A buffer confined to
+  // *worker* 7 must not be treated as owned by *strand* 7. The previous check
+  // compared bare ids minted by independent counters that both start at 1, so
+  // worker 7 == strand 7 and the access was wrongly allowed; the tagged owner
+  // id keeps the namespaces apart, making this a deterministic IsolationError
+  // no matter how the raw counters happen to line up.
+  std::shared_ptr<RuntimeByteBuffer> worker_owned;
+  {
+    RuntimeWorkerScope worker(7);
+    worker_owned = std::make_shared<RuntimeByteBuffer>(4);
+  }
+  {
+    RuntimeStrandScope strand(7);
+    expect(worker_owned->put('x').error_name == "IsolationError",
+           "worker-owned buffer must not be reachable from the same-numbered "
+           "strand id");
+  }
+
+  // Confinement and explicit handoff between two strands.
+  {
+    RuntimeStrandScope strand(9);
+    auto buffer = std::make_shared<RuntimeByteBuffer>(4);
+    expect(buffer->put('a').ok, "buffer must be usable from its owner strand");
+    {
+      RuntimeStrandScope other(10);
+      expect(buffer->put('b').error_name == "IsolationError",
+             "buffer must be confined to its creating strand");
+      // adopt! re-owns the buffer to the current strand even though it could
+      // not be accessed a moment ago -- adoption is the operation that grants
+      // ownership, so it cannot itself require ownership.
+      buffer->adopt_to_current_owner();
+      expect(buffer->put('b').ok,
+             "adopt_to_current_owner must re-own the buffer to this strand");
+    }
+    // The handoff moved ownership: strand 9 has lost access.
+    expect(buffer->put('c').error_name == "IsolationError",
+           "after handoff the original strand must lose access");
+  }
+
+  // The same identity/handoff applies to confined IO resources (files/sockets),
+  // which share check_access()'s owner comparison.
+  const RuntimePath confine_path(temp_path("confine.txt"));
+  RuntimeFileOpenOptions options;
+  options.create = true;
+  options.truncate = true;
+  std::shared_ptr<RuntimeFile> confined_file;
+  {
+    RuntimeWorkerScope worker(3);
+    auto opened = RuntimeFile::open(confine_path, RuntimeFileMode::Write,
+                                    options);
+    expect(opened.ok, "confinement file open failed");
+    confined_file = opened.file;
+  }
+  {
+    RuntimeStrandScope strand(3);
+    expect(confined_file->write("x").error_name == "IsolationError",
+           "worker-owned file must not be reachable from same-numbered strand");
+    confined_file->adopt_to_current_owner();
+    expect(confined_file->write("x").ok,
+           "adopt_to_current_owner must re-own the file to this strand");
+  }
+  confined_file->close();
+  ::unlink(confine_path.string().c_str());
+}
+
 void test_tcp_roundtrip_and_shutdown() {
   auto listening = RuntimeTcpListener::listen({"127.0.0.1", 0});
   expect(listening.ok, "TCP listen failed: " + listening.error_name + " " +
@@ -347,14 +427,213 @@ void test_udp_datagram_boundary() {
 
 } // namespace
 
+void make_nonblocking_socketpair(int fds[2]) {
+  expect(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0,
+         "reactor: socketpair failed");
+  for (int i = 0; i < 2; ++i) {
+    const int flags = ::fcntl(fds[i], F_GETFL, 0);
+    ::fcntl(fds[i], F_SETFL, flags | O_NONBLOCK);
+  }
+}
+
+void test_reactor() {
+  RuntimeReactor &reactor = RuntimeReactor::instance();
+
+  // Readiness: a waiter returns Ready once the peer writes.
+  {
+    int fds[2];
+    make_nonblocking_socketpair(fds);
+    std::atomic<ReactorOutcome> result{ReactorOutcome::Error};
+    std::thread waiter([&]() {
+      result =
+          reactor.wait(fds[0], ReactorInterest::Read, std::nullopt, nullptr);
+    });
+    std::this_thread::sleep_for(20ms);
+    const char byte = 'x';
+    expect(::write(fds[1], &byte, 1) == 1, "reactor: peer write failed");
+    waiter.join();
+    expect(result.load() == ReactorOutcome::Ready,
+           "reactor: expected Ready on readiness");
+    ::close(fds[0]);
+    ::close(fds[1]);
+  }
+
+  // Timeout: nothing is written, the deadline elapses.
+  {
+    int fds[2];
+    make_nonblocking_socketpair(fds);
+    const auto start = std::chrono::steady_clock::now();
+    const ReactorOutcome out =
+        reactor.wait(fds[0], ReactorInterest::Read, start + 50ms, nullptr);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    expect(out == ReactorOutcome::TimedOut, "reactor: expected TimedOut");
+    expect(elapsed >= 40ms, "reactor: timeout returned too early");
+    expect(elapsed < 1000ms, "reactor: timeout returned too late");
+    ::close(fds[0]);
+    ::close(fds[1]);
+  }
+
+  // Cancellation: a flipped cancel flag plus a kick wakes the waiter promptly.
+  {
+    int fds[2];
+    make_nonblocking_socketpair(fds);
+    std::atomic<bool> cancel{false};
+    std::atomic<ReactorOutcome> result{ReactorOutcome::Error};
+    std::thread waiter([&]() {
+      result =
+          reactor.wait(fds[0], ReactorInterest::Read, std::nullopt, &cancel);
+    });
+    std::this_thread::sleep_for(20ms);
+    cancel = true;
+    reactor.kick();
+    waiter.join();
+    expect(result.load() == ReactorOutcome::Cancelled,
+           "reactor: expected Cancelled");
+    ::close(fds[0]);
+    ::close(fds[1]);
+  }
+
+  // Closed: notify_closed releases a waiter blocked on the fd.
+  {
+    int fds[2];
+    make_nonblocking_socketpair(fds);
+    std::atomic<ReactorOutcome> result{ReactorOutcome::Error};
+    std::thread waiter([&]() {
+      result =
+          reactor.wait(fds[0], ReactorInterest::Read, std::nullopt, nullptr);
+    });
+    std::this_thread::sleep_for(20ms);
+    reactor.notify_closed(fds[0]);
+    waiter.join();
+    expect(result.load() == ReactorOutcome::Closed,
+           "reactor: expected Closed on notify_closed");
+    ::close(fds[0]);
+    ::close(fds[1]);
+  }
+
+  // Two strands waiting on one fd (the duplex / shared-socket case) both wake.
+  {
+    int fds[2];
+    make_nonblocking_socketpair(fds);
+    std::atomic<ReactorOutcome> r1{ReactorOutcome::Error};
+    std::atomic<ReactorOutcome> r2{ReactorOutcome::Error};
+    std::thread w1([&]() {
+      r1 = reactor.wait(fds[0], ReactorInterest::Read, std::nullopt, nullptr);
+    });
+    std::thread w2([&]() {
+      r2 = reactor.wait(fds[0], ReactorInterest::Read, std::nullopt, nullptr);
+    });
+    std::this_thread::sleep_for(20ms);
+    const char byte = 'y';
+    expect(::write(fds[1], &byte, 1) == 1, "reactor: duplex peer write failed");
+    w1.join();
+    w2.join();
+    expect(r1.load() == ReactorOutcome::Ready &&
+               r2.load() == ReactorOutcome::Ready,
+           "reactor: both waiters on one fd should wake Ready");
+    ::close(fds[0]);
+    ::close(fds[1]);
+  }
+
+  // Async registration (Layer B mechanism): the completion fires with Ready
+  // once the peer writes, driven from the reactor thread rather than blocking
+  // the caller.
+  {
+    int fds[2];
+    make_nonblocking_socketpair(fds);
+    std::atomic<bool> fired{false};
+    std::atomic<ReactorOutcome> got{ReactorOutcome::Error};
+    reactor.wait_async(fds[0], ReactorInterest::Read, std::nullopt, nullptr,
+                       [&](ReactorOutcome o) {
+                         got = o;
+                         fired = true;
+                       });
+    std::this_thread::sleep_for(20ms);
+    const char byte = 'z';
+    expect(::write(fds[1], &byte, 1) == 1, "reactor: async peer write failed");
+    for (int i = 0; i < 200 && !fired.load(); ++i) {
+      std::this_thread::sleep_for(5ms);
+    }
+    expect(fired.load() && got.load() == ReactorOutcome::Ready,
+           "reactor: wait_async should complete Ready on readiness");
+    ::close(fds[0]);
+    ::close(fds[1]);
+  }
+
+  // Async registration resolves with TimedOut when the deadline elapses.
+  {
+    int fds[2];
+    make_nonblocking_socketpair(fds);
+    std::atomic<bool> fired{false};
+    std::atomic<ReactorOutcome> got{ReactorOutcome::Error};
+    reactor.wait_async(fds[0], ReactorInterest::Read,
+                       std::chrono::steady_clock::now() + 50ms, nullptr,
+                       [&](ReactorOutcome o) {
+                         got = o;
+                         fired = true;
+                       });
+    for (int i = 0; i < 200 && !fired.load(); ++i) {
+      std::this_thread::sleep_for(5ms);
+    }
+    expect(fired.load() && got.load() == ReactorOutcome::TimedOut,
+           "reactor: wait_async should complete TimedOut on deadline");
+    ::close(fds[0]);
+    ::close(fds[1]);
+  }
+}
+
+// Layer B IO yield (io.cpp half): with cooperative parking enabled, a blocking
+// read on a socket with no data available must NOT block -- wait_fd records the
+// fd in the thread-local park channel and returns park, which the VM turns into
+// a strand park + reactor wait_async. With parking disabled the read blocks as
+// usual. (The full VM-driven socket e2e is gated on the Amber-source net/io
+// frontend, which still fails to compile -- BC1313 / class-path-ref.)
+void test_io_park_emission() {
+  auto listening = RuntimeTcpListener::listen({"127.0.0.1", 0});
+  expect(listening.ok, "io park: listen failed");
+  const RuntimeEndpoint endpoint = listening.listener->local_endpoint();
+  auto connected = RuntimeTcpStream::connect(endpoint, 2s);
+  expect(connected.ok, "io park: connect failed");
+  auto accepted = listening.listener->accept(2s);
+  expect(accepted.ok, "io park: accept failed");
+
+  amber::runtime::tls_runtime_io_park_enabled = true;
+  amber::runtime::tls_runtime_io_park_requested = false;
+  RuntimeByteBuffer buf(4);
+  auto parked = accepted.stream->read(buf, 2s);
+  amber::runtime::tls_runtime_io_park_enabled = false;
+  expect(parked.park && !parked.ok,
+         "io park: blocking read on no-data socket should park, not block");
+  expect(amber::runtime::tls_runtime_io_park_requested,
+         "io park: park request flag should be set");
+  expect(amber::runtime::tls_runtime_io_park_request.fd >= 0,
+         "io park: park request should record the fd");
+  expect(!amber::runtime::tls_runtime_io_park_request.want_write,
+         "io park: a read should record read interest");
+
+  // Parking disabled: the same read now blocks until data arrives, then reads.
+  expect(connected.stream->write_all("ping", 2s).ok, "io park: client write");
+  RuntimeByteBuffer buf2(4);
+  auto got = accepted.stream->read(buf2, 2s);
+  expect(got.ok && buf2.bytes() == "ping",
+         "io park: read should work normally when parking is disabled");
+
+  connected.stream->close();
+  accepted.stream->close();
+  listening.listener->close();
+}
+
 int main() {
   test_name_enums_and_path();
   test_byte_buffer();
   test_file_contract();
   test_pipe_contract();
   test_checked_and_unchecked_sharing();
+  test_strand_confinement_owner_namespaces();
   test_tcp_roundtrip_and_shutdown();
   test_udp_datagram_boundary();
+  test_reactor();
+  test_io_park_emission();
   std::cout << "io_tests: ok\n";
   return 0;
 }

@@ -107,7 +107,7 @@ FROZEN_SRCS := frozen/image.cpp
 PROFILE_SRCS := profile/capabilities.cpp profile/effects.cpp profile/replay.cpp profile/data.cpp profile/wasm_accel.cpp profile/modern.cpp
 BUILD_SRCS := buildsys/build.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
-IO_SRCS := runtime/io.cpp
+IO_SRCS := runtime/io.cpp runtime/reactor.cpp
 DIGEST_SRCS := runtime/digest.cpp
 STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_math.cpp runtime/stdlib_json.cpp runtime/stdlib_codecs.cpp runtime/stdlib_digest.cpp runtime/stdlib_secure_random.cpp runtime/stdlib_argparser.cpp runtime/stdlib_uuid.cpp runtime/stdlib_time.cpp runtime/stdlib_url.cpp
 RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp $(IO_SRCS) $(DIGEST_SRCS) runtime/vm.cpp $(STDLIB_SRCS) runtime/amber_ext.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
@@ -199,6 +199,8 @@ FORMAT_FILES := \
 	runtime/context.h \
 	runtime/io.cpp \
 	runtime/io.h \
+	runtime/reactor.cpp \
+	runtime/reactor.h \
 	runtime/digest.cpp \
 	runtime/digest.h \
 	runtime/text.cpp \

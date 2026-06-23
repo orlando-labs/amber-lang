@@ -3,6 +3,7 @@
 #include "frontend/hir/hir.h"
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
+#include "runtime/reactor.h"
 #include "runtime/vm.h"
 
 #include <atomic>
@@ -12,7 +13,9 @@
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1170,13 +1173,12 @@ void test_std016_threaded_collection_iteration_and_transforms() {
                         "threaded map ordered results");
 
   const amber::runtime::RuntimeFlowGatherResult filter_mapped =
-      threaded.filter_map(
-          [](const amber::runtime::Value &value, std::size_t) {
-            if (value.as_integer() % 2 != 0) {
-              return amber::runtime::Value::null();
-            }
-            return amber::runtime::Value::integer(value.as_integer() * 10);
-          });
+      threaded.filter_map([](const amber::runtime::Value &value, std::size_t) {
+        if (value.as_integer() % 2 != 0) {
+          return amber::runtime::Value::null();
+        }
+        return amber::runtime::Value::integer(value.as_integer() * 10);
+      });
   expect(filter_mapped.ok && !filter_mapped.failed,
          "threaded filter_map should complete successfully");
   expect_integer_values(filter_mapped.values, {20, 40},
@@ -1465,7 +1467,300 @@ void test_std017_source_level_flow_and_threaded_collection_compile_and_run() {
 
 } // namespace
 
+// Layer B: a running strand can park itself, releasing its worker to run other
+// strands, and resume later when woken. Eight strands park on an external wake
+// with only two workers: if parking frees the worker, all eight reach the
+// parked state; if it blocked the worker, `parks` would stall below eight and
+// the wait would time out.
+void test_layerb_scheduler_park_resume_frees_worker() {
+  amber::runtime::RuntimeScheduler scheduler(2);
+  const int strand_count = 8;
+  std::atomic<int> entered{0};
+  std::atomic<int> resumed{0};
+  std::vector<std::uint64_t> ids;
+  ids.reserve(strand_count);
+
+  for (int i = 0; i < strand_count; ++i) {
+    auto phase = std::make_shared<std::atomic<int>>(0);
+    const std::uint64_t id =
+        scheduler.spawn_strand([&scheduler, &entered, &resumed, phase]() {
+          if (phase->fetch_add(1) == 0) {
+            entered.fetch_add(1);
+            // Request to park; worker_loop parks this strand when we return,
+            // releasing the worker. Resume re-invokes this same function.
+            scheduler.park_current(std::nullopt);
+            return;
+          }
+          resumed.fetch_add(1);
+        });
+    ids.push_back(id);
+  }
+
+  expect(wait_for_condition(
+             [&]() {
+               return scheduler.stats().parks ==
+                      static_cast<std::uint64_t>(strand_count);
+             },
+             std::chrono::milliseconds(2000)),
+         "park: all strands should park with only two workers (worker freed)");
+  expect(entered.load() == strand_count, "park: every strand ran phase 0");
+  expect(resumed.load() == 0,
+         "park: no strand resumes before an explicit wake");
+
+  for (const std::uint64_t id : ids) {
+    expect(scheduler.wake_strand(id),
+           "park: waking a parked (Sleeping) strand should succeed");
+  }
+
+  expect(scheduler.wait_until_idle(std::chrono::milliseconds(2000)),
+         "park: scheduler should drain after all strands resume");
+  expect(resumed.load() == strand_count,
+         "park: every parked strand should resume and complete");
+
+  const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+  expect(stats.park_resumes >= static_cast<std::uint64_t>(strand_count),
+         "park: park_resumes should reflect every resume dispatch");
+
+  scheduler.shutdown();
+}
+
+// Layer B end-to-end: a task body that calls task.sleep parks cooperatively
+// (releasing its worker) instead of blocking it, then resumes and produces its
+// result. Four tasks each sleep once; the process-wide cooperative-park counter
+// must advance by exactly four (proving the park path was taken regardless of
+// how many workers the default pool has), and the results must still be
+// correct.
+void test_layerb_cooperative_sleep_parks_in_task() {
+  const std::uint64_t parks_before =
+      amber::runtime::runtime_cooperative_task_park_count();
+  // A closure that references the `task` import directly (`task.sleep` in the
+  // task body) compiles and verifies: the import alias resolves to a runtime
+  // constant and is never captured as an upvalue (see emitter_tests
+  // test_closure_module_import_reference_verifies for the BC1313 regression).
+  const amber::runtime::ExecutionResult exec =
+      execute_source_or_die("import task\n"
+                            "\n"
+                            "a = task.spawn: task.sleep(10)\n"
+                            "b = task.spawn: task.sleep(10)\n"
+                            "c = task.spawn: task.sleep(10)\n"
+                            "d = task.spawn: task.sleep(10)\n"
+                            "\n"
+                            "[a.wait(), b.wait(), c.wait(), d.wait()]\n");
+  const std::uint64_t parks_after =
+      amber::runtime::runtime_cooperative_task_park_count();
+
+  expect(exec.ok(), "cooperative sleep: source program should execute");
+  expect(exec.value.is_list() && exec.value.as_list() != nullptr &&
+             exec.value.as_list()->items.size() == 4,
+         "cooperative sleep: all four tasks should resume and complete");
+  expect(parks_after - parks_before == 4,
+         "cooperative sleep: each of the four task.sleep calls must park");
+}
+
+// Layer B end-to-end (IO-yield): a task that issues a single-shot,
+// infinite-timeout socket read cooperatively parks -- releasing its worker --
+// until the loopback peer writes, then resumes and completes the read. This is
+// the IO analogue of test_layerb_cooperative_sleep_parks_in_task: it drives the
+// VM socket dispatch -> reactor wait -> park -> wake -> retry path entirely
+// from Amber source. The reader CONNECTS its own client socket inside the task
+// body (so the socket and the ByteBuffer are owned by the reader strand, not
+// shared across strands) and reaches read! before the server writes, so the
+// read genuinely blocks and parks. Keeping the socket strand-local keeps this
+// test about the cooperative-park path alone; cross-strand handoff is now a
+// sound, separately tested concern (see
+// test_strand_confinement_handoff_to_task / _rejects_cross_strand below).
+void test_layerb_cooperative_socket_read_parks_in_task() {
+  const std::uint64_t parks_before =
+      amber::runtime::runtime_cooperative_task_park_count();
+  const amber::runtime::ExecutionResult exec = execute_source_or_die(
+      "import task\n"
+      "import net\n"
+      "from io import ByteBuffer\n"
+      "\n"
+      "listener = net.tcp.listen(\"127.0.0.1\", 0)\n"
+      "port = listener.local_endpoint().port()\n"
+      "\n"
+      "reader = task.spawn:\n"
+      "  client = net.tcp.connect(\"127.0.0.1\", port)\n"
+      "  buf = ByteBuffer.new(4)\n"
+      "  client.read!(buf)\n"
+      "  payload = buf.bytes().to_str()\n"
+      "  client.close!()\n"
+      "  payload\n"
+      "\n"
+      "server = listener.accept!()\n"
+      "task.sleep(50)\n"
+      "server.write_all!(\"pong\".bytes())\n"
+      "out = reader.wait()\n"
+      "server.close!()\n"
+      "listener.close!()\n"
+      // The program decides correctness itself (avoids resolving the runtime
+      // string table from C++): true only if the bytes read equal the payload.
+      "out == \"pong\"\n");
+  const std::uint64_t parks_after =
+      amber::runtime::runtime_cooperative_task_park_count();
+
+  expect(exec.ok(), "cooperative socket read: source program should execute");
+  // Correctness: park -> resume -> retry must have actually completed the read,
+  // returning the exact payload the peer wrote.
+  expect_bool(
+      exec.value, true,
+      "cooperative socket read: reader must return the written payload");
+  // Cooperative-park proof. Only a spawned task body is parkable, so the only
+  // cooperative park in this run is the reader's blocked read: the main
+  // strand's task.sleep (used purely to order the write after the read parks)
+  // and reader.wait() both block their worker without parking. So the delta
+  // counts the IO park alone -- a read that found data already buffered would
+  // not park and the delta would be 0 (proving this asserts the cooperative
+  // path, not merely that the read completed).
+  expect(parks_after - parks_before >= 1,
+         "cooperative socket read: the blocked read must park cooperatively "
+         "rather than tying up a worker");
+}
+
+// Strand-confinement, end to end: a non-shareable buffer created on the main
+// strand must NOT be usable from a spawned task strand without an explicit
+// handoff. With the tagged owner id this is a deterministic IsolationError no
+// matter which worker the task lands on (IO faults are terminal, so the task
+// fails and worker.wait() re-raises it to the program). A regression would
+// either let the cross-strand access through (program returns a value) or
+// surface a different error. This is the cross-strand half of test (1) at the
+// language level; the unit-level namespace soundness lives in io_tests.
+void test_strand_confinement_rejects_cross_strand() {
+  const amber::runtime::ExecutionResult exec = execute_source_or_die(
+      "import task\n"
+      "from io import ByteBuffer\n"
+      "\n"
+      "buf = ByteBuffer.new(4)\n"
+      "buf.put_all!(\"hi\".bytes())\n"        // usable on the owner (main) strand
+      "\n"
+      "worker = task.spawn:\n"
+      "  buf.put!(120)\n"                     // cross-strand access -> rejected
+      "  \"reached\"\n"
+      "\n"
+      "worker.wait()\n");
+  expect(!exec.ok() && exec.fault.has_value(),
+         "cross-strand confinement: task access must fail");
+  expect(exec.fault->error_name == "IsolationError",
+         "cross-strand confinement: failure must be a deterministic "
+         "IsolationError");
+}
+
+// Accept-on-main, handle-in-task: the net.http/server handoff pattern. A buffer
+// is created on the main strand, handed to a worker task that adopts it, and
+// then used there. adopt! is the explicit handoff: it re-binds the owner to the
+// task strand so the access is allowed by design. This is test (2): the
+// accept/create-on-one-strand, use-in-another pattern, made deterministic.
+void test_strand_confinement_handoff_to_task() {
+  const amber::runtime::ExecutionResult exec = execute_source_or_die(
+      "import task\n"
+      "from io import ByteBuffer\n"
+      "\n"
+      "buf = ByteBuffer.new(4)\n"             // created/owned on the main strand
+      "\n"
+      "worker = task.spawn:\n"
+      "  buf.adopt!()\n"                      // explicit handoff to this strand
+      "  buf.put_all!(\"pong\".bytes())\n"
+      "  buf.flip!()\n"
+      "  buf.bytes().to_str()\n"
+      "\n"
+      "worker.wait() == \"pong\"\n");
+  expect(exec.ok(),
+         "handoff to task: source program should execute");
+  expect_bool(exec.value, true,
+              "handoff to task: an adopted buffer must be usable on the task "
+              "strand");
+}
+
+// Accept-on-main, read-in-task over a real socket: the concrete net direction.
+// The server side is accepted on the main strand, handed to a worker task that
+// adopts the stream (and owns a task-local buffer), and reads the payload the
+// client already wrote. Proves the handoff works for a confined TcpStream, not
+// only a ByteBuffer.
+void test_strand_confinement_socket_handoff_read_in_task() {
+  const amber::runtime::ExecutionResult exec = execute_source_or_die(
+      "import task\n"
+      "import net\n"
+      "from io import ByteBuffer\n"
+      "\n"
+      "listener = net.tcp.listen(\"127.0.0.1\", 0)\n"
+      "port = listener.local_endpoint().port()\n"
+      "client = net.tcp.connect(\"127.0.0.1\", port)\n"
+      "client.write_all!(\"ping\".bytes())\n"
+      "server = listener.accept!()\n"          // accepted on the MAIN strand
+      "\n"
+      "worker = task.spawn:\n"
+      "  server.adopt!()\n"                     // hand the socket to this task
+      "  buf = ByteBuffer.new(4)\n"
+      "  server.read!(buf)\n"
+      "  payload = buf.bytes().to_str()\n"
+      "  server.close!()\n"
+      "  payload\n"
+      "\n"
+      "out = worker.wait()\n"
+      "client.close!()\n"
+      "listener.close!()\n"
+      "out == \"ping\"\n");
+  expect(exec.ok(),
+         "socket handoff: source program should execute");
+  expect_bool(exec.value, true,
+              "socket handoff: a task that adopts an accepted socket must read "
+              "the payload");
+}
+
+// Layer B: the cooperative-IO mechanism (the foundation the VM's socket
+// dispatch will use). A strand registers reactor readiness interest on a socket
+// and parks (releasing its worker); the reactor's readiness completion wakes
+// it. The peer is written *before* the strand parks, so the completion races
+// the park transition -- exercising the park/wake race fix. A lost wake would
+// hang the strand and time out wait_until_idle.
+void test_layerb_io_park_via_reactor() {
+  amber::runtime::RuntimeScheduler scheduler(2);
+  amber::runtime::RuntimeReactor &reactor =
+      amber::runtime::RuntimeReactor::instance();
+
+  int fds[2];
+  expect(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0,
+         "io park: socketpair should succeed");
+  const char byte = 'x';
+  expect(::write(fds[1], &byte, 1) == 1, "io park: peer write should succeed");
+  const int read_fd = fds[0];
+
+  std::atomic<int> phase{0};
+  std::atomic<bool> resumed{false};
+  scheduler.spawn_strand([&scheduler, &reactor, &phase, &resumed, read_fd]() {
+    if (phase.fetch_add(1) == 0) {
+      const std::uint64_t self_id = amber::runtime::current_runtime_strand_id();
+      // Park first, then register interest: a completion that fires before we
+      // finish parking sets park_wake_pending rather than being lost.
+      scheduler.park_current(std::nullopt);
+      reactor.wait_async(read_fd, amber::runtime::ReactorInterest::Read,
+                         std::nullopt, nullptr,
+                         [&scheduler, self_id](amber::runtime::ReactorOutcome) {
+                           scheduler.wake_strand(self_id);
+                         });
+      return;
+    }
+    resumed = true;
+  });
+
+  expect(scheduler.wait_until_idle(std::chrono::milliseconds(2000)),
+         "io park: scheduler should drain (no lost wake)");
+  expect(resumed.load(),
+         "io park: strand should resume after reactor readiness");
+  scheduler.shutdown();
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
 int main() {
+  test_layerb_scheduler_park_resume_frees_worker();
+  test_layerb_io_park_via_reactor();
+  test_layerb_cooperative_sleep_parks_in_task();
+  test_layerb_cooperative_socket_read_parks_in_task();
+  test_strand_confinement_rejects_cross_strand();
+  test_strand_confinement_handoff_to_task();
+  test_strand_confinement_socket_handoff_read_in_task();
   test_std010_task_async_spawn_and_wait_return_values();
   test_std010_task_wait_timeout_does_not_cancel_child();
   test_std010_task_yield_sleep_and_cancel_surface();

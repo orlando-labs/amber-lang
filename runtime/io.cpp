@@ -1,6 +1,7 @@
 #include "runtime/io.h"
 
 #include "runtime/context.h"
+#include "runtime/reactor.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -157,40 +158,47 @@ wait_fd(int fd, short events, const Deadline &deadline, const char *operation,
   if (deadline_expired(deadline)) {
     return io_timeout(operation);
   }
+  // Layer B cooperative IO yield: when the VM's task driver has enabled
+  // parking, do not block here. Record the fd we would have waited on and
+  // return park; the VM parks the strand (releasing the worker) and registers a
+  // reactor wait_async that resumes it, after which this op is retried.
+  if (tls_runtime_io_park_enabled) {
+    tls_runtime_io_park_requested = true;
+    tls_runtime_io_park_request.fd = fd;
+    tls_runtime_io_park_request.want_write = (events & POLLOUT) != 0;
+    tls_runtime_io_park_request.deadline = deadline;
+    RuntimeIoStatus parked;
+    parked.park = true;
+    return parked;
+  }
   if (interest == RuntimeIoWaitInterest::Other) {
     interest = interest_from_poll(events);
   }
   RuntimeIoWaitScope wait_scope(operation, std::move(resource), interest,
                                 resource_id, wait_scope_timeout(deadline));
-  while (true) {
-    if (current_runtime_task_cancel_requested()) {
-      return io_cancelled(operation);
-    }
-    if (deadline_expired(deadline)) {
-      return io_timeout(operation);
-    }
 
-    int wait_ms = 10;
-    if (deadline.has_value()) {
-      const auto remaining =
-          std::chrono::duration_cast<std::chrono::milliseconds>(*deadline -
-                                                                Clock::now());
-      wait_ms = static_cast<int>(
-          std::clamp<std::int64_t>(remaining.count(), 0, wait_ms));
-    }
-    pollfd descriptor{fd, events, 0};
-    const int rc = ::poll(&descriptor, 1, wait_ms);
-    if (rc > 0) {
-      if ((descriptor.revents & POLLNVAL) != 0) {
-        return io_error("AlreadyClosedError", "resource is closed");
-      }
-      if ((descriptor.revents & (events | POLLERR | POLLHUP)) != 0) {
-        return io_ok();
-      }
-    } else if (rc < 0 && errno != EINTR) {
-      return errno_status("poll");
-    }
+  // Park on the shared reactor (epoll/kqueue) instead of busy-polling this fd.
+  // The reactor wakes us on readiness, at the deadline, on a cancellation kick,
+  // or when the fd is closed out from under us. Ready also covers EOF/HUP/ERR:
+  // the caller re-attempts the syscall and observes the precise errno (the old
+  // poll loop returned ok on POLLERR/POLLHUP for the same reason).
+  const ReactorInterest reactor_interest =
+      (events & POLLOUT) != 0 ? ReactorInterest::Write : ReactorInterest::Read;
+  const ReactorOutcome outcome = RuntimeReactor::instance().wait(
+      fd, reactor_interest, deadline, tls_runtime_task_cancel_flag);
+  switch (outcome) {
+  case ReactorOutcome::Ready:
+    return io_ok();
+  case ReactorOutcome::TimedOut:
+    return io_timeout(operation);
+  case ReactorOutcome::Cancelled:
+    return io_cancelled(operation);
+  case ReactorOutcome::Closed:
+    return io_error("AlreadyClosedError", "resource is closed");
+  case ReactorOutcome::Error:
+    return errno_status("poll");
   }
+  return io_ok(); // unreachable: all ReactorOutcome values handled above
 }
 
 bool set_nonblocking(int fd) {
@@ -493,11 +501,7 @@ std::shared_ptr<RuntimeByteBuffer> RuntimeByteSlice::owner() const {
 
 RuntimeByteBuffer::RuntimeByteBuffer(std::size_t capacity)
     : storage_(capacity), limit_(capacity),
-      owner_strand_id_(current_runtime_owner_strand_id()) {
-  if (owner_strand_id_ == 0) {
-    owner_strand_id_ = current_runtime_native_thread_id();
-  }
-}
+      owner_strand_id_(current_runtime_resource_owner_id()) {}
 
 RuntimeByteBuffer::RuntimeByteBuffer(const RuntimeBytes &bytes)
     : RuntimeByteBuffer(bytes.count()) {
@@ -506,14 +510,16 @@ RuntimeByteBuffer::RuntimeByteBuffer(const RuntimeBytes &bytes)
 }
 
 RuntimeIoStatus RuntimeByteBuffer::check_owner() const {
-  std::uint64_t current = current_runtime_owner_strand_id();
-  if (current == 0) {
-    current = current_runtime_native_thread_id();
-  }
-  return current == owner_strand_id_
+  return current_runtime_resource_owner_id() ==
+                 owner_strand_id_.load(std::memory_order_relaxed)
              ? io_ok()
              : io_error("IsolationError",
                         "ByteBuffer accessed from a non-owner strand");
+}
+
+void RuntimeByteBuffer::adopt_to_current_owner() {
+  owner_strand_id_.store(current_runtime_resource_owner_id(),
+                         std::memory_order_relaxed);
 }
 
 std::pair<std::size_t, std::size_t> RuntimeByteBuffer::active_range() const {
@@ -845,20 +851,21 @@ RuntimePath RuntimePath::normalize() const {
 }
 
 RuntimeIoResource::RuntimeIoResource(RuntimeIsolationMode isolation)
-    : owner_strand_id_(current_runtime_owner_strand_id()),
+    : owner_strand_id_(current_runtime_resource_owner_id()),
       resource_id_(next_io_resource_id.fetch_add(1, std::memory_order_relaxed)),
-      unchecked_sharing_(isolation == RuntimeIsolationMode::Unchecked) {
-  if (owner_strand_id_ == 0) {
-    owner_strand_id_ = current_runtime_native_thread_id();
-  }
-}
+      unchecked_sharing_(isolation == RuntimeIsolationMode::Unchecked) {}
 
 RuntimeIoResource::~RuntimeIoResource() = default;
 
 bool RuntimeIoResource::closed() const { return closed_.load(); }
 
 std::uint64_t RuntimeIoResource::owner_strand_id() const {
-  return owner_strand_id_;
+  return owner_strand_id_.load(std::memory_order_relaxed);
+}
+
+void RuntimeIoResource::adopt_to_current_owner() {
+  owner_strand_id_.store(current_runtime_resource_owner_id(),
+                         std::memory_order_relaxed);
 }
 
 void RuntimeIoResource::allow_unchecked_sharing(bool allow) {
@@ -884,12 +891,10 @@ RuntimeIoStatus RuntimeIoResource::close() {
 }
 
 RuntimeIoStatus RuntimeIoResource::check_access() const {
-  std::uint64_t current_owner = current_runtime_owner_strand_id();
-  if (current_owner == 0) {
-    current_owner = current_runtime_native_thread_id();
-  }
-  if (!shareable() && !unchecked_sharing_allowed() && owner_strand_id_ != 0 &&
-      current_owner != owner_strand_id_) {
+  const std::uint64_t current_owner = current_runtime_resource_owner_id();
+  const std::uint64_t owner = owner_strand_id_.load(std::memory_order_relaxed);
+  if (!shareable() && !unchecked_sharing_allowed() && owner != 0 &&
+      current_owner != owner) {
     return io_error("IsolationError",
                     "IO resource accessed from a non-owner strand");
   }
@@ -1952,6 +1957,10 @@ RuntimeIoStatus RuntimeTcpStream::close() {
   fd_ = -1;
   mark_closed();
   if (fd >= 0) {
+    // Release any strand parked on this fd in the reactor before tearing the
+    // socket down, so a concurrent read/write wait wakes with Closed rather
+    // than hanging until its deadline.
+    RuntimeReactor::instance().notify_closed(fd);
     (void)::shutdown(fd, SHUT_RDWR);
     if (::close(fd) != 0) {
       return errno_status("close");
@@ -2126,6 +2135,9 @@ RuntimeIoStatus RuntimeTcpListener::close() {
   const int fd = fd_;
   fd_ = -1;
   mark_closed();
+  if (fd >= 0) {
+    RuntimeReactor::instance().notify_closed(fd);
+  }
   return fd < 0 || ::close(fd) == 0 ? io_ok() : errno_status("close");
 }
 
@@ -2439,6 +2451,9 @@ RuntimeIoStatus RuntimeUdpSocket::close() {
   const int fd = fd_;
   fd_ = -1;
   mark_closed();
+  if (fd >= 0) {
+    RuntimeReactor::instance().notify_closed(fd);
+  }
   return fd < 0 || ::close(fd) == 0 ? io_ok() : errno_status("close");
 }
 
