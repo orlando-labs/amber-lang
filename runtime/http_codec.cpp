@@ -111,6 +111,12 @@ const char *http_error_class_name(HttpErrorKind kind) {
     return "";
   case HttpErrorKind::InvalidHeader:
     return "InvalidHeaderError";
+  case HttpErrorKind::InvalidUrl:
+    return "InvalidUrlError";
+  case HttpErrorKind::InvalidMethod:
+    return "InvalidMethodError";
+  case HttpErrorKind::UnsupportedScheme:
+    return "UnsupportedSchemeError";
   case HttpErrorKind::Protocol:
     return "ProtocolError";
   case HttpErrorKind::HeaderLimit:
@@ -121,6 +127,8 @@ const char *http_error_class_name(HttpErrorKind kind) {
     return "ChunkError";
   case HttpErrorKind::UnexpectedEof:
     return "UnexpectedEofError";
+  case HttpErrorKind::Connection:
+    return "ConnectionError";
   }
   return "";
 }

@@ -28,12 +28,17 @@ enum class HttpErrorKind {
   None,
   // Request-construction / header validation (§21.1 RequestError subtree).
   InvalidHeader,
+  InvalidUrl,
+  InvalidMethod,
+  UnsupportedScheme,
   // Response parser (§21.1 ProtocolError subtree).
   Protocol,
   HeaderLimit,
   StatusLineLimit,
   Chunk,
   UnexpectedEof,
+  // Transport failure surfaced during an exchange (§21.2 ConnectionError).
+  Connection,
 };
 
 // The §21.1 error class name a kind maps to (e.g. "ChunkError"). "None" yields
