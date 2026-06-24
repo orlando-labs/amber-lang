@@ -278,6 +278,8 @@ enum class RuntimeNativeTypeKind {
   NetEndpoint,
   NetTcp,
   NetUdp,
+  NetHttp,
+  NetHttpClient,
   Uuid
 };
 

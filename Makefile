@@ -109,8 +109,9 @@ BUILD_SRCS := buildsys/build.cpp
 BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 IO_SRCS := runtime/io.cpp runtime/reactor.cpp
 DIGEST_SRCS := runtime/digest.cpp
+HTTP_SRCS := runtime/http_codec.cpp runtime/net_http.cpp runtime/net_http_transport.cpp
 STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_math.cpp runtime/stdlib_json.cpp runtime/stdlib_codecs.cpp runtime/stdlib_digest.cpp runtime/stdlib_secure_random.cpp runtime/stdlib_argparser.cpp runtime/stdlib_uuid.cpp runtime/stdlib_time.cpp runtime/stdlib_url.cpp
-RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp $(IO_SRCS) $(DIGEST_SRCS) runtime/vm.cpp $(STDLIB_SRCS) runtime/amber_ext.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
+RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp $(IO_SRCS) $(DIGEST_SRCS) $(HTTP_SRCS) runtime/vm.cpp $(STDLIB_SRCS) runtime/amber_ext.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(CHECKER_SRCS) $(HIR_SRCS)
@@ -150,6 +151,7 @@ IO_TEST_SRCS := tests/io_tests.cpp runtime/context.cpp runtime/text.cpp $(IO_SRC
 HTTP_CODEC_TEST_SRCS := tests/http_codec_tests.cpp runtime/http_codec.cpp
 NET_HTTP_TEST_SRCS := tests/net_http_tests.cpp runtime/net_http.cpp runtime/http_codec.cpp
 NET_HTTP_TCP_TEST_SRCS := tests/net_http_tcp_tests.cpp runtime/net_http_transport.cpp runtime/net_http.cpp runtime/http_codec.cpp runtime/context.cpp runtime/text.cpp $(IO_SRCS)
+VM_NET_HTTP_TEST_SRCS := tests/vm_net_http_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BUILD_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
 PACKAGE_TEST_SRCS := tests/package_tests.cpp $(PROFILE_SRCS) $(PACKAGE_SRCS) $(LEXER_SRCS)
 
@@ -381,6 +383,9 @@ $(BUILD_DIR)/net_http_tests: $(NET_HTTP_TEST_SRCS) | $(BUILD_DIR)/.dir
 
 $(BUILD_DIR)/net_http_tcp_tests: $(NET_HTTP_TCP_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(NET_HTTP_TCP_TEST_SRCS) $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/vm_net_http_tests: $(VM_NET_HTTP_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(VM_NET_HTTP_TEST_SRCS) $(LDFLAGS) -o $@
 
 $(BUILD_DIR)/module_loader_tests: $(MODULE_LOADER_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODULE_LOADER_TEST_SRCS) $(LDFLAGS) -o $@

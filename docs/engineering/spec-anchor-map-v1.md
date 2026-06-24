@@ -47,7 +47,7 @@ Check with `make spec-sync-check`.
 | `spec/registries/diagnostics.yaml` | 108 | `a7627a70b3d7ac864e783bb924ca92622c402463adcb98063dc442adb8031046` |
 | `spec/registries/opcodes.yaml` | 192 | `c74537900d7c6df3b704c19a258ac8c79c8b867ac1c00cb7466634f863101d27` |
 | `spec/registries/prelude.yaml` | 459 | `4354692b1f14a2c4ad23e218396435728fd946eb979ecd2725ad3367626aa1bf` |
-| `spec/registries/runtime_errors.yaml` | 143 | `5cde9f9c4e4dbef2b9d1f48f90219b5f43b5cd2fe9141d41c836615bf7583b9a` |
+| `spec/registries/runtime_errors.yaml` | 187 | `6ae7943f20231dfa5eae8d29952601e2589c8fd83df81f875189953a32aaeb3e` |
 | `spec/registries/tokens.yaml` | 127 | `8f625d0ae80376759b848e935282dca05065e1d7b742c69b6371d611f1a42fab` |
 
 ## Anchor Map

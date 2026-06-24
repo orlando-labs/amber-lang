@@ -145,3 +145,43 @@ errors:
     fields: [exit_code, usage, help]
     default_message: help requested
     default_exit_code: 0
+  - name: HttpError
+    parent: Exception
+  - name: RequestError
+    parent: HttpError
+  - name: InvalidUrlError
+    parent: RequestError
+  - name: InvalidMethodError
+    parent: RequestError
+  - name: InvalidHeaderError
+    parent: RequestError
+  - name: UnsupportedSchemeError
+    parent: RequestError
+  - name: RequestStateError
+    parent: RequestError
+  - name: ProtocolError
+    parent: HttpError
+  - name: HeaderLimitError
+    parent: ProtocolError
+  - name: StatusLineLimitError
+    parent: ProtocolError
+  - name: ChunkError
+    parent: ProtocolError
+  - name: UnexpectedEofError
+    parent: ProtocolError
+  - name: BodyError
+    parent: HttpError
+  - name: BodyConsumedError
+    parent: BodyError
+  - name: BodyLengthError
+    parent: BodyError
+  - name: BodyLimitError
+    parent: BodyError
+  - name: ConnectionError
+    parent: Exception
+  - name: ConnectionRefusedError
+    parent: ConnectionError
+  - name: ConnectionResetError
+    parent: ConnectionError
+  - name: DnsError
+    parent: Exception
