@@ -7661,6 +7661,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "net.http";
   case RuntimeNativeTypeKind::NetHttpClient:
     return "net.http.Client";
+  case RuntimeNativeTypeKind::NetHttpRequest:
+    return "net.http.Request";
   }
   return "NativeType";
 }
@@ -10026,6 +10028,20 @@ public:
   std::string body; // fully buffered in Phase 2
   bool body_consumed = false;
   bool closed = false;
+};
+
+// An immutable request snapshot (§8). Shareable across strands: it owns no
+// resource and is never mutated after construction. v1 carries only static
+// bodies (Str/Bytes).
+class RuntimeHttpRequest final : public RuntimeIoValue {
+public:
+  const char *type_name() const override { return "net.http.Request"; }
+  bool shareable() const override { return true; }
+  std::string method; // normalized uppercase token
+  std::string url;
+  http::HttpHeaders headers;
+  std::string body;
+  bool has_body = false;
 };
 
 class Vm : public StdlibHost {
@@ -14466,6 +14482,9 @@ private:
     }
     if (path == "net.http.Client") {
       return Value::native_type(RuntimeNativeTypeKind::NetHttpClient);
+    }
+    if (path == "net.http.Request") {
+      return Value::native_type(RuntimeNativeTypeKind::NetHttpRequest);
     }
     if (path == "Amber") {
       return Value::native_type(RuntimeNativeTypeKind::Amber);
@@ -21561,10 +21580,23 @@ private:
       timeout = client->timeout;
     }
 
+    return perform_http_request(frame, method, *url, headers, body, has_body,
+                                *timeout, block, out);
+  }
+
+  // Shared tail for both client.<verb>(url) and client.send(request): build the
+  // resolved request, check the per-origin net.connect capability, run one
+  // exchange, and return (or scope, when a block is given) a Response.
+  SendStatus perform_http_request(const Frame &frame, const std::string &method,
+                                  const std::string &url,
+                                  const http::HttpHeaders &headers,
+                                  const std::string &body, bool has_body,
+                                  std::chrono::milliseconds timeout,
+                                  const Value &block, Value *out) {
     http::HttpRequest request;
     http::HttpErrorKind kind = http::HttpErrorKind::None;
     std::string error;
-    if (!http::http_build_request(method, *url, headers, body, has_body,
+    if (!http::http_build_request(method, url, headers, body, has_body,
                                   /*auto_host=*/true, &request, &kind,
                                   &error)) {
       return raise_http_error(frame, kind, error);
@@ -21580,7 +21612,7 @@ private:
     http::HttpErrorKind connect_kind = http::HttpErrorKind::None;
     std::string connect_error;
     std::unique_ptr<http::TcpHttpTransport> transport = http::http_tcp_connect(
-        request.host, request.port, *timeout, &connect_kind, &connect_error);
+        request.host, request.port, timeout, &connect_kind, &connect_error);
     if (transport == nullptr) {
       return raise_http_error(frame, connect_kind, connect_error);
     }
@@ -21621,6 +21653,173 @@ private:
     return SendStatus::Matched;
   }
 
+  // Build an immutable Request snapshot (§8): keyword-only
+  // method:/url:/headers:/ body:. Method and URL are validated eagerly so
+  // construction (not send) surfaces InvalidMethod/InvalidUrl.
+  SendStatus construct_http_request(
+      const Frame &frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (!block.is_null()) {
+      set_fault(frame, "TypeError", "net.http.Request does not take a block");
+      return SendStatus::Faulted;
+    }
+    if (!args.empty()) {
+      set_fault(frame, "ArgumentError",
+                "net.http.Request takes keyword arguments");
+      return SendStatus::Faulted;
+    }
+    if (!reject_unknown_keywords(frame, kw_args,
+                                 {"method", "url", "headers", "body"})) {
+      return SendStatus::Faulted;
+    }
+
+    const std::optional<Value> method_value =
+        keyword_arg_value(kw_args, "method");
+    if (!method_value.has_value() || method_value->is_null()) {
+      set_fault(frame, "ArgumentError", "net.http.Request requires method:");
+      return SendStatus::Faulted;
+    }
+    const std::optional<std::string> method_text =
+        text_from_symbol_or_string(*method_value);
+    if (!method_text.has_value()) {
+      set_fault(frame, "TypeError", "method must be a Symbol or Str");
+      return SendStatus::Faulted;
+    }
+    std::string method;
+    if (!http::http_normalize_method(*method_text, &method)) {
+      return raise_http_error(frame, http::HttpErrorKind::InvalidMethod,
+                              "invalid HTTP method: " + *method_text);
+    }
+
+    const std::optional<Value> url_value = keyword_arg_value(kw_args, "url");
+    if (!url_value.has_value() || !url_value->is_string()) {
+      set_fault(frame, "TypeError", "net.http.Request requires url: as Str");
+      return SendStatus::Faulted;
+    }
+    const std::optional<std::string> url =
+        text_from_symbol_or_string(*url_value);
+    if (!url.has_value()) {
+      set_fault(frame, "TypeError", "net.http.Request requires url: as Str");
+      return SendStatus::Faulted;
+    }
+    http::HttpUrl parsed;
+    http::HttpErrorKind url_kind = http::HttpErrorKind::None;
+    std::string url_error;
+    if (!http::http_parse_url(*url, &parsed, &url_kind, &url_error)) {
+      return raise_http_error(frame, url_kind, url_error);
+    }
+
+    http::HttpHeaders headers;
+    if (const std::optional<Value> hv = keyword_arg_value(kw_args, "headers");
+        hv.has_value()) {
+      if (!http_headers_from_value(frame, *hv, &headers)) {
+        return SendStatus::Faulted;
+      }
+    }
+    std::string body;
+    bool has_body = false;
+    if (const std::optional<Value> bv = keyword_arg_value(kw_args, "body");
+        bv.has_value() && !bv->is_null()) {
+      if (!http_body_from_value(frame, *bv, &body)) {
+        return SendStatus::Faulted;
+      }
+      has_body = true;
+    }
+
+    auto request = std::make_shared<RuntimeHttpRequest>();
+    request->method = std::move(method);
+    request->url = *url;
+    request->headers = std::move(headers);
+    request->body = std::move(body);
+    request->has_body = has_body;
+    *out = Value::io_value(request);
+    return SendStatus::Matched;
+  }
+
+  SendStatus apply_http_request_send(
+      const Frame &frame, const std::shared_ptr<RuntimeHttpRequest> &request,
+      const std::string &selector, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+      set_fault(frame, "ArgumentError",
+                "net.http.Request#" + selector + " takes no arguments");
+      return SendStatus::Faulted;
+    }
+    if (selector == "method") {
+      *out = string_value_from_text(request->method);
+      return SendStatus::Matched;
+    }
+    if (selector == "url") {
+      *out = string_value_from_text(request->url);
+      return SendStatus::Matched;
+    }
+    if (selector == "headers") {
+      *out = http_headers_to_map(request->headers);
+      return SendStatus::Matched;
+    }
+    if (selector == "body") {
+      *out = request->has_body ? string_value_from_text(request->body)
+                               : Value::null();
+      return SendStatus::Matched;
+    }
+    if (selector == "content_length") {
+      *out =
+          request->has_body
+              ? Value::integer(static_cast<std::int64_t>(request->body.size()))
+              : Value::null();
+      return SendStatus::Matched;
+    }
+    if (selector == "replayable?") {
+      // v1 carries only static bodies, which are always replayable.
+      *out = Value::boolean(true);
+      return SendStatus::Matched;
+    }
+    set_fault(frame, "NoMethodError",
+              "net.http.Request has no method " + selector);
+    return SendStatus::Faulted;
+  }
+
+  SendStatus http_client_send(
+      const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (client->closed) {
+      raise_runtime_error(frame, "ClosedResourceError",
+                          "net.http.Client is closed");
+      return SendStatus::Faulted;
+    }
+    if (args.size() != 1U) {
+      set_fault(frame, "ArgumentError",
+                "net.http.Client#send expects a Request argument");
+      return SendStatus::Faulted;
+    }
+    std::shared_ptr<RuntimeHttpRequest> request;
+    if (args[0].is_io_value()) {
+      request =
+          std::dynamic_pointer_cast<RuntimeHttpRequest>(args[0].as_io_value());
+    }
+    if (request == nullptr) {
+      set_fault(frame, "TypeError",
+                "net.http.Client#send expects a net.http.Request");
+      return SendStatus::Faulted;
+    }
+    if (!reject_unknown_keywords(frame, kw_args, {"timeout"})) {
+      return SendStatus::Faulted;
+    }
+    std::optional<std::chrono::milliseconds> timeout =
+        io_timeout_from_keywords(frame, kw_args);
+    if (!timeout.has_value()) {
+      return SendStatus::Faulted;
+    }
+    if (keyword_arg_value(kw_args, "timeout") == std::nullopt) {
+      timeout = client->timeout;
+    }
+    return perform_http_request(frame, request->method, request->url,
+                                request->headers, request->body,
+                                request->has_body, *timeout, block, out);
+  }
+
   SendStatus apply_http_client_send(
       const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
       const std::string &selector, const std::vector<Value> &args,
@@ -21649,6 +21848,9 @@ private:
     if (selector == "patch") {
       return http_client_request(frame, client, "PATCH", true, args, block,
                                  kw_args, out);
+    }
+    if (selector == "send") {
+      return http_client_send(frame, client, args, block, kw_args, out);
     }
     if (selector == "closed?" || selector == "close!" ||
         selector == "close_idle!") {
@@ -21899,11 +22101,20 @@ private:
         if (selector == "Client") {
           return construct_http_client(frame, args, block, kw_args, out);
         }
+        if (selector == "Request") {
+          return construct_http_request(frame, args, block, kw_args, out);
+        }
         return SendStatus::NotHandled;
       }
       if (kind == RuntimeNativeTypeKind::NetHttpClient) {
         if (selector == "new" || selector == "__call__") {
           return construct_http_client(frame, args, block, kw_args, out);
+        }
+        return SendStatus::NotHandled;
+      }
+      if (kind == RuntimeNativeTypeKind::NetHttpRequest) {
+        if (selector == "new" || selector == "__call__") {
+          return construct_http_request(frame, args, block, kw_args, out);
         }
         return SendStatus::NotHandled;
       }
@@ -23275,6 +23486,11 @@ private:
               std::dynamic_pointer_cast<RuntimeHttpResponse>(io_value)) {
         return apply_http_response_send(frame, response, selector, args, block,
                                         kw_args, out);
+      }
+      if (const auto request =
+              std::dynamic_pointer_cast<RuntimeHttpRequest>(io_value)) {
+        return apply_http_request_send(frame, request, selector, args, block,
+                                       kw_args, out);
       }
 
       if (const auto bytes =

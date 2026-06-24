@@ -255,6 +255,69 @@ void test_rescue_unsupported_scheme() {
   expect_ok_int(result, 1, "UnsupportedSchemeError rescued as HttpError");
 }
 
+void test_send_request() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result =
+      run_with_server("import net\n"
+                      "req = net.http.Request(method: :get, "
+                      "url: \"http://127.0.0.1:%PORT%/\")\n"
+                      "net.http.Client().send(req).status()\n",
+                      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "client.send(request).status()");
+}
+
+void test_send_post_request_body() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result =
+      run_with_server("import net\n"
+                      "req = net.http.Request(method: :post, "
+                      "url: \"http://127.0.0.1:%PORT%/\", body: \"hi\")\n"
+                      "net.http.Client().send(req).ok?()\n",
+                      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_true(result, "send POST request with body");
+}
+
+void test_request_method_normalized() {
+  const amber::runtime::ExecutionResult result =
+      execute_source("import net\n"
+                     "req = net.http.Request(method: :post, url: "
+                     "\"http://h/x\")\n"
+                     "req.method() == \"POST\"\n");
+  expect_ok_true(result, "request.method() normalized to POST");
+}
+
+void test_request_content_length() {
+  const amber::runtime::ExecutionResult result =
+      execute_source("import net\n"
+                     "req = net.http.Request(method: \"post\", url: "
+                     "\"http://h/x\", body: \"abcd\")\n"
+                     "req.content_length()\n");
+  expect_ok_int(result, 4, "request.content_length() from body");
+}
+
+void test_request_invalid_method() {
+  const amber::runtime::ExecutionResult result =
+      execute_source("import net\n"
+                     "net.http.Request(method: \"bad method\", url: "
+                     "\"http://h/x\")\n");
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "InvalidMethodError",
+         "bad method -> InvalidMethodError, got " +
+             (result.fault.has_value() ? result.fault->error_name : ""));
+}
+
+void test_request_invalid_url_scheme() {
+  const amber::runtime::ExecutionResult result =
+      execute_source("import net\n"
+                     "net.http.Request(method: :get, url: \"https://h/x\")\n");
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "UnsupportedSchemeError",
+         "https Request -> UnsupportedSchemeError, got " +
+             (result.fault.has_value() ? result.fault->error_name : ""));
+}
+
 } // namespace
 
 int main() {
@@ -264,6 +327,12 @@ int main() {
   test_get_headers_map();
   test_scoped_block_form();
   test_post_body();
+  test_send_request();
+  test_send_post_request_body();
+  test_request_method_normalized();
+  test_request_content_length();
+  test_request_invalid_method();
+  test_request_invalid_url_scheme();
   test_unsupported_scheme_raises();
   test_connection_refused_raises();
   test_rescue_unsupported_scheme();
