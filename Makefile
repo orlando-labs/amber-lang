@@ -147,6 +147,7 @@ STDLIB_TIME_TEST_SRCS := tests/stdlib_time_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS
 STDLIB_URL_TEST_SRCS := tests/stdlib_url_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 AMBER_EXT_TEST_SRCS := tests/amber_ext_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 IO_TEST_SRCS := tests/io_tests.cpp runtime/context.cpp runtime/text.cpp $(IO_SRCS)
+HTTP_CODEC_TEST_SRCS := tests/http_codec_tests.cpp runtime/http_codec.cpp
 MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BUILD_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
 PACKAGE_TEST_SRCS := tests/package_tests.cpp $(PROFILE_SRCS) $(PACKAGE_SRCS) $(LEXER_SRCS)
 
@@ -201,6 +202,8 @@ FORMAT_FILES := \
 	runtime/io.h \
 	runtime/reactor.cpp \
 	runtime/reactor.h \
+	runtime/http_codec.cpp \
+	runtime/http_codec.h \
 	runtime/digest.cpp \
 	runtime/digest.h \
 	runtime/text.cpp \
@@ -256,13 +259,14 @@ FORMAT_FILES := \
 	tests/stdlib_argparser_tests.cpp \
 	tests/stdlib_uuid_tests.cpp \
 	tests/stdlib_time_tests.cpp \
-	tests/io_tests.cpp
+	tests/io_tests.cpp \
+	tests/http_codec_tests.cpp
 
 .PHONY: all build test conformance backend-equivalence spec-sync-check fmt clean
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/stdlib_registry_tests $(BUILD_DIR)/stdlib_json_tests $(BUILD_DIR)/stdlib_codecs_tests $(BUILD_DIR)/stdlib_digest_tests $(BUILD_DIR)/stdlib_secure_random_tests $(BUILD_DIR)/stdlib_argparser_tests $(BUILD_DIR)/stdlib_uuid_tests $(BUILD_DIR)/stdlib_time_tests $(BUILD_DIR)/stdlib_url_tests $(BUILD_DIR)/amber_ext_tests $(BUILD_DIR)/io_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/stdlib_registry_tests $(BUILD_DIR)/stdlib_json_tests $(BUILD_DIR)/stdlib_codecs_tests $(BUILD_DIR)/stdlib_digest_tests $(BUILD_DIR)/stdlib_secure_random_tests $(BUILD_DIR)/stdlib_argparser_tests $(BUILD_DIR)/stdlib_uuid_tests $(BUILD_DIR)/stdlib_time_tests $(BUILD_DIR)/stdlib_url_tests $(BUILD_DIR)/amber_ext_tests $(BUILD_DIR)/io_tests $(BUILD_DIR)/http_codec_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -361,6 +365,9 @@ $(BUILD_DIR)/amber_ext_tests: $(AMBER_EXT_TEST_SRCS) | $(BUILD_DIR)/.dir
 $(BUILD_DIR)/io_tests: $(IO_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(IO_TEST_SRCS) $(LDFLAGS) -o $@
 
+$(BUILD_DIR)/http_codec_tests: $(HTTP_CODEC_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(HTTP_CODEC_TEST_SRCS) $(LDFLAGS) -o $@
+
 $(BUILD_DIR)/module_loader_tests: $(MODULE_LOADER_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(MODULE_LOADER_TEST_SRCS) $(LDFLAGS) -o $@
 
@@ -395,6 +402,7 @@ test: build
 	$(BUILD_DIR)/stdlib_url_tests
 	$(BUILD_DIR)/amber_ext_tests
 	$(BUILD_DIR)/io_tests
+	$(BUILD_DIR)/http_codec_tests
 	$(BUILD_DIR)/module_loader_tests
 	$(BUILD_DIR)/package_tests
 	$(BUILD_DIR)/iamber_tests
