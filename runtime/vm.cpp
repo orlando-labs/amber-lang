@@ -7663,6 +7663,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "net.http.Client";
   case RuntimeNativeTypeKind::NetHttpRequest:
     return "net.http.Request";
+  case RuntimeNativeTypeKind::NetHttpHeaders:
+    return "net.http.Headers";
   }
   return "NativeType";
 }
@@ -10042,6 +10044,17 @@ public:
   http::HttpHeaders headers;
   std::string body;
   bool has_body = false;
+};
+
+// An ordered, case-insensitive multi-value header collection (§9), distinct
+// from Map. `read_only` is set for response/request header views, which reject
+// the mutating verbs.
+class RuntimeHttpHeaders final : public RuntimeIoValue {
+public:
+  const char *type_name() const override { return "net.http.Headers"; }
+  bool shareable() const override { return read_only; }
+  http::HttpHeaders headers;
+  bool read_only = false;
 };
 
 class Vm : public StdlibHost {
@@ -14485,6 +14498,9 @@ private:
     }
     if (path == "net.http.Request") {
       return Value::native_type(RuntimeNativeTypeKind::NetHttpRequest);
+    }
+    if (path == "net.http.Headers") {
+      return Value::native_type(RuntimeNativeTypeKind::NetHttpHeaders);
     }
     if (path == "Amber") {
       return Value::native_type(RuntimeNativeTypeKind::Amber);
@@ -21401,14 +21417,28 @@ private:
     return SendStatus::Faulted;
   }
 
-  // Convert an Amber Str-keyed/Str-valued Map into validated wire headers.
+  // Convert an Amber Str-keyed/Str-valued Map -- or a net.http.Headers value --
+  // into validated wire headers.
   bool http_headers_from_value(const Frame &frame, const Value &headers_value,
                                http::HttpHeaders *out) {
     if (headers_value.is_null()) {
       return true;
     }
+    if (headers_value.is_io_value()) {
+      if (const auto headers = std::dynamic_pointer_cast<RuntimeHttpHeaders>(
+              headers_value.as_io_value())) {
+        for (const auto &entry : headers->headers.pairs()) {
+          out->add_parsed(entry.first, entry.second);
+        }
+        return true;
+      }
+      set_fault(frame, "TypeError",
+                "headers must be a Map or net.http.Headers");
+      return false;
+    }
     if (!headers_value.is_map()) {
-      set_fault(frame, "TypeError", "headers must be a Map");
+      set_fault(frame, "TypeError",
+                "headers must be a Map or net.http.Headers");
       return false;
     }
     const std::optional<std::vector<MapEntry>> entries =
@@ -21462,7 +21492,17 @@ private:
     return false;
   }
 
-  // Build a read-only Map[Str, Array[Str]] view of response headers (§9.2),
+  // Wrap wire headers as a net.http.Headers value (§9). `read_only` views
+  // (response/request headers) reject the mutating verbs.
+  Value make_http_headers_value(const http::HttpHeaders &headers,
+                                bool read_only) {
+    auto value = std::make_shared<RuntimeHttpHeaders>();
+    value->headers = headers;
+    value->read_only = read_only;
+    return Value::io_value(value);
+  }
+
+  // Build a StrictMap[Str, Array[Str]] view of headers (§9.2 to_map),
   // preserving first-seen field-name order and per-name value order.
   Value http_headers_to_map(const http::HttpHeaders &headers) {
     std::vector<std::pair<std::string, std::vector<Value>>> ordered;
@@ -21488,7 +21528,190 @@ private:
       map_entries.push_back(std::move(map_entry));
     }
     return state_->heap.make_symbol_map_value(std::move(map_entries), false,
-                                              false);
+                                              true);
+  }
+
+  // `net.http.Headers()` (empty) or `Headers(map)` (seeded + validated).
+  SendStatus construct_http_headers(
+      const Frame &frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (!block.is_null()) {
+      set_fault(frame, "TypeError", "net.http.Headers does not take a block");
+      return SendStatus::Faulted;
+    }
+    if (!kw_args.empty()) {
+      set_fault(frame, "TypeError", "net.http.Headers does not take keywords");
+      return SendStatus::Faulted;
+    }
+    if (args.size() > 1U) {
+      set_fault(frame, "ArgumentError",
+                "net.http.Headers takes at most one Map argument");
+      return SendStatus::Faulted;
+    }
+    auto value = std::make_shared<RuntimeHttpHeaders>();
+    if (args.size() == 1U && !args[0].is_null()) {
+      if (!http_headers_from_value(frame, args[0], &value->headers)) {
+        return SendStatus::Faulted;
+      }
+    }
+    *out = Value::io_value(value);
+    return SendStatus::Matched;
+  }
+
+  SendStatus apply_http_headers_send(
+      const Frame &frame, const std::shared_ptr<RuntimeHttpHeaders> &headers,
+      const std::string &selector, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    http::HttpHeaders &h = headers->headers;
+
+    // Mutating verbs (rejected on read-only response/request views).
+    if (selector == "add!" || selector == "set!" || selector == "delete!") {
+      if (headers->read_only) {
+        set_fault(frame, "TypeError",
+                  "net.http.Headers view is read-only (" + selector + ")");
+        return SendStatus::Faulted;
+      }
+      if (!block.is_null() || !kw_args.empty()) {
+        set_fault(frame, "TypeError",
+                  "net.http.Headers#" + selector + " takes no keywords/block");
+        return SendStatus::Faulted;
+      }
+      const std::size_t arity = selector == "delete!" ? 1U : 2U;
+      if (args.size() != arity) {
+        set_fault(frame, "ArgumentError",
+                  "net.http.Headers#" + selector + " wrong arity");
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::string> name =
+          text_from_symbol_or_string(args[0]);
+      if (!name.has_value()) {
+        set_fault(frame, "TypeError", "header name must be a Str or Symbol");
+        return SendStatus::Faulted;
+      }
+      if (selector == "delete!") {
+        h.remove(*name);
+        *out = Value::io_value(headers);
+        return SendStatus::Matched;
+      }
+      const std::optional<std::string> value =
+          args[1].is_string() ? text_from_symbol_or_string(args[1])
+                              : std::nullopt;
+      if (!value.has_value()) {
+        set_fault(frame, "TypeError", "header value must be a Str");
+        return SendStatus::Faulted;
+      }
+      std::string error;
+      const bool ok = selector == "add!" ? h.add(*name, *value, &error)
+                                         : h.set(*name, *value, &error);
+      if (!ok) {
+        raise_runtime_error(frame, "InvalidHeaderError", error);
+        return SendStatus::Faulted;
+      }
+      *out = Value::io_value(headers);
+      return SendStatus::Matched;
+    }
+
+    if (selector == "each") {
+      if (args.size() != 0U || !kw_args.empty() || block.is_null()) {
+        set_fault(frame, "ArgumentError",
+                  "net.http.Headers#each requires a |name, value| block");
+        return SendStatus::Faulted;
+      }
+      std::optional<NativeBlockInvoker> invoker =
+          make_native_block_invoker(frame, block, "net.http.Headers#each");
+      if (!invoker.has_value()) {
+        return SendStatus::Faulted;
+      }
+      try {
+        for (const auto &entry : h.pairs()) {
+          (*invoker)({string_value_from_text(entry.first),
+                      string_value_from_text(entry.second)});
+        }
+      } catch (const RuntimeTaskFailure &failure) {
+        set_fault(frame, failure.error_name(), failure.message());
+        return SendStatus::Faulted;
+      }
+      *out = Value::io_value(headers);
+      return SendStatus::Matched;
+    }
+
+    // Read accessors take a single header-name argument or none.
+    if (!block.is_null() || !kw_args.empty()) {
+      set_fault(frame, "TypeError",
+                "net.http.Headers#" + selector + " takes no keywords/block");
+      return SendStatus::Faulted;
+    }
+    if (selector == "size" || selector == "empty?" || selector == "to_map" ||
+        selector == "to_pairs") {
+      if (!args.empty()) {
+        set_fault(frame, "ArgumentError",
+                  "net.http.Headers#" + selector + " takes no arguments");
+        return SendStatus::Faulted;
+      }
+      if (selector == "size") {
+        *out = Value::integer(static_cast<std::int64_t>(h.size()));
+      } else if (selector == "empty?") {
+        *out = Value::boolean(h.empty());
+      } else if (selector == "to_map") {
+        *out = http_headers_to_map(h);
+      } else {
+        std::vector<Value> pairs;
+        pairs.reserve(h.size());
+        for (const auto &entry : h.pairs()) {
+          pairs.push_back(
+              make_tuple_value({string_value_from_text(entry.first),
+                                string_value_from_text(entry.second)}));
+        }
+        *out = make_list_value(std::move(pairs));
+      }
+      return SendStatus::Matched;
+    }
+
+    if (selector == "first" || selector == "all" || selector == "include?" ||
+        selector == "combined" || selector == "combined?") {
+      if (args.size() != 1U) {
+        set_fault(frame, "ArgumentError",
+                  "net.http.Headers#" + selector + " expects a name argument");
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::string> name =
+          text_from_symbol_or_string(args[0]);
+      if (!name.has_value()) {
+        set_fault(frame, "TypeError", "header name must be a Str or Symbol");
+        return SendStatus::Faulted;
+      }
+      if (selector == "include?") {
+        *out = Value::boolean(h.contains(*name));
+      } else if (selector == "first") {
+        const std::optional<std::string> value = h.first(*name);
+        *out =
+            value.has_value() ? string_value_from_text(*value) : Value::null();
+      } else if (selector == "all") {
+        std::vector<Value> values;
+        for (const std::string &value : h.all(*name)) {
+          values.push_back(string_value_from_text(value));
+        }
+        *out = make_list_value(std::move(values));
+      } else if (selector == "combined?") {
+        *out = Value::boolean(http::HttpHeaders::is_list_combinable(
+            http::ascii_lower_copy(*name)));
+      } else { // combined
+        if (!http::HttpHeaders::is_list_combinable(
+                http::ascii_lower_copy(*name))) {
+          *out = Value::null();
+        } else {
+          const std::optional<std::string> value = h.combined(*name);
+          *out = value.has_value() ? string_value_from_text(*value)
+                                   : Value::null();
+        }
+      }
+      return SendStatus::Matched;
+    }
+
+    set_fault(frame, "NoMethodError",
+              "net.http.Headers has no method " + selector);
+    return SendStatus::Faulted;
   }
 
   SendStatus construct_http_client(
@@ -21755,7 +21978,7 @@ private:
       return SendStatus::Matched;
     }
     if (selector == "headers") {
-      *out = http_headers_to_map(request->headers);
+      *out = make_http_headers_value(request->headers, /*read_only=*/true);
       return SendStatus::Matched;
     }
     if (selector == "body") {
@@ -21943,7 +22166,7 @@ private:
       if (!bare("headers")) {
         return SendStatus::Faulted;
       }
-      *out = http_headers_to_map(response->headers);
+      *out = make_http_headers_value(response->headers, /*read_only=*/true);
       return SendStatus::Matched;
     }
     if (selector == "body_text" || selector == "body_bytes") {
@@ -22104,6 +22327,9 @@ private:
         if (selector == "Request") {
           return construct_http_request(frame, args, block, kw_args, out);
         }
+        if (selector == "Headers") {
+          return construct_http_headers(frame, args, block, kw_args, out);
+        }
         return SendStatus::NotHandled;
       }
       if (kind == RuntimeNativeTypeKind::NetHttpClient) {
@@ -22115,6 +22341,12 @@ private:
       if (kind == RuntimeNativeTypeKind::NetHttpRequest) {
         if (selector == "new" || selector == "__call__") {
           return construct_http_request(frame, args, block, kw_args, out);
+        }
+        return SendStatus::NotHandled;
+      }
+      if (kind == RuntimeNativeTypeKind::NetHttpHeaders) {
+        if (selector == "new" || selector == "__call__") {
+          return construct_http_headers(frame, args, block, kw_args, out);
         }
         return SendStatus::NotHandled;
       }
@@ -23491,6 +23723,11 @@ private:
               std::dynamic_pointer_cast<RuntimeHttpRequest>(io_value)) {
         return apply_http_request_send(frame, request, selector, args, block,
                                        kw_args, out);
+      }
+      if (const auto headers_value =
+              std::dynamic_pointer_cast<RuntimeHttpHeaders>(io_value)) {
+        return apply_http_headers_send(frame, headers_value, selector, args,
+                                       block, kw_args, out);
       }
 
       if (const auto bytes =
@@ -32399,6 +32636,7 @@ private:
             kind == RuntimeNativeTypeKind::NetEndpoint ||
             kind == RuntimeNativeTypeKind::NetHttpClient ||
             kind == RuntimeNativeTypeKind::NetHttpRequest ||
+            kind == RuntimeNativeTypeKind::NetHttpHeaders ||
             kind == RuntimeNativeTypeKind::ArgParser) {
           Value result = Value::null();
           const std::string constructor_selector =

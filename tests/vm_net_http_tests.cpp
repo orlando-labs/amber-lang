@@ -180,15 +180,108 @@ void test_get_ok_predicate() {
   expect_ok_true(result, "get().ok?()");
 }
 
-void test_get_headers_map() {
+void test_get_headers_value() {
   std::string server_error;
   const amber::runtime::ExecutionResult result = run_with_server(
       "import net\n"
       "res = net.http.Client().get(\"http://127.0.0.1:%PORT%/\")\n"
-      "res.headers()[\"x-test\"][0] == \"yes\"\n",
+      "res.headers().first(\"X-Test\") == \"yes\"\n",
       kResponse, &server_error);
   expect(server_error.empty(), "server error: " + server_error);
-  expect_ok_true(result, "get().headers() map");
+  expect_ok_true(result, "get().headers() Headers value, case-insensitive");
+}
+
+void test_response_headers_read_only() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "import net\n"
+      "res = net.http.Client().get(\"http://127.0.0.1:%PORT%/\")\n"
+      "res.headers().add!(\"x\", \"y\")\n",
+      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "TypeError",
+         "mutating response headers -> TypeError (read-only)");
+}
+
+void test_headers_value_api() {
+  // Duplicate preservation + case-insensitive all().
+  const amber::runtime::ExecutionResult dup =
+      execute_source("import net\n"
+                     "h = net.http.Headers()\n"
+                     "h.add!(\"X-Tag\", \"one\")\n"
+                     "h.add!(\"x-tag\", \"two\")\n"
+                     "h.all(\"X-TAG\").size()\n");
+  expect_ok_int(dup, 2, "Headers add! duplicate + case-insensitive all()");
+
+  // first() returns the earliest line, case-insensitively.
+  const amber::runtime::ExecutionResult first =
+      execute_source("import net\n"
+                     "h = net.http.Headers()\n"
+                     "h.add!(\"X-Tag\", \"one\")\n"
+                     "h.add!(\"x-tag\", \"two\")\n"
+                     "h.first(\"x-tag\") == \"one\"\n");
+  expect_ok_true(first, "Headers first() earliest line");
+
+  // set! replaces all lines for a name.
+  const amber::runtime::ExecutionResult set =
+      execute_source("import net\n"
+                     "h = net.http.Headers()\n"
+                     "h.add!(\"x-tag\", \"one\")\n"
+                     "h.add!(\"x-tag\", \"two\")\n"
+                     "h.set!(\"x-tag\", \"only\")\n"
+                     "h.all(\"x-tag\").size()\n");
+  expect_ok_int(set, 1, "Headers set! replaces all");
+}
+
+void test_headers_include_and_combined() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import net\n"
+      "h = net.http.Headers()\n"
+      "h.add!(\"Accept\", \"text/html\")\n"
+      "h.add!(\"accept\", \"application/json\")\n"
+      "h.combined(\"accept\") == \"text/html, application/json\"\n");
+  expect_ok_true(result, "Headers combined() joins list field");
+}
+
+void test_request_accepts_headers_value() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result =
+      run_with_server("import net\n"
+                      "h = net.http.Headers()\n"
+                      "h.add!(\"accept\", \"application/json\")\n"
+                      "req = net.http.Request(method: :get, "
+                      "url: \"http://127.0.0.1:%PORT%/\", headers: h)\n"
+                      "net.http.Client().send(req).status()\n",
+                      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "Request accepts a Headers value");
+}
+
+void test_from_import_headers() {
+  const amber::runtime::ExecutionResult result =
+      execute_source("from net.http import Headers\n"
+                     "h = Headers()\n"
+                     "h.add!(\"a\", \"b\")\n"
+                     "h.include?(\"A\")\n");
+  expect_ok_true(result, "from net.http import Headers; include?");
+}
+
+void test_capability_denied() {
+  // A world with no capability grants must deny net.connect *before* any
+  // socket opens (§20.1 / §25.9). Port 9 is never contacted.
+  amber::bytecode::BcModule module =
+      compile_source_or_die("import net\n"
+                            "net.http.Client().get(\"http://127.0.0.1:9/\")\n");
+  amber::runtime::RuntimeWorldOptions options; // no net.connect grant
+  amber::runtime::RuntimeWorld world(module, options);
+  const amber::runtime::ExecutionResult result =
+      world.execute(module.init.entry_code_id);
+  expect(!result.ok() && result.fault.has_value(),
+         "denied net.connect should fault");
+  expect(result.fault->error_name == "CapabilityError",
+         "denied net.connect -> CapabilityError, got " +
+             (result.fault.has_value() ? result.fault->error_name : ""));
 }
 
 void test_scoped_block_form() {
@@ -347,7 +440,12 @@ int main() {
   test_get_status();
   test_get_body_text();
   test_get_ok_predicate();
-  test_get_headers_map();
+  test_get_headers_value();
+  test_response_headers_read_only();
+  test_headers_value_api();
+  test_headers_include_and_combined();
+  test_request_accepts_headers_value();
+  test_from_import_headers();
   test_scoped_block_form();
   test_post_body();
   test_send_request();
@@ -359,6 +457,7 @@ int main() {
   test_unsupported_scheme_raises();
   test_connection_refused_raises();
   test_rescue_unsupported_scheme();
+  test_capability_denied();
   std::cout << "vm net.http tests passed (" << g_checks << " checks)\n";
   return 0;
 }

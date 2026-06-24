@@ -2823,6 +2823,9 @@ private:
     if (binding.source == "net.http:Request") {
       return "net.http.Request";
     }
+    if (binding.source == "net.http:Headers") {
+      return "net.http.Headers";
+    }
     return "";
   }
 
