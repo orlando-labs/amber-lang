@@ -318,9 +318,32 @@ void test_request_invalid_url_scheme() {
              (result.fault.has_value() ? result.fault->error_name : ""));
 }
 
+void test_from_import_client() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result =
+      run_with_server("from net.http import Client\n"
+                      "Client().get(\"http://127.0.0.1:%PORT%/\").status()\n",
+                      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "from net.http import Client; Client().get");
+}
+
+void test_from_import_request_send() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "from net.http import Client, Request\n"
+      "req = Request(method: :get, url: \"http://127.0.0.1:%PORT%/\")\n"
+      "Client().send(req).status()\n",
+      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "from net.http import Request + send");
+}
+
 } // namespace
 
 int main() {
+  test_from_import_client();
+  test_from_import_request_send();
   test_get_status();
   test_get_body_text();
   test_get_ok_predicate();

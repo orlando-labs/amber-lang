@@ -2761,6 +2761,10 @@ private:
         (binding.source == "io" || binding.source == "net")) {
       return binding.source;
     }
+    // `import net.http` binds `http` to the net.http namespace constant.
+    if (binding.role == "module_import" && binding.source == "net.http") {
+      return "net.http";
+    }
     if (binding.role != "from_import") {
       return "";
     }
@@ -2809,6 +2813,15 @@ private:
     }
     if (binding.source == "net:Endpoint") {
       return "net.Endpoint";
+    }
+    // `from net.http import Client` / `Request` -> the net.http type objects,
+    // which construct via their CALL ("new"). Other net.http names are not yet
+    // constructible by reference and intentionally fall through.
+    if (binding.source == "net.http:Client") {
+      return "net.http.Client";
+    }
+    if (binding.source == "net.http:Request") {
+      return "net.http.Request";
     }
     return "";
   }

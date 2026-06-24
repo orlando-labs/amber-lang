@@ -32397,6 +32397,8 @@ private:
             kind == RuntimeNativeTypeKind::IoPipe ||
             kind == RuntimeNativeTypeKind::FsPath ||
             kind == RuntimeNativeTypeKind::NetEndpoint ||
+            kind == RuntimeNativeTypeKind::NetHttpClient ||
+            kind == RuntimeNativeTypeKind::NetHttpRequest ||
             kind == RuntimeNativeTypeKind::ArgParser) {
           Value result = Value::null();
           const std::string constructor_selector =
