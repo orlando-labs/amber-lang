@@ -51,7 +51,9 @@ slices add `RuntimeNativeModuleDescriptor` for path/handler exports and
 register the current migrated stdlib set (`Math`, `Json`, codecs, `Digest`,
 `SecureRandom`, `ArgParser`, `Uuid`, `Time`, and `Url`) directly into
 `RuntimeModuleRegistry` and `RuntimeDispatchRegistry`, while still feeding the
-legacy `NativeRegistry` for compatibility.
+legacy `NativeRegistry` for compatibility. `RuntimeWorld` and direct VM
+fallback registries no longer seed module/dispatch bindings from
+`NativeRegistry`; the import helpers remain only as compatibility APIs/tests.
 
 ## 2. Current Pressure Points
 
@@ -220,7 +222,8 @@ descriptor registration.
   `RuntimeModuleRegistry`, `RuntimeTypeRegistry`, `RuntimeDispatchRegistry`,
   and `RuntimeErrorRegistry` have landed first as compatibility adapters over
   legacy native paths, native type calls, migrated native handlers, and builtin
-  runtime error lookup.
+  runtime error lookup. Runtime module/dispatch wiring for migrated stdlib now
+  uses descriptors instead of importing `NativeRegistry` path/handler tables.
 - Add descriptor structs for paths, types, constructors, methods, properties,
   and errors. The first path/handler descriptor shape,
   `RuntimeNativeModuleDescriptor`, has landed for the migrated stdlib modules

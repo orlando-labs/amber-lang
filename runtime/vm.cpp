@@ -10558,7 +10558,6 @@ public:
     }
     if (module_registry_ == nullptr) {
       register_core_prelude_bindings(owned_module_registry_);
-      owned_module_registry_.import_native_paths(*native_registry_);
       register_legacy_native_type_paths(owned_module_registry_);
       module_registry_ = &owned_module_registry_;
     }
@@ -10567,7 +10566,6 @@ public:
       type_registry_ = &owned_type_registry_;
     }
     if (dispatch_registry_ == nullptr) {
-      owned_dispatch_registry_.import_native_handlers(*native_registry_);
       dispatch_registry_ = &owned_dispatch_registry_;
     }
     if (module_registry_ == &owned_module_registry_ &&
@@ -37311,9 +37309,7 @@ struct RuntimeWorld::Impl {
         package(std::move(package_image)), options(std::move(world_options)) {
     state->initialize_for_module(*module);
     register_builtin_stdlib(native_registry);
-    dispatch_registry.import_native_handlers(native_registry);
     register_core_prelude_bindings(module_registry);
-    module_registry.import_native_paths(native_registry);
     register_legacy_native_type_paths(module_registry);
     register_builtin_runtime_modules(module_registry, dispatch_registry);
     register_legacy_native_type_calls(type_registry);
