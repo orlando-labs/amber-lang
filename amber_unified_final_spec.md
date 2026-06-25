@@ -132,6 +132,8 @@ StrictMap{key: value} # exact-key ordered Map
 Начиная с `Map` key может быть:
 
 - legacy identifier key: `{name: value}` означает `{:name: value}`;
+- same-name identifier entry: `{name:}` означает `{:name: name}` and reads the
+  ordinary lexical binding `name`;
 - explicit symbol key: `{:name: value}`;
 - string/scalar literal key: `{"name": value, 1: value, true: value}`;
 - expression key в скобках: `{(name): value}`, `{(user.id): value}`;
@@ -5588,6 +5590,7 @@ CollectionCondition::= "if" Expr
 MapEntryList::= ConditionalMapEntry { "," ConditionalMapEntry } [ "," ]
 
 ConditionalMapEntry::= MapKey ":" Expr CollectionCondition?
+ | Name ":"
 
 MapKey::= Name
  | SymbolLiteral
@@ -12077,6 +12080,24 @@ means:
 
 This rule preserves existing symbol-key map behavior and conditional map entry syntax.
 
+If the same bare identifier key is immediately followed by the entry boundary,
+the value may be omitted:
+
+```amber
+name = "Ada"
+{name:}
+```
+
+This is exactly equivalent to:
+
+```amber
+{name: name}
+```
+
+The right-hand side is an ordinary lexical binding read. The shorthand applies
+only to bare identifier keys; explicit symbol keys (`{:name:}`), string keys and
+expression keys still require an explicit value.
+
 ---
 
 #### 4.2. Explicit symbol keys
@@ -14362,11 +14383,15 @@ Reference grammar:
 ```ebnf
 CallArg::= Expr
  | Identifier ":" Expr
+ | Identifier ":"
  | "*" Expr
  | "**" Expr
 ```
 
 Ordering restrictions are semantic/parser validation rules, not precedence rules.
+`Identifier ":"` is same-name keyword argument shorthand and is accepted only at
+an argument boundary. It is exactly equivalent to `Identifier ":" Identifier`,
+where the value side is an ordinary lexical binding read.
 
 ---
 
@@ -14394,6 +14419,7 @@ Reference grammar:
 
 ```ebnf
 MapEntry::= MapKey ":" Expr CollectionCondition?
+ | Identifier ":"
  | "**" Expr CollectionCondition?
 ```
 
@@ -14406,6 +14432,9 @@ MapEntry::= MapKey ":" Expr CollectionCondition?
 {:name: v} # explicit Symbol key
 {(1..5): v} # parenthesized Range key
 ```
+
+The `Identifier ":"` form is same-name map entry shorthand and is exactly
+equivalent to `Identifier ":" Identifier`.
 
 ---
 

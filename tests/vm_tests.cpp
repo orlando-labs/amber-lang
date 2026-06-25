@@ -586,6 +586,25 @@ void test_execute_emitted_collection_literals() {
                  symbol_id_or_die(map_result.module, "ok"),
          "symbol literal map value");
 
+  amber::bytecode::EmitResult same_name_map_result =
+      emit_ok("x = 42\n"
+              "{a: 100500, x:}\n");
+  amber::runtime::ExecutionResult same_name_map_exec =
+      amber::runtime::execute_code(
+          same_name_map_result.module,
+          same_name_map_result.module.init.entry_code_id);
+  expect(same_name_map_exec.ok(), "same-name map literal execution failed");
+  const amber::runtime::IntrusivePtr<amber::runtime::MapValue>
+      same_name_map = same_name_map_exec.value.as_map();
+  expect(same_name_map != nullptr && same_name_map->entries.size() == 2,
+         "same-name map entry count");
+  expect(same_name_map->entries[1].symbol_id ==
+             symbol_id_or_die(same_name_map_result.module, "x"),
+         "same-name map key");
+  expect(same_name_map->entries[1].value.is_integer() &&
+             same_name_map->entries[1].value.as_integer() == 42,
+         "same-name map reads local value");
+
   amber::bytecode::EmitResult index_store_result =
       emit_ok("items = [1, 2, 3]\n"
               "items[1] = 9\n"
@@ -790,6 +809,61 @@ void test_execute_emitted_v20_7_spread() {
   expect(exec.ok(), "keyword string-key spread execution failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 15,
          "keyword spread converts string keys to keyword names");
+
+  emit_result = emit_ok("class Config:\n"
+                        "  class_method def pack(a, b:, x:, y:):\n"
+                        "    [a, b, x, y]\n"
+                        "\n"
+                        "def probe():\n"
+                        "  b = 5\n"
+                        "  x = 42\n"
+                        "  y = 6\n"
+                        "  paren = Config.pack(1, b:, x:, y:)\n"
+                        "  bare = Config.pack 1, b:, x:, y:\n"
+                        "  [paren[0], paren[1], paren[2], bare[2], bare[3]]\n");
+  method = method_by_name(emit_result.module, "probe");
+  expect(method != nullptr, "same-name keyword probe method exists");
+  exec =
+      amber::runtime::execute_code(emit_result.module, method->entry_code_id);
+  expect(exec.ok(), "same-name keyword call execution failed");
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue>
+      same_name_call_items = exec.value.as_list();
+  expect(same_name_call_items != nullptr &&
+             same_name_call_items->items.size() == 5,
+         "same-name keyword result count");
+  expect(same_name_call_items->items[0].as_integer() == 1 &&
+             same_name_call_items->items[1].as_integer() == 5 &&
+             same_name_call_items->items[2].as_integer() == 42 &&
+             same_name_call_items->items[3].as_integer() == 42 &&
+             same_name_call_items->items[4].as_integer() == 6,
+         "same-name keyword args read locals");
+
+  emit_result = emit_ok("def pack(a, b:, x:, y:):\n"
+                        "  [a, b, x, y]\n"
+                        "\n"
+                        "def probe():\n"
+                        "  b = 5\n"
+                        "  x = 42\n"
+                        "  y = 6\n"
+                        "  paren = pack(1, b:, x:, y:)\n"
+                        "  bare = pack 1, b:, x:, y:\n"
+                        "  [paren[0], paren[1], paren[2], bare[2], bare[3]]\n");
+  method = method_by_name(emit_result.module, "probe");
+  expect(method != nullptr, "same-name closure keyword probe method exists");
+  exec =
+      amber::runtime::execute_code(emit_result.module, method->entry_code_id);
+  expect(exec.ok(), "same-name closure keyword call execution failed");
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue>
+      same_name_closure_items = exec.value.as_list();
+  expect(same_name_closure_items != nullptr &&
+             same_name_closure_items->items.size() == 5,
+         "same-name closure keyword result count");
+  expect(same_name_closure_items->items[0].as_integer() == 1 &&
+             same_name_closure_items->items[1].as_integer() == 5 &&
+             same_name_closure_items->items[2].as_integer() == 42 &&
+             same_name_closure_items->items[3].as_integer() == 42 &&
+             same_name_closure_items->items[4].as_integer() == 6,
+         "same-name closure keyword args read locals");
 
   emit_result = emit_ok("[1, *[2, 3], *(4..5)]\n");
   exec = amber::runtime::execute_code(emit_result.module,

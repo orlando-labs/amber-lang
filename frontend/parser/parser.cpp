@@ -17,6 +17,26 @@ ast::Expr &keyword_arg_field(ast::Expr &expr, const lexer::Token &name) {
   return expr;
 }
 
+std::unique_ptr<ast::Expr> make_same_name_value(const lexer::Token &name) {
+  auto value = ast::make_expr("AstName", name.span);
+  value->string_field("name", name.lexeme);
+  return value;
+}
+
+bool is_same_name_map_value_boundary(lexer::TokenKind kind) {
+  return kind == lexer::TokenKind::Comma || kind == lexer::TokenKind::RBrace;
+}
+
+bool is_same_name_call_value_boundary(lexer::TokenKind kind,
+                                      lexer::TokenKind closing_kind) {
+  return kind == lexer::TokenKind::Comma || kind == closing_kind;
+}
+
+bool is_same_name_bare_arg_value_boundary(lexer::TokenKind kind) {
+  return kind == lexer::TokenKind::Comma || kind == lexer::TokenKind::Newline ||
+         kind == lexer::TokenKind::Dedent || kind == lexer::TokenKind::Eof;
+}
+
 bool is_keyword_spread_start(const lexer::Token &first,
                              const lexer::Token &second) {
   (void)second;
@@ -3545,9 +3565,11 @@ std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
     std::string key_value;
     lexer::Span key_span = key.span;
     std::unique_ptr<ast::Expr> key_expr;
+    bool allow_same_name_value = false;
 
     if (match(lexer::TokenKind::Identifier)) {
       key_value = key.lexeme;
+      allow_same_name_value = true;
     } else if (match(lexer::TokenKind::String)) {
       key_kind = "string";
       key_value = key.lexeme;
@@ -3569,7 +3591,11 @@ std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
     }
 
     consume(lexer::TokenKind::Colon, "expected ':' after map literal key");
-    std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
+    std::unique_ptr<ast::Expr> value =
+        allow_same_name_value &&
+                is_same_name_map_value_boundary(current().kind)
+            ? make_same_name_value(key)
+            : parse_expression(1, stop_mode);
     std::unique_ptr<ast::Expr> condition = parse_collection_condition();
     auto entry = ast::make_expr(
         "AstMapEntry",
@@ -3959,7 +3985,8 @@ Parser::parse_paren_args(StopMode stop_mode) {
   return parse_call_arg_list(lexer::TokenKind::RParen, stop_mode);
 }
 
-std::unique_ptr<ast::Expr> Parser::parse_call_arg(StopMode stop_mode) {
+std::unique_ptr<ast::Expr>
+Parser::parse_call_arg(StopMode stop_mode, lexer::TokenKind closing_kind) {
   // RFC block-parameters §6: a trailing `&name` argument routes the local's
   // callable into the callee's block channel. `&local` is not otherwise a
   // legal expression (§4.6 restricts prefix `&` to static reference targets),
@@ -4009,7 +4036,10 @@ std::unique_ptr<ast::Expr> Parser::parse_call_arg(StopMode stop_mode) {
       peek().kind == lexer::TokenKind::Colon) {
     const lexer::Token name = advance();
     advance();
-    std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
+    std::unique_ptr<ast::Expr> value =
+        is_same_name_call_value_boundary(current().kind, closing_kind)
+            ? make_same_name_value(name)
+            : parse_expression(1, stop_mode);
     auto keyword = ast::make_expr("AstKeywordArg",
                                   ast::join_spans(name.span, value->span));
     keyword_arg_field(*keyword, name);
@@ -4035,7 +4065,7 @@ Parser::parse_call_arg_list(lexer::TokenKind closing_kind,
       error_code(current(), "AMB_BLOCK_PASS_TARGET",
                  "a `&name` block-pass argument must be the last argument");
     }
-    std::unique_ptr<ast::Expr> arg = parse_call_arg(stop_mode);
+    std::unique_ptr<ast::Expr> arg = parse_call_arg(stop_mode, closing_kind);
     if (arg != nullptr && arg->kind == "AstBlockPass") {
       saw_block_pass = true;
     }
@@ -4082,7 +4112,10 @@ Parser::parse_bare_args(StopMode stop_mode) {
         peek().kind == lexer::TokenKind::Colon) {
       const lexer::Token name = advance();
       advance();
-      std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
+      std::unique_ptr<ast::Expr> value =
+          is_same_name_bare_arg_value_boundary(current().kind)
+              ? make_same_name_value(name)
+              : parse_expression(1, stop_mode);
       auto keyword = ast::make_expr("AstKeywordArg",
                                     ast::join_spans(name.span, value->span));
       keyword_arg_field(*keyword, name);
@@ -4109,7 +4142,10 @@ Parser::parse_expr_list(lexer::TokenKind closing_kind, StopMode stop_mode) {
         peek().kind == lexer::TokenKind::Colon) {
       const lexer::Token name = advance();
       advance();
-      std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
+      std::unique_ptr<ast::Expr> value =
+          is_same_name_call_value_boundary(current().kind, closing_kind)
+              ? make_same_name_value(name)
+              : parse_expression(1, stop_mode);
       auto keyword = ast::make_expr("AstKeywordArg",
                                     ast::join_spans(name.span, value->span));
       keyword_arg_field(*keyword, name);

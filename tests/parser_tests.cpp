@@ -264,6 +264,22 @@ void test_bare_call() {
          "one bare arg");
   expect(list_field(*tails.values[0], "args").values[0]->kind == "AstBinary",
          "bare arg parses as expression");
+
+  std::unique_ptr<Expr> same_name = parse_ok("puts 1, x:, y: 2\n");
+  const amber::ast::ListField &same_name_tails =
+      list_field(*same_name, "tails");
+  const amber::ast::ListField &same_name_args =
+      list_field(*same_name_tails.values[0], "args");
+  expect(same_name_args.values.size() == 3, "same-name bare arg count");
+  expect(same_name_args.values[1]->kind == "AstKeywordArg",
+         "same-name bare keyword arg");
+  expect(string_field(*same_name_args.values[1], "name") == "x",
+         "same-name bare keyword name");
+  expect(node_field(*same_name_args.values[1], "value").kind == "AstName",
+         "same-name bare keyword value is name read");
+  expect(string_field(node_field(*same_name_args.values[1], "value"), "name") ==
+             "x",
+         "same-name bare keyword value name");
 }
 
 void test_dot_call_segment() {
@@ -507,6 +523,19 @@ void test_collection_literals() {
   expect(string_field(*entries.values[2], "key") == "kind",
          "explicit symbol key text");
 
+  std::unique_ptr<Expr> same_name_map = parse_ok("{a: 1, x:}\n");
+  const amber::ast::ListField &same_name_entries =
+      list_field(*same_name_map, "entries");
+  expect(same_name_entries.values.size() == 2,
+         "same-name map entry count");
+  expect(string_field(*same_name_entries.values[1], "key") == "x",
+         "same-name map key text");
+  expect(node_field(*same_name_entries.values[1], "value").kind == "AstName",
+         "same-name map value is name read");
+  expect(string_field(node_field(*same_name_entries.values[1], "value"),
+                      "name") == "x",
+         "same-name map value name");
+
   std::unique_ptr<Expr> expr_key_map =
       parse_ok("{1: :int, (name): value, [1, 2]: :pair}\n");
   expect(expr_key_map->kind == "AstMapLiteral",
@@ -544,6 +573,21 @@ void test_v20_7_spread_surface() {
   expect(args.values[2]->kind == "AstKeywordArg", "ordinary keyword arg");
   expect(args.values[3]->kind == "AstKeywordSpreadArg",
          "keyword spread arg");
+
+  std::unique_ptr<Expr> same_name_call = parse_ok("fn(1, x:, y: 2)\n");
+  const amber::ast::ListField &same_name_call_tails =
+      list_field(*same_name_call, "tails");
+  const amber::ast::ListField &same_name_call_args =
+      list_field(*same_name_call_tails.values[0], "args");
+  expect(same_name_call_args.values.size() == 3,
+         "same-name paren call arg count");
+  expect(same_name_call_args.values[1]->kind == "AstKeywordArg",
+         "same-name paren keyword arg");
+  expect(string_field(*same_name_call_args.values[1], "name") == "x",
+         "same-name paren keyword name");
+  expect(node_field(*same_name_call_args.values[1], "value").kind ==
+             "AstName",
+         "same-name paren keyword value is name read");
 
   std::unique_ptr<Expr> list =
       parse_ok("[1, *items if include_items?, 9]\n");

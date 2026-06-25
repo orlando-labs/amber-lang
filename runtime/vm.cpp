@@ -34104,11 +34104,6 @@ private:
       }
 
       if (packet.callee.is_closure()) {
-        if (!packet.kw_args.empty()) {
-          set_fault(frame, "TypeError",
-                    "closure CALL does not accept keyword arguments");
-          return;
-        }
         if (!ensure_lifecycle_access(frame, packet.callee)) {
           return;
         }
@@ -34120,6 +34115,32 @@ private:
         const BcCode *code = find_code(module_, closure->code_id);
         if (code == nullptr) {
           set_fault(frame, "VMError", "closure code id is unknown");
+          return;
+        }
+        if (!packet.kw_args.empty()) {
+          const bytecode::BcMethod *method =
+              find_method_by_entry_code(closure->code_id);
+          if (method == nullptr || !method->clause_table.empty()) {
+            set_fault(frame, "TypeError",
+                      "closure CALL does not accept keyword arguments");
+            return;
+          }
+          std::vector<bytecode::MethodParamEntry> params;
+          std::vector<BoundMethodArg> slots;
+          if (!shape_method_call(frame, *method, packet.pos_args,
+                                 packet.kw_args, &params, &slots)) {
+            return;
+          }
+          const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
+          ++frame.pc;
+          frame.active_call_pc = call_pc;
+          push_frame(*code, {}, closure->captures, closure->self,
+                     packet.block, packet.dst);
+          Frame &callee_frame = frames_.back();
+          if (!materialize_defaults(callee_frame, *method, params, slots) ||
+              !apply_auto_assigns(callee_frame, *method, *code)) {
+            return;
+          }
           return;
         }
         // Native-extension dispatch for a native-bound closure (5c-ii).
