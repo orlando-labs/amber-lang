@@ -89,6 +89,94 @@ void register_builtin_stdlib(NativeRegistry &registry) {
   register_url(registry);
 }
 
+void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
+  registry.register_native_type_path("Kernel", RuntimeNativeTypeKind::Kernel);
+  registry.register_native_type_path("io", RuntimeNativeTypeKind::Io);
+  registry.register_native_type_path("io.Buffer",
+                                     RuntimeNativeTypeKind::TextBuffer);
+  registry.register_native_type_path("io.Logger",
+                                     RuntimeNativeTypeKind::Logger);
+  registry.register_native_type_path("Bytes", RuntimeNativeTypeKind::Bytes);
+  registry.register_native_type_path("io.ByteBuffer",
+                                     RuntimeNativeTypeKind::ByteBuffer);
+  registry.register_native_type_path("io.ByteSlice",
+                                     RuntimeNativeTypeKind::ByteSlice);
+  registry.register_native_type_path("io.Pipe", RuntimeNativeTypeKind::IoPipe);
+  registry.register_native_type_path("fs", RuntimeNativeTypeKind::Fs);
+  registry.register_native_type_path("fs.Path", RuntimeNativeTypeKind::FsPath);
+  registry.register_native_type_path("fs.File", RuntimeNativeTypeKind::FsFile);
+  registry.register_native_type_path("net", RuntimeNativeTypeKind::Net);
+  registry.register_native_type_path("net.Endpoint",
+                                     RuntimeNativeTypeKind::NetEndpoint);
+  registry.register_native_type_path("net.tcp", RuntimeNativeTypeKind::NetTcp);
+  registry.register_native_type_path("net.udp", RuntimeNativeTypeKind::NetUdp);
+  registry.register_native_type_path("net.http",
+                                     RuntimeNativeTypeKind::NetHttp);
+  registry.register_native_type_path("net.http.Client",
+                                     RuntimeNativeTypeKind::NetHttpClient);
+  registry.register_native_type_path("net.http.Request",
+                                     RuntimeNativeTypeKind::NetHttpRequest);
+  registry.register_native_type_path(
+      "net.http.RequestBody", RuntimeNativeTypeKind::NetHttpRequestBody);
+  registry.register_native_type_path("net.http.Headers",
+                                     RuntimeNativeTypeKind::NetHttpHeaders);
+  registry.register_native_type_path("net.http.Server",
+                                     RuntimeNativeTypeKind::NetHttpServer);
+  registry.register_native_type_path(
+      "net.http.ServerRequest", RuntimeNativeTypeKind::NetHttpServerRequest);
+  registry.register_native_type_path(
+      "net.http.ServerResponse", RuntimeNativeTypeKind::NetHttpServerResponse);
+  registry.register_native_type_path("net.http.json",
+                                     RuntimeNativeTypeKind::NetHttpJson);
+  registry.register_native_type_path(
+      "net.http.json.get_json", RuntimeNativeTypeKind::NetHttpJsonGetJson);
+  registry.register_native_type_path(
+      "net.http.json.post_json", RuntimeNativeTypeKind::NetHttpJsonPostJson);
+  registry.register_native_type_path("net.http.form",
+                                     RuntimeNativeTypeKind::NetHttpForm);
+  registry.register_native_type_path("net.http.form.FormBody",
+                                     RuntimeNativeTypeKind::NetHttpFormBody);
+  registry.register_native_type_path("Amber", RuntimeNativeTypeKind::Amber);
+  registry.register_native_type_path("Str", RuntimeNativeTypeKind::Str);
+  registry.register_native_type_path("Int", RuntimeNativeTypeKind::Int);
+  registry.register_native_type_path("BigInt", RuntimeNativeTypeKind::BigInt);
+  registry.register_native_type_path("Float", RuntimeNativeTypeKind::Float);
+  registry.register_native_type_path("Bool", RuntimeNativeTypeKind::Bool);
+  registry.register_native_type_path("Symbol", RuntimeNativeTypeKind::Symbol);
+  registry.register_native_type_path("Array", RuntimeNativeTypeKind::Array);
+  registry.register_native_type_path("Tuple", RuntimeNativeTypeKind::Tuple);
+  registry.register_native_type_path("Set", RuntimeNativeTypeKind::Set);
+  registry.register_native_type_path("Map", RuntimeNativeTypeKind::Map);
+  registry.register_native_type_path("StrictMap",
+                                     RuntimeNativeTypeKind::StrictMap);
+  registry.register_native_type_path("StrictHashMap",
+                                     RuntimeNativeTypeKind::StrictMap);
+  registry.register_native_type_path("Range", RuntimeNativeTypeKind::Range);
+  registry.register_native_type_path("Null", RuntimeNativeTypeKind::Null);
+  registry.register_native_type_path("Object", RuntimeNativeTypeKind::Object);
+  registry.register_native_type_path("Flow", RuntimeNativeTypeKind::Flow);
+  registry.register_native_type_path("task.flow.Flow",
+                                     RuntimeNativeTypeKind::Flow);
+  registry.register_native_type_path("Channel",
+                                     RuntimeNativeTypeKind::Channel);
+  registry.register_native_type_path("sync.Channel",
+                                     RuntimeNativeTypeKind::Channel);
+  registry.register_native_type_path("Mutex", RuntimeNativeTypeKind::Mutex);
+  registry.register_native_type_path("sync.Mutex",
+                                     RuntimeNativeTypeKind::Mutex);
+  registry.register_native_type_path("Atomic", RuntimeNativeTypeKind::Atomic);
+  registry.register_native_type_path("sync.Atomic",
+                                     RuntimeNativeTypeKind::Atomic);
+  registry.register_native_type_path("Barrier", RuntimeNativeTypeKind::Barrier);
+  registry.register_native_type_path("sync.Barrier",
+                                     RuntimeNativeTypeKind::Barrier);
+  registry.register_native_type_path(
+      "ThreadedCollection", RuntimeNativeTypeKind::ThreadedCollection);
+  registry.register_native_type_path(
+      "task.flow.ThreadedCollection",
+      RuntimeNativeTypeKind::ThreadedCollection);
+}
+
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry) {
   registry.register_native_type_call(RuntimeNativeTypeKind::Bytes, "new");
   registry.register_native_type_call(RuntimeNativeTypeKind::ByteBuffer, "new");

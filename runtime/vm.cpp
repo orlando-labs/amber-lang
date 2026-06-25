@@ -10555,6 +10555,7 @@ public:
     }
     if (module_registry_ == nullptr) {
       owned_module_registry_.import_native_paths(*native_registry_);
+      register_legacy_native_type_paths(owned_module_registry_);
       module_registry_ = &owned_module_registry_;
     }
     if (type_registry_ == nullptr) {
@@ -14963,159 +14964,11 @@ private:
             native_registry().kind_for_path(path)) {
       return Value::native_type(*registered_kind);
     }
-    if (path == "Kernel") {
-      return Value::native_type(RuntimeNativeTypeKind::Kernel);
-    }
-    if (path == "io") {
-      return Value::native_type(RuntimeNativeTypeKind::Io);
-    }
-    if (path == "io.Buffer") {
-      return Value::native_type(RuntimeNativeTypeKind::TextBuffer);
-    }
-    if (path == "io.Logger") {
-      return Value::native_type(RuntimeNativeTypeKind::Logger);
-    }
-    if (path == "Bytes") {
-      return Value::native_type(RuntimeNativeTypeKind::Bytes);
-    }
-    if (path == "io.ByteBuffer") {
-      return Value::native_type(RuntimeNativeTypeKind::ByteBuffer);
-    }
-    if (path == "io.ByteSlice") {
-      return Value::native_type(RuntimeNativeTypeKind::ByteSlice);
-    }
-    if (path == "io.Pipe") {
-      return Value::native_type(RuntimeNativeTypeKind::IoPipe);
-    }
-    if (path == "fs") {
-      return Value::native_type(RuntimeNativeTypeKind::Fs);
-    }
-    if (path == "fs.Path") {
-      return Value::native_type(RuntimeNativeTypeKind::FsPath);
-    }
-    if (path == "fs.File") {
-      return Value::native_type(RuntimeNativeTypeKind::FsFile);
-    }
-    if (path == "net") {
-      return Value::native_type(RuntimeNativeTypeKind::Net);
-    }
-    if (path == "net.Endpoint") {
-      return Value::native_type(RuntimeNativeTypeKind::NetEndpoint);
-    }
-    if (path == "net.tcp") {
-      return Value::native_type(RuntimeNativeTypeKind::NetTcp);
-    }
-    if (path == "net.udp") {
-      return Value::native_type(RuntimeNativeTypeKind::NetUdp);
-    }
-    if (path == "net.http") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttp);
-    }
-    if (path == "net.http.Client") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpClient);
-    }
-    if (path == "net.http.Request") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpRequest);
-    }
-    if (path == "net.http.RequestBody") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpRequestBody);
-    }
-    if (path == "net.http.Headers") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpHeaders);
-    }
-    if (path == "net.http.Server") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpServer);
-    }
-    if (path == "net.http.ServerRequest") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpServerRequest);
-    }
-    if (path == "net.http.ServerResponse") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpServerResponse);
-    }
-    if (path == "net.http.json") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpJson);
-    }
-    if (path == "net.http.json.get_json") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpJsonGetJson);
-    }
-    if (path == "net.http.json.post_json") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpJsonPostJson);
-    }
-    if (path == "net.http.form") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpForm);
-    }
-    if (path == "net.http.form.FormBody") {
-      return Value::native_type(RuntimeNativeTypeKind::NetHttpFormBody);
-    }
-    if (path == "Amber") {
-      return Value::native_type(RuntimeNativeTypeKind::Amber);
-    }
-    if (path == "Str") {
-      return Value::native_type(RuntimeNativeTypeKind::Str);
-    }
-    if (path == "Int") {
-      return Value::native_type(RuntimeNativeTypeKind::Int);
-    }
-    if (path == "BigInt") {
-      return Value::native_type(RuntimeNativeTypeKind::BigInt);
-    }
-    if (path == "Float") {
-      return Value::native_type(RuntimeNativeTypeKind::Float);
-    }
-    if (path == "Bool") {
-      return Value::native_type(RuntimeNativeTypeKind::Bool);
-    }
-    if (path == "Symbol") {
-      return Value::native_type(RuntimeNativeTypeKind::Symbol);
-    }
-    if (path == "Array") {
-      return Value::native_type(RuntimeNativeTypeKind::Array);
-    }
-    if (path == "Tuple") {
-      return Value::native_type(RuntimeNativeTypeKind::Tuple);
-    }
-    if (path == "Set") {
-      return Value::native_type(RuntimeNativeTypeKind::Set);
-    }
-    if (path == "Map") {
-      return Value::native_type(RuntimeNativeTypeKind::Map);
-    }
-    if (path == "StrictMap" || path == "StrictHashMap") {
-      return Value::native_type(RuntimeNativeTypeKind::StrictMap);
-    }
-    if (path == "Range") {
-      return Value::native_type(RuntimeNativeTypeKind::Range);
-    }
-    if (path == "Null") {
-      return Value::native_type(RuntimeNativeTypeKind::Null);
-    }
-    if (path == "Object") {
-      return Value::native_type(RuntimeNativeTypeKind::Object);
-    }
     if (path == "task") {
       return Value::task_module(std::make_shared<RuntimeTaskModule>());
     }
     if (path == "task.flow") {
       return Value::flow_module(std::make_shared<RuntimeFlowModule>());
-    }
-    if (path == "Flow" || path == "task.flow.Flow") {
-      return Value::native_type(RuntimeNativeTypeKind::Flow);
-    }
-    if (path == "Channel" || path == "sync.Channel") {
-      return Value::native_type(RuntimeNativeTypeKind::Channel);
-    }
-    if (path == "Mutex" || path == "sync.Mutex") {
-      return Value::native_type(RuntimeNativeTypeKind::Mutex);
-    }
-    if (path == "Atomic" || path == "sync.Atomic") {
-      return Value::native_type(RuntimeNativeTypeKind::Atomic);
-    }
-    if (path == "Barrier" || path == "sync.Barrier") {
-      return Value::native_type(RuntimeNativeTypeKind::Barrier);
-    }
-    if (path == "ThreadedCollection" ||
-        path == "task.flow.ThreadedCollection") {
-      return Value::native_type(RuntimeNativeTypeKind::ThreadedCollection);
     }
     return std::nullopt;
   }
@@ -37432,6 +37285,7 @@ struct RuntimeWorld::Impl {
     state->initialize_for_module(*module);
     register_builtin_stdlib(native_registry);
     module_registry.import_native_paths(native_registry);
+    register_legacy_native_type_paths(module_registry);
     register_legacy_native_type_calls(type_registry);
     capabilities = capability::resolve_capabilities(module->capabilities,
                                                     options.capability_grants);

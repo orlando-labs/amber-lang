@@ -36,6 +36,10 @@ that imports legacy native paths as `RuntimeBindingRef` values and makes
 `NativeRegistry::kind_for_path`. The third slice introduces a
 `RuntimeTypeRegistry` adapter for native type call metadata and makes bytecode
 `CALL` ask the registry instead of keeping a constructor allowlist in the VM.
+The next slice moves legacy native type path exports such as `net.http.Client`,
+`StrictHashMap`, and `sync.Channel` into `RuntimeModuleRegistry`; the VM now
+keeps only non-type special bindings such as `task` and `task.flow` in
+`lookup_native_prelude_constant`.
 
 ## 2. Current Pressure Points
 
@@ -44,7 +48,8 @@ that imports legacy native paths as `RuntimeBindingRef` values and makes
   `Digest`, `Time`, `Bytes`, `FsPath`, and similar names.
 - `Vm::lookup_native_prelude_constant` maps module paths directly to
   `RuntimeNativeTypeKind` values, including nested paths such as
-  `net.http.Client`.
+  `net.http.Client`. This direct map is now reduced to registry lookup plus
+  non-type special values.
 - `Vm::try_apply_native_stdlib_send` still contains large module-specific
   dispatch chains, even though `runtime/stdlib_registry.{h,cpp}` is already a
   partial registry seam for newer stdlib modules.
@@ -205,7 +210,7 @@ descriptor registration.
   and errors.
 - Teach `lookup_native_prelude_constant` to ask the module registry first, then
   fall back to the legacy enum mapping during migration. This is landed for
-  native-type path bindings.
+  migrated stdlib paths and for the VM's former native-type path map.
 - Teach `CALL` on a registered type to use descriptor constructor/call metadata
   instead of the VM hardcoded allowlist. This is landed for legacy native-type
   call selectors.

@@ -233,6 +233,7 @@ void test_path_resolution(const NativeRegistry &registry) {
 void test_module_registry_imports_native_paths(const NativeRegistry &registry) {
   RuntimeModuleRegistry modules;
   modules.import_native_paths(registry);
+  amber::runtime::register_legacy_native_type_paths(modules);
 
   const std::optional<RuntimeBindingRef> math =
       modules.binding_for_path("Math");
@@ -246,6 +247,27 @@ void test_module_registry_imports_native_paths(const NativeRegistry &registry) {
              uuid_alias->kind == RuntimeBindingKind::NativeType &&
              uuid_alias->native_type == RuntimeNativeTypeKind::Uuid,
          "module registry preserves native path aliases");
+
+  const std::optional<RuntimeBindingRef> http_client =
+      modules.binding_for_path("net.http.Client");
+  expect(http_client.has_value() &&
+             http_client->kind == RuntimeBindingKind::NativeType &&
+             http_client->native_type == RuntimeNativeTypeKind::NetHttpClient,
+         "module registry resolves legacy net.http.Client binding");
+
+  const std::optional<RuntimeBindingRef> strict_hash =
+      modules.binding_for_path("StrictHashMap");
+  expect(strict_hash.has_value() &&
+             strict_hash->kind == RuntimeBindingKind::NativeType &&
+             strict_hash->native_type == RuntimeNativeTypeKind::StrictMap,
+         "module registry preserves StrictHashMap alias");
+
+  const std::optional<RuntimeBindingRef> sync_channel =
+      modules.binding_for_path("sync.Channel");
+  expect(sync_channel.has_value() &&
+             sync_channel->kind == RuntimeBindingKind::NativeType &&
+             sync_channel->native_type == RuntimeNativeTypeKind::Channel,
+         "module registry resolves sync.Channel alias");
 
   expect(!modules.binding_for_path("NotALibrary").has_value(),
          "module registry reports unknown paths");

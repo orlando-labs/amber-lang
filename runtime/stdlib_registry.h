@@ -454,6 +454,7 @@ private:
 // `register_<name>` that adds its names and handler; this is the single place
 // that lists them.
 void register_builtin_stdlib(NativeRegistry &registry);
+void register_legacy_native_type_paths(RuntimeModuleRegistry &registry);
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
 
 // Per-library registration entry points (defined in
