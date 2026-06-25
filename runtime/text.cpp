@@ -1,3 +1,5 @@
+#include "runtime/text.h"
+
 #include "runtime/context.h"
 
 #include <condition_variable>

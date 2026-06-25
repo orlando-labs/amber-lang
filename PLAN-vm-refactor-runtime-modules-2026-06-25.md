@@ -1,9 +1,8 @@
 # VM Refactor: Runtime Modules, Dispatch, and Error Registry
 
-Status: active refactor; phase order clarified 2026-06-26. Phase 0 guardrails
-are partially exercised but still need an explicit baseline record. Phase 1
-registry foundation is mostly landed. The broad mechanical file split is now
-Phase 2, after semantic registry seams exist.
+Status: active refactor; phase order clarified 2026-06-26. Phase 0 guardrail
+baseline is recorded. Phase 1 registry foundation is mostly landed. The broad
+mechanical file split is now Phase 2, after semantic registry seams exist.
 
 This is a refactor path for shrinking `runtime/vm.h` / `runtime/vm.cpp` while
 also removing the semantic coupling that currently makes core stdlib modules and
@@ -177,8 +176,7 @@ smaller than a phase, but every slice must say which phase item it advances.
 
 ### Phase 0: Guardrails
 
-Status: partially exercised after each slice; still needs an explicit baseline
-record before the next code phase.
+Status: baseline recorded before Phase 2.
 
 - Add/confirm focused tests around current behavior before moving code:
   registered stdlib dispatch, native prelude path lookup, constructor `CALL`,
@@ -249,9 +247,22 @@ of preserving VM-local module branches in smaller files.
 
 ### Phase 2: Mechanical file split for editability
 
-Status: not started beyond pre-existing helper files. This phase moved after
-Phase 1 because registry seams now show which code is VM-owned versus
-module-owned.
+Status: in progress. The first mechanical slice starts with
+`runtime/text.h` because text buffers/logger declarations already have a
+separate `runtime/text.cpp` implementation and do not require moving VM
+dispatch behavior.
+
+Slice record, 2026-06-26:
+
+- Split text writer/logger declarations from `runtime/vm.h` into
+  `runtime/text.h`; `runtime/vm.h` remains the compatibility umbrella.
+- Verified with focused build targets: `build/vm_tests`,
+  `build/stdlib_registry_tests`, `build/amber_ext_tests`,
+  `build/module_loader_tests`, `build/native_tests`,
+  `build/stdlib_argparser_tests`, and `build/iamber_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_registry_tests`,
+  `build/amber_ext_tests`, `build/module_loader_tests`, `build/native_tests`,
+  `build/stdlib_argparser_tests`, and `build/iamber_tests`.
 
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
