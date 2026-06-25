@@ -1,0 +1,310 @@
+# VM Refactor: Runtime Modules, Dispatch, and Error Registry
+
+Status: active refactor; world-owned legacy registry plus first module/type
+registry adapters landed, 2026-06-25.
+
+This is a refactor path for shrinking `runtime/vm.h` / `runtime/vm.cpp` while
+also removing the semantic coupling that currently makes core stdlib modules and
+native package concepts leak directly into the VM.
+
+## 1. Goal
+
+The VM should own the language execution kernel:
+
+- bytecode dispatch, frames, stack/register state, unwinding, and control flow;
+- value representation and object/heap lifetime mechanics;
+- capability/effect enforcement at the runtime boundary;
+- stable hooks that let registered modules participate in calls, type checks,
+  construction, errors, and native ABI interop.
+
+The VM should not know that `net.http.Client`, `ArgParser`, `Uuid`, `Digest`, or
+future third-party native package types exist. Those are runtime modules, not VM
+intrinsics.
+
+The immediate editability goal is still important: `runtime/vm.h` is about 2.7k
+lines and `runtime/vm.cpp` is about 37k lines. The file split should happen, but
+it should support the semantic redesign instead of just rearranging large
+branches into smaller files.
+
+Current implementation note: `RuntimeWorld` already exists. The first
+implementation slice moves the legacy `NativeRegistry` used for migrated stdlib
+path lookup and dispatch under `RuntimeWorld::Impl`; private VMs borrow that
+registry, while direct VM entry points keep a local fallback for tests and
+`execute_code`. The second slice introduces a `RuntimeModuleRegistry` adapter
+that imports legacy native paths as `RuntimeBindingRef` values and makes
+`Vm::lookup_native_prelude_constant` query it before falling back to
+`NativeRegistry::kind_for_path`. The third slice introduces a
+`RuntimeTypeRegistry` adapter for native type call metadata and makes bytecode
+`CALL` ask the registry instead of keeping a constructor allowlist in the VM.
+
+## 2. Current Pressure Points
+
+- `RuntimeNativeTypeKind` mixes true VM concepts with stdlib/module concepts.
+  Core examples include `NetHttpClient`, `NetHttpRequest`, `ArgParser`, `Uuid`,
+  `Digest`, `Time`, `Bytes`, `FsPath`, and similar names.
+- `Vm::lookup_native_prelude_constant` maps module paths directly to
+  `RuntimeNativeTypeKind` values, including nested paths such as
+  `net.http.Client`.
+- `Vm::try_apply_native_stdlib_send` still contains large module-specific
+  dispatch chains, even though `runtime/stdlib_registry.{h,cpp}` is already a
+  partial registry seam for newer stdlib modules.
+- The bytecode `CALL` path contains an allowlist of native type kinds that may
+  behave as constructors. Adding a module-owned type can require editing the VM
+  dispatch loop. The first `RuntimeTypeRegistry` adapter removes this allowlist
+  from the VM, but still registers legacy enum-backed call metadata.
+- Typed rescue depends on a VM-global runtime error hierarchy. The
+  `PoolTimeoutError` issue is the same smell in a different subsystem: if a
+  module-owned error class is not registered in the VM's error table, then
+  `rescue PoolTimeoutError` or `rescue HttpTimeoutError` cannot match it.
+- Third-party native packages already have `RuntimeForeignHandle`,
+  `NativeTagRegistry`, `NativeExtRegistry`, generated thunk registration, and
+  `amber_ext` fault plumbing, but they do not yet have one unified route for
+  registering package-owned types, constructors, dispatch, and rescue-able error
+  classes into the same runtime namespace as first-party modules.
+- The compatibility stdlib registry is now world-owned, and its path exports
+  feed a first `RuntimeModuleRegistry` adapter. A first `RuntimeTypeRegistry`
+  adapter owns native type call selectors. Both adapters still point at
+  `RuntimeNativeTypeKind`; the next pressure point is replacing those imported
+  entries with descriptor-backed module/type/dispatch registrations.
+
+In the current checkout, `PoolTimeoutError` is already present in
+`spec/registries/runtime_errors.yaml` and `spec/registries/runtime_errors.def`,
+and `tests/vm_net_http_tests.cpp` has a typed rescue test for the active-slot
+pool timeout path. If a parallel branch still says typed rescue does not catch
+it, that branch is probably missing or failing to regenerate the runtime error
+registry. The architectural pressure remains: module errors should not require
+hardcoding in the VM.
+
+## 3. Target Architecture
+
+### Runtime world as composition root
+
+`RuntimeWorld` becomes the owner of runtime registries:
+
+- module/path registry: resolves `Math`, `net.http.Client`, package exports, and
+  aliases to runtime bindings;
+- type registry: stores VM intrinsic types plus module-defined runtime types;
+- dispatch registry: routes static calls, constructors, methods, properties, and
+  conversion hooks;
+- error registry: stores error classes and parent links used by typed rescue;
+- native package registry: exposes thunks, foreign-handle descriptors, ownership
+  rules, and package-provided error classes.
+
+The private `Vm` receives a `RuntimeWorld` and queries registries through narrow
+interfaces. It does not switch on module-owned names.
+
+During migration, the existing `NativeRegistry` should become a world-owned
+compatibility adapter. New descriptor registries can then grow beside it without
+requiring every `Vm` instance to rebuild module tables independently.
+
+### Split intrinsic VM types from registered runtime types
+
+Replace the overloaded meaning of `RuntimeNativeTypeKind` with two concepts:
+
+- VM intrinsic kinds for values and language primitives that the VM truly owns
+  (`Str`, `Int`, `Float`, `Bool`, `Array`, `Map`, `Null`, `Object`, and related
+  conversion machinery);
+- registered runtime type references for stdlib and package types
+  (`net.http.Client`, `ArgParser`, `crypto.blake3.Hasher`, etc.).
+
+During migration, keep `RuntimeNativeTypeKind` as an adapter so existing code can
+move incrementally. The end state removes module-specific enum cases from VM
+control flow.
+
+### Module descriptors
+
+First-party stdlib modules and third-party native packages register through the
+same descriptor shape:
+
+- exported paths and aliases;
+- type descriptors, including constructor/call behavior;
+- static and instance dispatch entries;
+- module-owned error classes with parent references;
+- capability/effect requirements;
+- optional native ABI hooks for thunk calls and foreign-handle lifecycle.
+
+The descriptor API should cover current `NativeRegistry` use cases and the
+legacy inline branches in `try_apply_native_stdlib_send`.
+
+### Error registry and typed rescue
+
+Keep the existing generated runtime error list as the bootstrap source for VM and
+core errors while the registry is introduced.
+
+Then make error lookup world-scoped:
+
+- `RuntimeErrorClassId` identifies registered error classes, not just static
+  indexes from `runtime_errors.def`;
+- `ErrorInstanceValue` stores the resolved error class id;
+- typed rescue uses `RuntimeWorld::errors().is_a(actual, matcher)`;
+- module descriptors register errors such as
+  `net.http.PoolTimeoutError <: net.http.HttpTimeoutError <: net.http.HttpError
+  <: Exception`;
+- frontend binding imports known error exports so `rescue SomePackage.Error`
+  resolves like other exported names;
+- `amber_fault` and VM-side `raise_runtime_error` resolve error names through the
+  active world registry.
+
+This lets third-party native code raise rescue-able package errors without
+adding every package error class to `vm.cpp` or the global generated table.
+
+## 4. Implementation Path
+
+### Phase 0: Guardrails
+
+- Add/confirm focused tests around current behavior before moving code:
+  registered stdlib dispatch, native prelude path lookup, constructor `CALL`,
+  typed rescue inheritance, net.http `PoolTimeoutError`, and native extension
+  fault translation.
+- Run the relevant gates before and after each phase:
+  `vm_tests`, `stdlib_registry_tests`, `vm_net_http_tests`,
+  `amber_ext_tests`, `module_loader_tests`, `native_tests`,
+  `make test`, `make backend-equivalence`, and the tagged `VALUE_REPR` build
+  where value layout is touched.
+
+### Phase 1: Mechanical file split for editability
+
+Landed first with a low-risk ownership slice before broad file movement:
+
+- move builtin `NativeRegistry` construction from `Vm` into `RuntimeWorld::Impl`;
+- pass a read-only registry adapter into each private `Vm` created by
+  `RuntimeWorld::execute`;
+- keep direct VM execution paths working by lazily constructing the same legacy
+  registry when no world registry is supplied;
+- keep existing registered-stdlib behavior byte-for-byte equivalent.
+
+Then keep `runtime/vm.h` as a compatibility umbrella, but move declarations into
+smaller headers:
+
+
+- `runtime/value.h` / `runtime/value.cpp`: `Value`, value helpers, value display
+  basics, intrinsic type naming;
+- `runtime/objects.h`: heap object structs and runtime object handles;
+- `runtime/heap.h` / `runtime/heap.cpp`: heap allocation, string table, pinning,
+  and lifecycle helpers;
+- `runtime/watch.h` / `runtime/watch.cpp`: runtime watch/debug state;
+- `runtime/concurrency.h` / `runtime/concurrency.cpp`: task/channel/mutex/atomic
+  runtime objects;
+- `runtime/text.h` / `runtime/text.cpp`: text buffers, logger, text writer
+  declarations already implemented outside `vm.cpp`;
+- `runtime/world.h` / `runtime/world.cpp`: `RuntimeWorld` public surface and
+  registry ownership.
+
+After that, introduce a private `runtime/vm_internal.h` for the `Vm` class and
+split low-coupling implementation islands out of `vm.cpp`. Do not move
+module-specific branches unchanged unless the move is a stepping stone toward
+descriptor registration.
+
+### Phase 2: Registry foundation
+
+- Introduce `RuntimeModuleRegistry`, `RuntimeTypeRegistry`,
+  `RuntimeDispatchRegistry`, and `RuntimeErrorRegistry` under `RuntimeWorld`.
+  `RuntimeModuleRegistry` has landed first as a compatibility adapter over
+  legacy native paths.
+- Add descriptor structs for paths, types, constructors, methods, properties,
+  and errors.
+- Teach `lookup_native_prelude_constant` to ask the module registry first, then
+  fall back to the legacy enum mapping during migration. This is landed for
+  native-type path bindings.
+- Teach `CALL` on a registered type to use descriptor constructor/call metadata
+  instead of the VM hardcoded allowlist. This is landed for legacy native-type
+  call selectors.
+- Keep `NativeRegistry` as a compatibility facade until all current stdlib
+  modules have moved to the richer descriptor API.
+
+### Phase 3: Move first-party modules behind descriptors
+
+Migrate modules in slices, each with tests:
+
+- modules already using `NativeRegistry`: Math, Json, codecs, Digest,
+  SecureRandom, ArgParser, Uuid, Time, Url;
+- IO/data types currently in `vm.cpp`: Bytes, ByteBuffer, ByteSlice, IoPipe,
+  TextBuffer, Logger;
+- filesystem/network modules: fs, net, tcp, udp, net.http;
+- task/sync modules: Task, Channel, Mutex, Atomic, Barrier, Flow,
+  ThreadedCollection.
+
+Acceptance criterion for each migrated slice: no path lookup, constructor
+allowlist, or selector dispatch for that module remains in `Vm` except through
+the registry interface.
+
+### Phase 4: Move errors behind descriptors
+
+- Add error descriptors to core module registration.
+- Register net.http errors from the net.http module descriptor, including
+  `PoolTimeoutError`.
+- Make typed rescue use the world-scoped error registry for both core and module
+  errors.
+- Keep `runtime_errors.def` for VM/kernel bootstrap errors and for generated
+  frontend knowledge until package/module error exports are loaded through the
+  compiler/module loader.
+- Add a native package test where a thunk raises a package-defined error and
+  Amber catches it by exact class and by parent class.
+
+### Phase 5: Unify third-party native packages
+
+- Extend generated native package registration so it contributes a module
+  descriptor, not only `NativeExtRegistry` thunks and `NativeTagRegistry` types.
+- Register package-owned foreign-handle types, constructors, methods, ownership
+  rules, and errors through the same world registries used by first-party
+  modules.
+- Route `amber_fault(ctx, "...", ...)` through the active world's error registry.
+- Preserve current native package semantics: pure Amber fallback in bytecode,
+  native thunk in native builds, native-only leaves fail closed without native
+  support, and foreign-handle lifetime rules remain deterministic.
+
+### Phase 6: Remove legacy coupling
+
+- Retire module-specific `RuntimeNativeTypeKind` enum values once all callers use
+  runtime type references.
+- Delete the VM hardcoded module path map and constructor allowlist.
+- Reduce `try_apply_native_stdlib_send` to registry dispatch plus true VM
+  intrinsic behavior.
+- Keep `vm.cpp` focused on interpreter control flow and VM-owned primitives.
+
+## 5. Public Interface Changes
+
+The following new or revised interfaces should be treated as the stable refactor
+surface:
+
+- `RuntimeModuleDescriptor`: exported paths, type descriptors, dispatch entries,
+  errors, capability/effect metadata, and optional native hooks.
+- `RuntimeTypeRef` / `RuntimeBindingRef`: opaque references returned by the
+  world registries for registered types and path exports.
+- `RuntimeErrorClassId` and `RuntimeErrorRegistry`: dynamic error identity and
+  inheritance checks for typed rescue.
+- `StdlibHost`: remains the narrow VM facade for stdlib/native ABI helpers, but
+  should lose dependencies on module-specific enum cases over time.
+- `NativeExtRegistry`: becomes a contributor to `RuntimeWorld` registration
+  rather than a parallel global namespace.
+
+No Amber source-level behavior should change as part of this refactor.
+
+## 6. Test Plan
+
+- Unit tests for module registry path lookup, alias lookup, descriptor dispatch,
+  constructor/call routing, and fallback to legacy enum mapping during migration.
+- Unit tests for error registry inheritance: exact class, parent class,
+  `Exception`, unknown error names, and duplicate registration diagnostics.
+- net.http tests: active-slot pool timeout raises `PoolTimeoutError`; rescue by
+  `PoolTimeoutError`, `HttpTimeoutError`, `HttpError`, and `Exception` all work.
+- Native extension tests: a generated native package registers a type, method,
+  constructor, and package error; its thunk raises that error; Amber catches it
+  by exact class and parent class.
+- Regression gates: `make test`, `make conformance`, `make backend-equivalence`,
+  plus tagged value representation coverage for phases that touch `Value` or
+  runtime object layout.
+
+## 7. Assumptions and Defaults
+
+- Prefer incremental adapters over a big-bang rewrite. The current enum and
+  generated error table can remain as compatibility layers until each module is
+  migrated.
+- First-party stdlib modules should use the same registration machinery as
+  third-party modules. Core status may affect trust and distribution, but not VM
+  dispatch shape.
+- The VM may keep intrinsic knowledge for language primitives and representation
+  details. It should not keep semantic knowledge of optional libraries.
+- Package/module descriptors are the source of truth for module-owned errors.
+  The generated `runtime_errors.def` file remains the source of truth only for
+  VM/kernel bootstrap errors during the transition.

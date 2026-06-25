@@ -16,7 +16,12 @@
 using amber::runtime::NativeRegistry;
 using amber::runtime::NativeStdlibCall;
 using amber::runtime::NativeStdlibHandler;
+using amber::runtime::RuntimeBindingKind;
+using amber::runtime::RuntimeBindingRef;
+using amber::runtime::RuntimeModuleRegistry;
 using amber::runtime::RuntimeNativeTypeKind;
+using amber::runtime::RuntimeTypeCallDescriptor;
+using amber::runtime::RuntimeTypeRegistry;
 using amber::runtime::SendStatus;
 using amber::runtime::StdlibHost;
 using amber::runtime::Value;
@@ -225,6 +230,27 @@ void test_path_resolution(const NativeRegistry &registry) {
          "unregistered path resolves to nullopt");
 }
 
+void test_module_registry_imports_native_paths(const NativeRegistry &registry) {
+  RuntimeModuleRegistry modules;
+  modules.import_native_paths(registry);
+
+  const std::optional<RuntimeBindingRef> math =
+      modules.binding_for_path("Math");
+  expect(math.has_value() && math->kind == RuntimeBindingKind::NativeType &&
+             math->native_type == RuntimeNativeTypeKind::Math,
+         "module registry resolves Math native binding");
+
+  const std::optional<RuntimeBindingRef> uuid_alias =
+      modules.binding_for_path("UUID");
+  expect(uuid_alias.has_value() &&
+             uuid_alias->kind == RuntimeBindingKind::NativeType &&
+             uuid_alias->native_type == RuntimeNativeTypeKind::Uuid,
+         "module registry preserves native path aliases");
+
+  expect(!modules.binding_for_path("NotALibrary").has_value(),
+         "module registry reports unknown paths");
+}
+
 void test_handler_table(const NativeRegistry &registry) {
   expect(registry.handler_for(RuntimeNativeTypeKind::Math) != nullptr,
          "Math handler is registered");
@@ -246,6 +272,24 @@ void test_handler_table(const NativeRegistry &registry) {
   // chain.
   expect(registry.handler_for(RuntimeNativeTypeKind::Kernel) == nullptr,
          "unmigrated kind has no registered handler");
+}
+
+void test_type_call_registry() {
+  RuntimeTypeRegistry registry;
+  amber::runtime::register_legacy_native_type_calls(registry);
+
+  const std::optional<RuntimeTypeCallDescriptor> argparser =
+      registry.native_type_call(RuntimeNativeTypeKind::ArgParser);
+  expect(argparser.has_value() && argparser->selector == "new",
+         "ArgParser type call routes through new");
+
+  const std::optional<RuntimeTypeCallDescriptor> pipe =
+      registry.native_type_call(RuntimeNativeTypeKind::IoPipe);
+  expect(pipe.has_value() && pipe->selector == "__call__",
+         "IoPipe type call routes through __call__");
+
+  expect(!registry.native_type_call(RuntimeNativeTypeKind::Math).has_value(),
+         "Math is not directly callable as a constructor");
 }
 
 void test_math_compute(const NativeRegistry &registry) {
@@ -366,7 +410,9 @@ int main() {
   amber::runtime::register_builtin_stdlib(registry);
 
   test_path_resolution(registry);
+  test_module_registry_imports_native_paths(registry);
   test_handler_table(registry);
+  test_type_call_registry();
   test_math_compute(registry);
   test_math_not_handled(registry);
   test_math_faults(registry);

@@ -10532,19 +10532,35 @@ public:
               const RuntimeWorldOptions *world_options = nullptr,
               const RuntimeCapabilityResolution *capabilities = nullptr,
               const RuntimeEffectValidation *effects = nullptr,
-              std::function<void(RuntimeTraceEvent)> trace_recorder = {})
+              std::function<void(RuntimeTraceEvent)> trace_recorder = {},
+              const NativeRegistry *native_registry = nullptr,
+              const RuntimeModuleRegistry *module_registry = nullptr,
+              const RuntimeTypeRegistry *type_registry = nullptr)
       : module_(module), initial_string_count_(module.strings.size()),
         initial_symbol_count_(module.symbols.size()),
         state_(state == nullptr ? std::make_shared<RuntimeState>()
                                 : std::move(state)),
         module_id_(std::move(module_id)), world_options_(world_options),
         capabilities_(capabilities), effects_(effects),
-        trace_recorder_(std::move(trace_recorder)) {
+        trace_recorder_(std::move(trace_recorder)),
+        native_registry_(native_registry), module_registry_(module_registry),
+        type_registry_(type_registry) {
     state_->initialize_for_module(module_);
     resolve_numeric_policy();
-    // Layer 0 stdlib substrate: populate the registry once here rather than via
-    // static initializers, to avoid static-init-order fiascos.
-    register_builtin_stdlib(native_registry_);
+    if (native_registry_ == nullptr) {
+      // Direct VM entry points are not attached to a RuntimeWorld, so they keep
+      // a local copy of the same compatibility registry.
+      register_builtin_stdlib(owned_native_registry_);
+      native_registry_ = &owned_native_registry_;
+    }
+    if (module_registry_ == nullptr) {
+      owned_module_registry_.import_native_paths(*native_registry_);
+      module_registry_ = &owned_module_registry_;
+    }
+    if (type_registry_ == nullptr) {
+      register_legacy_native_type_calls(owned_type_registry_);
+      type_registry_ = &owned_type_registry_;
+    }
     resolve_native_bindings();
   }
 
@@ -10930,6 +10946,28 @@ public:
   }
 
 private:
+  const NativeRegistry &native_registry() const { return *native_registry_; }
+
+  const RuntimeModuleRegistry &module_registry() const {
+    return *module_registry_;
+  }
+
+  const RuntimeTypeRegistry &type_registry() const { return *type_registry_; }
+
+  const NativeRegistry *child_native_registry() const {
+    return native_registry_ == &owned_native_registry_ ? nullptr
+                                                      : native_registry_;
+  }
+
+  const RuntimeModuleRegistry *child_module_registry() const {
+    return module_registry_ == &owned_module_registry_ ? nullptr
+                                                       : module_registry_;
+  }
+
+  const RuntimeTypeRegistry *child_type_registry() const {
+    return type_registry_ == &owned_type_registry_ ? nullptr : type_registry_;
+  }
+
   ExecutionResult with_runtime_names(ExecutionResult result) const {
     if (module_.strings.size() != initial_string_count_) {
       result.runtime_strings = module_.strings;
@@ -12035,7 +12073,10 @@ private:
     } else {
       lease.vm =
           std::make_unique<Vm>(module_, state_, module_id_, world_options_,
-                               capabilities_, effects_, trace_recorder_);
+                               capabilities_, effects_, trace_recorder_,
+                               child_native_registry(),
+                               child_module_registry(),
+                               child_type_registry());
       // Block results flow through final_value_; nobody reads the completed
       // register snapshot, so skip the per-return register copy.
       lease.vm->capture_completed_frames_ = false;
@@ -14905,11 +14946,21 @@ private:
     if (path == "Err") {
       return Value::native_function(RuntimeNativeFunctionKind::ResultErr);
     }
-    // Layer 0 stdlib substrate: libraries that have migrated onto the registry
-    // resolve their source path here (e.g. "Math"); the legacy inline chain
-    // below still owns everything not yet registered.
+    // Phase-2 registry adapter: registered module paths resolve through the
+    // world-owned module registry first. During migration the binding can still
+    // point at a legacy RuntimeNativeTypeKind.
+    if (const std::optional<RuntimeBindingRef> binding =
+            module_registry().binding_for_path(path)) {
+      switch (binding->kind) {
+      case RuntimeBindingKind::NativeType:
+        return Value::native_type(binding->native_type);
+      }
+    }
+    // Legacy compatibility fallback: direct VM paths and partially migrated
+    // worlds can still resolve NativeRegistry names until every path export
+    // comes from descriptors.
     if (const std::optional<RuntimeNativeTypeKind> registered_kind =
-            native_registry_.kind_for_path(path)) {
+            native_registry().kind_for_path(path)) {
       return Value::native_type(*registered_kind);
     }
     if (path == "Kernel") {
@@ -21017,20 +21068,25 @@ private:
         current_runtime_stdout();
     const std::shared_ptr<RuntimeTextWriter> inherited_stderr =
         current_runtime_stderr();
+    const NativeRegistry *child_registry = child_native_registry();
+    const RuntimeModuleRegistry *child_modules = child_module_registry();
+    const RuntimeTypeRegistry *child_types = child_type_registry();
 
     return [module_template = std::move(module_template),
             runtime_state = std::move(runtime_state),
             module_id = std::move(module_id), code_id,
             captures = std::move(captures), self = std::move(self), task,
             inherited_stdout, inherited_stderr, world_options, capabilities,
-            effects, trace_recorder = std::move(trace_recorder)](
+            effects, trace_recorder = std::move(trace_recorder),
+            child_registry, child_modules, child_types](
                std::vector<Value> args) mutable -> std::function<Value()> {
       // The persistent VM owns its own copy of the module, so the entry frame's
       // code pointer (into vm->module_) stays valid for the task's whole life,
       // independent of the spawning VM.
       std::shared_ptr<Vm> vm(new Vm(module_template, runtime_state, module_id,
                                     world_options, capabilities, effects,
-                                    trace_recorder));
+                                    trace_recorder, child_registry,
+                                    child_modules, child_types));
       vm->parkable_ = true;
       const BcCode *code = find_code(vm->module_, code_id);
       if (code == nullptr) {
@@ -22183,7 +22239,7 @@ private:
                    const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
                    Value *out) {
     const NativeStdlibHandler handler =
-        native_registry_.handler_for(RuntimeNativeTypeKind::Json);
+        native_registry().handler_for(RuntimeNativeTypeKind::Json);
     if (handler == nullptr) {
       set_fault(frame, "VMError", "Json stdlib handler is not registered");
       return SendStatus::Faulted;
@@ -25913,7 +25969,7 @@ private:
                             ? RuntimeNativeTypeKind::Time
                             : RuntimeNativeTypeKind::TimePeriod));
       if (const NativeStdlibHandler handler =
-              native_registry_.handler_for(kind)) {
+              native_registry().handler_for(kind)) {
         NativeStdlibCall call{*this, &frame, receiver, kind, selector,
                               args,  block,  kw_args,  out};
         const SendStatus status = handler(call);
@@ -25956,7 +26012,7 @@ private:
       // unknown selector for a migrated kind) falls through to the unchanged
       // path, so any kind not yet on the registry behaves exactly as before.
       if (const NativeStdlibHandler handler =
-              native_registry_.handler_for(kind)) {
+              native_registry().handler_for(kind)) {
         NativeStdlibCall call{*this, &frame, receiver, kind, selector,
                               args,  block,  kw_args,  out};
         const SendStatus status = handler(call);
@@ -31894,7 +31950,7 @@ private:
 
     if (data_path_selector) {
       const NativeStdlibHandler handler =
-          native_registry_.handler_for(RuntimeNativeTypeKind::Json);
+          native_registry().handler_for(RuntimeNativeTypeKind::Json);
       if (handler == nullptr) {
         return SendStatus::NotHandled;
       }
@@ -36476,31 +36532,11 @@ private:
 
       if (packet.callee.is_native_type()) {
         const RuntimeNativeTypeKind kind = packet.callee.as_native_type().kind;
-        if (kind == RuntimeNativeTypeKind::Bytes ||
-            kind == RuntimeNativeTypeKind::ByteBuffer ||
-            kind == RuntimeNativeTypeKind::IoPipe ||
-            kind == RuntimeNativeTypeKind::FsPath ||
-            kind == RuntimeNativeTypeKind::NetEndpoint ||
-            kind == RuntimeNativeTypeKind::NetHttpClient ||
-            kind == RuntimeNativeTypeKind::NetHttpRequest ||
-            kind == RuntimeNativeTypeKind::NetHttpRequestBody ||
-            kind == RuntimeNativeTypeKind::NetHttpHeaders ||
-            kind == RuntimeNativeTypeKind::NetHttpServer ||
-            kind == RuntimeNativeTypeKind::NetHttpServerResponse ||
-            kind == RuntimeNativeTypeKind::NetHttpJsonGetJson ||
-            kind == RuntimeNativeTypeKind::NetHttpJsonPostJson ||
-            kind == RuntimeNativeTypeKind::NetHttpFormBody ||
-            kind == RuntimeNativeTypeKind::ArgParser) {
+        if (const std::optional<RuntimeTypeCallDescriptor> type_call =
+                type_registry().native_type_call(kind)) {
           Value result = Value::null();
-          const bool call_through =
-              kind == RuntimeNativeTypeKind::IoPipe ||
-              kind == RuntimeNativeTypeKind::NetHttpJsonGetJson ||
-              kind == RuntimeNativeTypeKind::NetHttpJsonPostJson ||
-              kind == RuntimeNativeTypeKind::NetHttpFormBody;
-          const std::string constructor_selector =
-              call_through ? "__call__" : "new";
           const SendStatus status = try_apply_native_stdlib_send(
-              frame, packet.callee, constructor_selector, packet.pos_args,
+              frame, packet.callee, type_call->selector, packet.pos_args,
               packet.block, packet.kw_args, &result);
           if (status == SendStatus::Faulted) {
             return;
@@ -37255,9 +37291,22 @@ private:
   // unsupported-profile message reported at execute() entry.
   NumericPolicy numeric_policy_;
   std::string numeric_profile_error_;
-  // Layer 0 stdlib substrate: kind->handler and path->kind tables for native
-  // libraries that have migrated off the legacy inline chains.
-  NativeRegistry native_registry_;
+  // Direct VM fallback for code paths that are not attached to RuntimeWorld.
+  NativeRegistry owned_native_registry_;
+  // World-owned compatibility registry, or `owned_native_registry_` for direct
+  // VM entry points.
+  const NativeRegistry *native_registry_ = nullptr;
+  // Direct VM fallback for module/path bindings imported from the compatibility
+  // registry.
+  RuntimeModuleRegistry owned_module_registry_;
+  // World-owned module registry, or `owned_module_registry_` for direct VM
+  // entry points.
+  const RuntimeModuleRegistry *module_registry_ = nullptr;
+  // Direct VM fallback for native type call metadata.
+  RuntimeTypeRegistry owned_type_registry_;
+  // World-owned type registry, or `owned_type_registry_` for direct VM entry
+  // points.
+  const RuntimeTypeRegistry *type_registry_ = nullptr;
   // Native-extension dispatch (native-packages 5c-ii): entry code object ->
   // {is_method, logical-symbol}, lowered from `amber.native.bind:<code_id>`
   // module attrs. A registered thunk for the logical name (native build) runs
@@ -37381,6 +37430,9 @@ struct RuntimeWorld::Impl {
         module(owned_module.get()), state(std::make_shared<RuntimeState>()),
         package(std::move(package_image)), options(std::move(world_options)) {
     state->initialize_for_module(*module);
+    register_builtin_stdlib(native_registry);
+    module_registry.import_native_paths(native_registry);
+    register_legacy_native_type_calls(type_registry);
     capabilities = capability::resolve_capabilities(module->capabilities,
                                                     options.capability_grants);
     effects = effect::validate_effect_summaries(
@@ -37485,6 +37537,9 @@ struct RuntimeWorld::Impl {
   const bytecode::BcModule *module = nullptr;
   std::shared_ptr<RuntimeState> state;
   std::optional<RuntimePackageImage> package;
+  NativeRegistry native_registry;
+  RuntimeModuleRegistry module_registry;
+  RuntimeTypeRegistry type_registry;
   RuntimeWorldOptions options;
   RuntimeCapabilityResolution capabilities;
   RuntimeEffectValidation effects;
@@ -37589,7 +37644,9 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
         &impl_->capabilities, &impl_->effects,
         [impl = impl_](RuntimeTraceEvent event) {
           impl->record_event(std::move(event));
-        });
+        },
+        &impl_->native_registry, &impl_->module_registry,
+        &impl_->type_registry);
   ExecutionResult result =
       vm.execute(code_id, args, std::move(self), std::move(block));
   if (result.ok()) {

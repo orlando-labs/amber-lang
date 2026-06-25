@@ -365,6 +365,59 @@ struct NativeStdlibCall {
 // kind's selectors and returns `NotHandled` for anything it does not.
 using NativeStdlibHandler = SendStatus (*)(NativeStdlibCall &call);
 
+class NativeRegistry;
+
+enum class RuntimeBindingKind { NativeType };
+
+struct RuntimeBindingRef {
+  RuntimeBindingKind kind = RuntimeBindingKind::NativeType;
+  RuntimeNativeTypeKind native_type = RuntimeNativeTypeKind::TaskModule;
+
+  static RuntimeBindingRef native_type_binding(RuntimeNativeTypeKind kind) {
+    RuntimeBindingRef ref;
+    ref.kind = RuntimeBindingKind::NativeType;
+    ref.native_type = kind;
+    return ref;
+  }
+};
+
+class RuntimeModuleRegistry {
+public:
+  void register_native_type_path(std::string path,
+                                 RuntimeNativeTypeKind kind);
+
+  std::optional<RuntimeBindingRef>
+  binding_for_path(const std::string &path) const;
+
+  void import_native_paths(const NativeRegistry &registry);
+
+private:
+  std::unordered_map<std::string, RuntimeBindingRef> bindings_;
+};
+
+struct RuntimeTypeCallDescriptor {
+  RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
+  std::string selector;
+};
+
+class RuntimeTypeRegistry {
+public:
+  void register_native_type_call(RuntimeNativeTypeKind kind,
+                                 std::string selector);
+
+  std::optional<RuntimeTypeCallDescriptor>
+  native_type_call(RuntimeNativeTypeKind kind) const;
+
+private:
+  struct KindHash {
+    std::size_t operator()(RuntimeNativeTypeKind kind) const {
+      return static_cast<std::size_t>(kind);
+    }
+  };
+  std::unordered_map<RuntimeNativeTypeKind, RuntimeTypeCallDescriptor, KindHash>
+      native_calls_;
+};
+
 // Two tables, populated once during VM construction (no static initializers, to
 // avoid static-init-order fiascos): `kind -> handler` for dispatch and
 // `path -> kind` for prelude name resolution.
@@ -383,6 +436,9 @@ public:
   std::optional<RuntimeNativeTypeKind>
   kind_for_path(const std::string &path) const;
 
+  std::vector<std::pair<std::string, RuntimeNativeTypeKind>>
+  registered_paths() const;
+
 private:
   struct KindHash {
     std::size_t operator()(RuntimeNativeTypeKind kind) const {
@@ -398,6 +454,7 @@ private:
 // `register_<name>` that adds its names and handler; this is the single place
 // that lists them.
 void register_builtin_stdlib(NativeRegistry &registry);
+void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
 
 // Per-library registration entry points (defined in
 // `runtime/stdlib_<name>.cpp`).
