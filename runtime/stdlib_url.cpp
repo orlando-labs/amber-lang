@@ -972,9 +972,20 @@ std::string runtime_url_build_query(
   return out;
 }
 
+RuntimeNativeModuleDescriptor url_module_descriptor() {
+  return {{{"Url", RuntimeNativeTypeKind::Url}},
+          {{RuntimeNativeTypeKind::Url, &url_dispatch}}};
+}
+
 void register_url(NativeRegistry &registry) {
-  registry.register_path("Url", RuntimeNativeTypeKind::Url);
-  registry.register_handler(RuntimeNativeTypeKind::Url, &url_dispatch);
+  register_native_module_descriptor(registry, url_module_descriptor());
+}
+
+void register_url_runtime_module(RuntimeModuleRegistry &modules,
+                                 RuntimeDispatchRegistry &dispatch) {
+  const RuntimeNativeModuleDescriptor descriptor = url_module_descriptor();
+  register_runtime_module_descriptor(modules, descriptor);
+  register_runtime_dispatch_descriptor(dispatch, descriptor);
 }
 
 } // namespace amber::runtime

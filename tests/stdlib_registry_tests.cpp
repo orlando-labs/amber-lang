@@ -341,24 +341,53 @@ void test_dispatch_registry_imports_native_handlers(
          "dispatch registry preserves unmigrated native kinds");
 }
 
-void test_math_runtime_module_descriptor() {
+void test_builtin_runtime_module_descriptors() {
   RuntimeModuleRegistry modules;
   RuntimeDispatchRegistry dispatch;
-  amber::runtime::register_math_runtime_module(modules, dispatch);
+  amber::runtime::register_builtin_runtime_modules(modules, dispatch);
 
-  const std::optional<RuntimeBindingRef> math =
-      modules.binding_for_path("Math");
-  expect(math.has_value() && math->kind == RuntimeBindingKind::NativeType &&
-             math->native_type == RuntimeNativeTypeKind::Math,
-         "Math descriptor registers runtime module path");
+  const auto expect_path = [&](const std::string &path,
+                               RuntimeNativeTypeKind kind) {
+    const std::optional<RuntimeBindingRef> binding =
+        modules.binding_for_path(path);
+    expect(binding.has_value() &&
+               binding->kind == RuntimeBindingKind::NativeType &&
+               binding->native_type == kind,
+           "builtin descriptor registers " + path + " module path");
+  };
+  const auto expect_handler = [&](RuntimeNativeTypeKind kind,
+                                  const std::string &name) {
+    expect(dispatch.native_handler(kind).has_value(),
+           "builtin descriptor registers " + name + " dispatch handler");
+  };
 
-  const std::optional<NativeStdlibHandler> handler =
+  expect_path("Math", RuntimeNativeTypeKind::Math);
+  expect_path("Json", RuntimeNativeTypeKind::Json);
+  expect_path("Base64Url", RuntimeNativeTypeKind::Base64Url);
+  expect_path("Digest", RuntimeNativeTypeKind::Digest);
+  expect_path("SecureRandom", RuntimeNativeTypeKind::SecureRandom);
+  expect_path("ArgParser", RuntimeNativeTypeKind::ArgParser);
+  expect_path("UUID", RuntimeNativeTypeKind::Uuid);
+  expect_path("TimePeriod", RuntimeNativeTypeKind::TimePeriod);
+  expect_path("Url", RuntimeNativeTypeKind::Url);
+
+  expect_handler(RuntimeNativeTypeKind::Math, "Math");
+  expect_handler(RuntimeNativeTypeKind::Json, "Json");
+  expect_handler(RuntimeNativeTypeKind::Base64, "Base64");
+  expect_handler(RuntimeNativeTypeKind::Digest, "Digest");
+  expect_handler(RuntimeNativeTypeKind::SecureRandom, "SecureRandom");
+  expect_handler(RuntimeNativeTypeKind::ArgParser, "ArgParser");
+  expect_handler(RuntimeNativeTypeKind::Uuid, "Uuid");
+  expect_handler(RuntimeNativeTypeKind::Time, "Time");
+  expect_handler(RuntimeNativeTypeKind::Url, "Url");
+
+  const std::optional<NativeStdlibHandler> math_handler =
       dispatch.native_handler(RuntimeNativeTypeKind::Math);
-  expect(handler.has_value(), "Math descriptor registers dispatch handler");
+  expect(math_handler.has_value(), "Math descriptor registers dispatch handler");
 
   MockHost host;
   Value out = Value::null();
-  expect(dispatch_math_handler(*handler, host, "sqrt",
+  expect(dispatch_math_handler(*math_handler, host, "sqrt",
                                {Value::floating(25.0)}, Value::null(),
                                &out) == SendStatus::Matched,
          "Math descriptor dispatches through runtime registry");
@@ -503,7 +532,7 @@ int main() {
   test_module_registry_imports_native_paths(registry);
   test_handler_table(registry);
   test_dispatch_registry_imports_native_handlers(registry);
-  test_math_runtime_module_descriptor();
+  test_builtin_runtime_module_descriptors();
   test_type_call_registry();
   test_math_compute(registry);
   test_math_not_handled(registry);

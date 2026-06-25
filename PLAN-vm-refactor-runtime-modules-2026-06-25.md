@@ -46,11 +46,12 @@ instead of calling `NativeRegistry::handler_for` directly. The error-registry
 slice adds `RuntimeErrorRegistry` as a world/direct-VM adapter for builtin error
 id/name/inheritance lookup; VM prelude lookup, rescue matching, and native
 error SEND selectors now ask that adapter while field/default-message metadata
-remains on the legacy generated table. The first descriptor-backed module slice
-adds `RuntimeNativeModuleDescriptor` for path/handler exports and registers
-`Math` through it directly into `RuntimeModuleRegistry` and
-`RuntimeDispatchRegistry`, while still feeding the legacy `NativeRegistry` for
-compatibility.
+remains on the legacy generated table. The first descriptor-backed module
+slices add `RuntimeNativeModuleDescriptor` for path/handler exports and
+register the current migrated stdlib set (`Math`, `Json`, codecs, `Digest`,
+`SecureRandom`, `ArgParser`, `Uuid`, `Time`, and `Url`) directly into
+`RuntimeModuleRegistry` and `RuntimeDispatchRegistry`, while still feeding the
+legacy `NativeRegistry` for compatibility.
 
 ## 2. Current Pressure Points
 
@@ -222,7 +223,8 @@ descriptor registration.
   runtime error lookup.
 - Add descriptor structs for paths, types, constructors, methods, properties,
   and errors. The first path/handler descriptor shape,
-  `RuntimeNativeModuleDescriptor`, has landed for `Math`.
+  `RuntimeNativeModuleDescriptor`, has landed for the migrated stdlib modules
+  that already had `NativeRegistry` handlers.
 - Teach `lookup_native_prelude_constant` to ask the module registry. This is
   landed for core prelude bindings, migrated stdlib paths, and the VM's former
   native-type path map; the `NativeRegistry::kind_for_path` fallback has been

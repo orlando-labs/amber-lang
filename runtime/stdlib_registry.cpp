@@ -179,6 +179,14 @@ void register_builtin_stdlib(NativeRegistry &registry) {
 void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
                                       RuntimeDispatchRegistry &dispatch) {
   register_math_runtime_module(modules, dispatch);
+  register_json_runtime_module(modules, dispatch);
+  register_codecs_runtime_module(modules, dispatch);
+  register_digest_runtime_module(modules, dispatch);
+  register_secure_random_runtime_module(modules, dispatch);
+  register_argparser_runtime_module(modules, dispatch);
+  register_uuid_runtime_module(modules, dispatch);
+  register_time_runtime_module(modules, dispatch);
+  register_url_runtime_module(modules, dispatch);
 }
 
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {

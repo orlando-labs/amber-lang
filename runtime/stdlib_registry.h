@@ -551,12 +551,28 @@ void register_math(NativeRegistry &registry);
 void register_math_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch);
 void register_json(NativeRegistry &registry);
+void register_json_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch);
 void register_codecs(NativeRegistry &registry);
+void register_codecs_runtime_module(RuntimeModuleRegistry &modules,
+                                    RuntimeDispatchRegistry &dispatch);
 void register_digest(NativeRegistry &registry);
+void register_digest_runtime_module(RuntimeModuleRegistry &modules,
+                                    RuntimeDispatchRegistry &dispatch);
 void register_secure_random(NativeRegistry &registry);
+void register_secure_random_runtime_module(RuntimeModuleRegistry &modules,
+                                           RuntimeDispatchRegistry &dispatch);
 void register_argparser(NativeRegistry &registry);
+void register_argparser_runtime_module(RuntimeModuleRegistry &modules,
+                                       RuntimeDispatchRegistry &dispatch);
 void register_uuid(NativeRegistry &registry);
+void register_uuid_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch);
 void register_time(NativeRegistry &registry);
+void register_time_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch);
 void register_url(NativeRegistry &registry);
+void register_url_runtime_module(RuntimeModuleRegistry &modules,
+                                 RuntimeDispatchRegistry &dispatch);
 
 } // namespace amber::runtime

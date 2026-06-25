@@ -62,11 +62,22 @@ SendStatus digest_dispatch(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+RuntimeNativeModuleDescriptor digest_module_descriptor() {
+  return {{{"Digest", RuntimeNativeTypeKind::Digest}},
+          {{RuntimeNativeTypeKind::Digest, &digest_dispatch}}};
+}
+
 } // namespace
 
 void register_digest(NativeRegistry &registry) {
-  registry.register_path("Digest", RuntimeNativeTypeKind::Digest);
-  registry.register_handler(RuntimeNativeTypeKind::Digest, &digest_dispatch);
+  register_native_module_descriptor(registry, digest_module_descriptor());
+}
+
+void register_digest_runtime_module(RuntimeModuleRegistry &modules,
+                                    RuntimeDispatchRegistry &dispatch) {
+  const RuntimeNativeModuleDescriptor descriptor = digest_module_descriptor();
+  register_runtime_module_descriptor(modules, descriptor);
+  register_runtime_dispatch_descriptor(dispatch, descriptor);
 }
 
 } // namespace amber::runtime

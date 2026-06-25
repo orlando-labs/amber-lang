@@ -1099,11 +1099,22 @@ SendStatus parser_dispatch(NativeStdlibCall &call) {
   return SendStatus::NotHandled;
 }
 
+RuntimeNativeModuleDescriptor argparser_module_descriptor() {
+  return {{{"ArgParser", RuntimeNativeTypeKind::ArgParser}},
+          {{RuntimeNativeTypeKind::ArgParser, &parser_dispatch}}};
+}
+
 } // namespace
 
 void register_argparser(NativeRegistry &registry) {
-  registry.register_path("ArgParser", RuntimeNativeTypeKind::ArgParser);
-  registry.register_handler(RuntimeNativeTypeKind::ArgParser, &parser_dispatch);
+  register_native_module_descriptor(registry, argparser_module_descriptor());
+}
+
+void register_argparser_runtime_module(RuntimeModuleRegistry &modules,
+                                       RuntimeDispatchRegistry &dispatch) {
+  const RuntimeNativeModuleDescriptor descriptor = argparser_module_descriptor();
+  register_runtime_module_descriptor(modules, descriptor);
+  register_runtime_dispatch_descriptor(dispatch, descriptor);
 }
 
 } // namespace amber::runtime

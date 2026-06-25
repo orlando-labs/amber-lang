@@ -199,10 +199,21 @@ std::string runtime_uuid_to_string(const RuntimeUuidValue &value) {
   return out;
 }
 
+RuntimeNativeModuleDescriptor uuid_module_descriptor() {
+  return {{{"Uuid", RuntimeNativeTypeKind::Uuid},
+           {"UUID", RuntimeNativeTypeKind::Uuid}},
+          {{RuntimeNativeTypeKind::Uuid, &uuid_dispatch}}};
+}
+
 void register_uuid(NativeRegistry &registry) {
-  registry.register_path("Uuid", RuntimeNativeTypeKind::Uuid);
-  registry.register_path("UUID", RuntimeNativeTypeKind::Uuid);
-  registry.register_handler(RuntimeNativeTypeKind::Uuid, &uuid_dispatch);
+  register_native_module_descriptor(registry, uuid_module_descriptor());
+}
+
+void register_uuid_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch) {
+  const RuntimeNativeModuleDescriptor descriptor = uuid_module_descriptor();
+  register_runtime_module_descriptor(modules, descriptor);
+  register_runtime_dispatch_descriptor(dispatch, descriptor);
 }
 
 } // namespace amber::runtime

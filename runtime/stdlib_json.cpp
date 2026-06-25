@@ -1569,11 +1569,22 @@ SendStatus json_dispatch(NativeStdlibCall &call) {
   return SendStatus::NotHandled;
 }
 
+RuntimeNativeModuleDescriptor json_module_descriptor() {
+  return {{{"Json", RuntimeNativeTypeKind::Json}},
+          {{RuntimeNativeTypeKind::Json, &json_dispatch}}};
+}
+
 } // namespace
 
 void register_json(NativeRegistry &registry) {
-  registry.register_path("Json", RuntimeNativeTypeKind::Json);
-  registry.register_handler(RuntimeNativeTypeKind::Json, &json_dispatch);
+  register_native_module_descriptor(registry, json_module_descriptor());
+}
+
+void register_json_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch) {
+  const RuntimeNativeModuleDescriptor descriptor = json_module_descriptor();
+  register_runtime_module_descriptor(modules, descriptor);
+  register_runtime_dispatch_descriptor(dispatch, descriptor);
 }
 
 } // namespace amber::runtime

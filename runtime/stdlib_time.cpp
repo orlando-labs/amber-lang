@@ -960,11 +960,22 @@ std::string runtime_time_period_to_string(const RuntimeTimePeriodValue &value) {
   return out.str();
 }
 
+RuntimeNativeModuleDescriptor time_module_descriptor() {
+  return {{{"Time", RuntimeNativeTypeKind::Time},
+           {"TimePeriod", RuntimeNativeTypeKind::TimePeriod}},
+          {{RuntimeNativeTypeKind::Time, &time_dispatch},
+           {RuntimeNativeTypeKind::TimePeriod, &time_dispatch}}};
+}
+
 void register_time(NativeRegistry &registry) {
-  registry.register_path("Time", RuntimeNativeTypeKind::Time);
-  registry.register_path("TimePeriod", RuntimeNativeTypeKind::TimePeriod);
-  registry.register_handler(RuntimeNativeTypeKind::Time, &time_dispatch);
-  registry.register_handler(RuntimeNativeTypeKind::TimePeriod, &time_dispatch);
+  register_native_module_descriptor(registry, time_module_descriptor());
+}
+
+void register_time_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch) {
+  const RuntimeNativeModuleDescriptor descriptor = time_module_descriptor();
+  register_runtime_module_descriptor(modules, descriptor);
+  register_runtime_dispatch_descriptor(dispatch, descriptor);
 }
 
 } // namespace amber::runtime

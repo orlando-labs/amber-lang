@@ -367,15 +367,26 @@ SendStatus codec_dispatch(NativeStdlibCall &call) {
   return SendStatus::NotHandled;
 }
 
+RuntimeNativeModuleDescriptor codecs_module_descriptor() {
+  return {{{"Base64", RuntimeNativeTypeKind::Base64},
+           {"Base64Url", RuntimeNativeTypeKind::Base64Url},
+           {"Hex", RuntimeNativeTypeKind::Hex}},
+          {{RuntimeNativeTypeKind::Base64, &codec_dispatch},
+           {RuntimeNativeTypeKind::Base64Url, &codec_dispatch},
+           {RuntimeNativeTypeKind::Hex, &codec_dispatch}}};
+}
+
 } // namespace
 
 void register_codecs(NativeRegistry &registry) {
-  registry.register_path("Base64", RuntimeNativeTypeKind::Base64);
-  registry.register_path("Base64Url", RuntimeNativeTypeKind::Base64Url);
-  registry.register_path("Hex", RuntimeNativeTypeKind::Hex);
-  registry.register_handler(RuntimeNativeTypeKind::Base64, &codec_dispatch);
-  registry.register_handler(RuntimeNativeTypeKind::Base64Url, &codec_dispatch);
-  registry.register_handler(RuntimeNativeTypeKind::Hex, &codec_dispatch);
+  register_native_module_descriptor(registry, codecs_module_descriptor());
+}
+
+void register_codecs_runtime_module(RuntimeModuleRegistry &modules,
+                                    RuntimeDispatchRegistry &dispatch) {
+  const RuntimeNativeModuleDescriptor descriptor = codecs_module_descriptor();
+  register_runtime_module_descriptor(modules, descriptor);
+  register_runtime_dispatch_descriptor(dispatch, descriptor);
 }
 
 } // namespace amber::runtime
