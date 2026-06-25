@@ -477,6 +477,21 @@ public:
                   std::uint16_t ancestor_error_id) const;
 };
 
+struct RuntimeNativeModulePathDescriptor {
+  const char *path = "";
+  RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
+};
+
+struct RuntimeNativeModuleHandlerDescriptor {
+  RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
+  NativeStdlibHandler handler = nullptr;
+};
+
+struct RuntimeNativeModuleDescriptor {
+  std::vector<RuntimeNativeModulePathDescriptor> paths;
+  std::vector<RuntimeNativeModuleHandlerDescriptor> handlers;
+};
+
 // Two tables, populated once during VM construction (no static initializers, to
 // avoid static-init-order fiascos): `kind -> handler` for dispatch and
 // `path -> kind` for prelude name resolution.
@@ -516,6 +531,16 @@ private:
 // `register_<name>` that adds its names and handler; this is the single place
 // that lists them.
 void register_builtin_stdlib(NativeRegistry &registry);
+void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
+                                      RuntimeDispatchRegistry &dispatch);
+void register_native_module_descriptor(
+    NativeRegistry &registry, const RuntimeNativeModuleDescriptor &descriptor);
+void register_runtime_module_descriptor(
+    RuntimeModuleRegistry &modules,
+    const RuntimeNativeModuleDescriptor &descriptor);
+void register_runtime_dispatch_descriptor(
+    RuntimeDispatchRegistry &dispatch,
+    const RuntimeNativeModuleDescriptor &descriptor);
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry);
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry);
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
@@ -523,6 +548,8 @@ void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
 // Per-library registration entry points (defined in
 // `runtime/stdlib_<name>.cpp`).
 void register_math(NativeRegistry &registry);
+void register_math_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch);
 void register_json(NativeRegistry &registry);
 void register_codecs(NativeRegistry &registry);
 void register_digest(NativeRegistry &registry);

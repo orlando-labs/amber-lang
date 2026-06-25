@@ -169,11 +169,22 @@ SendStatus math_dispatch(NativeStdlibCall &call) {
   return SendStatus::NotHandled;
 }
 
+RuntimeNativeModuleDescriptor math_module_descriptor() {
+  return {{{"Math", RuntimeNativeTypeKind::Math}},
+          {{RuntimeNativeTypeKind::Math, &math_dispatch}}};
+}
+
 } // namespace
 
 void register_math(NativeRegistry &registry) {
-  registry.register_path("Math", RuntimeNativeTypeKind::Math);
-  registry.register_handler(RuntimeNativeTypeKind::Math, &math_dispatch);
+  register_native_module_descriptor(registry, math_module_descriptor());
+}
+
+void register_math_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch) {
+  const RuntimeNativeModuleDescriptor descriptor = math_module_descriptor();
+  register_runtime_module_descriptor(modules, descriptor);
+  register_runtime_dispatch_descriptor(dispatch, descriptor);
 }
 
 } // namespace amber::runtime

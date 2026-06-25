@@ -10570,6 +10570,11 @@ public:
       owned_dispatch_registry_.import_native_handlers(*native_registry_);
       dispatch_registry_ = &owned_dispatch_registry_;
     }
+    if (module_registry_ == &owned_module_registry_ &&
+        dispatch_registry_ == &owned_dispatch_registry_) {
+      register_builtin_runtime_modules(owned_module_registry_,
+                                       owned_dispatch_registry_);
+    }
     if (error_registry_ == nullptr) {
       error_registry_ = &owned_error_registry_;
     }
@@ -37310,6 +37315,7 @@ struct RuntimeWorld::Impl {
     register_core_prelude_bindings(module_registry);
     module_registry.import_native_paths(native_registry);
     register_legacy_native_type_paths(module_registry);
+    register_builtin_runtime_modules(module_registry, dispatch_registry);
     register_legacy_native_type_calls(type_registry);
     capabilities = capability::resolve_capabilities(module->capabilities,
                                                     options.capability_grants);

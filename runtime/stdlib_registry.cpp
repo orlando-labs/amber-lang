@@ -134,6 +134,34 @@ NativeRegistry::registered_handlers() const {
   return handlers;
 }
 
+void register_native_module_descriptor(
+    NativeRegistry &registry, const RuntimeNativeModuleDescriptor &descriptor) {
+  for (const RuntimeNativeModulePathDescriptor &path : descriptor.paths) {
+    registry.register_path(path.path, path.kind);
+  }
+  for (const RuntimeNativeModuleHandlerDescriptor &handler :
+       descriptor.handlers) {
+    registry.register_handler(handler.kind, handler.handler);
+  }
+}
+
+void register_runtime_module_descriptor(
+    RuntimeModuleRegistry &modules,
+    const RuntimeNativeModuleDescriptor &descriptor) {
+  for (const RuntimeNativeModulePathDescriptor &path : descriptor.paths) {
+    modules.register_native_type_path(path.path, path.kind);
+  }
+}
+
+void register_runtime_dispatch_descriptor(
+    RuntimeDispatchRegistry &dispatch,
+    const RuntimeNativeModuleDescriptor &descriptor) {
+  for (const RuntimeNativeModuleHandlerDescriptor &handler :
+       descriptor.handlers) {
+    dispatch.register_native_handler(handler.kind, handler.handler);
+  }
+}
+
 // The single list of builtin libraries. New libraries add one line here and
 // ship as `runtime/stdlib_<name>.{cpp}` — no further edit to `vm.cpp`.
 void register_builtin_stdlib(NativeRegistry &registry) {
@@ -146,6 +174,11 @@ void register_builtin_stdlib(NativeRegistry &registry) {
   register_uuid(registry);
   register_time(registry);
   register_url(registry);
+}
+
+void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
+                                      RuntimeDispatchRegistry &dispatch) {
+  register_math_runtime_module(modules, dispatch);
 }
 
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {

@@ -163,14 +163,12 @@ struct MockHost : StdlibHost {
   }
 };
 
-// Build and dispatch one Math SEND through the registry handler. Returns the
+// Build and dispatch one Math SEND through a registry handler. Returns the
 // status; `out` and `host` carry the result / fault back to the caller.
-SendStatus dispatch_math(const NativeRegistry &registry, MockHost &host,
-                         const std::string &selector,
-                         const std::vector<Value> &args, const Value &block,
-                         Value *out) {
-  const NativeStdlibHandler handler =
-      registry.handler_for(RuntimeNativeTypeKind::Math);
+SendStatus dispatch_math_handler(NativeStdlibHandler handler, MockHost &host,
+                                 const std::string &selector,
+                                 const std::vector<Value> &args,
+                                 const Value &block, Value *out) {
   expect(handler != nullptr, "Math must be registered");
   int frame_marker = 0;
   const std::vector<std::pair<std::uint32_t, Value>> kw_args;
@@ -184,6 +182,15 @@ SendStatus dispatch_math(const NativeRegistry &registry, MockHost &host,
                         kw_args,
                         out};
   return handler(call);
+}
+
+SendStatus dispatch_math(const NativeRegistry &registry, MockHost &host,
+                         const std::string &selector,
+                         const std::vector<Value> &args, const Value &block,
+                         Value *out) {
+  return dispatch_math_handler(
+      registry.handler_for(RuntimeNativeTypeKind::Math), host, selector, args,
+      block, out);
 }
 
 void test_path_resolution(const NativeRegistry &registry) {
@@ -334,6 +341,31 @@ void test_dispatch_registry_imports_native_handlers(
          "dispatch registry preserves unmigrated native kinds");
 }
 
+void test_math_runtime_module_descriptor() {
+  RuntimeModuleRegistry modules;
+  RuntimeDispatchRegistry dispatch;
+  amber::runtime::register_math_runtime_module(modules, dispatch);
+
+  const std::optional<RuntimeBindingRef> math =
+      modules.binding_for_path("Math");
+  expect(math.has_value() && math->kind == RuntimeBindingKind::NativeType &&
+             math->native_type == RuntimeNativeTypeKind::Math,
+         "Math descriptor registers runtime module path");
+
+  const std::optional<NativeStdlibHandler> handler =
+      dispatch.native_handler(RuntimeNativeTypeKind::Math);
+  expect(handler.has_value(), "Math descriptor registers dispatch handler");
+
+  MockHost host;
+  Value out = Value::null();
+  expect(dispatch_math_handler(*handler, host, "sqrt",
+                               {Value::floating(25.0)}, Value::null(),
+                               &out) == SendStatus::Matched,
+         "Math descriptor dispatches through runtime registry");
+  expect(out.is_float() && std::fabs(out.as_float() - 5.0) < 1e-12,
+         "Math.sqrt(25.0) == 5.0 through descriptor");
+}
+
 void test_type_call_registry() {
   RuntimeTypeRegistry registry;
   amber::runtime::register_legacy_native_type_calls(registry);
@@ -471,6 +503,7 @@ int main() {
   test_module_registry_imports_native_paths(registry);
   test_handler_table(registry);
   test_dispatch_registry_imports_native_handlers(registry);
+  test_math_runtime_module_descriptor();
   test_type_call_registry();
   test_math_compute(registry);
   test_math_not_handled(registry);
