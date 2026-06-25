@@ -79,6 +79,22 @@ std::string with_port(const std::string &templ, std::uint16_t port) {
   return out;
 }
 
+std::string with_two_ports(const std::string &templ, std::uint16_t port1,
+                           std::uint16_t port2) {
+  std::string out = templ;
+  const std::string token1 = "%PORT1%";
+  for (std::size_t pos = out.find(token1); pos != std::string::npos;
+       pos = out.find(token1, pos)) {
+    out.replace(pos, token1.size(), std::to_string(port1));
+  }
+  const std::string token2 = "%PORT2%";
+  for (std::size_t pos = out.find(token2); pos != std::string::npos;
+       pos = out.find(token2, pos)) {
+    out.replace(pos, token2.size(), std::to_string(port2));
+  }
+  return out;
+}
+
 std::string ascii_lower(std::string text) {
   std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
     return static_cast<char>(std::tolower(c));
@@ -334,6 +350,88 @@ amber::runtime::ExecutionResult run_with_two_connection_server(
       execute_source(with_port(source, port));
   server.join();
   listening.listener->close();
+  return result;
+}
+
+amber::runtime::ExecutionResult run_with_two_origin_server(
+    const std::string &source, const std::string &first_response_template,
+    const std::string &second_response, std::string *server_error,
+    std::string *first_request, std::string *second_request) {
+  auto first = RuntimeTcpListener::listen({"127.0.0.1", 0});
+  expect(first.ok, "first loopback listen failed: " + first.error_name);
+  auto second = RuntimeTcpListener::listen({"127.0.0.1", 0});
+  expect(second.ok, "second loopback listen failed: " + second.error_name);
+  const std::uint16_t port1 = first.listener->local_endpoint().port;
+  const std::uint16_t port2 = second.listener->local_endpoint().port;
+  first.listener->allow_unchecked_sharing();
+  second.listener->allow_unchecked_sharing();
+
+  std::thread first_server([&] {
+    auto accepted = first.listener->accept(2s);
+    if (!accepted.ok) {
+      *server_error = "first accept:" + accepted.error_name;
+      return;
+    }
+    std::string request;
+    while (!request_complete(request)) {
+      RuntimeByteBuffer buf(4096);
+      auto read = accepted.stream->read(buf, 2s);
+      if (read.eof) {
+        break;
+      }
+      if (!read.ok) {
+        *server_error = "first read:" + read.error_name;
+        return;
+      }
+      request += buf.bytes();
+    }
+    if (first_request != nullptr) {
+      *first_request = request;
+    }
+    const std::string response =
+        with_two_ports(first_response_template, port1, port2);
+    auto written = accepted.stream->write_all(response, 2s);
+    if (!written.ok) {
+      *server_error = "first write:" + written.error_name;
+    }
+    accepted.stream->close();
+  });
+
+  std::thread second_server([&] {
+    auto accepted = second.listener->accept(2s);
+    if (!accepted.ok) {
+      *server_error = "second accept:" + accepted.error_name;
+      return;
+    }
+    std::string request;
+    while (!request_complete(request)) {
+      RuntimeByteBuffer buf(4096);
+      auto read = accepted.stream->read(buf, 2s);
+      if (read.eof) {
+        break;
+      }
+      if (!read.ok) {
+        *server_error = "second read:" + read.error_name;
+        return;
+      }
+      request += buf.bytes();
+    }
+    if (second_request != nullptr) {
+      *second_request = request;
+    }
+    auto written = accepted.stream->write_all(second_response, 2s);
+    if (!written.ok) {
+      *server_error = "second write:" + written.error_name;
+    }
+    accepted.stream->close();
+  });
+
+  amber::runtime::ExecutionResult result =
+      execute_source(with_two_ports(source, port1, port2));
+  first_server.join();
+  second_server.join();
+  first.listener->close();
+  second.listener->close();
   return result;
 }
 
@@ -616,6 +714,183 @@ void test_pool_timeout_when_active_slot_unavailable() {
   expect(request.find("/hold") != std::string::npos,
          "pool timeout test opened the held request");
   expect_ok_true(result, "max_active_per_origin observes pool_timeout");
+}
+
+void test_redirect_off_returns_3xx() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "import net\n"
+      "net.http.Client().get(\"http://127.0.0.1:%PORT%/start\").status()\n",
+      "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n",
+      &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 302, "default redirects: :off returns 3xx");
+}
+
+void test_redirect_manual_exposes_location() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "import net\n"
+      "res = net.http.Client(redirects: :manual).get("
+      "\"http://127.0.0.1:%PORT%/start\")\n"
+      "res.status() == 302 and res.redirect_location() == "
+      "\"http://127.0.0.1:%PORT%/final\"\n",
+      "HTTP/1.1 302 Found\r\nLocation: /final#frag\r\n"
+      "Content-Length: 0\r\n\r\n",
+      &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_true(result, "redirects: :manual exposes parsed Location");
+}
+
+void test_redirect_safe_follows_relative_and_records() {
+  std::string server_error;
+  std::vector<std::string> requests;
+  int accepts = 0;
+  const amber::runtime::ExecutionResult result = run_with_persistent_server(
+      "import net\n"
+      "client = net.http.Client(redirects: :safe)\n"
+      "res = client.get(\"http://127.0.0.1:%PORT%/start\")\n"
+      "rec = res.redirects()[0]\n"
+      "\"#{res.status()}:#{res.body_text()}:#{res.redirects().size()}:"
+      "#{rec.status()}:#{rec.method_before()}:#{rec.method_after()}:"
+      "#{rec.to_url() == \"http://127.0.0.1:%PORT%/final\"}\"\n",
+      {"HTTP/1.1 302 Found\r\nLocation: /final\r\n"
+       "Content-Length: 0\r\n\r\n",
+       "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndone"},
+      &server_error, &requests, &accepts);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "200:done:1:302:GET:GET:true",
+                   "redirects: :safe follows GET and records hop");
+  expect(accepts == 1, "safe redirect reuses drained same-origin connection");
+  expect(requests.size() == 2, "safe redirect server saw two requests");
+  expect(requests[0].find("GET /start HTTP/1.1\r\n") == 0,
+         "first redirect request path");
+  expect(requests[1].find("GET /final HTTP/1.1\r\n") == 0,
+         "second redirect request path");
+}
+
+void test_redirect_303_rewrites_post_to_get() {
+  std::string server_error;
+  std::vector<std::string> requests;
+  int accepts = 0;
+  const amber::runtime::ExecutionResult result = run_with_persistent_server(
+      "import net\n"
+      "client = net.http.Client(redirects: :safe)\n"
+      "res = client.post(\"http://127.0.0.1:%PORT%/submit\", "
+      "body: \"payload\")\n"
+      "rec = res.redirects()[0]\n"
+      "\"#{res.body_text()}:#{rec.method_before()}:#{rec.method_after()}\"\n",
+      {"HTTP/1.1 303 See Other\r\nLocation: /done\r\n"
+       "Content-Length: 0\r\n\r\n",
+       "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"},
+      &server_error, &requests, &accepts);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "ok:POST:GET", "303 rewrites POST to GET");
+  expect(requests.size() == 2, "303 server saw two requests");
+  expect(requests[0].find("POST /submit HTTP/1.1\r\n") == 0,
+         "first 303 request is POST");
+  expect(requests[0].find("payload") != std::string::npos,
+         "first 303 request carries body");
+  expect(requests[1].find("GET /done HTTP/1.1\r\n") == 0,
+         "second 303 request is GET");
+  expect(requests[1].find("payload") == std::string::npos,
+         "303 redirect drops request body");
+  expect(requests[1].find("content-length:") == std::string::npos,
+         "303 redirect drops Content-Length");
+}
+
+void test_redirect_cross_origin_strips_credentials_and_host() {
+  std::string server_error;
+  std::string first_request;
+  std::string second_request;
+  const amber::runtime::ExecutionResult result = run_with_two_origin_server(
+      "import net\n"
+      "headers = net.http.Headers()\n"
+      "headers.add!(\"authorization\", \"Bearer secret\")\n"
+      "headers.add!(\"cookie\", \"sid=secret\")\n"
+      "headers.add!(\"host\", \"caller.example\")\n"
+      "client = net.http.Client(redirects: :safe)\n"
+      "res = client.get(\"http://127.0.0.1:%PORT1%/start\", "
+      "headers: headers)\n"
+      "rec = res.redirects()[0]\n"
+      "\"#{res.body_text()}:#{rec.cross_origin?()}\"\n",
+      "HTTP/1.1 302 Found\r\n"
+      "Location: http://127.0.0.1:%PORT2%/landing\r\n"
+      "Content-Length: 0\r\n\r\n",
+      "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nlanding",
+      &server_error, &first_request, &second_request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "landing:true",
+                   "cross-origin redirect follows and records origin change");
+  expect(first_request.find("authorization: Bearer secret\r\n") !=
+             std::string::npos,
+         "first origin receives authorization");
+  expect(first_request.find("cookie: sid=secret\r\n") != std::string::npos,
+         "first origin receives cookie");
+  expect(first_request.find("host: caller.example\r\n") != std::string::npos,
+         "first origin receives caller Host");
+  expect(second_request.find("authorization:") == std::string::npos,
+         "redirect strips authorization across origin");
+  expect(second_request.find("cookie:") == std::string::npos,
+         "redirect strips cookie across origin");
+  expect(second_request.find("host: caller.example\r\n") == std::string::npos,
+         "redirect strips caller Host");
+  expect(second_request.find("GET /landing HTTP/1.1\r\n") == 0,
+         "second origin receives redirected path");
+}
+
+void test_redirect_unsupported_scheme_raises() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "import net\n"
+      "client = net.http.Client(redirects: :safe)\n"
+      "client.get(\"http://127.0.0.1:%PORT%/start\")\n",
+      "HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\n"
+      "Content-Length: 0\r\n\r\n",
+      &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "UnsupportedSchemeError",
+         "safe redirect to https -> UnsupportedSchemeError");
+}
+
+void test_redirect_max_redirects_raises() {
+  std::string server_error;
+  std::vector<std::string> requests;
+  int accepts = 0;
+  const amber::runtime::ExecutionResult result = run_with_persistent_server(
+      "import net\n"
+      "client = net.http.Client(redirects: :safe, max_redirects: 1)\n"
+      "client.get(\"http://127.0.0.1:%PORT%/one\")\n",
+      {"HTTP/1.1 302 Found\r\nLocation: /two\r\n"
+       "Content-Length: 0\r\n\r\n",
+       "HTTP/1.1 302 Found\r\nLocation: /three\r\n"
+       "Content-Length: 0\r\n\r\n"},
+      &server_error, &requests, &accepts);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "TooManyRedirectsError",
+         "max_redirects -> TooManyRedirectsError");
+  expect(requests.size() == 2, "max_redirects follows only allowed hop");
+}
+
+void test_redirect_nonreplayable_body_raises() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "import net\n"
+      "body = net.http.RequestBody.stream(length: null) |w|:\n"
+      "  w.write_all!(\"abc\".bytes())\n"
+      "req = net.http.Request(method: :get, "
+      "url: \"http://127.0.0.1:%PORT%/start\", body: body)\n"
+      "net.http.Client(redirects: :safe).send(req)\n",
+      "HTTP/1.1 307 Temporary Redirect\r\nLocation: /again\r\n"
+      "Content-Length: 0\r\n\r\n",
+      &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "NonReplayableRedirectError",
+         "307 with non-replayable GET body -> NonReplayableRedirectError");
 }
 
 void test_post_body() {
@@ -969,6 +1244,14 @@ int main() {
   test_close_idle_closes_pooled_connection();
   test_pool_does_not_reuse_after_early_close();
   test_pool_timeout_when_active_slot_unavailable();
+  test_redirect_off_returns_3xx();
+  test_redirect_manual_exposes_location();
+  test_redirect_safe_follows_relative_and_records();
+  test_redirect_303_rewrites_post_to_get();
+  test_redirect_cross_origin_strips_credentials_and_host();
+  test_redirect_unsupported_scheme_raises();
+  test_redirect_max_redirects_raises();
+  test_redirect_nonreplayable_body_raises();
   test_post_body();
   test_request_body_text_static();
   test_request_body_stream_chunked();

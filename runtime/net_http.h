@@ -36,6 +36,18 @@ struct HttpUrl {
 bool http_parse_url(const std::string &url, HttpUrl *out, HttpErrorKind *kind,
                     std::string *error);
 
+// Serialize a parsed v1 URL back to its canonical absolute form. The default
+// port 80 is omitted and `target` is emitted as path[?query].
+std::string http_url_to_string(const HttpUrl &url);
+
+// Resolve an HTTP Location field against a base absolute URL (§16.4). Absolute
+// and scheme-relative targets are parsed through http_parse_url, so redirects
+// to https:// report UnsupportedScheme in v1. Relative references are resolved
+// against the current path and fragments are stripped.
+bool http_resolve_location(const std::string &base_url,
+                           const std::string &location, std::string *out,
+                           HttpErrorKind *kind, std::string *error);
+
 // A fully-resolved, immutable request ready to serialize (§8). Header synthesis
 // (Host, Content-Length) and validation happen in http_build_request; this
 // struct is what http_perform writes to the wire.

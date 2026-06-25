@@ -170,6 +170,35 @@ void test_url_parse_rejections() {
       "scheme-less rejected");
 }
 
+void test_resolve_location_relative() {
+  HttpErrorKind kind = HttpErrorKind::None;
+  std::string error;
+  std::string resolved;
+  expect(amber::runtime::http::http_resolve_location(
+             "http://example.com:80/a/b/page?q=old", "../next?x=1#frag",
+             &resolved, &kind, &error),
+         "relative Location resolves");
+  expect(resolved == "http://example.com/a/next?x=1",
+         "relative redirect is canonical and fragment-free");
+}
+
+void test_resolve_location_scheme_relative_and_unsupported() {
+  HttpErrorKind kind = HttpErrorKind::None;
+  std::string error;
+  std::string resolved;
+  expect(amber::runtime::http::http_resolve_location(
+             "http://example.com/a", "//other.example/path", &resolved, &kind,
+             &error),
+         "scheme-relative Location resolves");
+  expect(resolved == "http://other.example/path",
+         "scheme-relative redirect keeps base scheme");
+  expect(!amber::runtime::http::http_resolve_location(
+             "http://example.com/a", "https://example.com/secure", &resolved,
+             &kind, &error) &&
+             kind == HttpErrorKind::UnsupportedScheme,
+         "https redirect target is unsupported in net.http v1");
+}
+
 // ---------------------------------------------------------------------------
 // Request building + serialization (§18.1)
 // ---------------------------------------------------------------------------
@@ -505,6 +534,8 @@ int main() {
   test_url_parse_port_and_default_path();
   test_url_parse_strips_fragment();
   test_url_parse_rejections();
+  test_resolve_location_relative();
+  test_resolve_location_scheme_relative_and_unsupported();
 
   test_build_get_synthesizes_host_no_body();
   test_build_post_synthesizes_content_length();

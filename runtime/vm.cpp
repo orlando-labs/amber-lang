@@ -10014,6 +10014,17 @@ struct RuntimeHttpPoolAcquire {
   std::unique_ptr<http::HttpTransport> transport;
 };
 
+enum class RuntimeHttpRedirectMode { Off, Manual, Safe };
+
+struct RuntimeHttpRedirectRecordData {
+  int status = 0;
+  std::string from_url;
+  std::string to_url;
+  std::string method_before;
+  std::string method_after;
+  bool cross_origin = false;
+};
+
 // net.http Amber-facing value instances (DESIGN-stdlib-net-http-io §7/§12),
 // wrapped as io values via Value::io_value and dispatched in the is_io_value
 // SEND chain. Response bodies and request handles own active pool leases until
@@ -10036,6 +10047,8 @@ public:
   std::size_t max_idle_connections = 64;
   std::size_t max_idle_per_origin = 4;
   std::size_t max_active_per_origin = 16;
+  RuntimeHttpRedirectMode redirect_mode = RuntimeHttpRedirectMode::Off;
+  std::size_t max_redirects = 5;
 
   bool closed() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -10268,6 +10281,13 @@ public:
   RuntimeHttpBodyMode mode = RuntimeHttpBodyMode::None;
 };
 
+class RuntimeHttpRedirectRecord final : public RuntimeIoValue {
+public:
+  const char *type_name() const override { return "net.http.RedirectRecord"; }
+  bool shareable() const override { return true; }
+  RuntimeHttpRedirectRecordData data;
+};
+
 // An immutable request snapshot (§8). Shareable across strands: it owns no
 // resource and is never mutated after construction. Static bodies remain
 // shareable; streaming bodies deliberately do not.
@@ -10291,6 +10311,8 @@ public:
   int minor_version = 1;
   http::HttpHeaders headers;
   std::shared_ptr<RuntimeHttpResponseBody> body;
+  std::optional<std::string> redirect_location;
+  std::vector<RuntimeHttpRedirectRecordData> redirects;
 };
 
 class RuntimeHttpRequestHandle final : public RuntimeIoResource {
@@ -22328,6 +22350,38 @@ private:
     return true;
   }
 
+  bool http_redirect_client_option(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      RuntimeHttpRedirectMode *out) {
+    const std::optional<Value> value = keyword_arg_value(kw_args, "redirects");
+    if (!value.has_value()) {
+      return true;
+    }
+    const std::optional<std::string> text =
+        text_from_symbol_or_string(*value);
+    if (!text.has_value()) {
+      set_fault(frame, "TypeError", "redirects must be a Symbol or Str");
+      return false;
+    }
+    const std::string mode = http::ascii_lower_copy(*text);
+    if (mode == "off") {
+      *out = RuntimeHttpRedirectMode::Off;
+      return true;
+    }
+    if (mode == "manual") {
+      *out = RuntimeHttpRedirectMode::Manual;
+      return true;
+    }
+    if (mode == "safe") {
+      *out = RuntimeHttpRedirectMode::Safe;
+      return true;
+    }
+    set_fault(frame, "ArgumentError",
+              "redirects must be :off, :manual, or :safe");
+    return false;
+  }
+
   std::optional<std::chrono::milliseconds> http_pool_timeout_for_request(
       const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
@@ -22354,7 +22408,8 @@ private:
                                  {"timeout", "pool_timeout", "idle_timeout",
                                   "max_idle_connections",
                                   "max_idle_per_origin",
-                                  "max_active_per_origin"})) {
+                                  "max_active_per_origin", "redirects",
+                                  "max_redirects"})) {
       return SendStatus::Faulted;
     }
     auto client = std::make_shared<RuntimeHttpClient>();
@@ -22376,7 +22431,12 @@ private:
                                  /*allow_zero=*/true) ||
         !http_size_client_option(frame, kw_args, "max_active_per_origin",
                                  &client->max_active_per_origin,
-                                 /*allow_zero=*/false)) {
+                                 /*allow_zero=*/false) ||
+        !http_redirect_client_option(frame, kw_args,
+                                     &client->redirect_mode) ||
+        !http_size_client_option(frame, kw_args, "max_redirects",
+                                 &client->max_redirects,
+                                 /*allow_zero=*/true)) {
       return SendStatus::Faulted;
     }
     *out = Value::io_value(client);
@@ -22456,7 +22516,10 @@ private:
                                 *timeout, *pool_timeout, block, out);
   }
 
-  Value make_http_response_value(http::HttpResponseStartResult started) {
+  Value make_http_response_value(
+      http::HttpResponseStartResult started,
+      std::optional<std::string> redirect_location = std::nullopt,
+      std::vector<RuntimeHttpRedirectRecordData> redirects = {}) {
     auto response = std::make_shared<RuntimeHttpResponse>();
     response->status = started.status;
     response->reason = std::move(started.reason);
@@ -22465,7 +22528,107 @@ private:
     auto body = std::make_shared<RuntimeHttpResponseBody>();
     body->stream = std::move(started.body);
     response->body = std::move(body);
+    response->redirect_location = std::move(redirect_location);
+    response->redirects = std::move(redirects);
     return Value::io_value(response);
+  }
+
+  std::shared_ptr<RuntimeHttpResponse>
+  http_response_from_value(const Value &value) {
+    if (!value.is_io_value()) {
+      return nullptr;
+    }
+    return std::dynamic_pointer_cast<RuntimeHttpResponse>(value.as_io_value());
+  }
+
+  void close_http_response_value(const Value &value) {
+    if (const auto response = http_response_from_value(value)) {
+      if (response->body != nullptr) {
+        (void)response->body->close();
+      }
+    }
+  }
+
+  bool http_redirect_status(int status) {
+    return status == 301 || status == 302 || status == 303 ||
+           status == 307 || status == 308;
+  }
+
+  bool http_urls_same_origin(const std::string &left,
+                             const std::string &right) {
+    http::HttpUrl left_url;
+    http::HttpUrl right_url;
+    http::HttpErrorKind kind = http::HttpErrorKind::None;
+    std::string error;
+    if (!http::http_parse_url(left, &left_url, &kind, &error) ||
+        !http::http_parse_url(right, &right_url, &kind, &error)) {
+      return false;
+    }
+    return left_url.scheme == right_url.scheme &&
+           left_url.host == right_url.host && left_url.port == right_url.port;
+  }
+
+  bool http_safe_redirect_next_request(
+      int status, const std::string &method,
+      const std::shared_ptr<RuntimeHttpRequestBody> &body,
+      std::string *method_after,
+      std::shared_ptr<RuntimeHttpRequestBody> *body_after,
+      bool *replays_body) {
+    if (!http_redirect_status(status)) {
+      return false;
+    }
+    if (method == "GET" || method == "HEAD") {
+      *method_after = method;
+      *body_after = body;
+      *replays_body = body != nullptr;
+      return true;
+    }
+    if (status == 303) {
+      *method_after = "GET";
+      body_after->reset();
+      *replays_body = false;
+      return true;
+    }
+    return false;
+  }
+
+  http::HttpHeaders http_redirect_headers(http::HttpHeaders headers,
+                                          bool cross_origin) {
+    headers.remove("host");
+    if (cross_origin) {
+      headers.remove("authorization");
+      headers.remove("cookie");
+      headers.remove("proxy-authorization");
+    }
+    return headers;
+  }
+
+  SendStatus finish_http_response(
+      const Frame &frame, Value response_value, const Value &block,
+      Value *out) {
+    if (block.is_null()) {
+      *out = std::move(response_value);
+      return SendStatus::Matched;
+    }
+    std::optional<NativeBlockInvoker> invoker =
+        make_scoped_native_block_invoker(frame, block, "net.http.Client");
+    if (!invoker.has_value()) {
+      close_http_response_value(response_value);
+      return SendStatus::Faulted;
+    }
+    try {
+      Value block_result = (*invoker)({response_value});
+      close_http_response_value(response_value);
+      *out = std::move(block_result);
+    } catch (const NativeBlockUnwind &) {
+      close_http_response_value(response_value);
+      return SendStatus::Faulted;
+    } catch (const RuntimeTaskFailure &failure) {
+      close_http_response_value(response_value);
+      set_fault(frame, failure.error_name(), failure.message());
+      return SendStatus::Faulted;
+    }
+    return SendStatus::Matched;
   }
 
   std::string http_pool_origin(const http::HttpRequest &request) {
@@ -22802,17 +22965,15 @@ private:
     return http_request_handle_finish(frame, handle, &ignored);
   }
 
-  // Shared tail for both client.<verb>(url) and client.send(request): build the
-  // resolved request, check the per-origin net.connect capability, stream the
-  // request body if needed, and return (or scope) a Response whose body owns
-  // the live transport lease.
-  SendStatus perform_http_request(
+  // Execute one request/response exchange. Redirect policy is applied by
+  // perform_http_request below so every hop can reuse this same body/lease path.
+  SendStatus perform_http_request_once(
       const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
       const std::string &method, const std::string &url,
       const http::HttpHeaders &headers,
       const std::shared_ptr<RuntimeHttpRequestBody> &body,
       std::chrono::milliseconds timeout,
-      std::chrono::milliseconds pool_timeout, const Value &block, Value *out) {
+      std::chrono::milliseconds pool_timeout, Value *out) {
     std::shared_ptr<RuntimeHttpRequestHandle> handle;
     SendStatus begin_status;
     if (body != nullptr) {
@@ -22873,47 +23034,137 @@ private:
     if (response_status != SendStatus::Matched) {
       return response_status;
     }
-
-    if (block.is_null()) {
-      *out = std::move(response_value);
-      return SendStatus::Matched;
-    }
-    std::optional<NativeBlockInvoker> invoker =
-        make_scoped_native_block_invoker(frame, block, "net.http.Client");
-    if (!invoker.has_value()) {
-      return SendStatus::Faulted;
-    }
-    try {
-      Value block_result = (*invoker)({response_value});
-      if (const auto response =
-              std::dynamic_pointer_cast<RuntimeHttpResponse>(
-                  response_value.as_io_value())) {
-        if (response->body != nullptr) {
-          (void)response->body->close();
-        }
-      }
-      *out = std::move(block_result);
-    } catch (const NativeBlockUnwind &) {
-      if (const auto response =
-              std::dynamic_pointer_cast<RuntimeHttpResponse>(
-                  response_value.as_io_value())) {
-        if (response->body != nullptr) {
-          (void)response->body->close();
-        }
-      }
-      return SendStatus::Faulted;
-    } catch (const RuntimeTaskFailure &failure) {
-      if (const auto response =
-              std::dynamic_pointer_cast<RuntimeHttpResponse>(
-                  response_value.as_io_value())) {
-        if (response->body != nullptr) {
-          (void)response->body->close();
-        }
-      }
-      set_fault(frame, failure.error_name(), failure.message());
-      return SendStatus::Faulted;
-    }
+    *out = std::move(response_value);
     return SendStatus::Matched;
+  }
+
+  // Shared tail for both client.<verb>(url) and client.send(request): build the
+  // resolved request, check per-origin net.connect, stream any body, apply the
+  // configured redirect policy, and return (or scope) a Response whose body owns
+  // the live transport lease.
+  SendStatus perform_http_request(
+      const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
+      const std::string &method, const std::string &url,
+      const http::HttpHeaders &headers,
+      const std::shared_ptr<RuntimeHttpRequestBody> &body,
+      std::chrono::milliseconds timeout,
+      std::chrono::milliseconds pool_timeout, const Value &block, Value *out) {
+    std::string current_method = method;
+    std::string current_url = url;
+    http::HttpHeaders current_headers = headers;
+    std::shared_ptr<RuntimeHttpRequestBody> current_body = body;
+    std::vector<RuntimeHttpRedirectRecordData> redirects;
+
+    for (;;) {
+      Value response_value = Value::null();
+      const SendStatus once_status = perform_http_request_once(
+          frame, client, current_method, current_url, current_headers,
+          current_body, timeout, pool_timeout, &response_value);
+      if (once_status != SendStatus::Matched) {
+        return once_status;
+      }
+      const std::shared_ptr<RuntimeHttpResponse> response =
+          http_response_from_value(response_value);
+      if (response == nullptr) {
+        set_fault(frame, "VMError", "net.http response value is invalid");
+        return SendStatus::Faulted;
+      }
+
+      std::optional<std::string> resolved_location;
+      http::HttpErrorKind location_kind = http::HttpErrorKind::None;
+      std::string location_error;
+      const std::optional<std::string> location =
+          response->headers.first("location");
+      if (http_redirect_status(response->status) && location.has_value()) {
+        std::string resolved;
+        if (http::http_resolve_location(current_url, *location, &resolved,
+                                        &location_kind, &location_error)) {
+          resolved_location = std::move(resolved);
+        }
+      }
+
+      if (client->redirect_mode == RuntimeHttpRedirectMode::Manual) {
+        response->redirect_location = resolved_location;
+        response->redirects = redirects;
+        return finish_http_response(frame, std::move(response_value), block,
+                                    out);
+      }
+
+      if (client->redirect_mode != RuntimeHttpRedirectMode::Safe ||
+          !http_redirect_status(response->status)) {
+        response->redirects = redirects;
+        return finish_http_response(frame, std::move(response_value), block,
+                                    out);
+      }
+
+      std::string method_after;
+      std::shared_ptr<RuntimeHttpRequestBody> body_after;
+      bool replays_body = false;
+      if (!http_safe_redirect_next_request(response->status, current_method,
+                                           current_body, &method_after,
+                                           &body_after, &replays_body)) {
+        response->redirect_location = resolved_location;
+        response->redirects = redirects;
+        return finish_http_response(frame, std::move(response_value), block,
+                                    out);
+      }
+
+      if (!resolved_location.has_value()) {
+        close_http_response_value(response_value);
+        return raise_http_error(
+            frame,
+            location_kind == http::HttpErrorKind::None
+                ? http::HttpErrorKind::InvalidUrl
+                : location_kind,
+            location_error.empty() ? "redirect response has no valid Location"
+                                   : location_error);
+      }
+      if (redirects.size() >= client->max_redirects) {
+        close_http_response_value(response_value);
+        raise_runtime_error(frame, "TooManyRedirectsError",
+                            "too many HTTP redirects");
+        return SendStatus::Faulted;
+      }
+      if (replays_body && current_body != nullptr &&
+          current_body->kind != RuntimeHttpRequestBodyKind::Static) {
+        close_http_response_value(response_value);
+        raise_runtime_error(frame, "NonReplayableRedirectError",
+                            "redirect would replay a non-replayable body");
+        return SendStatus::Faulted;
+      }
+
+      const bool cross_origin =
+          !http_urls_same_origin(current_url, *resolved_location);
+      http::HttpErrorKind discard_kind = http::HttpErrorKind::None;
+      std::string discard_error;
+      if (response->body != nullptr && response->body->stream != nullptr) {
+        response->body->mode = RuntimeHttpBodyMode::Discard;
+        if (!response->body->stream->discard(std::nullopt, &discard_kind,
+                                             &discard_error)) {
+          return raise_http_error(frame, discard_kind, discard_error);
+        }
+      }
+
+      RuntimeHttpRedirectRecordData record;
+      record.status = response->status;
+      record.from_url = current_url;
+      record.to_url = *resolved_location;
+      record.method_before = current_method;
+      record.method_after = method_after;
+      record.cross_origin = cross_origin;
+      redirects.push_back(std::move(record));
+
+      http::HttpHeaders next_headers =
+          http_redirect_headers(std::move(current_headers), cross_origin);
+      if (current_body != nullptr && body_after == nullptr) {
+        next_headers.remove("content-length");
+        next_headers.remove("transfer-encoding");
+      }
+      current_headers = std::move(next_headers);
+      current_method = std::move(method_after);
+      current_url = *resolved_location;
+      current_body = std::move(body_after);
+    }
   }
 
   // Build an immutable Request snapshot (§8): keyword-only
@@ -23301,6 +23552,47 @@ private:
     return SendStatus::Faulted;
   }
 
+  SendStatus apply_http_redirect_record_send(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpRedirectRecord> &record,
+      const std::string &selector, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) {
+    if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+      set_fault(frame, "ArgumentError",
+                "net.http.RedirectRecord#" + selector + " takes no arguments");
+      return SendStatus::Faulted;
+    }
+    if (selector == "status") {
+      *out = Value::integer(record->data.status);
+      return SendStatus::Matched;
+    }
+    if (selector == "from_url") {
+      *out = string_value_from_text(record->data.from_url);
+      return SendStatus::Matched;
+    }
+    if (selector == "to_url") {
+      *out = string_value_from_text(record->data.to_url);
+      return SendStatus::Matched;
+    }
+    if (selector == "method_before") {
+      *out = string_value_from_text(record->data.method_before);
+      return SendStatus::Matched;
+    }
+    if (selector == "method_after") {
+      *out = string_value_from_text(record->data.method_after);
+      return SendStatus::Matched;
+    }
+    if (selector == "cross_origin?") {
+      *out = Value::boolean(record->data.cross_origin);
+      return SendStatus::Matched;
+    }
+    set_fault(frame, "NoMethodError",
+              "net.http.RedirectRecord has no method " + selector);
+    return SendStatus::Faulted;
+  }
+
   bool http_response_body_claim(
       const Frame &frame, const std::shared_ptr<RuntimeHttpResponseBody> &body,
       RuntimeHttpBodyMode mode) {
@@ -23659,6 +23951,29 @@ private:
       }
       *out = response->body == nullptr ? Value::null()
                                        : Value::io_value(response->body);
+      return SendStatus::Matched;
+    }
+    if (selector == "redirect_location") {
+      if (!bare("redirect_location")) {
+        return SendStatus::Faulted;
+      }
+      *out = response->redirect_location.has_value()
+                 ? string_value_from_text(*response->redirect_location)
+                 : Value::null();
+      return SendStatus::Matched;
+    }
+    if (selector == "redirects") {
+      if (!bare("redirects")) {
+        return SendStatus::Faulted;
+      }
+      std::vector<Value> items;
+      items.reserve(response->redirects.size());
+      for (const RuntimeHttpRedirectRecordData &data : response->redirects) {
+        auto record = std::make_shared<RuntimeHttpRedirectRecord>();
+        record->data = data;
+        items.push_back(Value::io_value(std::move(record)));
+      }
+      *out = make_list_value(std::move(items), true);
       return SendStatus::Matched;
     }
     if (selector == "body_text" || selector == "body_bytes") {
@@ -25229,6 +25544,12 @@ private:
               std::dynamic_pointer_cast<RuntimeHttpResponseBody>(io_value)) {
         return apply_http_response_body_send(frame, response_body, selector,
                                              args, block, kw_args, out);
+      }
+      if (const auto redirect_record =
+              std::dynamic_pointer_cast<RuntimeHttpRedirectRecord>(io_value)) {
+        return apply_http_redirect_record_send(frame, redirect_record,
+                                               selector, args, block, kw_args,
+                                               out);
       }
       if (const auto request =
               std::dynamic_pointer_cast<RuntimeHttpRequest>(io_value)) {

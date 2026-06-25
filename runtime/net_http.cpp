@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace amber::runtime::http {
 
@@ -75,6 +76,75 @@ bool parse_port_digits(const std::string &text, std::uint16_t *out,
   }
   *out = static_cast<std::uint16_t>(value);
   return true;
+}
+
+std::string strip_fragment(std::string text) {
+  const std::size_t fragment = text.find('#');
+  if (fragment != std::string::npos) {
+    text.erase(fragment);
+  }
+  return text;
+}
+
+std::string http_url_authority(const HttpUrl &url) {
+  std::string authority = url.host;
+  if (url.port != 80) {
+    authority += ":" + std::to_string(url.port);
+  }
+  return authority;
+}
+
+std::string http_target_path(const std::string &target) {
+  const std::size_t query = target.find('?');
+  std::string path =
+      query == std::string::npos ? target : target.substr(0, query);
+  if (path.empty()) {
+    path = "/";
+  }
+  return path;
+}
+
+std::string remove_dot_segments(const std::string &path) {
+  const bool absolute = !path.empty() && path.front() == '/';
+  const bool trailing_slash = !path.empty() && path.back() == '/';
+  std::vector<std::string> segments;
+  std::size_t start = 0;
+  while (start <= path.size()) {
+    const std::size_t slash = path.find('/', start);
+    const std::size_t end = slash == std::string::npos ? path.size() : slash;
+    const std::string segment = path.substr(start, end - start);
+    if (segment.empty() || segment == ".") {
+      // skip
+    } else if (segment == "..") {
+      if (!segments.empty()) {
+        segments.pop_back();
+      }
+    } else {
+      segments.push_back(segment);
+    }
+    if (slash == std::string::npos) {
+      break;
+    }
+    start = slash + 1U;
+  }
+
+  std::string out = absolute ? "/" : "";
+  for (std::size_t i = 0; i < segments.size(); ++i) {
+    if (i > 0 || (absolute && out != "/")) {
+      out += "/";
+    }
+    out += segments[i];
+  }
+  if (out.empty()) {
+    out = absolute ? "/" : "";
+  }
+  if (trailing_slash && out.back() != '/') {
+    out += "/";
+  }
+  if (out.empty() || out.front() != '/') {
+    out = "/" + out;
+  }
+  return out;
 }
 
 } // namespace
@@ -174,6 +244,77 @@ bool http_parse_url(const std::string &url, HttpUrl *out, HttpErrorKind *kind,
   out->host = host;
   out->port = port;
   out->target = path_query;
+  return true;
+}
+
+std::string http_url_to_string(const HttpUrl &url) {
+  const std::string target = url.target.empty() ? "/" : url.target;
+  return url.scheme + "://" + http_url_authority(url) + target;
+}
+
+bool http_resolve_location(const std::string &base_url,
+                           const std::string &location, std::string *out,
+                           HttpErrorKind *kind, std::string *error) {
+  HttpUrl base;
+  if (!http_parse_url(base_url, &base, kind, error)) {
+    return false;
+  }
+
+  const std::string loc = strip_fragment(location);
+  if (loc.empty()) {
+    *out = http_url_to_string(base);
+    return true;
+  }
+
+  if (loc.find("://") != std::string::npos) {
+    HttpUrl absolute;
+    if (!http_parse_url(loc, &absolute, kind, error)) {
+      return false;
+    }
+    *out = http_url_to_string(absolute);
+    return true;
+  }
+
+  if (loc.rfind("//", 0) == 0) {
+    HttpUrl absolute;
+    if (!http_parse_url(base.scheme + ":" + loc, &absolute, kind, error)) {
+      return false;
+    }
+    *out = http_url_to_string(absolute);
+    return true;
+  }
+
+  std::string target;
+  if (loc.front() == '/') {
+    target = loc;
+  } else if (loc.front() == '?') {
+    target = http_target_path(base.target) + loc;
+  } else {
+    std::string path_part = loc;
+    std::string query_part;
+    const std::size_t query = loc.find('?');
+    if (query != std::string::npos) {
+      path_part = loc.substr(0, query);
+      query_part = loc.substr(query);
+    }
+    const std::string base_path = http_target_path(base.target);
+    const std::size_t slash = base_path.rfind('/');
+    const std::string base_dir =
+        slash == std::string::npos ? "/" : base_path.substr(0, slash + 1U);
+    target = remove_dot_segments(base_dir + path_part) + query_part;
+  }
+  if (target.empty() || target.front() == '?') {
+    target = "/" + target;
+  }
+
+  HttpUrl resolved = base;
+  resolved.target = target;
+  const std::string candidate = http_url_to_string(resolved);
+  HttpUrl checked;
+  if (!http_parse_url(candidate, &checked, kind, error)) {
+    return false;
+  }
+  *out = http_url_to_string(checked);
   return true;
 }
 

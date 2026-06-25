@@ -177,6 +177,12 @@ errors:
     parent: BodyError
   - name: BodyLimitError
     parent: BodyError
+  - name: RedirectError
+    parent: HttpError
+  - name: TooManyRedirectsError
+    parent: RedirectError
+  - name: NonReplayableRedirectError
+    parent: RedirectError
   - name: HttpTimeoutError
     parent: HttpError
   - name: PoolTimeoutError
