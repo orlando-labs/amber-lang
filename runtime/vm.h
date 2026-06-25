@@ -283,6 +283,14 @@ enum class RuntimeNativeTypeKind {
   NetHttpRequest,
   NetHttpRequestBody,
   NetHttpHeaders,
+  NetHttpServer,
+  NetHttpServerRequest,
+  NetHttpServerResponse,
+  NetHttpJson,
+  NetHttpJsonGetJson,
+  NetHttpJsonPostJson,
+  NetHttpForm,
+  NetHttpFormBody,
   Uuid
 };
 

@@ -2765,6 +2765,12 @@ private:
     if (binding.role == "module_import" && binding.source == "net.http") {
       return "net.http";
     }
+    if (binding.role == "module_import" && binding.source == "net.http.json") {
+      return "net.http.json";
+    }
+    if (binding.role == "module_import" && binding.source == "net.http.form") {
+      return "net.http.form";
+    }
     if (binding.role != "from_import") {
       return "";
     }
@@ -2828,6 +2834,30 @@ private:
     }
     if (binding.source == "net.http:Headers") {
       return "net.http.Headers";
+    }
+    if (binding.source == "net.http:Server") {
+      return "net.http.Server";
+    }
+    if (binding.source == "net.http:ServerRequest") {
+      return "net.http.ServerRequest";
+    }
+    if (binding.source == "net.http:ServerResponse") {
+      return "net.http.ServerResponse";
+    }
+    if (binding.source == "net.http:json") {
+      return "net.http.json";
+    }
+    if (binding.source == "net.http:form") {
+      return "net.http.form";
+    }
+    if (binding.source == "net.http.json:get_json") {
+      return "net.http.json.get_json";
+    }
+    if (binding.source == "net.http.json:post_json") {
+      return "net.http.json.post_json";
+    }
+    if (binding.source == "net.http.form:FormBody") {
+      return "net.http.form.FormBody";
     }
     return "";
   }

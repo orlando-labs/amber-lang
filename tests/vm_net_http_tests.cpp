@@ -13,8 +13,8 @@
 #include "runtime/vm.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -109,15 +109,15 @@ bool request_complete(const std::string &request) {
   }
   const std::string headers = ascii_lower(request.substr(0, header_end + 2));
   const std::size_t body_start = header_end + 4U;
-  if (headers.find("\r\ntransfer-encoding: chunked\r\n") !=
-      std::string::npos) {
+  if (headers.find("\r\ntransfer-encoding: chunked\r\n") != std::string::npos) {
     return request.find("\r\n0\r\n\r\n", body_start) != std::string::npos;
   }
   const std::size_t cl = headers.find("\r\ncontent-length:");
   if (cl == std::string::npos) {
     return true;
   }
-  const std::size_t value_start = cl + std::string("\r\ncontent-length:").size();
+  const std::size_t value_start =
+      cl + std::string("\r\ncontent-length:").size();
   const std::size_t value_end = headers.find("\r\n", value_start);
   if (value_end == std::string::npos) {
     return false;
@@ -464,8 +464,7 @@ void expect_ok_true(const amber::runtime::ExecutionResult &result,
 }
 
 void expect_ok_string(const amber::runtime::ExecutionResult &result,
-                      const std::string &expected,
-                      const std::string &what) {
+                      const std::string &expected, const std::string &what) {
   if (!result.ok() && result.fault.has_value()) {
     std::cerr << "[fault] " << what << ": " << result.fault->error_name << " / "
               << result.fault->message << "\n";
@@ -474,8 +473,7 @@ void expect_ok_string(const amber::runtime::ExecutionResult &result,
   expect(result.value.is_string(), what + " should return Str");
   expect(result.value.as_string().string_id < result.runtime_strings.size(),
          what + " string id in range");
-  expect(result.runtime_strings[result.value.as_string().string_id] ==
-             expected,
+  expect(result.runtime_strings[result.value.as_string().string_id] == expected,
          what + " value mismatch");
 }
 
@@ -660,8 +658,8 @@ void test_close_idle_closes_pooled_connection() {
       "b = client.get(\"http://127.0.0.1:%PORT%/two\").body_text()\n"
       "\"#{a}|#{b}\"\n",
       "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\none",
-      "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo",
-      &server_error, &requests, &accepts);
+      "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo", &server_error,
+      &requests, &accepts);
   expect(server_error.empty(), "server error: " + server_error);
   expect_ok_string(result, "one|two", "close_idle! closes pooled connection");
   expect(accepts == 2, "close_idle! forces a second TCP connection");
@@ -682,8 +680,8 @@ void test_pool_does_not_reuse_after_early_close() {
       "b = client.get(\"http://127.0.0.1:%PORT%/two\").body_text()\n"
       "\"#{status}:#{b}\"\n",
       "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
-      "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo",
-      &server_error, &requests, &accepts);
+      "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo", &server_error,
+      &requests, &accepts);
   expect(server_error.empty(), "server error: " + server_error);
   expect_ok_string(result, "200:two",
                    "early response close prevents pool reuse");
@@ -729,15 +727,15 @@ void test_redirect_off_returns_3xx() {
 
 void test_redirect_manual_exposes_location() {
   std::string server_error;
-  const amber::runtime::ExecutionResult result = run_with_server(
-      "import net\n"
-      "res = net.http.Client(redirects: :manual).get("
-      "\"http://127.0.0.1:%PORT%/start\")\n"
-      "res.status() == 302 and res.redirect_location() == "
-      "\"http://127.0.0.1:%PORT%/final\"\n",
-      "HTTP/1.1 302 Found\r\nLocation: /final#frag\r\n"
-      "Content-Length: 0\r\n\r\n",
-      &server_error);
+  const amber::runtime::ExecutionResult result =
+      run_with_server("import net\n"
+                      "res = net.http.Client(redirects: :manual).get("
+                      "\"http://127.0.0.1:%PORT%/start\")\n"
+                      "res.status() == 302 and res.redirect_location() == "
+                      "\"http://127.0.0.1:%PORT%/final\"\n",
+                      "HTTP/1.1 302 Found\r\nLocation: /final#frag\r\n"
+                      "Content-Length: 0\r\n\r\n",
+                      &server_error);
   expect(server_error.empty(), "server error: " + server_error);
   expect_ok_true(result, "redirects: :manual exposes parsed Location");
 }
@@ -817,8 +815,8 @@ void test_redirect_cross_origin_strips_credentials_and_host() {
       "HTTP/1.1 302 Found\r\n"
       "Location: http://127.0.0.1:%PORT2%/landing\r\n"
       "Content-Length: 0\r\n\r\n",
-      "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nlanding",
-      &server_error, &first_request, &second_request);
+      "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nlanding", &server_error,
+      &first_request, &second_request);
   expect(server_error.empty(), "server error: " + server_error);
   expect_ok_string(result, "landing:true",
                    "cross-origin redirect follows and records origin change");
@@ -841,13 +839,13 @@ void test_redirect_cross_origin_strips_credentials_and_host() {
 
 void test_redirect_unsupported_scheme_raises() {
   std::string server_error;
-  const amber::runtime::ExecutionResult result = run_with_server(
-      "import net\n"
-      "client = net.http.Client(redirects: :safe)\n"
-      "client.get(\"http://127.0.0.1:%PORT%/start\")\n",
-      "HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\n"
-      "Content-Length: 0\r\n\r\n",
-      &server_error);
+  const amber::runtime::ExecutionResult result =
+      run_with_server("import net\n"
+                      "client = net.http.Client(redirects: :safe)\n"
+                      "client.get(\"http://127.0.0.1:%PORT%/start\")\n",
+                      "HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\n"
+                      "Content-Length: 0\r\n\r\n",
+                      &server_error);
   expect(server_error.empty(), "server error: " + server_error);
   expect(!result.ok() && result.fault.has_value() &&
              result.fault->error_name == "UnsupportedSchemeError",
@@ -937,8 +935,7 @@ void test_request_body_stream_chunked() {
   expect_ok_true(result, "RequestBody.stream chunked body");
   expect(request.find("transfer-encoding: chunked\r\n") != std::string::npos,
          "producer body emits chunked transfer");
-  expect(request.find("3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n") !=
-             std::string::npos,
+  expect(request.find("3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n") != std::string::npos,
          "producer chunks sent");
 }
 
@@ -963,6 +960,80 @@ void test_request_body_from_reader_fixed() {
          "reader body payload sent");
 }
 
+void test_get_json_helper_and_response_json() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "from net.http.json import get_json\n"
+      "payload = get_json(\"http://127.0.0.1:%PORT%/data\").json()\n"
+      "payload[:answer]\n",
+      "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"answer\":42}",
+      &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 42, "get_json helper returns response with json()");
+  expect(request.find("accept: application/json\r\n") != std::string::npos,
+         "get_json sends JSON Accept header");
+}
+
+void test_post_json_helper_sends_json_defaults() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "from net.http.json import post_json\n"
+      "res = post_json(\"http://127.0.0.1:%PORT%/users\", "
+      "{name: \"Ada\", n: 2})\n"
+      "res.expect_status!(201).status()\n",
+      "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n", &server_error,
+      &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 201, "post_json helper status");
+  expect(request.find("content-type: application/json\r\n") !=
+             std::string::npos,
+         "post_json sends JSON Content-Type");
+  expect(request.find("accept: application/json\r\n") != std::string::npos,
+         "post_json sends JSON Accept");
+  expect(request.find("\"name\":\"Ada\"") != std::string::npos &&
+             request.find("\"n\":2") != std::string::npos,
+         "post_json sends generated JSON body");
+}
+
+void test_form_body_encodes_and_sets_content_type() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "from net.http import Client\n"
+      "from net.http.form import FormBody\n"
+      "body = FormBody({name: \"Ada Lovelace\", tags: [\"math\", \"code\"]})\n"
+      "Client().post(\"http://127.0.0.1:%PORT%/form\", body: body).status()\n",
+      kResponse, &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "FormBody post status");
+  expect(request.find("content-type: application/x-www-form-urlencoded\r\n") !=
+             std::string::npos,
+         "FormBody sets form Content-Type");
+  expect(request.find("name=Ada+Lovelace&tags[]=math&tags[]=code") !=
+             std::string::npos,
+         "FormBody percent-encodes query body");
+}
+
+void test_http_trace_hook_events() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "import net\n"
+      "seen = \"\"\n"
+      "client = net.http.Client(trace: net.http.trace |event|:\n"
+      "  seen = seen + event[:name] + \",\"\n"
+      ")\n"
+      "res = client.get(\"http://127.0.0.1:%PORT%/trace\")\n"
+      "res.body_text()\n"
+      "seen.contains?(\"request.start\") and "
+      "seen.contains?(\"read.headers.end\") and "
+      "seen.contains?(\"read.body.eof\")\n",
+      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_true(result, "Client(trace:) emits request/body events");
+}
+
 void test_manual_request_handle_chunked() {
   std::string server_error;
   std::string request;
@@ -978,21 +1049,20 @@ void test_manual_request_handle_chunked() {
       kResponse, &server_error, &request);
   expect(server_error.empty(), "server error: " + server_error);
   expect_ok_int(result, 200, "manual RequestHandle chunked body");
-  expect(request.find("3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n") !=
-             std::string::npos,
+  expect(request.find("3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n") != std::string::npos,
          "manual handle chunks sent");
 }
 
 void test_manual_request_handle_underwrite() {
   std::string server_error;
   std::string request;
-  const amber::runtime::ExecutionResult result = run_with_server_capture(
-      "import net\n"
-      "h = net.http.Client().begin(method: :post, "
-      "url: \"http://127.0.0.1:%PORT%/\", length: 4)\n"
-      "h.write_all!(\"ab\".bytes())\n"
-      "h.finish!()\n",
-      kResponse, &server_error, &request);
+  const amber::runtime::ExecutionResult result =
+      run_with_server_capture("import net\n"
+                              "h = net.http.Client().begin(method: :post, "
+                              "url: \"http://127.0.0.1:%PORT%/\", length: 4)\n"
+                              "h.write_all!(\"ab\".bytes())\n"
+                              "h.finish!()\n",
+                              kResponse, &server_error, &request);
   (void)request;
   expect(!result.ok() && result.fault.has_value() &&
              result.fault->error_name == "BodyLengthError",
@@ -1225,11 +1295,64 @@ void test_from_import_request_send() {
   expect_ok_int(result, 200, "from net.http import Request + send");
 }
 
+void test_http_server_serves_request_hook() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server, ServerResponse\n"
+      "\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, workers: 2, "
+      "max_concurrent_per_worker: 2)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 1) |req|:\n"
+      "    ServerResponse.text("
+      "\"#{req.method()}:#{req.path()}:#{req.query()}:#{req.body_text()}\", "
+      "headers: {\"x-seen\": \"yes\"})\n"
+      "\n"
+      "res = Client().post(\"http://127.0.0.1:#{port}/submit?x=1\", "
+      "body: \"hello\")\n"
+      "body = res.body_text()\n"
+      "runner.wait()\n"
+      "res.status() == 200 and body == \"POST:/submit:x=1:hello\" and "
+      "res.headers().first(\"x-seen\") == \"yes\"\n");
+  expect_ok_true(result, "net.http.Server serve hook responds");
+}
+
+void test_http_server_allows_cooperative_concurrency_per_worker() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server, ServerResponse\n"
+      "\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, workers: 1, "
+      "max_concurrent_per_worker: 2)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 2) |req|:\n"
+      "    if req.path() == \"/slow\":\n"
+      "      task.sleep(20)\n"
+      "    ServerResponse.text(req.path())\n"
+      "\n"
+      "a = task.spawn:\n"
+      "  Client().get(\"http://127.0.0.1:#{port}/slow\").body_text()\n"
+      "b = task.spawn:\n"
+      "  Client().get(\"http://127.0.0.1:#{port}/fast\").body_text()\n"
+      "ra = a.wait()\n"
+      "rb = b.wait()\n"
+      "runner.wait()\n"
+      "server.workers() == 1 and server.max_concurrent_per_worker() == 2 and "
+      "((ra == \"/slow\" and rb == \"/fast\") or "
+      "(ra == \"/fast\" and rb == \"/slow\"))\n");
+  expect_ok_true(result,
+                 "net.http.Server workers/concurrency handles parked hooks");
+}
+
 } // namespace
 
 int main() {
   test_from_import_client();
   test_from_import_request_send();
+  test_http_server_serves_request_hook();
+  test_http_server_allows_cooperative_concurrency_per_worker();
   test_get_status();
   test_get_body_text();
   test_get_ok_predicate();
@@ -1256,6 +1379,10 @@ int main() {
   test_request_body_text_static();
   test_request_body_stream_chunked();
   test_request_body_from_reader_fixed();
+  test_get_json_helper_and_response_json();
+  test_post_json_helper_sends_json_defaults();
+  test_form_body_encodes_and_sets_content_type();
+  test_http_trace_hook_events();
   test_manual_request_handle_chunked();
   test_manual_request_handle_underwrite();
   test_request_handle_write_after_response_state();
