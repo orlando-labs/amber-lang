@@ -130,7 +130,8 @@ class HttpResponseBodyStream {
 public:
   HttpResponseBodyStream(std::unique_ptr<HttpTransport> transport,
                          HttpResponseParser parser,
-                         HttpTransportRelease release = {});
+                         HttpTransportRelease release = {},
+                         bool reusable_on_success = true);
   ~HttpResponseBodyStream();
 
   HttpResponseBodyStream(const HttpResponseBodyStream &) = delete;
@@ -157,6 +158,7 @@ private:
   HttpResponseParser parser_;
   std::string pending_;
   HttpTransportRelease release_;
+  bool reusable_on_success_ = true;
   bool closed_ = false;
   bool consumed_ = false;
 };
@@ -179,7 +181,8 @@ struct HttpResponseStartResult {
 HttpResponseStartResult
 http_read_response_start(std::unique_ptr<HttpTransport> transport,
                          bool head_request = false,
-                         const HttpResponseParserLimits &limits = {});
+                         const HttpResponseParserLimits &limits = {},
+                         HttpTransportRelease release = {});
 
 // Outcome of a single exchange. On `ok`, the response is fully read: status,
 // headers, and the decoded body are populated. On failure, `error_kind`/

@@ -10008,18 +10008,227 @@ struct DirectEntryClosure {
   Value self = Value::null();
 };
 
+struct RuntimeHttpPoolAcquire {
+  enum class Kind { Reused, OpenNew, Closed, Timeout };
+  Kind kind = Kind::OpenNew;
+  std::unique_ptr<http::HttpTransport> transport;
+};
+
 // net.http Amber-facing value instances (DESIGN-stdlib-net-http-io §7/§12),
 // wrapped as io values via Value::io_value and dispatched in the is_io_value
-// SEND chain. Phase 3 gives response bodies and request handles ownership of
-// the live transport; Phase 4 can swap the successful close path for a pool
-// release without changing the Amber-visible objects.
+// SEND chain. Response bodies and request handles own active pool leases until
+// EOF/discard, early close, or failure.
 class RuntimeHttpClient final : public RuntimeIoValue {
+  struct RuntimeHttpIdleConnection {
+    std::string origin;
+    std::unique_ptr<http::HttpTransport> transport;
+    std::chrono::steady_clock::time_point idle_since;
+    std::uint64_t sequence = 0;
+  };
+
 public:
   const char *type_name() const override { return "net.http.Client"; }
-  // Per-request transport timeout (max() == no timeout); Phase 4 splits this
-  // into the per-phase open/read/write deadlines.
+  bool shareable() const override { return true; }
+
   std::chrono::milliseconds timeout = std::chrono::milliseconds::max();
-  bool closed = false;
+  std::chrono::milliseconds pool_timeout = std::chrono::milliseconds(5000);
+  std::chrono::milliseconds idle_timeout = std::chrono::milliseconds(90000);
+  std::size_t max_idle_connections = 64;
+  std::size_t max_idle_per_origin = 4;
+  std::size_t max_active_per_origin = 16;
+
+  bool closed() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return closed_;
+  }
+
+  void close_client() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    closed_ = true;
+    close_idle_locked();
+    cv_.notify_all();
+  }
+
+  void close_idle() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    close_idle_locked();
+  }
+
+  RuntimeHttpPoolAcquire acquire_slot(
+      const std::string &origin, std::chrono::milliseconds wait_timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto deadline =
+        wait_timeout == std::chrono::milliseconds::max()
+            ? std::chrono::steady_clock::time_point::max()
+            : std::chrono::steady_clock::now() + wait_timeout;
+
+    for (;;) {
+      prune_idle_locked(std::chrono::steady_clock::now());
+      if (closed_) {
+        return {RuntimeHttpPoolAcquire::Kind::Closed, nullptr};
+      }
+
+      auto idle = idle_by_origin_.find(origin);
+      if (idle != idle_by_origin_.end() && !idle->second.empty()) {
+        RuntimeHttpIdleConnection lease = std::move(idle->second.front());
+        idle->second.pop_front();
+        --idle_count_;
+        if (idle->second.empty()) {
+          idle_by_origin_.erase(idle);
+        }
+        ++active_by_origin_[origin];
+        RuntimeHttpPoolAcquire result;
+        result.kind = RuntimeHttpPoolAcquire::Kind::Reused;
+        result.transport = std::move(lease.transport);
+        return result;
+      }
+
+      if (active_by_origin_[origin] < max_active_per_origin) {
+        ++active_by_origin_[origin];
+        return {RuntimeHttpPoolAcquire::Kind::OpenNew, nullptr};
+      }
+
+      if (wait_timeout == std::chrono::milliseconds(0)) {
+        return {RuntimeHttpPoolAcquire::Kind::Timeout, nullptr};
+      }
+      if (wait_timeout == std::chrono::milliseconds::max()) {
+        cv_.wait(lock);
+      } else if (cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+        return {RuntimeHttpPoolAcquire::Kind::Timeout, nullptr};
+      }
+    }
+  }
+
+  void release_transport(const std::string &origin,
+                         std::unique_ptr<http::HttpTransport> transport,
+                         bool reusable) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      auto active = active_by_origin_.find(origin);
+      if (active != active_by_origin_.end() && active->second > 0U) {
+        --active->second;
+        if (active->second == 0U) {
+          active_by_origin_.erase(active);
+        }
+      }
+      if (transport != nullptr && reusable && !closed_ &&
+          max_idle_connections > 0U && max_idle_per_origin > 0U) {
+        RuntimeHttpIdleConnection idle;
+        idle.origin = origin;
+        idle.transport = std::move(transport);
+        idle.idle_since = std::chrono::steady_clock::now();
+        idle.sequence = next_idle_sequence_++;
+        idle_by_origin_[origin].push_back(std::move(idle));
+        ++idle_count_;
+        evict_idle_locked();
+      } else if (transport != nullptr) {
+        transport->close();
+      }
+    }
+    cv_.notify_all();
+  }
+
+private:
+  void close_idle_locked() {
+    for (auto &bucket : idle_by_origin_) {
+      for (auto &idle : bucket.second) {
+        if (idle.transport != nullptr) {
+          idle.transport->close();
+        }
+      }
+    }
+    idle_by_origin_.clear();
+    idle_count_ = 0;
+  }
+
+  void prune_idle_locked(std::chrono::steady_clock::time_point now) {
+    if (idle_timeout == std::chrono::milliseconds::max()) {
+      return;
+    }
+    for (auto it = idle_by_origin_.begin(); it != idle_by_origin_.end();) {
+      auto &bucket = it->second;
+      while (!bucket.empty() &&
+             now - bucket.front().idle_since >= idle_timeout) {
+        if (bucket.front().transport != nullptr) {
+          bucket.front().transport->close();
+        }
+        bucket.pop_front();
+        --idle_count_;
+      }
+      if (bucket.empty()) {
+        it = idle_by_origin_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  void evict_idle_locked() {
+    for (;;) {
+      bool evicted = false;
+      for (auto it = idle_by_origin_.begin(); it != idle_by_origin_.end();) {
+        auto &bucket = it->second;
+        while (bucket.size() > max_idle_per_origin) {
+          if (bucket.front().transport != nullptr) {
+            bucket.front().transport->close();
+          }
+          bucket.pop_front();
+          --idle_count_;
+          evicted = true;
+        }
+        if (bucket.empty()) {
+          it = idle_by_origin_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      if (idle_count_ <= max_idle_connections) {
+        return;
+      }
+
+      auto oldest_bucket = idle_by_origin_.end();
+      for (auto it = idle_by_origin_.begin(); it != idle_by_origin_.end();
+           ++it) {
+        if (it->second.empty()) {
+          continue;
+        }
+        if (oldest_bucket == idle_by_origin_.end() ||
+            it->second.front().idle_since <
+                oldest_bucket->second.front().idle_since ||
+            (it->second.front().idle_since ==
+                 oldest_bucket->second.front().idle_since &&
+             it->second.front().sequence <
+                 oldest_bucket->second.front().sequence)) {
+          oldest_bucket = it;
+        }
+      }
+      if (oldest_bucket == idle_by_origin_.end()) {
+        idle_count_ = 0;
+        return;
+      }
+      if (oldest_bucket->second.front().transport != nullptr) {
+        oldest_bucket->second.front().transport->close();
+      }
+      oldest_bucket->second.pop_front();
+      --idle_count_;
+      evicted = true;
+      if (oldest_bucket->second.empty()) {
+        idle_by_origin_.erase(oldest_bucket);
+      }
+      if (!evicted) {
+        return;
+      }
+    }
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  bool closed_ = false;
+  std::unordered_map<std::string, std::deque<RuntimeHttpIdleConnection>>
+      idle_by_origin_;
+  std::unordered_map<std::string, std::size_t> active_by_origin_;
+  std::size_t idle_count_ = 0;
+  std::uint64_t next_idle_sequence_ = 0;
 };
 
 enum class RuntimeHttpRequestBodyKind { Static, Producer, Reader };
@@ -10091,17 +10300,31 @@ public:
   const char *type_name() const override { return "net.http.RequestHandle"; }
   RuntimeIoStatus close() override {
     if (transport != nullptr) {
-      transport->close();
-      transport.reset();
+      if (pool_active) {
+        if (const std::shared_ptr<RuntimeHttpClient> owner = client.lock()) {
+          owner->release_transport(pool_origin, std::move(transport),
+                                   /*reusable=*/false);
+        } else {
+          transport->close();
+          transport.reset();
+        }
+        pool_active = false;
+      } else {
+        transport->close();
+        transport.reset();
+      }
     }
     aborted = true;
     return RuntimeIoResource::close();
   }
 
+  std::weak_ptr<RuntimeHttpClient> client;
+  std::string pool_origin;
   std::unique_ptr<http::HttpTransport> transport;
   http::HttpRequest request;
   std::chrono::milliseconds timeout = std::chrono::milliseconds::max();
   std::uint64_t bytes_written = 0;
+  bool pool_active = false;
   bool finished = false;
   bool response_returned = false;
   bool aborted = false;
@@ -18988,6 +19211,16 @@ private:
     return found == native_bindings_.end() ? nullptr : &found->second;
   }
 
+  const bytecode::BcMethod *
+  find_method_by_entry_code(std::uint32_t code_id) const {
+    for (const bytecode::BcMethod &method : module_.methods) {
+      if (method.entry_code_id == code_id) {
+        return &method;
+      }
+    }
+    return nullptr;
+  }
+
   // If `method` is native-bound and a thunk is registered for its logical
   // symbol, bridge the call across the amber_ext.h ABI to that C thunk and
   // report the result in `*out`. Returns true when handled natively (the caller
@@ -19409,11 +19642,6 @@ private:
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
       const Value &block, std::uint32_t dst) {
     if (callee.is_closure()) {
-      if (!kw_args.empty()) {
-        set_fault(frame, "TypeError",
-                  "closure CALL does not accept keyword arguments");
-        return false;
-      }
       if (!ensure_lifecycle_access(frame, callee)) {
         return false;
       }
@@ -19426,6 +19654,30 @@ private:
       if (code == nullptr) {
         set_fault(frame, "VMError", "closure code id is unknown");
         return false;
+      }
+      if (!kw_args.empty()) {
+        const bytecode::BcMethod *method =
+            find_method_by_entry_code(closure->code_id);
+        if (method == nullptr || !method->clause_table.empty()) {
+          set_fault(frame, "TypeError",
+                    "closure CALL does not accept keyword arguments");
+          return false;
+        }
+        std::vector<bytecode::MethodParamEntry> params;
+        std::vector<BoundMethodArg> slots;
+        if (!shape_method_call(frame, *method, pos_args, kw_args, &params,
+                               &slots)) {
+          return false;
+        }
+        const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
+        ++frame.pc;
+        frame.active_call_pc = call_pc;
+        push_frame(*code, {}, closure->captures, closure->self, block, dst);
+        Frame &callee_frame = frames_.back();
+        if (!materialize_defaults(callee_frame, *method, params, slots)) {
+          return false;
+        }
+        return apply_auto_assigns(callee_frame, *method, *code);
       }
       const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
       ++frame.pc;
@@ -22036,6 +22288,56 @@ private:
     return SendStatus::Faulted;
   }
 
+  bool http_timeout_client_option(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const std::string &name, std::chrono::milliseconds *out) {
+    const std::optional<Value> value = keyword_arg_value(kw_args, name);
+    if (!value.has_value()) {
+      return true;
+    }
+    const std::optional<std::chrono::milliseconds> parsed =
+        io_timeout_from_value(frame, *value);
+    if (!parsed.has_value()) {
+      return false;
+    }
+    *out = *parsed;
+    return true;
+  }
+
+  bool http_size_client_option(
+      const Frame &frame,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const std::string &name, std::size_t *out, bool allow_zero) {
+    const std::optional<Value> value = keyword_arg_value(kw_args, name);
+    if (!value.has_value()) {
+      return true;
+    }
+    if (!value->is_integer()) {
+      set_fault(frame, "TypeError", name + " must be an Int");
+      return false;
+    }
+    if (value->as_integer() < 0 ||
+        (!allow_zero && value->as_integer() == 0)) {
+      set_fault(frame, "ArgumentError",
+                name + (allow_zero ? " must be non-negative"
+                                   : " must be positive"));
+      return false;
+    }
+    *out = static_cast<std::size_t>(value->as_integer());
+    return true;
+  }
+
+  std::optional<std::chrono::milliseconds> http_pool_timeout_for_request(
+      const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
+    const std::optional<Value> value = keyword_arg_value(kw_args, "pool_timeout");
+    if (!value.has_value()) {
+      return client->pool_timeout;
+    }
+    return io_timeout_from_value(frame, *value);
+  }
+
   SendStatus construct_http_client(
       const Frame &frame, const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
@@ -22048,7 +22350,11 @@ private:
                 "net.http.Client takes no positional arguments");
       return SendStatus::Faulted;
     }
-    if (!reject_unknown_keywords(frame, kw_args, {"timeout"})) {
+    if (!reject_unknown_keywords(frame, kw_args,
+                                 {"timeout", "pool_timeout", "idle_timeout",
+                                  "max_idle_connections",
+                                  "max_idle_per_origin",
+                                  "max_active_per_origin"})) {
       return SendStatus::Faulted;
     }
     auto client = std::make_shared<RuntimeHttpClient>();
@@ -22058,6 +22364,21 @@ private:
       return SendStatus::Faulted;
     }
     client->timeout = *timeout;
+    if (!http_timeout_client_option(frame, kw_args, "pool_timeout",
+                                    &client->pool_timeout) ||
+        !http_timeout_client_option(frame, kw_args, "idle_timeout",
+                                    &client->idle_timeout) ||
+        !http_size_client_option(frame, kw_args, "max_idle_connections",
+                                 &client->max_idle_connections,
+                                 /*allow_zero=*/true) ||
+        !http_size_client_option(frame, kw_args, "max_idle_per_origin",
+                                 &client->max_idle_per_origin,
+                                 /*allow_zero=*/true) ||
+        !http_size_client_option(frame, kw_args, "max_active_per_origin",
+                                 &client->max_active_per_origin,
+                                 /*allow_zero=*/false)) {
+      return SendStatus::Faulted;
+    }
     *out = Value::io_value(client);
     return SendStatus::Matched;
   }
@@ -22070,7 +22391,7 @@ private:
       const std::string &method, bool allow_body,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
-    if (client->closed) {
+    if (client->closed()) {
       raise_runtime_error(frame, "ClosedResourceError",
                           "net.http.Client is closed");
       return SendStatus::Faulted;
@@ -22092,8 +22413,11 @@ private:
     const bool ok_keywords =
         allow_body
             ? reject_unknown_keywords(frame, kw_args,
-                                      {"headers", "body", "timeout"})
-            : reject_unknown_keywords(frame, kw_args, {"headers", "timeout"});
+                                      {"headers", "body", "timeout",
+                                       "pool_timeout"})
+            : reject_unknown_keywords(frame, kw_args,
+                                      {"headers", "timeout",
+                                       "pool_timeout"});
     if (!ok_keywords) {
       return SendStatus::Faulted;
     }
@@ -22119,12 +22443,17 @@ private:
     if (!timeout.has_value()) {
       return SendStatus::Faulted;
     }
+    std::optional<std::chrono::milliseconds> pool_timeout =
+        http_pool_timeout_for_request(frame, client, kw_args);
+    if (!pool_timeout.has_value()) {
+      return SendStatus::Faulted;
+    }
     if (keyword_arg_value(kw_args, "timeout") == std::nullopt) {
       timeout = client->timeout;
     }
 
     return perform_http_request(frame, client, method, *url, headers, body,
-                                *timeout, block, out);
+                                *timeout, *pool_timeout, block, out);
   }
 
   Value make_http_response_value(http::HttpResponseStartResult started) {
@@ -22139,15 +22468,40 @@ private:
     return Value::io_value(response);
   }
 
-  bool http_connect_for_request(const Frame &frame,
-                                const http::HttpRequest &request,
-                                std::chrono::milliseconds timeout,
-                                std::unique_ptr<http::HttpTransport> *out) {
+  std::string http_pool_origin(const http::HttpRequest &request) {
+    return "http://" + request.host + ":" + std::to_string(request.port);
+  }
+
+  SendStatus http_acquire_transport_for_request(
+      const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
+      const http::HttpRequest &request, std::chrono::milliseconds timeout,
+      std::chrono::milliseconds pool_timeout,
+      std::unique_ptr<http::HttpTransport> *out) {
     const std::string target =
         request.host + ":" + std::to_string(request.port);
     if (!check_io_policy(frame, "net_connect", "net.connect", target)) {
-      return false;
+      return SendStatus::Faulted;
     }
+
+    const std::string origin = http_pool_origin(request);
+    record_io_wait("http.pool", origin);
+    RuntimeHttpPoolAcquire acquired =
+        client->acquire_slot(origin, pool_timeout);
+    if (acquired.kind == RuntimeHttpPoolAcquire::Kind::Closed) {
+      raise_runtime_error(frame, "ClosedResourceError",
+                          "net.http.Client is closed");
+      return SendStatus::Faulted;
+    }
+    if (acquired.kind == RuntimeHttpPoolAcquire::Kind::Timeout) {
+      raise_runtime_error(frame, "PoolTimeoutError",
+                          "timed out waiting for an HTTP connection slot");
+      return SendStatus::Faulted;
+    }
+    if (acquired.kind == RuntimeHttpPoolAcquire::Kind::Reused) {
+      *out = std::move(acquired.transport);
+      return SendStatus::Matched;
+    }
+
     record_io_wait("http.connect", target);
 
     http::HttpErrorKind connect_kind = http::HttpErrorKind::None;
@@ -22155,11 +22509,12 @@ private:
     std::unique_ptr<http::TcpHttpTransport> transport = http::http_tcp_connect(
         request.host, request.port, timeout, &connect_kind, &connect_error);
     if (transport == nullptr) {
+      client->release_transport(origin, nullptr, /*reusable=*/false);
       raise_http_error(frame, connect_kind, connect_error);
-      return false;
+      return SendStatus::Faulted;
     }
     *out = std::move(transport);
-    return true;
+    return SendStatus::Matched;
   }
 
   SendStatus http_request_handle_write_bytes(
@@ -22247,13 +22602,35 @@ private:
     }
     std::unique_ptr<http::HttpTransport> transport =
         std::move(handle->transport);
+    std::weak_ptr<RuntimeHttpClient> weak_client = handle->client;
+    const std::string origin = handle->pool_origin;
+    http::HttpTransportRelease release =
+        [weak_client, origin](std::unique_ptr<http::HttpTransport> released,
+                              bool reusable) mutable {
+          if (const std::shared_ptr<RuntimeHttpClient> owner =
+                  weak_client.lock()) {
+            owner->release_transport(origin, std::move(released), reusable);
+          } else if (released != nullptr) {
+            released->close();
+          }
+        };
     http::HttpResponseStartResult started = http::http_read_response_start(
-        std::move(transport), handle->request.method == "HEAD");
+        std::move(transport), handle->request.method == "HEAD",
+        http::HttpResponseParserLimits{}, std::move(release));
     handle->response_returned = true;
     if (!started.ok) {
+      if (handle->pool_active) {
+        if (const std::shared_ptr<RuntimeHttpClient> owner =
+                handle->client.lock()) {
+          owner->release_transport(handle->pool_origin, nullptr,
+                                   /*reusable=*/false);
+        }
+        handle->pool_active = false;
+      }
       return raise_http_error(frame, started.error_kind,
                               started.error_message);
     }
+    handle->pool_active = false;
     *out = make_http_response_value(std::move(started));
     return SendStatus::Matched;
   }
@@ -22328,8 +22705,9 @@ private:
       const std::string &method, const std::string &url,
       const http::HttpHeaders &headers, std::optional<std::uint64_t> length,
       std::chrono::milliseconds timeout,
+      std::chrono::milliseconds pool_timeout,
       std::shared_ptr<RuntimeHttpRequestHandle> *out_handle) {
-    if (client->closed) {
+    if (client->closed()) {
       raise_runtime_error(frame, "ClosedResourceError",
                           "net.http.Client is closed");
       return SendStatus::Faulted;
@@ -22343,17 +22721,23 @@ private:
       return raise_http_error(frame, kind, error);
     }
     std::unique_ptr<http::HttpTransport> transport;
-    if (!http_connect_for_request(frame, request, timeout, &transport)) {
-      return SendStatus::Faulted;
+    SendStatus acquire_status = http_acquire_transport_for_request(
+        frame, client, request, timeout, pool_timeout, &transport);
+    if (acquire_status != SendStatus::Matched) {
+      return acquire_status;
     }
     if (!http::http_write_request_head(*transport, request, &kind, &error)) {
-      transport->close();
+      client->release_transport(http_pool_origin(request), std::move(transport),
+                                /*reusable=*/false);
       return raise_http_error(frame, kind, error);
     }
     auto handle = std::make_shared<RuntimeHttpRequestHandle>();
+    handle->client = client;
+    handle->pool_origin = http_pool_origin(request);
     handle->transport = std::move(transport);
     handle->request = std::move(request);
     handle->timeout = timeout;
+    handle->pool_active = true;
     *out_handle = std::move(handle);
     return SendStatus::Matched;
   }
@@ -22427,15 +22811,17 @@ private:
       const std::string &method, const std::string &url,
       const http::HttpHeaders &headers,
       const std::shared_ptr<RuntimeHttpRequestBody> &body,
-      std::chrono::milliseconds timeout, const Value &block, Value *out) {
+      std::chrono::milliseconds timeout,
+      std::chrono::milliseconds pool_timeout, const Value &block, Value *out) {
     std::shared_ptr<RuntimeHttpRequestHandle> handle;
     SendStatus begin_status;
     if (body != nullptr) {
       begin_status = http_begin_request_handle(frame, client, method, url,
                                                headers, body->length, timeout,
+                                               pool_timeout,
                                                &handle);
     } else {
-      if (client->closed) {
+      if (client->closed()) {
         raise_runtime_error(frame, "ClosedResourceError",
                             "net.http.Client is closed");
         return SendStatus::Faulted;
@@ -22449,17 +22835,24 @@ private:
         return raise_http_error(frame, kind, error);
       }
       std::unique_ptr<http::HttpTransport> transport;
-      if (!http_connect_for_request(frame, request, timeout, &transport)) {
-        return SendStatus::Faulted;
+      SendStatus acquire_status = http_acquire_transport_for_request(
+          frame, client, request, timeout, pool_timeout, &transport);
+      if (acquire_status != SendStatus::Matched) {
+        return acquire_status;
       }
       if (!http::http_write_request_head(*transport, request, &kind, &error)) {
-        transport->close();
+        client->release_transport(http_pool_origin(request),
+                                  std::move(transport),
+                                  /*reusable=*/false);
         return raise_http_error(frame, kind, error);
       }
       handle = std::make_shared<RuntimeHttpRequestHandle>();
+      handle->client = client;
+      handle->pool_origin = http_pool_origin(request);
       handle->transport = std::move(transport);
       handle->request = std::move(request);
       handle->timeout = timeout;
+      handle->pool_active = true;
       handle->finished = true;
       begin_status = SendStatus::Matched;
     }
@@ -22657,7 +23050,7 @@ private:
       const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
-    if (client->closed) {
+    if (client->closed()) {
       raise_runtime_error(frame, "ClosedResourceError",
                           "net.http.Client is closed");
       return SendStatus::Faulted;
@@ -22677,7 +23070,8 @@ private:
                 "net.http.Client#send expects a net.http.Request");
       return SendStatus::Faulted;
     }
-    if (!reject_unknown_keywords(frame, kw_args, {"timeout"})) {
+    if (!reject_unknown_keywords(frame, kw_args,
+                                 {"timeout", "pool_timeout"})) {
       return SendStatus::Faulted;
     }
     std::optional<std::chrono::milliseconds> timeout =
@@ -22685,12 +23079,17 @@ private:
     if (!timeout.has_value()) {
       return SendStatus::Faulted;
     }
+    std::optional<std::chrono::milliseconds> pool_timeout =
+        http_pool_timeout_for_request(frame, client, kw_args);
+    if (!pool_timeout.has_value()) {
+      return SendStatus::Faulted;
+    }
     if (keyword_arg_value(kw_args, "timeout") == std::nullopt) {
       timeout = client->timeout;
     }
     return perform_http_request(frame, client, request->method, request->url,
                                 request->headers, request->body, *timeout,
-                                block, out);
+                                *pool_timeout, block, out);
   }
 
   SendStatus apply_http_client_send(
@@ -22738,7 +23137,7 @@ private:
       }
       if (!reject_unknown_keywords(frame, kw_args,
                                    {"method", "url", "headers", "length",
-                                    "timeout"})) {
+                                    "timeout", "pool_timeout"})) {
         return SendStatus::Faulted;
       }
       const std::optional<Value> method_value =
@@ -22780,12 +23179,18 @@ private:
       if (!timeout.has_value()) {
         return SendStatus::Faulted;
       }
+      std::optional<std::chrono::milliseconds> pool_timeout =
+          http_pool_timeout_for_request(frame, client, kw_args);
+      if (!pool_timeout.has_value()) {
+        return SendStatus::Faulted;
+      }
       if (keyword_arg_value(kw_args, "timeout") == std::nullopt) {
         timeout = client->timeout;
       }
       std::shared_ptr<RuntimeHttpRequestHandle> handle;
       SendStatus status = http_begin_request_handle(
-          frame, client, *method, *url, headers, length, *timeout, &handle);
+          frame, client, *method, *url, headers, length, *timeout,
+          *pool_timeout, &handle);
       if (status != SendStatus::Matched) {
         return status;
       }
@@ -22800,10 +23205,12 @@ private:
         return SendStatus::Faulted;
       }
       if (selector == "closed?") {
-        *out = Value::boolean(client->closed);
+        *out = Value::boolean(client->closed());
       } else {
         if (selector == "close!") {
-          client->closed = true;
+          client->close_client();
+        } else {
+          client->close_idle();
         }
         *out = Value::null();
       }

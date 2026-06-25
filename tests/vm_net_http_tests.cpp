@@ -20,6 +20,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -220,6 +221,122 @@ amber::runtime::ExecutionResult run_with_server_until_request_contains(
   return result;
 }
 
+amber::runtime::ExecutionResult run_with_persistent_server(
+    const std::string &source, const std::vector<std::string> &responses,
+    std::string *server_error, std::vector<std::string> *got_requests,
+    int *accept_count) {
+  auto listening = RuntimeTcpListener::listen({"127.0.0.1", 0});
+  expect(listening.ok, "loopback listen failed: " + listening.error_name);
+  const std::uint16_t port = listening.listener->local_endpoint().port;
+  listening.listener->allow_unchecked_sharing();
+
+  std::thread server([&] {
+    auto accepted = listening.listener->accept(2s);
+    if (!accepted.ok) {
+      *server_error = "accept:" + accepted.error_name;
+      return;
+    }
+    ++*accept_count;
+    for (const std::string &response : responses) {
+      std::string request;
+      while (!request_complete(request)) {
+        RuntimeByteBuffer buf(4096);
+        auto read = accepted.stream->read(buf, 2s);
+        if (read.eof) {
+          break;
+        }
+        if (!read.ok) {
+          *server_error = "read:" + read.error_name;
+          return;
+        }
+        request += buf.bytes();
+      }
+      if (!request_complete(request)) {
+        *server_error = "read:request incomplete";
+        return;
+      }
+      if (got_requests != nullptr) {
+        got_requests->push_back(request);
+      }
+      auto written = accepted.stream->write_all(response, 2s);
+      if (!written.ok) {
+        *server_error = "write:" + written.error_name;
+        return;
+      }
+    }
+    accepted.stream->close();
+  });
+
+  amber::runtime::ExecutionResult result =
+      execute_source(with_port(source, port));
+  server.join();
+  listening.listener->close();
+  return result;
+}
+
+amber::runtime::ExecutionResult run_with_two_connection_server(
+    const std::string &source, const std::string &first_response,
+    const std::string &second_response, std::string *server_error,
+    std::vector<std::string> *got_requests, int *accept_count) {
+  auto listening = RuntimeTcpListener::listen({"127.0.0.1", 0});
+  expect(listening.ok, "loopback listen failed: " + listening.error_name);
+  const std::uint16_t port = listening.listener->local_endpoint().port;
+  listening.listener->allow_unchecked_sharing();
+
+  std::thread server([&] {
+    const std::string responses[2] = {first_response, second_response};
+    for (int i = 0; i < 2; ++i) {
+      auto accepted = listening.listener->accept(2s);
+      if (!accepted.ok) {
+        *server_error = "accept:" + accepted.error_name;
+        return;
+      }
+      ++*accept_count;
+      std::string request;
+      while (!request_complete(request)) {
+        RuntimeByteBuffer buf(4096);
+        auto read = accepted.stream->read(buf, 2s);
+        if (read.eof) {
+          break;
+        }
+        if (!read.ok) {
+          *server_error = "read:" + read.error_name;
+          return;
+        }
+        request += buf.bytes();
+      }
+      if (!request_complete(request)) {
+        *server_error = "read:request incomplete";
+        return;
+      }
+      if (got_requests != nullptr) {
+        got_requests->push_back(request);
+      }
+      auto written = accepted.stream->write_all(responses[i], 2s);
+      if (!written.ok) {
+        *server_error = "write:" + written.error_name;
+        return;
+      }
+      if (i == 0) {
+        RuntimeByteBuffer buf(4096);
+        auto read = accepted.stream->read(buf, 2s);
+        if (!read.eof) {
+          *server_error = read.ok ? "read:first connection reused"
+                                  : "read:" + read.error_name;
+          return;
+        }
+      }
+      accepted.stream->close();
+    }
+  });
+
+  amber::runtime::ExecutionResult result =
+      execute_source(with_port(source, port));
+  server.join();
+  listening.listener->close();
+  return result;
+}
+
 const char *kResponse = "HTTP/1.1 200 OK\r\n"
                         "Content-Length: 13\r\n"
                         "X-Test: yes\r\n"
@@ -410,6 +527,95 @@ void test_scoped_block_form() {
       kResponse, &server_error);
   expect(server_error.empty(), "server error: " + server_error);
   expect_ok_int(result, 200, "scoped block get");
+}
+
+void test_pool_reuses_after_body_read() {
+  std::string server_error;
+  std::vector<std::string> requests;
+  int accepts = 0;
+  const amber::runtime::ExecutionResult result = run_with_persistent_server(
+      "import net\n"
+      "client = net.http.Client(max_idle_connections: 4, "
+      "max_idle_per_origin: 2)\n"
+      "a = client.get(\"http://127.0.0.1:%PORT%/one\").body_text()\n"
+      "b = client.get(\"http://127.0.0.1:%PORT%/two\").body_text()\n"
+      "\"#{a}|#{b}\"\n",
+      {"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\none",
+       "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo"},
+      &server_error, &requests, &accepts);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "one|two", "pool reuse after body read");
+  expect(accepts == 1, "pooled requests reuse one TCP connection");
+  expect(requests.size() == 2, "persistent server saw two requests");
+}
+
+void test_close_idle_closes_pooled_connection() {
+  std::string server_error;
+  std::vector<std::string> requests;
+  int accepts = 0;
+  const amber::runtime::ExecutionResult result = run_with_two_connection_server(
+      "import net\n"
+      "client = net.http.Client(max_idle_connections: 4, "
+      "max_idle_per_origin: 2)\n"
+      "a = client.get(\"http://127.0.0.1:%PORT%/one\").body_text()\n"
+      "client.close_idle!()\n"
+      "b = client.get(\"http://127.0.0.1:%PORT%/two\").body_text()\n"
+      "\"#{a}|#{b}\"\n",
+      "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\none",
+      "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo",
+      &server_error, &requests, &accepts);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "one|two", "close_idle! closes pooled connection");
+  expect(accepts == 2, "close_idle! forces a second TCP connection");
+  expect(requests.size() == 2, "two-connection server saw two requests");
+}
+
+void test_pool_does_not_reuse_after_early_close() {
+  std::string server_error;
+  std::vector<std::string> requests;
+  int accepts = 0;
+  const amber::runtime::ExecutionResult result = run_with_two_connection_server(
+      "import net\n"
+      "client = net.http.Client(max_idle_connections: 4, "
+      "max_idle_per_origin: 2)\n"
+      "res = client.get(\"http://127.0.0.1:%PORT%/one\")\n"
+      "status = res.status()\n"
+      "res.close!()\n"
+      "b = client.get(\"http://127.0.0.1:%PORT%/two\").body_text()\n"
+      "\"#{status}:#{b}\"\n",
+      "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+      "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo",
+      &server_error, &requests, &accepts);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "200:two",
+                   "early response close prevents pool reuse");
+  expect(accepts == 2, "early close forces a second TCP connection");
+  expect(requests.size() == 2, "early-close server saw two requests");
+}
+
+void test_pool_timeout_when_active_slot_unavailable() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result =
+      run_with_server_until_request_contains(
+          "import net\n"
+          "client = net.http.Client(max_active_per_origin: 1)\n"
+          "h = client.begin(method: :post, "
+          "url: \"http://127.0.0.1:%PORT%/hold\", length: null)\n"
+          "caught = \"none\"\n"
+          "try:\n"
+          "  client.get(\"http://127.0.0.1:%PORT%/blocked\", "
+          "pool_timeout: 0)\n"
+          "rescue PoolTimeoutError:\n"
+          "  caught = \"pool\"\n"
+          "h.abort!()\n"
+          "caught == \"pool\"\n",
+          "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", "\r\n\r\n",
+          &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(request.find("/hold") != std::string::npos,
+         "pool timeout test opened the held request");
+  expect_ok_true(result, "max_active_per_origin observes pool_timeout");
 }
 
 void test_post_body() {
@@ -759,6 +965,10 @@ int main() {
   test_request_accepts_headers_value();
   test_from_import_headers();
   test_scoped_block_form();
+  test_pool_reuses_after_body_read();
+  test_close_idle_closes_pooled_connection();
+  test_pool_does_not_reuse_after_early_close();
+  test_pool_timeout_when_active_slot_unavailable();
   test_post_body();
   test_request_body_text_static();
   test_request_body_stream_chunked();

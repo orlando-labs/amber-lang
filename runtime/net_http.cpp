@@ -14,6 +14,47 @@ namespace {
 
 std::string ascii_lower(std::string text) { return ascii_lower_copy(text); }
 
+bool http_header_has_token(const HttpHeaders &headers, const std::string &name,
+                           const std::string &token) {
+  for (std::string value : headers.all(name)) {
+    value = ascii_lower_copy(std::move(value));
+    std::size_t start = 0;
+    while (start <= value.size()) {
+      const std::size_t comma = value.find(',', start);
+      std::string part =
+          comma == std::string::npos
+              ? value.substr(start)
+              : value.substr(start, comma - start);
+      while (!part.empty() &&
+             (part.front() == ' ' || part.front() == '\t')) {
+        part.erase(part.begin());
+      }
+      while (!part.empty() && (part.back() == ' ' || part.back() == '\t')) {
+        part.pop_back();
+      }
+      if (part == token) {
+        return true;
+      }
+      if (comma == std::string::npos) {
+        break;
+      }
+      start = comma + 1U;
+    }
+  }
+  return false;
+}
+
+bool response_reusable_on_success(const HttpResponseParser &parser) {
+  if (http_header_has_token(parser.headers(), "connection", "close")) {
+    return false;
+  }
+  if (parser.minor_version() == 0 &&
+      !http_header_has_token(parser.headers(), "connection", "keep-alive")) {
+    return false;
+  }
+  return true;
+}
+
 bool parse_port_digits(const std::string &text, std::uint16_t *out,
                        std::string *error) {
   if (text.empty()) {
@@ -373,9 +414,10 @@ bool http_finish_request_body(HttpTransport &transport,
 
 HttpResponseBodyStream::HttpResponseBodyStream(
     std::unique_ptr<HttpTransport> transport, HttpResponseParser parser,
-    HttpTransportRelease release)
+    HttpTransportRelease release, bool reusable_on_success)
     : transport_(std::move(transport)), parser_(std::move(parser)),
-      pending_(parser_.take_body()), release_(std::move(release)) {
+      pending_(parser_.take_body()), release_(std::move(release)),
+      reusable_on_success_(reusable_on_success) {
   if (parser_.message_complete() && pending_.empty()) {
     release_successfully();
   }
@@ -397,7 +439,7 @@ void HttpResponseBodyStream::release_transport(bool reusable) {
 
 void HttpResponseBodyStream::release_successfully() {
   consumed_ = true;
-  release_transport(/*reusable=*/true);
+  release_transport(reusable_on_success_);
 }
 
 void HttpResponseBodyStream::close() {
@@ -518,7 +560,8 @@ bool HttpResponseBodyStream::discard(std::optional<std::size_t> limit,
 HttpResponseStartResult
 http_read_response_start(std::unique_ptr<HttpTransport> transport,
                          bool head_request,
-                         const HttpResponseParserLimits &limits) {
+                         const HttpResponseParserLimits &limits,
+                         HttpTransportRelease release) {
   HttpResponseStartResult result;
   if (transport == nullptr) {
     result.error_kind = HttpErrorKind::Connection;
@@ -567,8 +610,11 @@ http_read_response_start(std::unique_ptr<HttpTransport> transport,
   result.reason = parser.reason();
   result.minor_version = parser.minor_version();
   result.headers = parser.headers();
+  const bool reusable_on_success = response_reusable_on_success(parser);
   result.body = std::make_unique<HttpResponseBodyStream>(std::move(transport),
-                                                         std::move(parser));
+                                                         std::move(parser),
+                                                         std::move(release),
+                                                         reusable_on_success);
   return result;
 }
 

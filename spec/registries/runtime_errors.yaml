@@ -177,6 +177,20 @@ errors:
     parent: BodyError
   - name: BodyLimitError
     parent: BodyError
+  - name: HttpTimeoutError
+    parent: HttpError
+  - name: PoolTimeoutError
+    parent: HttpTimeoutError
+  - name: OpenTimeoutError
+    parent: HttpTimeoutError
+  - name: ReadTimeoutError
+    parent: HttpTimeoutError
+  - name: WriteTimeoutError
+    parent: HttpTimeoutError
+  - name: BodyTimeoutError
+    parent: HttpTimeoutError
+  - name: TotalTimeoutError
+    parent: HttpTimeoutError
   - name: ConnectionError
     parent: Exception
   - name: ConnectionRefusedError
