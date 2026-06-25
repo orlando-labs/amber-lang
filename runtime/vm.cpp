@@ -20422,9 +20422,40 @@ private:
   using NativeBlockInvoker =
       std::function<Value(const std::vector<Value> &args)>;
 
+  struct NativeBlockUnwind {};
+
   std::optional<NativeBlockInvoker>
-  make_native_block_invoker(const Frame &frame, const Value &block,
-                            const std::string &context) {
+  make_scoped_native_block_invoker(const Frame &frame, const Value &block,
+                                   const std::string &context) {
+    if (block.is_null()) {
+      set_fault(frame, "TypeError", context + " requires block");
+      return std::nullopt;
+    }
+    if (!block.is_closure()) {
+      set_fault(frame, "TypeError", context + " block must be closure");
+      return std::nullopt;
+    }
+    if (!ensure_lifecycle_access(frame, block)) {
+      return std::nullopt;
+    }
+    const IntrusivePtr<ClosureValue> closure = block.as_closure();
+    if (closure == nullptr) {
+      set_fault(frame, "TypeError", "closure value is null");
+      return std::nullopt;
+    }
+
+    return [this, &frame, block](const std::vector<Value> &args) -> Value {
+      std::optional<Value> value = call_block_to_value(frame, block, args);
+      if (!value.has_value()) {
+        throw NativeBlockUnwind();
+      }
+      return *value;
+    };
+  }
+
+  std::optional<NativeBlockInvoker>
+  make_detached_native_block_invoker(const Frame &frame, const Value &block,
+                                     const std::string &context) {
     if (block.is_null()) {
       set_fault(frame, "TypeError", context + " requires block");
       return std::nullopt;
@@ -20479,7 +20510,8 @@ private:
   }
 
   // Layer B: build a resumable driver for a task body (task.async/spawn).
-  // Unlike make_native_block_invoker (one-shot: fresh VM run to completion),
+  // Unlike make_detached_native_block_invoker (one-shot: fresh VM run to
+  // completion),
   // this holds a persistent *parkable* VM with the block's entry frame pushed
   // once, and drives it until done, fault, or a suspension point (task.sleep)
   // requests a park. On park it parks the current scheduler strand (releasing
@@ -21906,7 +21938,8 @@ private:
         return SendStatus::Faulted;
       }
       std::optional<NativeBlockInvoker> invoker =
-          make_native_block_invoker(frame, block, "net.http.Headers#each");
+          make_scoped_native_block_invoker(frame, block,
+                                           "net.http.Headers#each");
       if (!invoker.has_value()) {
         return SendStatus::Faulted;
       }
@@ -21915,6 +21948,8 @@ private:
           (*invoker)({string_value_from_text(entry.first),
                       string_value_from_text(entry.second)});
         }
+      } catch (const NativeBlockUnwind &) {
+        return SendStatus::Faulted;
       } catch (const RuntimeTaskFailure &failure) {
         set_fault(frame, failure.error_name(), failure.message());
         return SendStatus::Faulted;
@@ -22133,14 +22168,14 @@ private:
     if (!set_fault_from_io_status(frame, handle->access_status())) {
       return SendStatus::Faulted;
     }
-    if (handle->aborted || handle->transport == nullptr) {
-      raise_runtime_error(frame, "RequestStateError",
-                          "HTTP request exchange has been aborted");
-      return SendStatus::Faulted;
-    }
     if (handle->response_returned) {
       raise_runtime_error(frame, "RequestStateError",
                           "HTTP response has already been returned");
+      return SendStatus::Faulted;
+    }
+    if (handle->aborted || handle->transport == nullptr) {
+      raise_runtime_error(frame, "RequestStateError",
+                          "HTTP request exchange has been aborted");
       return SendStatus::Faulted;
     }
     if (handle->finished) {
@@ -22168,14 +22203,14 @@ private:
     if (!set_fault_from_io_status(frame, handle->access_status())) {
       return SendStatus::Faulted;
     }
-    if (handle->aborted || handle->transport == nullptr) {
-      raise_runtime_error(frame, "RequestStateError",
-                          "HTTP request exchange has been aborted");
-      return SendStatus::Faulted;
-    }
     if (handle->response_returned) {
       raise_runtime_error(frame, "RequestStateError",
                           "HTTP response has already been returned");
+      return SendStatus::Faulted;
+    }
+    if (handle->aborted || handle->transport == nullptr) {
+      raise_runtime_error(frame, "RequestStateError",
+                          "HTTP request exchange has been aborted");
       return SendStatus::Faulted;
     }
     if (handle->finished) {
@@ -22200,14 +22235,14 @@ private:
     if (!set_fault_from_io_status(frame, handle->access_status())) {
       return SendStatus::Faulted;
     }
-    if (handle->aborted || handle->transport == nullptr) {
-      raise_runtime_error(frame, "RequestStateError",
-                          "HTTP request exchange has been aborted");
-      return SendStatus::Faulted;
-    }
     if (handle->response_returned) {
       raise_runtime_error(frame, "RequestStateError",
                           "HTTP response has already been returned");
+      return SendStatus::Faulted;
+    }
+    if (handle->aborted || handle->transport == nullptr) {
+      raise_runtime_error(frame, "RequestStateError",
+                          "HTTP request exchange has been aborted");
       return SendStatus::Faulted;
     }
     std::unique_ptr<http::HttpTransport> transport =
@@ -22339,14 +22374,18 @@ private:
       return http_request_handle_finish(frame, handle, &ignored);
     }
     if (body->kind == RuntimeHttpRequestBodyKind::Producer) {
-      std::optional<NativeBlockInvoker> invoker = make_native_block_invoker(
-          frame, body->producer, "net.http.RequestBody.stream");
+      std::optional<NativeBlockInvoker> invoker =
+          make_scoped_native_block_invoker(frame, body->producer,
+                                           "net.http.RequestBody.stream");
       if (!invoker.has_value()) {
         (void)handle->close();
         return SendStatus::Faulted;
       }
       try {
         (void)(*invoker)({Value::io_value(handle)});
+      } catch (const NativeBlockUnwind &) {
+        (void)handle->close();
+        return SendStatus::Faulted;
       } catch (const RuntimeTaskFailure &failure) {
         (void)handle->close();
         set_fault(frame, failure.error_name(), failure.message());
@@ -22447,7 +22486,7 @@ private:
       return SendStatus::Matched;
     }
     std::optional<NativeBlockInvoker> invoker =
-        make_native_block_invoker(frame, block, "net.http.Client");
+        make_scoped_native_block_invoker(frame, block, "net.http.Client");
     if (!invoker.has_value()) {
       return SendStatus::Faulted;
     }
@@ -22461,6 +22500,15 @@ private:
         }
       }
       *out = std::move(block_result);
+    } catch (const NativeBlockUnwind &) {
+      if (const auto response =
+              std::dynamic_pointer_cast<RuntimeHttpResponse>(
+                  response_value.as_io_value())) {
+        if (response->body != nullptr) {
+          (void)response->body->close();
+        }
+      }
+      return SendStatus::Faulted;
     } catch (const RuntimeTaskFailure &failure) {
       if (const auto response =
               std::dynamic_pointer_cast<RuntimeHttpResponse>(
@@ -23031,9 +23079,10 @@ private:
         return SendStatus::Faulted;
       }
       std::optional<NativeBlockInvoker> invoker =
-          make_native_block_invoker(frame, block,
-                                    "net.http.ResponseBody#each_chunk");
+          make_scoped_native_block_invoker(
+              frame, block, "net.http.ResponseBody#each_chunk");
       if (!invoker.has_value()) {
+        (void)body->close();
         return SendStatus::Faulted;
       }
       for (;;) {
@@ -23049,7 +23098,11 @@ private:
         }
         try {
           (void)(*invoker)({io_bytes_value(std::move(chunk))});
+        } catch (const NativeBlockUnwind &) {
+          (void)body->close();
+          return SendStatus::Faulted;
         } catch (const RuntimeTaskFailure &failure) {
+          (void)body->close();
           set_fault(frame, failure.error_name(), failure.message());
           return SendStatus::Faulted;
         }
@@ -23518,7 +23571,7 @@ private:
             stderr_writer = *writer;
           }
           std::optional<NativeBlockInvoker> invoker =
-              make_native_block_invoker(frame, block, "io.with_output");
+              make_scoped_native_block_invoker(frame, block, "io.with_output");
           if (!invoker.has_value()) {
             return SendStatus::Faulted;
           }
@@ -23526,6 +23579,8 @@ private:
             RuntimeOutputScope scope(std::move(stdout_writer),
                                      std::move(stderr_writer));
             *out = (*invoker)(std::vector<Value>{});
+          } catch (const NativeBlockUnwind &) {
+            return SendStatus::Faulted;
           } catch (const RuntimeTaskFailure &failure) {
             set_fault(frame, failure.error_name(), failure.message());
             return SendStatus::Faulted;
@@ -23840,7 +23895,7 @@ private:
           return SendStatus::Matched;
         }
         std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "fs.File.open");
+            make_scoped_native_block_invoker(frame, block, "fs.File.open");
         if (!invoker.has_value()) {
           if (const auto opened_resource =
                   std::dynamic_pointer_cast<RuntimeIoResource>(
@@ -23860,6 +23915,13 @@ private:
             return SendStatus::Faulted;
           }
           *out = std::move(block_result);
+        } catch (const NativeBlockUnwind &) {
+          if (const auto opened_resource =
+                  std::dynamic_pointer_cast<RuntimeIoResource>(
+                      file_value.as_io_value())) {
+            (void)opened_resource->close();
+          }
+          return SendStatus::Faulted;
         } catch (const RuntimeTaskFailure &failure) {
           if (const auto opened_resource =
                   std::dynamic_pointer_cast<RuntimeIoResource>(
@@ -24341,7 +24403,8 @@ private:
             return SendStatus::Matched;
           }
           std::optional<NativeBlockInvoker> invoker =
-              make_native_block_invoker(frame, block, "net.tcp.connect");
+              make_scoped_native_block_invoker(frame, block,
+                                               "net.tcp.connect");
           if (!invoker.has_value()) {
             connected.stream->close();
             return SendStatus::Faulted;
@@ -24353,6 +24416,9 @@ private:
               return SendStatus::Faulted;
             }
             *out = std::move(block_result);
+          } catch (const NativeBlockUnwind &) {
+            connected.stream->close();
+            return SendStatus::Faulted;
           } catch (const RuntimeTaskFailure &failure) {
             connected.stream->close();
             set_fault(frame, failure.error_name(), failure.message());
@@ -24393,7 +24459,7 @@ private:
           return SendStatus::Matched;
         }
         std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "net.tcp.listen");
+            make_scoped_native_block_invoker(frame, block, "net.tcp.listen");
         if (!invoker.has_value()) {
           listening.listener->close();
           return SendStatus::Faulted;
@@ -24405,6 +24471,9 @@ private:
             return SendStatus::Faulted;
           }
           *out = std::move(block_result);
+        } catch (const NativeBlockUnwind &) {
+          listening.listener->close();
+          return SendStatus::Faulted;
         } catch (const RuntimeTaskFailure &failure) {
           listening.listener->close();
           set_fault(frame, failure.error_name(), failure.message());
@@ -25438,7 +25507,8 @@ private:
         }
         std::optional<NativeBlockInvoker> invoker;
         if (selector == "each_chunk") {
-          invoker = make_native_block_invoker(frame, block, "each_chunk");
+          invoker = make_scoped_native_block_invoker(frame, block,
+                                                     "each_chunk");
           if (!invoker.has_value()) {
             return SendStatus::Faulted;
           }
@@ -25469,6 +25539,8 @@ private:
           if (selector == "each_chunk") {
             try {
               (void)(*invoker)({io_bytes_value(chunk)});
+            } catch (const NativeBlockUnwind &) {
+              return SendStatus::Faulted;
             } catch (const RuntimeTaskFailure &failure) {
               set_fault(frame, failure.error_name(), failure.message());
               return SendStatus::Faulted;
@@ -26597,13 +26669,16 @@ private:
           return SendStatus::Faulted;
         }
         std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "task.with_annotation");
+            make_scoped_native_block_invoker(frame, block,
+                                             "task.with_annotation");
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }
         try {
           RuntimeTaskAnnotationScope annotation_scope(*annotation);
           *out = (*invoker)(std::vector<Value>{});
+        } catch (const NativeBlockUnwind &) {
+          return SendStatus::Faulted;
         } catch (const RuntimeTaskFailure &failure) {
           set_fault(frame, failure.error_name(), failure.message());
           return SendStatus::Faulted;
@@ -26718,7 +26793,7 @@ private:
           return SendStatus::Faulted;
         }
         std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "task.sync");
+            make_scoped_native_block_invoker(frame, block, "task.sync");
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }
@@ -26729,6 +26804,8 @@ private:
           *out = task->sync([invoker = *invoker]() mutable {
             return invoker(std::vector<Value>{});
           });
+        } catch (const NativeBlockUnwind &) {
+          return SendStatus::Faulted;
         } catch (const RuntimeTaskFailure &failure) {
           set_fault(frame, failure.error_name(), failure.message());
           return SendStatus::Faulted;
@@ -26951,7 +27028,8 @@ private:
           return SendStatus::Faulted;
         }
         std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "Mutex.synchronize");
+            make_scoped_native_block_invoker(frame, block,
+                                             "Mutex.synchronize");
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }
@@ -26966,6 +27044,8 @@ private:
             return SendStatus::Faulted;
           }
           *out = synchronized.value;
+        } catch (const NativeBlockUnwind &) {
+          return SendStatus::Faulted;
         } catch (const RuntimeTaskFailure &failure) {
           set_fault(frame, failure.error_name(), failure.message());
           return SendStatus::Faulted;
@@ -27045,14 +27125,22 @@ private:
           return SendStatus::Faulted;
         }
         std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "Atomic.update");
+            make_scoped_native_block_invoker(frame, block, "Atomic.update");
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }
-        const RuntimeAtomic::Result result =
-            atomic->update([invoker = *invoker](const Value &current) mutable {
-              return invoker(std::vector<Value>{current});
-            });
+        RuntimeAtomic::Result result;
+        try {
+          result =
+              atomic->update([invoker = *invoker](const Value &current) mutable {
+                return invoker(std::vector<Value>{current});
+              });
+        } catch (const NativeBlockUnwind &) {
+          return SendStatus::Faulted;
+        } catch (const RuntimeTaskFailure &failure) {
+          set_fault(frame, failure.error_name(), failure.message());
+          return SendStatus::Faulted;
+        }
         if (!result.ok) {
           set_fault_from_atomic_result(frame, result);
           return SendStatus::Faulted;
@@ -27110,7 +27198,8 @@ private:
           return SendStatus::Faulted;
         }
         std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "flow scatter_map");
+            make_detached_native_block_invoker(frame, block,
+                                               "flow scatter_map");
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }
@@ -27141,7 +27230,7 @@ private:
           return SendStatus::Faulted;
         }
         std::optional<NativeBlockInvoker> invoker =
-            make_native_block_invoker(frame, block, "flow broadcast");
+            make_detached_native_block_invoker(frame, block, "flow broadcast");
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }
@@ -27214,8 +27303,9 @@ private:
           }
           return SendStatus::Faulted;
         }
-        std::optional<NativeBlockInvoker> invoker = make_native_block_invoker(
-            frame, block, "threaded collection " + collection_selector);
+        std::optional<NativeBlockInvoker> invoker =
+            make_detached_native_block_invoker(
+                frame, block, "threaded collection " + collection_selector);
         if (!invoker.has_value()) {
           return SendStatus::Faulted;
         }

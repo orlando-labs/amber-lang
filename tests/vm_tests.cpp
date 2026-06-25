@@ -1605,6 +1605,21 @@ void test_runtime_text_output_helpers_and_io_sinks() {
          "io.with_output should rebind logical stdout");
 
   emit_result = emit_ok("buffer = io.Buffer.new()\n"
+                        "try:\n"
+                        "  io.with_output(stdout: buffer):\n"
+                        "    print \"before\"\n"
+                        "    raise ValueError(\"scoped\")\n"
+                        "  \"no error\"\n"
+                        "rescue ValueError |e|:\n"
+                        "  \"#{e.message()}:#{buffer.to_str()}\"\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "dynamic output scope rescue execution failed");
+  expect(string_value_text_or_die(exec.value, emit_result.module, exec) ==
+             "scoped:before\n",
+         "io.with_output block exception should rescue outside scope");
+
+  emit_result = emit_ok("buffer = io.Buffer.new()\n"
                         "handle = io.with_output(stdout: buffer): "
                         "task.spawn: print \"async\"\n"
                         "handle.wait()\n"

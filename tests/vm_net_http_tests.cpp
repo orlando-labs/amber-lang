@@ -171,6 +171,55 @@ amber::runtime::ExecutionResult run_with_server(const std::string &source,
   return run_with_server_capture(source, response, server_error, nullptr);
 }
 
+amber::runtime::ExecutionResult run_with_server_until_request_contains(
+    const std::string &source, const std::string &response,
+    const std::string &needle, std::string *server_error,
+    std::string *got_request) {
+  auto listening = RuntimeTcpListener::listen({"127.0.0.1", 0});
+  expect(listening.ok, "loopback listen failed: " + listening.error_name);
+  const std::uint16_t port = listening.listener->local_endpoint().port;
+  listening.listener->allow_unchecked_sharing();
+
+  std::thread server([&] {
+    auto accepted = listening.listener->accept(2s);
+    if (!accepted.ok) {
+      *server_error = "accept:" + accepted.error_name;
+      return;
+    }
+    std::string request;
+    while (request.find(needle) == std::string::npos) {
+      RuntimeByteBuffer buf(4096);
+      auto read = accepted.stream->read(buf, 2s);
+      if (read.eof) {
+        break;
+      }
+      if (!read.ok) {
+        *server_error = "read:" + read.error_name;
+        return;
+      }
+      request += buf.bytes();
+    }
+    if (got_request != nullptr) {
+      *got_request = request;
+    }
+    if (request.find(needle) == std::string::npos) {
+      *server_error = "read:marker not found";
+      return;
+    }
+    auto written = accepted.stream->write_all(response, 2s);
+    if (!written.ok) {
+      *server_error = "write:" + written.error_name;
+    }
+    accepted.stream->close();
+  });
+
+  amber::runtime::ExecutionResult result =
+      execute_source(with_port(source, port));
+  server.join();
+  listening.listener->close();
+  return result;
+}
+
 const char *kResponse = "HTTP/1.1 200 OK\r\n"
                         "Content-Length: 13\r\n"
                         "X-Test: yes\r\n"
@@ -197,6 +246,22 @@ void expect_ok_true(const amber::runtime::ExecutionResult &result,
   expect(result.ok(), what + " should succeed");
   expect(result.value.is_bool() && result.value.as_bool(),
          what + " should return true");
+}
+
+void expect_ok_string(const amber::runtime::ExecutionResult &result,
+                      const std::string &expected,
+                      const std::string &what) {
+  if (!result.ok() && result.fault.has_value()) {
+    std::cerr << "[fault] " << what << ": " << result.fault->error_name << " / "
+              << result.fault->message << "\n";
+  }
+  expect(result.ok(), what + " should succeed");
+  expect(result.value.is_string(), what + " should return Str");
+  expect(result.value.as_string().string_id < result.runtime_strings.size(),
+         what + " string id in range");
+  expect(result.runtime_strings[result.value.as_string().string_id] ==
+             expected,
+         what + " value mismatch");
 }
 
 void test_get_status() {
@@ -453,6 +518,50 @@ void test_manual_request_handle_underwrite() {
          "manual underwrite -> BodyLengthError");
 }
 
+void test_request_handle_write_after_response_state() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "import net\n"
+      "h = net.http.Client().begin(method: :post, "
+      "url: \"http://127.0.0.1:%PORT%/\", length: null)\n"
+      "h.write_all!(\"one\".bytes())\n"
+      "h.finish!()\n"
+      "h.response()\n"
+      "h.write_all!(\"late\".bytes())\n",
+      kResponse, &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "RequestStateError" &&
+             result.fault->message.find("already been returned") !=
+                 std::string::npos,
+         "write after response -> already returned RequestStateError");
+}
+
+void test_request_handle_early_response_is_terminal() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result =
+      run_with_server_until_request_contains(
+          "import net\n"
+          "h = net.http.Client().begin(method: :post, "
+          "url: \"http://127.0.0.1:%PORT%/\", length: null)\n"
+          "h.write_all!(\"one\".bytes())\n"
+          "res = h.response()\n"
+          "caught = \"none\"\n"
+          "try:\n"
+          "  h.write_all!(\"late\".bytes())\n"
+          "rescue RequestStateError |e|:\n"
+          "  caught = \"#{res.status()}:#{e.message()}\"\n"
+          "caught\n",
+          kResponse, "\r\none\r\n", &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(request.find("transfer-encoding: chunked\r\n") != std::string::npos,
+         "early-response request is chunked");
+  expect_ok_string(result, "200:HTTP response has already been returned",
+                   "early response before finish is terminal");
+}
+
 void test_response_body_read_chunks() {
   std::string server_error;
   const amber::runtime::ExecutionResult result = run_with_server(
@@ -488,6 +597,26 @@ void test_response_body_single_consumer() {
   expect(!result.ok() && result.fault.has_value() &&
              result.fault->error_name == "BodyConsumedError",
          "mixed body consumption -> BodyConsumedError");
+}
+
+void test_response_body_each_chunk_propagates_block_failure() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "import net\n"
+      "res = net.http.Client().get(\"http://127.0.0.1:%PORT%/\")\n"
+      "body = res.body()\n"
+      "caught = \"none\"\n"
+      "try:\n"
+      "  body.each_chunk(size: 5) |chunk|:\n"
+      "    raise ValueError(\"stop\")\n"
+      "  caught = \"no error\"\n"
+      "rescue ValueError |e|:\n"
+      "  caught = \"#{e.message()}:#{body.closed?()}\"\n"
+      "caught\n",
+      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "stop:true",
+                   "ResponseBody.each_chunk block rescue and cleanup");
 }
 
 void test_unsupported_scheme_raises() {
@@ -636,8 +765,11 @@ int main() {
   test_request_body_from_reader_fixed();
   test_manual_request_handle_chunked();
   test_manual_request_handle_underwrite();
+  test_request_handle_write_after_response_state();
+  test_request_handle_early_response_is_terminal();
   test_response_body_read_chunks();
   test_response_body_single_consumer();
+  test_response_body_each_chunk_propagates_block_failure();
   test_send_request();
   test_send_post_request_body();
   test_request_method_normalized();

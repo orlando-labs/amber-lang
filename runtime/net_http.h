@@ -12,6 +12,7 @@
 #include "runtime/http_codec.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -118,10 +119,18 @@ bool http_finish_request_body(HttpTransport &transport,
                               std::uint64_t written, HttpErrorKind *kind,
                               std::string *error);
 
+// Called when a response body gives up its transport lease. `reusable` is true
+// only after the body has been fully drained and parsed successfully; early
+// close and parse/connection errors release with `reusable == false`.
+using HttpTransportRelease =
+    std::function<void(std::unique_ptr<HttpTransport> transport,
+                       bool reusable)>;
+
 class HttpResponseBodyStream {
 public:
   HttpResponseBodyStream(std::unique_ptr<HttpTransport> transport,
-                         HttpResponseParser parser);
+                         HttpResponseParser parser,
+                         HttpTransportRelease release = {});
   ~HttpResponseBodyStream();
 
   HttpResponseBodyStream(const HttpResponseBodyStream &) = delete;
@@ -141,11 +150,13 @@ public:
 
 private:
   bool fill_pending(HttpErrorKind *kind, std::string *error);
+  void release_transport(bool reusable);
   void release_successfully();
 
   std::unique_ptr<HttpTransport> transport_;
   HttpResponseParser parser_;
   std::string pending_;
+  HttpTransportRelease release_;
   bool closed_ = false;
   bool consumed_ = false;
 };

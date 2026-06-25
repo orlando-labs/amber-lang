@@ -372,9 +372,10 @@ bool http_finish_request_body(HttpTransport &transport,
 }
 
 HttpResponseBodyStream::HttpResponseBodyStream(
-    std::unique_ptr<HttpTransport> transport, HttpResponseParser parser)
+    std::unique_ptr<HttpTransport> transport, HttpResponseParser parser,
+    HttpTransportRelease release)
     : transport_(std::move(transport)), parser_(std::move(parser)),
-      pending_(parser_.take_body()) {
+      pending_(parser_.take_body()), release_(std::move(release)) {
   if (parser_.message_complete() && pending_.empty()) {
     release_successfully();
   }
@@ -382,14 +383,21 @@ HttpResponseBodyStream::HttpResponseBodyStream(
 
 HttpResponseBodyStream::~HttpResponseBodyStream() { close(); }
 
+void HttpResponseBodyStream::release_transport(bool reusable) {
+  if (transport_ == nullptr) {
+    return;
+  }
+  std::unique_ptr<HttpTransport> transport = std::move(transport_);
+  if (release_) {
+    release_(std::move(transport), reusable);
+    return;
+  }
+  transport->close();
+}
+
 void HttpResponseBodyStream::release_successfully() {
   consumed_ = true;
-  if (transport_ != nullptr) {
-    // Phase 4 will hand this lease back to a pool. Until pooling exists,
-    // releasing a successfully drained lease closes the one-shot transport.
-    transport_->close();
-    transport_.reset();
-  }
+  release_transport(/*reusable=*/true);
 }
 
 void HttpResponseBodyStream::close() {
@@ -397,10 +405,7 @@ void HttpResponseBodyStream::close() {
     return;
   }
   closed_ = true;
-  if (transport_ != nullptr) {
-    transport_->close();
-    transport_.reset();
-  }
+  release_transport(/*reusable=*/false);
 }
 
 bool HttpResponseBodyStream::fill_pending(HttpErrorKind *kind,

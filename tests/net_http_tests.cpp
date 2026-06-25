@@ -442,6 +442,62 @@ void test_response_start_streams_body() {
   expect(*closed, "transport closed when body lease releases");
 }
 
+void test_response_body_release_callback_reusable_on_drain() {
+  auto transport = std::make_unique<FakeTransport>();
+  std::shared_ptr<bool> closed = std::make_shared<bool>(false);
+  transport->closed_flag = closed;
+
+  amber::runtime::http::HttpResponseParser parser;
+  expect(parser.feed("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"),
+         "parser accepts complete response");
+
+  int releases = 0;
+  bool reusable = false;
+  amber::runtime::http::HttpResponseBodyStream body(
+      std::move(transport), std::move(parser),
+      [&](std::unique_ptr<HttpTransport> released, bool can_reuse) {
+        ++releases;
+        reusable = can_reuse;
+        released->close();
+      });
+
+  std::string bytes;
+  HttpErrorKind kind = HttpErrorKind::None;
+  std::string error;
+  expect(body.read_all(std::nullopt, &bytes, &kind, &error),
+         "draining body succeeds");
+  expect(bytes == "ok", "drained body bytes");
+  expect(releases == 1, "drained body releases exactly once");
+  expect(reusable, "drained body releases reusable transport");
+  expect(*closed, "release callback owns and closes transport");
+}
+
+void test_response_body_release_callback_non_reusable_on_close() {
+  auto transport = std::make_unique<FakeTransport>();
+  std::shared_ptr<bool> closed = std::make_shared<bool>(false);
+  transport->closed_flag = closed;
+
+  amber::runtime::http::HttpResponseParser parser;
+  expect(parser.feed("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nte"),
+         "parser accepts partial response body");
+
+  int releases = 0;
+  bool reusable = true;
+  amber::runtime::http::HttpResponseBodyStream body(
+      std::move(transport), std::move(parser),
+      [&](std::unique_ptr<HttpTransport> released, bool can_reuse) {
+        ++releases;
+        reusable = can_reuse;
+        released->close();
+      });
+
+  body.close();
+  body.close();
+  expect(releases == 1, "early close releases exactly once");
+  expect(!reusable, "early close releases non-reusable transport");
+  expect(*closed, "early close callback owns and closes transport");
+}
+
 } // namespace
 
 int main() {
@@ -467,6 +523,8 @@ int main() {
   test_streaming_chunked_request();
   test_streaming_fixed_length_mismatch();
   test_response_start_streams_body();
+  test_response_body_release_callback_reusable_on_drain();
+  test_response_body_release_callback_non_reusable_on_close();
 
   std::cout << "net.http exchange tests passed (" << g_checks << " checks)\n";
   return 0;
