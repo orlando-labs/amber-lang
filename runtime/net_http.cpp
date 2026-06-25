@@ -1,9 +1,12 @@
 #include "runtime/net_http.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace amber::runtime::http {
 
@@ -203,7 +206,365 @@ bool http_build_request(const std::string &method, const std::string &url,
   out->headers = std::move(headers);
   out->body = body;
   out->has_body = has_body;
+  out->chunked_body = false;
+  out->expected_body_length = has_body ? body.size() : 0U;
   return true;
+}
+
+bool http_build_streaming_request(const std::string &method,
+                                  const std::string &url,
+                                  const HttpHeaders &user_headers,
+                                  std::optional<std::uint64_t> length,
+                                  bool auto_host, HttpRequest *out,
+                                  HttpErrorKind *kind, std::string *error) {
+  std::string normalized_method;
+  if (!http_normalize_method(method, &normalized_method)) {
+    *kind = HttpErrorKind::InvalidMethod;
+    *error = "invalid HTTP method: " + method;
+    return false;
+  }
+
+  HttpUrl parsed;
+  if (!http_parse_url(url, &parsed, kind, error)) {
+    return false;
+  }
+
+  if (user_headers.contains("transfer-encoding")) {
+    *kind = HttpErrorKind::InvalidHeader;
+    *error = "caller-supplied Transfer-Encoding is not allowed in v1";
+    return false;
+  }
+
+  HttpHeaders headers = user_headers;
+
+  if (auto_host && !headers.contains("host")) {
+    std::string host_value = parsed.host;
+    if (parsed.port != 80) {
+      host_value += ":" + std::to_string(parsed.port);
+    }
+    std::string host_error;
+    if (!headers.set("host", host_value, &host_error)) {
+      *kind = HttpErrorKind::InvalidHeader;
+      *error = host_error;
+      return false;
+    }
+  }
+
+  if (length.has_value()) {
+    const std::string expected = std::to_string(*length);
+    if (headers.contains("content-length")) {
+      const std::optional<std::string> supplied =
+          headers.first("content-length");
+      if (!supplied.has_value() || *supplied != expected) {
+        *kind = HttpErrorKind::InvalidHeader;
+        *error =
+            "caller Content-Length does not match the streamed body length";
+        return false;
+      }
+    } else {
+      std::string cl_error;
+      if (!headers.set("content-length", expected, &cl_error)) {
+        *kind = HttpErrorKind::InvalidHeader;
+        *error = cl_error;
+        return false;
+      }
+    }
+  } else {
+    if (headers.contains("content-length")) {
+      *kind = HttpErrorKind::InvalidHeader;
+      *error =
+          "caller Content-Length is not allowed for unknown-length streaming";
+      return false;
+    }
+    std::string te_error;
+    if (!headers.set("transfer-encoding", "chunked", &te_error)) {
+      *kind = HttpErrorKind::InvalidHeader;
+      *error = te_error;
+      return false;
+    }
+  }
+
+  out->method = std::move(normalized_method);
+  out->host = parsed.host;
+  out->port = parsed.port;
+  out->target = parsed.target;
+  out->headers = std::move(headers);
+  out->body.clear();
+  out->has_body = true;
+  out->chunked_body = !length.has_value();
+  out->expected_body_length = length.value_or(0U);
+  return true;
+}
+
+bool http_write_request_head(HttpTransport &transport,
+                             const HttpRequest &request, HttpErrorKind *kind,
+                             std::string *error) {
+  const std::string wire = http_serialize_request_head(
+      request.method, request.target, request.headers);
+  std::string transport_error;
+  if (!transport.write_all(wire, &transport_error)) {
+    *kind = HttpErrorKind::Connection;
+    *error =
+        transport_error.empty() ? "failed to write request" : transport_error;
+    return false;
+  }
+  return true;
+}
+
+bool http_write_request_body_chunk(HttpTransport &transport,
+                                   const HttpRequest &request,
+                                   const std::string &bytes,
+                                   std::uint64_t *written,
+                                   HttpErrorKind *kind, std::string *error) {
+  if (bytes.empty()) {
+    return true;
+  }
+  if (!request.has_body) {
+    *kind = HttpErrorKind::BodyLength;
+    *error = "request does not accept a body";
+    return false;
+  }
+  if (!request.chunked_body) {
+    if (*written > request.expected_body_length ||
+        bytes.size() > request.expected_body_length - *written) {
+      *kind = HttpErrorKind::BodyLength;
+      *error = "request body exceeds Content-Length";
+      return false;
+    }
+  }
+
+  const std::string wire =
+      request.chunked_body ? http_encode_chunk(bytes) : bytes;
+  std::string transport_error;
+  if (!transport.write_all(wire, &transport_error)) {
+    *kind = HttpErrorKind::Connection;
+    *error = transport_error.empty() ? "failed to write request body"
+                                     : transport_error;
+    return false;
+  }
+  *written += bytes.size();
+  return true;
+}
+
+bool http_finish_request_body(HttpTransport &transport,
+                              const HttpRequest &request,
+                              std::uint64_t written, HttpErrorKind *kind,
+                              std::string *error) {
+  if (!request.has_body) {
+    return true;
+  }
+  if (!request.chunked_body) {
+    if (written != request.expected_body_length) {
+      *kind = HttpErrorKind::BodyLength;
+      *error = "request body byte count does not match Content-Length";
+      return false;
+    }
+    return true;
+  }
+  std::string transport_error;
+  if (!transport.write_all(http_encode_last_chunk(), &transport_error)) {
+    *kind = HttpErrorKind::Connection;
+    *error = transport_error.empty() ? "failed to finish chunked request body"
+                                     : transport_error;
+    return false;
+  }
+  return true;
+}
+
+HttpResponseBodyStream::HttpResponseBodyStream(
+    std::unique_ptr<HttpTransport> transport, HttpResponseParser parser)
+    : transport_(std::move(transport)), parser_(std::move(parser)),
+      pending_(parser_.take_body()) {
+  if (parser_.message_complete() && pending_.empty()) {
+    release_successfully();
+  }
+}
+
+HttpResponseBodyStream::~HttpResponseBodyStream() { close(); }
+
+void HttpResponseBodyStream::release_successfully() {
+  consumed_ = true;
+  if (transport_ != nullptr) {
+    // Phase 4 will hand this lease back to a pool. Until pooling exists,
+    // releasing a successfully drained lease closes the one-shot transport.
+    transport_->close();
+    transport_.reset();
+  }
+}
+
+void HttpResponseBodyStream::close() {
+  if (closed_) {
+    return;
+  }
+  closed_ = true;
+  if (transport_ != nullptr) {
+    transport_->close();
+    transport_.reset();
+  }
+}
+
+bool HttpResponseBodyStream::fill_pending(HttpErrorKind *kind,
+                                          std::string *error) {
+  while (pending_.empty() && !parser_.message_complete()) {
+    if (transport_ == nullptr) {
+      *kind = HttpErrorKind::Connection;
+      *error = "response transport is closed";
+      return false;
+    }
+    std::string chunk;
+    std::string transport_error;
+    const long n = transport_->read_some(&chunk, &transport_error);
+    if (n < 0) {
+      *kind = HttpErrorKind::Connection;
+      *error = transport_error.empty() ? "failed to read response body"
+                                       : transport_error;
+      close();
+      return false;
+    }
+    if (n == 0) {
+      parser_.finish();
+    } else {
+      parser_.feed(chunk);
+    }
+    if (parser_.has_error()) {
+      *kind = parser_.error_kind();
+      *error = parser_.error_message();
+      close();
+      return false;
+    }
+    pending_ += parser_.take_body();
+  }
+  if (pending_.empty() && parser_.message_complete()) {
+    release_successfully();
+  }
+  return true;
+}
+
+bool HttpResponseBodyStream::read(std::size_t max_bytes, std::string *bytes,
+                                  HttpErrorKind *kind, std::string *error) {
+  bytes->clear();
+  if (closed_) {
+    *kind = HttpErrorKind::Connection;
+    *error = "response body is closed";
+    return false;
+  }
+  if (max_bytes == 0 || consumed_) {
+    return true;
+  }
+  if (!fill_pending(kind, error)) {
+    return false;
+  }
+  if (pending_.empty()) {
+    return true;
+  }
+  const std::size_t n = std::min(max_bytes, pending_.size());
+  bytes->assign(pending_, 0, n);
+  pending_.erase(0, n);
+  if (pending_.empty() && parser_.message_complete()) {
+    release_successfully();
+  }
+  return true;
+}
+
+bool HttpResponseBodyStream::read_all(std::optional<std::size_t> limit,
+                                      std::string *bytes, HttpErrorKind *kind,
+                                      std::string *error) {
+  bytes->clear();
+  for (;;) {
+    std::string chunk;
+    if (!read(64U * 1024U, &chunk, kind, error)) {
+      return false;
+    }
+    if (chunk.empty()) {
+      return true;
+    }
+    if (limit.has_value() && bytes->size() + chunk.size() > *limit) {
+      *kind = HttpErrorKind::BodyLimit;
+      *error = "response body exceeds the requested limit";
+      close();
+      return false;
+    }
+    *bytes += chunk;
+  }
+}
+
+bool HttpResponseBodyStream::discard(std::optional<std::size_t> limit,
+                                     HttpErrorKind *kind,
+                                     std::string *error) {
+  std::size_t discarded = 0;
+  for (;;) {
+    std::string chunk;
+    if (!read(64U * 1024U, &chunk, kind, error)) {
+      return false;
+    }
+    if (chunk.empty()) {
+      return true;
+    }
+    discarded += chunk.size();
+    if (limit.has_value() && discarded > *limit) {
+      *kind = HttpErrorKind::BodyLimit;
+      *error = "response body exceeds discard limit";
+      close();
+      return false;
+    }
+  }
+}
+
+HttpResponseStartResult
+http_read_response_start(std::unique_ptr<HttpTransport> transport,
+                         bool head_request,
+                         const HttpResponseParserLimits &limits) {
+  HttpResponseStartResult result;
+  if (transport == nullptr) {
+    result.error_kind = HttpErrorKind::Connection;
+    result.error_message = "response transport is null";
+    return result;
+  }
+
+  HttpResponseParser parser(limits, head_request);
+  std::string chunk;
+  std::string transport_error;
+  while (!parser.headers_complete() && !parser.message_complete()) {
+    chunk.clear();
+    const long n = transport->read_some(&chunk, &transport_error);
+    if (n < 0) {
+      result.error_kind = HttpErrorKind::Connection;
+      result.error_message =
+          transport_error.empty() ? "failed to read response" : transport_error;
+      transport->close();
+      return result;
+    }
+    if (n == 0) {
+      parser.finish();
+      break;
+    }
+    parser.feed(chunk);
+    if (parser.has_error()) {
+      break;
+    }
+  }
+
+  if (parser.has_error()) {
+    result.error_kind = parser.error_kind();
+    result.error_message = parser.error_message();
+    transport->close();
+    return result;
+  }
+  if (!parser.headers_complete() && !parser.message_complete()) {
+    result.error_kind = HttpErrorKind::UnexpectedEof;
+    result.error_message = "response ended before headers were complete";
+    transport->close();
+    return result;
+  }
+
+  result.ok = true;
+  result.status = parser.status();
+  result.reason = parser.reason();
+  result.minor_version = parser.minor_version();
+  result.headers = parser.headers();
+  result.body = std::make_unique<HttpResponseBodyStream>(std::move(transport),
+                                                         std::move(parser));
+  return result;
 }
 
 HttpExchangeResult http_perform(HttpTransport &transport,

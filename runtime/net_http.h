@@ -12,6 +12,8 @@
 #include "runtime/http_codec.h"
 
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
 
 namespace amber::runtime::http {
@@ -42,8 +44,10 @@ struct HttpRequest {
   std::uint16_t port = 80;
   std::string target;  // origin-form request target
   HttpHeaders headers; // final header block (Host/Content-Length synthesized)
-  std::string body;    // static request body (v1: static bodies only)
+  std::string body;    // static request body, when present
   bool has_body = false;
+  bool chunked_body = false;
+  std::uint64_t expected_body_length = 0;
 };
 
 // Build a resolved HttpRequest from a method, URL, caller headers, and optional
@@ -58,6 +62,18 @@ bool http_build_request(const std::string &method, const std::string &url,
                         const std::string &body, bool has_body, bool auto_host,
                         HttpRequest *out, HttpErrorKind *kind,
                         std::string *error);
+
+// Build a request whose body will be streamed after the head is written
+// (DESIGN Phase 3). A present `length` emits Content-Length and requires the
+// writer to produce exactly that many bytes; nullopt emits
+// Transfer-Encoding: chunked. Caller-supplied TE is rejected, and
+// caller-supplied CL is allowed only when it matches `length`.
+bool http_build_streaming_request(const std::string &method,
+                                  const std::string &url,
+                                  const HttpHeaders &user_headers,
+                                  std::optional<std::uint64_t> length,
+                                  bool auto_host, HttpRequest *out,
+                                  HttpErrorKind *kind, std::string *error);
 
 // Abstract byte transport (an io.Duplex viewed VM-independently, D2). The VM
 // connector implements this over a RuntimeTcpStream; tests implement an
@@ -78,6 +94,81 @@ public:
   // Release the transport. Idempotent.
   virtual void close() = 0;
 };
+
+// Write the serialized request head. For non-chunked static requests,
+// `http_perform` remains the convenience all-in-one helper; Phase 3 streaming
+// callers use these lower-level pieces.
+bool http_write_request_head(HttpTransport &transport,
+                             const HttpRequest &request,
+                             HttpErrorKind *kind, std::string *error);
+
+// Write one body payload segment according to the request framing. `written`
+// tracks unencoded body bytes and is updated only after a successful transport
+// write. Writing past a fixed Content-Length reports HttpErrorKind::BodyLength.
+bool http_write_request_body_chunk(HttpTransport &transport,
+                                   const HttpRequest &request,
+                                   const std::string &bytes,
+                                   std::uint64_t *written,
+                                   HttpErrorKind *kind, std::string *error);
+
+// Finish a streamed body: fixed-length bodies validate the final byte count;
+// chunked bodies emit the zero-size chunk terminator.
+bool http_finish_request_body(HttpTransport &transport,
+                              const HttpRequest &request,
+                              std::uint64_t written, HttpErrorKind *kind,
+                              std::string *error);
+
+class HttpResponseBodyStream {
+public:
+  HttpResponseBodyStream(std::unique_ptr<HttpTransport> transport,
+                         HttpResponseParser parser);
+  ~HttpResponseBodyStream();
+
+  HttpResponseBodyStream(const HttpResponseBodyStream &) = delete;
+  HttpResponseBodyStream &operator=(const HttpResponseBodyStream &) = delete;
+
+  bool read(std::size_t max_bytes, std::string *bytes, HttpErrorKind *kind,
+            std::string *error);
+  bool read_all(std::optional<std::size_t> limit, std::string *bytes,
+                HttpErrorKind *kind, std::string *error);
+  bool discard(std::optional<std::size_t> limit, HttpErrorKind *kind,
+               std::string *error);
+  void close();
+
+  bool closed() const { return closed_; }
+  bool consumed() const { return consumed_; }
+  const HttpHeaders &trailers() const { return parser_.trailers(); }
+
+private:
+  bool fill_pending(HttpErrorKind *kind, std::string *error);
+  void release_successfully();
+
+  std::unique_ptr<HttpTransport> transport_;
+  HttpResponseParser parser_;
+  std::string pending_;
+  bool closed_ = false;
+  bool consumed_ = false;
+};
+
+struct HttpResponseStartResult {
+  bool ok = false;
+  HttpErrorKind error_kind = HttpErrorKind::None;
+  std::string error_message;
+
+  int status = 0;
+  std::string reason;
+  int minor_version = 1;
+  HttpHeaders headers;
+  std::unique_ptr<HttpResponseBodyStream> body;
+};
+
+// Read through the final response headers and return a streaming body lease.
+// The transport is owned by the returned body stream on success; it is closed
+// on failure.
+HttpResponseStartResult
+http_read_response_start(std::unique_ptr<HttpTransport> transport,
+                         bool head_request = false,
+                         const HttpResponseParserLimits &limits = {});
 
 // Outcome of a single exchange. On `ok`, the response is fully read: status,
 // headers, and the decoded body are populated. On failure, `error_kind`/

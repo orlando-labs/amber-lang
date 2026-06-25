@@ -10,6 +10,8 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <string>
 
 namespace {
@@ -41,6 +43,8 @@ public:
   std::size_t read_chunk = std::string::npos; // bytes per read_some
   bool fail_write = false;
   bool fail_read = false;
+  bool closed = false;
+  std::shared_ptr<bool> closed_flag;
 
   bool write_all(const std::string &data, std::string *error) override {
     if (fail_write) {
@@ -66,7 +70,12 @@ public:
     return static_cast<long>(n);
   }
 
-  void close() override {}
+  void close() override {
+    closed = true;
+    if (closed_flag != nullptr) {
+      *closed_flag = true;
+    }
+  }
 };
 
 HttpRequest build_or_die(const std::string &method, const std::string &url,
@@ -326,6 +335,113 @@ void test_exchange_truncated_body() {
          "truncated body -> UnexpectedEof");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 request/response streaming
+// ---------------------------------------------------------------------------
+
+void test_streaming_fixed_length_request() {
+  HttpHeaders headers;
+  HttpRequest req;
+  HttpErrorKind kind = HttpErrorKind::None;
+  std::string error;
+  expect(amber::runtime::http::http_build_streaming_request(
+             "POST", "http://h/upload", headers, 5U, true, &req, &kind,
+             &error),
+         "fixed streaming request builds");
+  FakeTransport t;
+  std::uint64_t written = 0;
+  expect(amber::runtime::http::http_write_request_head(t, req, &kind, &error),
+         "fixed streaming head writes");
+  expect(amber::runtime::http::http_write_request_body_chunk(
+             t, req, "he", &written, &kind, &error),
+         "fixed streaming first chunk writes");
+  expect(amber::runtime::http::http_write_request_body_chunk(
+             t, req, "llo", &written, &kind, &error),
+         "fixed streaming second chunk writes");
+  expect(amber::runtime::http::http_finish_request_body(t, req, written, &kind,
+                                                        &error),
+         "fixed streaming finish validates length");
+  expect(t.written == "POST /upload HTTP/1.1\r\n"
+                      "host: h\r\n"
+                      "content-length: 5\r\n\r\n"
+                      "hello",
+         "fixed streaming wire bytes");
+}
+
+void test_streaming_chunked_request() {
+  HttpHeaders headers;
+  HttpRequest req;
+  HttpErrorKind kind = HttpErrorKind::None;
+  std::string error;
+  expect(amber::runtime::http::http_build_streaming_request(
+             "POST", "http://h/upload", headers, std::nullopt, true, &req,
+             &kind, &error),
+         "chunked streaming request builds");
+  FakeTransport t;
+  std::uint64_t written = 0;
+  expect(amber::runtime::http::http_write_request_head(t, req, &kind, &error),
+         "chunked streaming head writes");
+  expect(amber::runtime::http::http_write_request_body_chunk(
+             t, req, "abc", &written, &kind, &error),
+         "chunked streaming chunk writes");
+  expect(amber::runtime::http::http_finish_request_body(t, req, written, &kind,
+                                                        &error),
+         "chunked streaming finish writes terminator");
+  expect(t.written == "POST /upload HTTP/1.1\r\n"
+                      "host: h\r\n"
+                      "transfer-encoding: chunked\r\n\r\n"
+                      "3\r\nabc\r\n0\r\n\r\n",
+         "chunked streaming wire bytes");
+}
+
+void test_streaming_fixed_length_mismatch() {
+  HttpHeaders headers;
+  HttpRequest req;
+  HttpErrorKind kind = HttpErrorKind::None;
+  std::string error;
+  expect(amber::runtime::http::http_build_streaming_request(
+             "POST", "http://h/upload", headers, 4U, true, &req, &kind,
+             &error),
+         "fixed streaming mismatch request builds");
+  FakeTransport t;
+  std::uint64_t written = 0;
+  expect(amber::runtime::http::http_write_request_head(t, req, &kind, &error),
+         "fixed mismatch head writes");
+  expect(!amber::runtime::http::http_write_request_body_chunk(
+             t, req, "abcde", &written, &kind, &error) &&
+             kind == HttpErrorKind::BodyLength,
+         "fixed streaming overwrite -> BodyLength");
+  expect(!amber::runtime::http::http_finish_request_body(t, req, written, &kind,
+                                                         &error) &&
+             kind == HttpErrorKind::BodyLength,
+         "fixed streaming underwrite -> BodyLength");
+}
+
+void test_response_start_streams_body() {
+  auto transport = std::make_unique<FakeTransport>();
+  std::shared_ptr<bool> closed = std::make_shared<bool>(false);
+  transport->closed_flag = closed;
+  transport->to_read =
+      "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world";
+  transport->read_chunk = 9;
+  amber::runtime::http::HttpResponseStartResult started =
+      amber::runtime::http::http_read_response_start(std::move(transport));
+  expect(started.ok, "response start ok: " + started.error_message);
+  expect(started.status == 200, "streaming response status");
+  std::string first;
+  HttpErrorKind kind = HttpErrorKind::None;
+  std::string error;
+  expect(started.body->read(5, &first, &kind, &error),
+         "streaming response first read");
+  expect(first == "hello", "first streaming body chunk");
+  std::string rest;
+  expect(started.body->read_all(std::nullopt, &rest, &kind, &error),
+         "streaming response read_all rest");
+  expect(rest == " world", "remaining streaming body bytes");
+  expect(started.body->consumed(), "body consumed after read_all");
+  expect(*closed, "transport closed when body lease releases");
+}
+
 } // namespace
 
 int main() {
@@ -347,6 +463,10 @@ int main() {
   test_exchange_close_delimited_body();
   test_exchange_transport_errors();
   test_exchange_truncated_body();
+  test_streaming_fixed_length_request();
+  test_streaming_chunked_request();
+  test_streaming_fixed_length_mismatch();
+  test_response_start_streams_body();
 
   std::cout << "net.http exchange tests passed (" << g_checks << " checks)\n";
   return 0;

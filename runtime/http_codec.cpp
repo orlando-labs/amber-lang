@@ -117,6 +117,10 @@ const char *http_error_class_name(HttpErrorKind kind) {
     return "InvalidMethodError";
   case HttpErrorKind::UnsupportedScheme:
     return "UnsupportedSchemeError";
+  case HttpErrorKind::BodyLength:
+    return "BodyLengthError";
+  case HttpErrorKind::BodyLimit:
+    return "BodyLimitError";
   case HttpErrorKind::Protocol:
     return "ProtocolError";
   case HttpErrorKind::HeaderLimit:

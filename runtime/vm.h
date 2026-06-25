@@ -281,6 +281,7 @@ enum class RuntimeNativeTypeKind {
   NetHttp,
   NetHttpClient,
   NetHttpRequest,
+  NetHttpRequestBody,
   NetHttpHeaders,
   Uuid
 };

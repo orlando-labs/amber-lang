@@ -2814,14 +2814,17 @@ private:
     if (binding.source == "net:Endpoint") {
       return "net.Endpoint";
     }
-    // `from net.http import Client` / `Request` -> the net.http type objects,
-    // which construct via their CALL ("new"). Other net.http names are not yet
-    // constructible by reference and intentionally fall through.
+    // `from net.http import Client` / `Request` / `RequestBody` -> the
+    // net.http type objects, which construct or dispatch via their native
+    // selectors.
     if (binding.source == "net.http:Client") {
       return "net.http.Client";
     }
     if (binding.source == "net.http:Request") {
       return "net.http.Request";
+    }
+    if (binding.source == "net.http:RequestBody") {
+      return "net.http.RequestBody";
     }
     if (binding.source == "net.http:Headers") {
       return "net.http.Headers";

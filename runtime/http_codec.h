@@ -31,6 +31,8 @@ enum class HttpErrorKind {
   InvalidUrl,
   InvalidMethod,
   UnsupportedScheme,
+  BodyLength,
+  BodyLimit,
   // Response parser (§21.1 ProtocolError subtree).
   Protocol,
   HeaderLimit,

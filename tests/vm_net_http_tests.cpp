@@ -12,7 +12,9 @@
 #include "runtime/io.h"
 #include "runtime/vm.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -76,11 +78,52 @@ std::string with_port(const std::string &templ, std::uint16_t port) {
   return out;
 }
 
+std::string ascii_lower(std::string text) {
+  std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return text;
+}
+
+bool request_complete(const std::string &request) {
+  const std::size_t header_end = request.find("\r\n\r\n");
+  if (header_end == std::string::npos) {
+    return false;
+  }
+  const std::string headers = ascii_lower(request.substr(0, header_end + 2));
+  const std::size_t body_start = header_end + 4U;
+  if (headers.find("\r\ntransfer-encoding: chunked\r\n") !=
+      std::string::npos) {
+    return request.find("\r\n0\r\n\r\n", body_start) != std::string::npos;
+  }
+  const std::size_t cl = headers.find("\r\ncontent-length:");
+  if (cl == std::string::npos) {
+    return true;
+  }
+  const std::size_t value_start = cl + std::string("\r\ncontent-length:").size();
+  const std::size_t value_end = headers.find("\r\n", value_start);
+  if (value_end == std::string::npos) {
+    return false;
+  }
+  std::size_t length = 0;
+  for (std::size_t i = value_start; i < value_end; ++i) {
+    const char c = headers[i];
+    if (c == ' ' || c == '\t') {
+      continue;
+    }
+    if (c < '0' || c > '9') {
+      return true;
+    }
+    length = length * 10U + static_cast<std::size_t>(c - '0');
+  }
+  return request.size() - body_start >= length;
+}
+
 // Run `source` (with %PORT% substituted) while a one-shot loopback server
 // replies with `response`. Returns the execution result.
-amber::runtime::ExecutionResult run_with_server(const std::string &source,
-                                                const std::string &response,
-                                                std::string *server_error) {
+amber::runtime::ExecutionResult
+run_with_server_capture(const std::string &source, const std::string &response,
+                        std::string *server_error, std::string *got_request) {
   auto listening = RuntimeTcpListener::listen({"127.0.0.1", 0});
   expect(listening.ok, "loopback listen failed: " + listening.error_name);
   const std::uint16_t port = listening.listener->local_endpoint().port;
@@ -93,7 +136,7 @@ amber::runtime::ExecutionResult run_with_server(const std::string &source,
       return;
     }
     std::string request;
-    while (request.find("\r\n\r\n") == std::string::npos) {
+    while (!request_complete(request)) {
       RuntimeByteBuffer buf(4096);
       auto read = accepted.stream->read(buf, 2s);
       if (read.eof) {
@@ -104,6 +147,9 @@ amber::runtime::ExecutionResult run_with_server(const std::string &source,
         return;
       }
       request += buf.bytes();
+    }
+    if (got_request != nullptr) {
+      *got_request = request;
     }
     auto written = accepted.stream->write_all(response, 2s);
     if (!written.ok) {
@@ -117,6 +163,12 @@ amber::runtime::ExecutionResult run_with_server(const std::string &source,
   server.join();
   listening.listener->close();
   return result;
+}
+
+amber::runtime::ExecutionResult run_with_server(const std::string &source,
+                                                const std::string &response,
+                                                std::string *server_error) {
+  return run_with_server_capture(source, response, server_error, nullptr);
 }
 
 const char *kResponse = "HTTP/1.1 200 OK\r\n"
@@ -307,6 +359,137 @@ void test_post_body() {
   expect_ok_int(result, 200, "post with body");
 }
 
+void test_request_body_text_static() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "import net\n"
+      "body = net.http.RequestBody.text(\"payload\")\n"
+      "res = net.http.Client().post(\"http://127.0.0.1:%PORT%/\", body: body)\n"
+      "res.status()\n",
+      kResponse, &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "RequestBody.text static body");
+  expect(request.find("content-length: 7\r\n") != std::string::npos,
+         "static RequestBody emits Content-Length");
+  expect(request.rfind("payload") == request.size() - 7U,
+         "static RequestBody payload sent");
+}
+
+void test_request_body_stream_chunked() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "import net\n"
+      "body = net.http.RequestBody.stream(length: null) |w|:\n"
+      "  w.write_all!(\"abc\".bytes())\n"
+      "  w.write_all!(\"def\".bytes())\n"
+      "res = net.http.Client().post(\"http://127.0.0.1:%PORT%/\", body: body)\n"
+      "res.body_text() == \"Hello, world!\"\n",
+      kResponse, &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_true(result, "RequestBody.stream chunked body");
+  expect(request.find("transfer-encoding: chunked\r\n") != std::string::npos,
+         "producer body emits chunked transfer");
+  expect(request.find("3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n") !=
+             std::string::npos,
+         "producer chunks sent");
+}
+
+void test_request_body_from_reader_fixed() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "import io\n"
+      "import net\n"
+      "pair = io.Pipe.new(capacity: 16)\n"
+      "pair[1].write_all!(\"reader\".bytes())\n"
+      "pair[1].close!()\n"
+      "body = net.http.RequestBody.from_reader(pair[0], length: 6)\n"
+      "res = net.http.Client().post(\"http://127.0.0.1:%PORT%/\", body: body)\n"
+      "res.status()\n",
+      kResponse, &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "RequestBody.from_reader fixed body");
+  expect(request.find("content-length: 6\r\n") != std::string::npos,
+         "reader body emits Content-Length");
+  expect(request.rfind("reader") == request.size() - 6U,
+         "reader body payload sent");
+}
+
+void test_manual_request_handle_chunked() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "import net\n"
+      "h = net.http.Client().begin(method: :post, "
+      "url: \"http://127.0.0.1:%PORT%/\", length: null)\n"
+      "h.write_all!(\"one\".bytes())\n"
+      "h.write_all!(\"two\".bytes())\n"
+      "h.finish!()\n"
+      "res = h.response()\n"
+      "res.status()\n",
+      kResponse, &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "manual RequestHandle chunked body");
+  expect(request.find("3\r\none\r\n3\r\ntwo\r\n0\r\n\r\n") !=
+             std::string::npos,
+         "manual handle chunks sent");
+}
+
+void test_manual_request_handle_underwrite() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "import net\n"
+      "h = net.http.Client().begin(method: :post, "
+      "url: \"http://127.0.0.1:%PORT%/\", length: 4)\n"
+      "h.write_all!(\"ab\".bytes())\n"
+      "h.finish!()\n",
+      kResponse, &server_error, &request);
+  (void)request;
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "BodyLengthError",
+         "manual underwrite -> BodyLengthError");
+}
+
+void test_response_body_read_chunks() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "import io\n"
+      "import net\n"
+      "res = net.http.Client().get(\"http://127.0.0.1:%PORT%/\")\n"
+      "body = res.body()\n"
+      "a = io.ByteBuffer(5)\n"
+      "b = io.ByteBuffer(32)\n"
+      "n1 = body.read!(a)\n"
+      "n2 = body.read!(b)\n"
+      "\"#{n1}:#{a.bytes().to_str()}:#{n2}:#{b.bytes().to_str()}\"\n",
+      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(result.ok(), "ResponseBody read! should succeed");
+  expect(result.value.is_string(), "ResponseBody read! result Str");
+  expect(result.value.as_string().string_id < result.runtime_strings.size(),
+         "ResponseBody read! string id in range");
+  expect(result.runtime_strings[result.value.as_string().string_id] ==
+             "5:Hello:8:, world!",
+         "ResponseBody read! chunks match");
+}
+
+void test_response_body_single_consumer() {
+  std::string server_error;
+  const amber::runtime::ExecutionResult result = run_with_server(
+      "import net\n"
+      "res = net.http.Client().get(\"http://127.0.0.1:%PORT%/\")\n"
+      "res.body().read(max_bytes: 5)\n"
+      "res.body_text()\n",
+      kResponse, &server_error);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect(!result.ok() && result.fault.has_value() &&
+             result.fault->error_name == "BodyConsumedError",
+         "mixed body consumption -> BodyConsumedError");
+}
+
 void test_unsupported_scheme_raises() {
   // No server needed; the URL is rejected before any connection.
   const amber::runtime::ExecutionResult result =
@@ -448,6 +631,13 @@ int main() {
   test_from_import_headers();
   test_scoped_block_form();
   test_post_body();
+  test_request_body_text_static();
+  test_request_body_stream_chunked();
+  test_request_body_from_reader_fixed();
+  test_manual_request_handle_chunked();
+  test_manual_request_handle_underwrite();
+  test_response_body_read_chunks();
+  test_response_body_single_consumer();
   test_send_request();
   test_send_post_request_body();
   test_request_method_normalized();
