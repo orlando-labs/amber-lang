@@ -193,6 +193,25 @@ record before the next code phase.
   plan update. Do not start a later code phase with an unexplained missing
   guardrail.
 
+Baseline record, 2026-06-26 on `codex/vm-runtime-world-registry`:
+
+- Passed focused gates: `build/stdlib_registry_tests`, `build/vm_tests`,
+  `build/amber_ext_tests`, `build/native_tests`, `build/module_loader_tests`,
+  and elevated `build/vm_net_http_tests` (`566 checks`).
+- Passed full gate: elevated `make test`, including unit binaries, native
+  backend smoke checks, net.http TCP checks, and `ambertest run corpus`
+  (`139 passed, 0 failed`).
+- Passed backend gate: `make backend-equivalence` (`80 passed, 0 failed`).
+- Passed conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`). A sandboxed attempt failed first
+  on loopback socket corpus cases with `PermissionDeniedError`, so future
+  conformance runs that include socket cases should use elevated loopback
+  access.
+- Tagged `VALUE_REPR=tagged` build was not run for this baseline because the
+  next planned phase is mechanical file split and should not touch `Value`
+  layout. If Phase 2 touches `Value` storage or ABI, run a fresh tagged build in
+  a separate build directory before continuing.
+
 ### Phase 1: Registry foundation and composition seams
 
 Status: mostly landed. This phase intentionally comes before the broad file
