@@ -367,16 +367,43 @@ using NativeStdlibHandler = SendStatus (*)(NativeStdlibCall &call);
 
 class NativeRegistry;
 
-enum class RuntimeBindingKind { NativeType };
+enum class RuntimeBindingKind {
+  NativeType,
+  NativeFunction,
+  TaskModule,
+  FlowModule
+};
 
 struct RuntimeBindingRef {
   RuntimeBindingKind kind = RuntimeBindingKind::NativeType;
   RuntimeNativeTypeKind native_type = RuntimeNativeTypeKind::TaskModule;
+  RuntimeNativeFunctionKind native_function =
+      RuntimeNativeFunctionKind::Print;
 
   static RuntimeBindingRef native_type_binding(RuntimeNativeTypeKind kind) {
     RuntimeBindingRef ref;
     ref.kind = RuntimeBindingKind::NativeType;
     ref.native_type = kind;
+    return ref;
+  }
+
+  static RuntimeBindingRef
+  native_function_binding(RuntimeNativeFunctionKind kind) {
+    RuntimeBindingRef ref;
+    ref.kind = RuntimeBindingKind::NativeFunction;
+    ref.native_function = kind;
+    return ref;
+  }
+
+  static RuntimeBindingRef task_module_binding() {
+    RuntimeBindingRef ref;
+    ref.kind = RuntimeBindingKind::TaskModule;
+    return ref;
+  }
+
+  static RuntimeBindingRef flow_module_binding() {
+    RuntimeBindingRef ref;
+    ref.kind = RuntimeBindingKind::FlowModule;
     return ref;
   }
 };
@@ -385,6 +412,10 @@ class RuntimeModuleRegistry {
 public:
   void register_native_type_path(std::string path,
                                  RuntimeNativeTypeKind kind);
+  void register_native_function_path(std::string path,
+                                     RuntimeNativeFunctionKind kind);
+  void register_task_module_path(std::string path);
+  void register_flow_module_path(std::string path);
 
   std::optional<RuntimeBindingRef>
   binding_for_path(const std::string &path) const;
@@ -418,6 +449,26 @@ private:
       native_calls_;
 };
 
+class RuntimeDispatchRegistry {
+public:
+  void register_native_handler(RuntimeNativeTypeKind kind,
+                               NativeStdlibHandler handler);
+
+  std::optional<NativeStdlibHandler>
+  native_handler(RuntimeNativeTypeKind kind) const;
+
+  void import_native_handlers(const NativeRegistry &registry);
+
+private:
+  struct KindHash {
+    std::size_t operator()(RuntimeNativeTypeKind kind) const {
+      return static_cast<std::size_t>(kind);
+    }
+  };
+  std::unordered_map<RuntimeNativeTypeKind, NativeStdlibHandler, KindHash>
+      native_handlers_;
+};
+
 // Two tables, populated once during VM construction (no static initializers, to
 // avoid static-init-order fiascos): `kind -> handler` for dispatch and
 // `path -> kind` for prelude name resolution.
@@ -439,6 +490,9 @@ public:
   std::vector<std::pair<std::string, RuntimeNativeTypeKind>>
   registered_paths() const;
 
+  std::vector<std::pair<RuntimeNativeTypeKind, NativeStdlibHandler>>
+  registered_handlers() const;
+
 private:
   struct KindHash {
     std::size_t operator()(RuntimeNativeTypeKind kind) const {
@@ -454,6 +508,7 @@ private:
 // `register_<name>` that adds its names and handler; this is the single place
 // that lists them.
 void register_builtin_stdlib(NativeRegistry &registry);
+void register_core_prelude_bindings(RuntimeModuleRegistry &registry);
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry);
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
 

@@ -7,6 +7,20 @@ void RuntimeModuleRegistry::register_native_type_path(
   bindings_[std::move(path)] = RuntimeBindingRef::native_type_binding(kind);
 }
 
+void RuntimeModuleRegistry::register_native_function_path(
+    std::string path, RuntimeNativeFunctionKind kind) {
+  bindings_[std::move(path)] =
+      RuntimeBindingRef::native_function_binding(kind);
+}
+
+void RuntimeModuleRegistry::register_task_module_path(std::string path) {
+  bindings_[std::move(path)] = RuntimeBindingRef::task_module_binding();
+}
+
+void RuntimeModuleRegistry::register_flow_module_path(std::string path) {
+  bindings_[std::move(path)] = RuntimeBindingRef::flow_module_binding();
+}
+
 std::optional<RuntimeBindingRef>
 RuntimeModuleRegistry::binding_for_path(const std::string &path) const {
   const auto it = bindings_.find(path);
@@ -38,6 +52,27 @@ RuntimeTypeRegistry::native_type_call(RuntimeNativeTypeKind kind) const {
     return std::nullopt;
   }
   return it->second;
+}
+
+void RuntimeDispatchRegistry::register_native_handler(
+    RuntimeNativeTypeKind kind, NativeStdlibHandler handler) {
+  native_handlers_[kind] = handler;
+}
+
+std::optional<NativeStdlibHandler>
+RuntimeDispatchRegistry::native_handler(RuntimeNativeTypeKind kind) const {
+  const auto it = native_handlers_.find(kind);
+  if (it == native_handlers_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+void RuntimeDispatchRegistry::import_native_handlers(
+    const NativeRegistry &registry) {
+  for (const auto &[kind, handler] : registry.registered_handlers()) {
+    register_native_handler(kind, handler);
+  }
 }
 
 void NativeRegistry::register_handler(RuntimeNativeTypeKind kind,
@@ -75,6 +110,16 @@ NativeRegistry::registered_paths() const {
   return paths;
 }
 
+std::vector<std::pair<RuntimeNativeTypeKind, NativeStdlibHandler>>
+NativeRegistry::registered_handlers() const {
+  std::vector<std::pair<RuntimeNativeTypeKind, NativeStdlibHandler>> handlers;
+  handlers.reserve(handlers_.size());
+  for (const auto &[kind, handler] : handlers_) {
+    handlers.emplace_back(kind, handler);
+  }
+  return handlers;
+}
+
 // The single list of builtin libraries. New libraries add one line here and
 // ship as `runtime/stdlib_<name>.{cpp}` — no further edit to `vm.cpp`.
 void register_builtin_stdlib(NativeRegistry &registry) {
@@ -87,6 +132,21 @@ void register_builtin_stdlib(NativeRegistry &registry) {
   register_uuid(registry);
   register_time(registry);
   register_url(registry);
+}
+
+void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {
+  registry.register_native_function_path("print",
+                                         RuntimeNativeFunctionKind::Print);
+  registry.register_native_function_path("p", RuntimeNativeFunctionKind::P);
+  registry.register_native_function_path("pp", RuntimeNativeFunctionKind::Pp);
+  registry.register_native_function_path("desc",
+                                         RuntimeNativeFunctionKind::Desc);
+  registry.register_native_function_path("Ok",
+                                         RuntimeNativeFunctionKind::ResultOk);
+  registry.register_native_function_path("Err",
+                                         RuntimeNativeFunctionKind::ResultErr);
+  registry.register_task_module_path("task");
+  registry.register_flow_module_path("task.flow");
 }
 
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {

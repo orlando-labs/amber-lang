@@ -18,7 +18,9 @@ using amber::runtime::NativeStdlibCall;
 using amber::runtime::NativeStdlibHandler;
 using amber::runtime::RuntimeBindingKind;
 using amber::runtime::RuntimeBindingRef;
+using amber::runtime::RuntimeDispatchRegistry;
 using amber::runtime::RuntimeModuleRegistry;
+using amber::runtime::RuntimeNativeFunctionKind;
 using amber::runtime::RuntimeNativeTypeKind;
 using amber::runtime::RuntimeTypeCallDescriptor;
 using amber::runtime::RuntimeTypeRegistry;
@@ -232,8 +234,22 @@ void test_path_resolution(const NativeRegistry &registry) {
 
 void test_module_registry_imports_native_paths(const NativeRegistry &registry) {
   RuntimeModuleRegistry modules;
+  amber::runtime::register_core_prelude_bindings(modules);
   modules.import_native_paths(registry);
   amber::runtime::register_legacy_native_type_paths(modules);
+
+  const std::optional<RuntimeBindingRef> print =
+      modules.binding_for_path("print");
+  expect(print.has_value() &&
+             print->kind == RuntimeBindingKind::NativeFunction &&
+             print->native_function == RuntimeNativeFunctionKind::Print,
+         "module registry resolves print native function");
+
+  const std::optional<RuntimeBindingRef> task_flow =
+      modules.binding_for_path("task.flow");
+  expect(task_flow.has_value() &&
+             task_flow->kind == RuntimeBindingKind::FlowModule,
+         "module registry resolves task.flow module binding");
 
   const std::optional<RuntimeBindingRef> math =
       modules.binding_for_path("Math");
@@ -294,6 +310,27 @@ void test_handler_table(const NativeRegistry &registry) {
   // chain.
   expect(registry.handler_for(RuntimeNativeTypeKind::Kernel) == nullptr,
          "unmigrated kind has no registered handler");
+}
+
+void test_dispatch_registry_imports_native_handlers(
+    const NativeRegistry &registry) {
+  RuntimeDispatchRegistry dispatch;
+  dispatch.import_native_handlers(registry);
+
+  const std::optional<NativeStdlibHandler> math =
+      dispatch.native_handler(RuntimeNativeTypeKind::Math);
+  expect(math.has_value() &&
+             *math == registry.handler_for(RuntimeNativeTypeKind::Math),
+         "dispatch registry imports Math handler");
+
+  const std::optional<NativeStdlibHandler> json =
+      dispatch.native_handler(RuntimeNativeTypeKind::Json);
+  expect(json.has_value() &&
+             *json == registry.handler_for(RuntimeNativeTypeKind::Json),
+         "dispatch registry imports Json handler");
+
+  expect(!dispatch.native_handler(RuntimeNativeTypeKind::Kernel).has_value(),
+         "dispatch registry preserves unmigrated native kinds");
 }
 
 void test_type_call_registry() {
@@ -434,6 +471,7 @@ int main() {
   test_path_resolution(registry);
   test_module_registry_imports_native_paths(registry);
   test_handler_table(registry);
+  test_dispatch_registry_imports_native_handlers(registry);
   test_type_call_registry();
   test_math_compute(registry);
   test_math_not_handled(registry);

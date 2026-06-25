@@ -10535,7 +10535,8 @@ public:
               std::function<void(RuntimeTraceEvent)> trace_recorder = {},
               const NativeRegistry *native_registry = nullptr,
               const RuntimeModuleRegistry *module_registry = nullptr,
-              const RuntimeTypeRegistry *type_registry = nullptr)
+              const RuntimeTypeRegistry *type_registry = nullptr,
+              const RuntimeDispatchRegistry *dispatch_registry = nullptr)
       : module_(module), initial_string_count_(module.strings.size()),
         initial_symbol_count_(module.symbols.size()),
         state_(state == nullptr ? std::make_shared<RuntimeState>()
@@ -10544,7 +10545,7 @@ public:
         capabilities_(capabilities), effects_(effects),
         trace_recorder_(std::move(trace_recorder)),
         native_registry_(native_registry), module_registry_(module_registry),
-        type_registry_(type_registry) {
+        type_registry_(type_registry), dispatch_registry_(dispatch_registry) {
     state_->initialize_for_module(module_);
     resolve_numeric_policy();
     if (native_registry_ == nullptr) {
@@ -10554,6 +10555,7 @@ public:
       native_registry_ = &owned_native_registry_;
     }
     if (module_registry_ == nullptr) {
+      register_core_prelude_bindings(owned_module_registry_);
       owned_module_registry_.import_native_paths(*native_registry_);
       register_legacy_native_type_paths(owned_module_registry_);
       module_registry_ = &owned_module_registry_;
@@ -10561,6 +10563,10 @@ public:
     if (type_registry_ == nullptr) {
       register_legacy_native_type_calls(owned_type_registry_);
       type_registry_ = &owned_type_registry_;
+    }
+    if (dispatch_registry_ == nullptr) {
+      owned_dispatch_registry_.import_native_handlers(*native_registry_);
+      dispatch_registry_ = &owned_dispatch_registry_;
     }
     resolve_native_bindings();
   }
@@ -10947,13 +10953,15 @@ public:
   }
 
 private:
-  const NativeRegistry &native_registry() const { return *native_registry_; }
-
   const RuntimeModuleRegistry &module_registry() const {
     return *module_registry_;
   }
 
   const RuntimeTypeRegistry &type_registry() const { return *type_registry_; }
+
+  const RuntimeDispatchRegistry &dispatch_registry() const {
+    return *dispatch_registry_;
+  }
 
   const NativeRegistry *child_native_registry() const {
     return native_registry_ == &owned_native_registry_ ? nullptr
@@ -10967,6 +10975,11 @@ private:
 
   const RuntimeTypeRegistry *child_type_registry() const {
     return type_registry_ == &owned_type_registry_ ? nullptr : type_registry_;
+  }
+
+  const RuntimeDispatchRegistry *child_dispatch_registry() const {
+    return dispatch_registry_ == &owned_dispatch_registry_ ? nullptr
+                                                           : dispatch_registry_;
   }
 
   ExecutionResult with_runtime_names(ExecutionResult result) const {
@@ -12077,7 +12090,8 @@ private:
                                capabilities_, effects_, trace_recorder_,
                                child_native_registry(),
                                child_module_registry(),
-                               child_type_registry());
+                               child_type_registry(),
+                               child_dispatch_registry());
       // Block results flow through final_value_; nobody reads the completed
       // register snapshot, so skip the per-return register copy.
       lease.vm->capture_completed_frames_ = false;
@@ -14929,46 +14943,21 @@ private:
     if (const std::optional<std::uint16_t> error_id = runtime_error_id(path)) {
       return Value::native_error_class(*error_id);
     }
-    if (path == "print") {
-      return Value::native_function(RuntimeNativeFunctionKind::Print);
-    }
-    if (path == "p") {
-      return Value::native_function(RuntimeNativeFunctionKind::P);
-    }
-    if (path == "pp") {
-      return Value::native_function(RuntimeNativeFunctionKind::Pp);
-    }
-    if (path == "desc") {
-      return Value::native_function(RuntimeNativeFunctionKind::Desc);
-    }
-    if (path == "Ok") {
-      return Value::native_function(RuntimeNativeFunctionKind::ResultOk);
-    }
-    if (path == "Err") {
-      return Value::native_function(RuntimeNativeFunctionKind::ResultErr);
-    }
-    // Phase-2 registry adapter: registered module paths resolve through the
-    // world-owned module registry first. During migration the binding can still
-    // point at a legacy RuntimeNativeTypeKind.
+    // Registered prelude/module paths resolve through the world-owned module
+    // registry. During migration the binding can still point at a legacy
+    // RuntimeNativeTypeKind.
     if (const std::optional<RuntimeBindingRef> binding =
             module_registry().binding_for_path(path)) {
       switch (binding->kind) {
       case RuntimeBindingKind::NativeType:
         return Value::native_type(binding->native_type);
+      case RuntimeBindingKind::NativeFunction:
+        return Value::native_function(binding->native_function);
+      case RuntimeBindingKind::TaskModule:
+        return Value::task_module(std::make_shared<RuntimeTaskModule>());
+      case RuntimeBindingKind::FlowModule:
+        return Value::flow_module(std::make_shared<RuntimeFlowModule>());
       }
-    }
-    // Legacy compatibility fallback: direct VM paths and partially migrated
-    // worlds can still resolve NativeRegistry names until every path export
-    // comes from descriptors.
-    if (const std::optional<RuntimeNativeTypeKind> registered_kind =
-            native_registry().kind_for_path(path)) {
-      return Value::native_type(*registered_kind);
-    }
-    if (path == "task") {
-      return Value::task_module(std::make_shared<RuntimeTaskModule>());
-    }
-    if (path == "task.flow") {
-      return Value::flow_module(std::make_shared<RuntimeFlowModule>());
     }
     return std::nullopt;
   }
@@ -20924,6 +20913,7 @@ private:
     const NativeRegistry *child_registry = child_native_registry();
     const RuntimeModuleRegistry *child_modules = child_module_registry();
     const RuntimeTypeRegistry *child_types = child_type_registry();
+    const RuntimeDispatchRegistry *child_dispatch = child_dispatch_registry();
 
     return [module_template = std::move(module_template),
             runtime_state = std::move(runtime_state),
@@ -20931,7 +20921,7 @@ private:
             captures = std::move(captures), self = std::move(self), task,
             inherited_stdout, inherited_stderr, world_options, capabilities,
             effects, trace_recorder = std::move(trace_recorder),
-            child_registry, child_modules, child_types](
+            child_registry, child_modules, child_types, child_dispatch](
                std::vector<Value> args) mutable -> std::function<Value()> {
       // The persistent VM owns its own copy of the module, so the entry frame's
       // code pointer (into vm->module_) stays valid for the task's whole life,
@@ -20939,7 +20929,8 @@ private:
       std::shared_ptr<Vm> vm(new Vm(module_template, runtime_state, module_id,
                                     world_options, capabilities, effects,
                                     trace_recorder, child_registry,
-                                    child_modules, child_types));
+                                    child_modules, child_types,
+                                    child_dispatch));
       vm->parkable_ = true;
       const BcCode *code = find_code(vm->module_, code_id);
       if (code == nullptr) {
@@ -22091,9 +22082,9 @@ private:
                    const std::vector<Value> &args,
                    const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
                    Value *out) {
-    const NativeStdlibHandler handler =
-        native_registry().handler_for(RuntimeNativeTypeKind::Json);
-    if (handler == nullptr) {
+    const std::optional<NativeStdlibHandler> handler =
+        dispatch_registry().native_handler(RuntimeNativeTypeKind::Json);
+    if (!handler.has_value()) {
       set_fault(frame, "VMError", "Json stdlib handler is not registered");
       return SendStatus::Faulted;
     }
@@ -22102,7 +22093,7 @@ private:
         *this,    &frame, receiver,      RuntimeNativeTypeKind::Json,
         selector, args,   Value::null(), kw_args,
         out};
-    const SendStatus status = handler(call);
+    const SendStatus status = (*handler)(call);
     if (status == SendStatus::NotHandled) {
       set_fault(frame, "NoMethodError", "Json has no method " + selector);
       return SendStatus::Faulted;
@@ -25821,11 +25812,11 @@ private:
                      : (receiver.is_time()
                             ? RuntimeNativeTypeKind::Time
                             : RuntimeNativeTypeKind::TimePeriod));
-      if (const NativeStdlibHandler handler =
-              native_registry().handler_for(kind)) {
+      if (const std::optional<NativeStdlibHandler> handler =
+              dispatch_registry().native_handler(kind)) {
         NativeStdlibCall call{*this, &frame, receiver, kind, selector,
                               args,  block,  kw_args,  out};
-        const SendStatus status = handler(call);
+        const SendStatus status = (*handler)(call);
         if (status != SendStatus::NotHandled) {
           return status;
         }
@@ -25864,11 +25855,11 @@ private:
       // legacy inline chain below. A handler that returns NotHandled (e.g. an
       // unknown selector for a migrated kind) falls through to the unchanged
       // path, so any kind not yet on the registry behaves exactly as before.
-      if (const NativeStdlibHandler handler =
-              native_registry().handler_for(kind)) {
+      if (const std::optional<NativeStdlibHandler> handler =
+              dispatch_registry().native_handler(kind)) {
         NativeStdlibCall call{*this, &frame, receiver, kind, selector,
                               args,  block,  kw_args,  out};
-        const SendStatus status = handler(call);
+        const SendStatus status = (*handler)(call);
         if (status != SendStatus::NotHandled) {
           return status;
         }
@@ -31802,9 +31793,9 @@ private:
     }
 
     if (data_path_selector) {
-      const NativeStdlibHandler handler =
-          native_registry().handler_for(RuntimeNativeTypeKind::Json);
-      if (handler == nullptr) {
+      const std::optional<NativeStdlibHandler> handler =
+          dispatch_registry().native_handler(RuntimeNativeTypeKind::Json);
+      if (!handler.has_value()) {
         return SendStatus::NotHandled;
       }
       std::vector<Value> path_args;
@@ -31822,7 +31813,7 @@ private:
                             block,
                             kw_args,
                             out};
-      return handler(call);
+      return (*handler)(call);
     }
 
     if ((selector == "==" || selector == "===" || selector == "!=") &&
@@ -37160,6 +37151,11 @@ private:
   // World-owned type registry, or `owned_type_registry_` for direct VM entry
   // points.
   const RuntimeTypeRegistry *type_registry_ = nullptr;
+  // Direct VM fallback for migrated native handler dispatch.
+  RuntimeDispatchRegistry owned_dispatch_registry_;
+  // World-owned dispatch registry, or `owned_dispatch_registry_` for direct VM
+  // entry points.
+  const RuntimeDispatchRegistry *dispatch_registry_ = nullptr;
   // Native-extension dispatch (native-packages 5c-ii): entry code object ->
   // {is_method, logical-symbol}, lowered from `amber.native.bind:<code_id>`
   // module attrs. A registered thunk for the logical name (native build) runs
@@ -37284,6 +37280,8 @@ struct RuntimeWorld::Impl {
         package(std::move(package_image)), options(std::move(world_options)) {
     state->initialize_for_module(*module);
     register_builtin_stdlib(native_registry);
+    dispatch_registry.import_native_handlers(native_registry);
+    register_core_prelude_bindings(module_registry);
     module_registry.import_native_paths(native_registry);
     register_legacy_native_type_paths(module_registry);
     register_legacy_native_type_calls(type_registry);
@@ -37394,6 +37392,7 @@ struct RuntimeWorld::Impl {
   NativeRegistry native_registry;
   RuntimeModuleRegistry module_registry;
   RuntimeTypeRegistry type_registry;
+  RuntimeDispatchRegistry dispatch_registry;
   RuntimeWorldOptions options;
   RuntimeCapabilityResolution capabilities;
   RuntimeEffectValidation effects;
@@ -37500,7 +37499,7 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
           impl->record_event(std::move(event));
         },
         &impl_->native_registry, &impl_->module_registry,
-        &impl_->type_registry);
+        &impl_->type_registry, &impl_->dispatch_registry);
   ExecutionResult result =
       vm.execute(code_id, args, std::move(self), std::move(block));
   if (result.ok()) {

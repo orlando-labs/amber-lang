@@ -1,7 +1,7 @@
 # VM Refactor: Runtime Modules, Dispatch, and Error Registry
 
-Status: active refactor; world-owned legacy registry plus first module/type
-registry adapters landed, 2026-06-25.
+Status: active refactor; world-owned legacy registry plus first module/type/
+dispatch registry adapters landed, 2026-06-25.
 
 This is a refactor path for shrinking `runtime/vm.h` / `runtime/vm.cpp` while
 also removing the semantic coupling that currently makes core stdlib modules and
@@ -36,10 +36,13 @@ that imports legacy native paths as `RuntimeBindingRef` values and makes
 `NativeRegistry::kind_for_path`. The third slice introduces a
 `RuntimeTypeRegistry` adapter for native type call metadata and makes bytecode
 `CALL` ask the registry instead of keeping a constructor allowlist in the VM.
-The next slice moves legacy native type path exports such as `net.http.Client`,
-`StrictHashMap`, and `sync.Channel` into `RuntimeModuleRegistry`; the VM now
-keeps only non-type special bindings such as `task` and `task.flow` in
-`lookup_native_prelude_constant`.
+The next slices move legacy native type path exports such as `net.http.Client`,
+`StrictHashMap`, and `sync.Channel`, plus core non-type prelude bindings such
+as `print`, `Ok`, `task`, and `task.flow`, into `RuntimeModuleRegistry`. The VM
+no longer falls back to `NativeRegistry::kind_for_path` for prelude lookup. The
+current slice adds a `RuntimeDispatchRegistry` adapter for migrated native
+handler dispatch; `Vm::try_apply_native_stdlib_send` now asks that adapter
+instead of calling `NativeRegistry::handler_for` directly.
 
 ## 2. Current Pressure Points
 
@@ -48,11 +51,11 @@ keeps only non-type special bindings such as `task` and `task.flow` in
   `Digest`, `Time`, `Bytes`, `FsPath`, and similar names.
 - `Vm::lookup_native_prelude_constant` maps module paths directly to
   `RuntimeNativeTypeKind` values, including nested paths such as
-  `net.http.Client`. This direct map is now reduced to registry lookup plus
-  non-type special values.
+  `net.http.Client`. This direct map is now reduced to registry lookup.
 - `Vm::try_apply_native_stdlib_send` still contains large module-specific
-  dispatch chains, even though `runtime/stdlib_registry.{h,cpp}` is already a
-  partial registry seam for newer stdlib modules.
+  dispatch chains, but migrated handler dispatch now enters through
+  `RuntimeDispatchRegistry`; the remaining branches are the next descriptor
+  migration targets.
 - The bytecode `CALL` path contains an allowlist of native type kinds that may
   behave as constructors. Adding a module-owned type can require editing the VM
   dispatch loop. The first `RuntimeTypeRegistry` adapter removes this allowlist
@@ -66,9 +69,10 @@ keeps only non-type special bindings such as `task` and `task.flow` in
   `amber_ext` fault plumbing, but they do not yet have one unified route for
   registering package-owned types, constructors, dispatch, and rescue-able error
   classes into the same runtime namespace as first-party modules.
-- The compatibility stdlib registry is now world-owned, and its path exports
-  feed a first `RuntimeModuleRegistry` adapter. A first `RuntimeTypeRegistry`
-  adapter owns native type call selectors. Both adapters still point at
+- The compatibility stdlib registry is now world-owned. Its path exports feed
+  `RuntimeModuleRegistry`, its native type call selectors feed
+  `RuntimeTypeRegistry`, and its migrated handlers feed
+  `RuntimeDispatchRegistry`. These adapters still point at
   `RuntimeNativeTypeKind`; the next pressure point is replacing those imported
   entries with descriptor-backed module/type/dispatch registrations.
 
@@ -204,16 +208,21 @@ descriptor registration.
 
 - Introduce `RuntimeModuleRegistry`, `RuntimeTypeRegistry`,
   `RuntimeDispatchRegistry`, and `RuntimeErrorRegistry` under `RuntimeWorld`.
-  `RuntimeModuleRegistry` has landed first as a compatibility adapter over
-  legacy native paths.
+  `RuntimeModuleRegistry`, `RuntimeTypeRegistry`, and
+  `RuntimeDispatchRegistry` have landed first as compatibility adapters over
+  legacy native paths, native type calls, and migrated native handlers.
 - Add descriptor structs for paths, types, constructors, methods, properties,
   and errors.
-- Teach `lookup_native_prelude_constant` to ask the module registry first, then
-  fall back to the legacy enum mapping during migration. This is landed for
-  migrated stdlib paths and for the VM's former native-type path map.
+- Teach `lookup_native_prelude_constant` to ask the module registry. This is
+  landed for core prelude bindings, migrated stdlib paths, and the VM's former
+  native-type path map; the `NativeRegistry::kind_for_path` fallback has been
+  removed from the VM.
 - Teach `CALL` on a registered type to use descriptor constructor/call metadata
   instead of the VM hardcoded allowlist. This is landed for legacy native-type
   call selectors.
+- Teach migrated native SEND dispatch to use the dispatch registry instead of
+  calling `NativeRegistry::handler_for` from the VM. This is landed as a
+  compatibility adapter over the legacy handler table.
 - Keep `NativeRegistry` as a compatibility facade until all current stdlib
   modules have moved to the richer descriptor API.
 
