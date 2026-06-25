@@ -1,7 +1,9 @@
 # VM Refactor: Runtime Modules, Dispatch, and Error Registry
 
-Status: active refactor; world-owned legacy registry plus first module/type/
-dispatch registry adapters landed, 2026-06-25.
+Status: active refactor; phase order clarified 2026-06-26. Phase 0 guardrails
+are partially exercised but still need an explicit baseline record. Phase 1
+registry foundation is mostly landed. The broad mechanical file split is now
+Phase 2, after semantic registry seams exist.
 
 This is a refactor path for shrinking `runtime/vm.h` / `runtime/vm.cpp` while
 also removing the semantic coupling that currently makes core stdlib modules and
@@ -80,12 +82,12 @@ fallback registries no longer seed module/dispatch bindings from
   `amber_ext` fault plumbing, but they do not yet have one unified route for
   registering package-owned types, constructors, dispatch, and rescue-able error
   classes into the same runtime namespace as first-party modules.
-- The compatibility stdlib registry is now world-owned. Its path exports feed
-  `RuntimeModuleRegistry`, its native type call selectors feed
-  `RuntimeTypeRegistry`, and its migrated handlers feed
-  `RuntimeDispatchRegistry`. These adapters still point at
-  `RuntimeNativeTypeKind`; the next pressure point is replacing those imported
-  entries with descriptor-backed module/type/dispatch/error registrations.
+- The compatibility stdlib registry is now world-owned and still feeds legacy
+  callers/tests. Runtime module and dispatch registries for migrated stdlib
+  modules are seeded from descriptors instead of importing `NativeRegistry`
+  path/handler tables. These adapters still point at `RuntimeNativeTypeKind`;
+  the next pressure point is replacing the remaining enum-backed type,
+  constructor, dispatch, and error entries with richer descriptors.
 
 In the current checkout, `PoolTimeoutError` is already present in
 `spec/registries/runtime_errors.yaml` and `spec/registries/runtime_errors.def`,
@@ -170,32 +172,70 @@ adding every package error class to `vm.cpp` or the global generated table.
 
 ## 4. Implementation Path
 
+Phases are dependency order, not commit size. Implementation slices may be
+smaller than a phase, but every slice must say which phase item it advances.
+
 ### Phase 0: Guardrails
+
+Status: partially exercised after each slice; still needs an explicit baseline
+record before the next code phase.
 
 - Add/confirm focused tests around current behavior before moving code:
   registered stdlib dispatch, native prelude path lookup, constructor `CALL`,
   typed rescue inheritance, net.http `PoolTimeoutError`, and native extension
   fault translation.
-- Run the relevant gates before and after each phase:
+- Run and record the relevant gates before and after each phase:
   `vm_tests`, `stdlib_registry_tests`, `vm_net_http_tests`,
   `amber_ext_tests`, `module_loader_tests`, `native_tests`,
   `make test`, `make backend-equivalence`, and the tagged `VALUE_REPR` build
   where value layout is touched.
+- If a gate is intentionally skipped, record the reason in the phase commit or
+  plan update. Do not start a later code phase with an unexplained missing
+  guardrail.
 
-### Phase 1: Mechanical file split for editability
+### Phase 1: Registry foundation and composition seams
 
-Landed first with a low-risk ownership slice before broad file movement:
+Status: mostly landed. This phase intentionally comes before the broad file
+split so that later file movement follows semantic ownership boundaries instead
+of preserving VM-local module branches in smaller files.
 
-- move builtin `NativeRegistry` construction from `Vm` into `RuntimeWorld::Impl`;
-- pass a read-only registry adapter into each private `Vm` created by
-  `RuntimeWorld::execute`;
-- keep direct VM execution paths working by lazily constructing the same legacy
-  registry when no world registry is supplied;
-- keep existing registered-stdlib behavior byte-for-byte equivalent.
+- Move builtin `NativeRegistry` construction from `Vm` into
+  `RuntimeWorld::Impl`; private VMs borrow world registries, while direct VM
+  entry points keep local fallback registries.
+- Introduce `RuntimeModuleRegistry`, `RuntimeTypeRegistry`,
+  `RuntimeDispatchRegistry`, and `RuntimeErrorRegistry` under `RuntimeWorld`.
+  The first versions are compatibility adapters over legacy native paths,
+  native type calls, migrated native handlers, and builtin runtime error
+  lookup.
+- Teach `lookup_native_prelude_constant` to ask the module registry. This is
+  landed for core prelude bindings, migrated stdlib paths, and the VM's former
+  native-type path map; the `NativeRegistry::kind_for_path` fallback has been
+  removed from the VM.
+- Teach `CALL` on a registered type to use registry constructor/call metadata
+  instead of the VM hardcoded allowlist. This is landed for legacy native-type
+  call selectors.
+- Teach migrated native SEND dispatch to use the dispatch registry instead of
+  calling `NativeRegistry::handler_for` from the VM.
+- Teach prelude error lookup, native error matching, and native error class
+  selectors to use the error registry adapter. This is landed for id/name/is-a
+  lookup; error field/default metadata still comes from the generated legacy
+  table until module error descriptors land.
+- Add the first descriptor shape for exported paths and native handlers:
+  `RuntimeNativeModuleDescriptor`. Runtime module/dispatch wiring for migrated
+  stdlib now uses descriptors instead of importing `NativeRegistry`
+  path/handler tables.
+- Keep `NativeRegistry` as a compatibility facade until all current stdlib
+  modules have moved to the richer descriptor API and legacy tests no longer
+  need it.
 
-Then keep `runtime/vm.h` as a compatibility umbrella, but move declarations into
-smaller headers:
+### Phase 2: Mechanical file split for editability
 
+Status: not started beyond pre-existing helper files. This phase moved after
+Phase 1 because registry seams now show which code is VM-owned versus
+module-owned.
+
+Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
+declarations and low-coupling implementation islands into smaller files:
 
 - `runtime/value.h` / `runtime/value.cpp`: `Value`, value helpers, value display
   basics, intrinsic type naming;
@@ -208,49 +248,21 @@ smaller headers:
 - `runtime/text.h` / `runtime/text.cpp`: text buffers, logger, text writer
   declarations already implemented outside `vm.cpp`;
 - `runtime/world.h` / `runtime/world.cpp`: `RuntimeWorld` public surface and
-  registry ownership.
+  registry ownership;
+- private `runtime/vm_internal.h`: the `Vm` class and interpreter-only helpers.
 
-After that, introduce a private `runtime/vm_internal.h` for the `Vm` class and
-split low-coupling implementation islands out of `vm.cpp`. Do not move
-module-specific branches unchanged unless the move is a stepping stone toward
-descriptor registration.
-
-### Phase 2: Registry foundation
-
-- Introduce `RuntimeModuleRegistry`, `RuntimeTypeRegistry`,
-  `RuntimeDispatchRegistry`, and `RuntimeErrorRegistry` under `RuntimeWorld`.
-  `RuntimeModuleRegistry`, `RuntimeTypeRegistry`, `RuntimeDispatchRegistry`,
-  and `RuntimeErrorRegistry` have landed first as compatibility adapters over
-  legacy native paths, native type calls, migrated native handlers, and builtin
-  runtime error lookup. Runtime module/dispatch wiring for migrated stdlib now
-  uses descriptors instead of importing `NativeRegistry` path/handler tables.
-- Add descriptor structs for paths, types, constructors, methods, properties,
-  and errors. The first path/handler descriptor shape,
-  `RuntimeNativeModuleDescriptor`, has landed for the migrated stdlib modules
-  that already had `NativeRegistry` handlers.
-- Teach `lookup_native_prelude_constant` to ask the module registry. This is
-  landed for core prelude bindings, migrated stdlib paths, and the VM's former
-  native-type path map; the `NativeRegistry::kind_for_path` fallback has been
-  removed from the VM.
-- Teach `CALL` on a registered type to use descriptor constructor/call metadata
-  instead of the VM hardcoded allowlist. This is landed for legacy native-type
-  call selectors.
-- Teach migrated native SEND dispatch to use the dispatch registry instead of
-  calling `NativeRegistry::handler_for` from the VM. This is landed as a
-  compatibility adapter over the legacy handler table.
-- Teach prelude error lookup, native error matching, and native error class
-  selectors to use the error registry adapter. This is landed for id/name/is-a
-  lookup; error field/default metadata still comes from the generated legacy
-  table until module error descriptors land.
-- Keep `NativeRegistry` as a compatibility facade until all current stdlib
-  modules have moved to the richer descriptor API.
+Do not move module-specific SEND/constructor branches unchanged just to shrink
+`vm.cpp`. Move a module branch only when the move is part of descriptor
+registration or when the branch is already behind a registry interface.
 
 ### Phase 3: Move first-party modules behind descriptors
 
 Migrate modules in slices, each with tests:
 
 - modules already using `NativeRegistry`: Math, Json, codecs, Digest,
-  SecureRandom, ArgParser, Uuid, Time, Url;
+  SecureRandom, ArgParser, Uuid, Time, Url. This slice is landed for path and
+  handler descriptors; richer type/constructor/error descriptors remain future
+  work where applicable;
 - IO/data types currently in `vm.cpp`: Bytes, ByteBuffer, ByteSlice, IoPipe,
   TextBuffer, Logger;
 - filesystem/network modules: fs, net, tcp, udp, net.http;
@@ -316,7 +328,8 @@ No Amber source-level behavior should change as part of this refactor.
 ## 6. Test Plan
 
 - Unit tests for module registry path lookup, alias lookup, descriptor dispatch,
-  constructor/call routing, and fallback to legacy enum mapping during migration.
+  constructor/call routing, and legacy enum-backed compatibility descriptors
+  during migration.
 - Unit tests for error registry inheritance: exact class, parent class,
   `Exception`, unknown error names, and duplicate registration diagnostics.
 - net.http tests: active-slot pool timeout raises `PoolTimeoutError`; rescue by
