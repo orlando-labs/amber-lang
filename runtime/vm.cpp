@@ -10536,7 +10536,8 @@ public:
               const NativeRegistry *native_registry = nullptr,
               const RuntimeModuleRegistry *module_registry = nullptr,
               const RuntimeTypeRegistry *type_registry = nullptr,
-              const RuntimeDispatchRegistry *dispatch_registry = nullptr)
+              const RuntimeDispatchRegistry *dispatch_registry = nullptr,
+              const RuntimeErrorRegistry *error_registry = nullptr)
       : module_(module), initial_string_count_(module.strings.size()),
         initial_symbol_count_(module.symbols.size()),
         state_(state == nullptr ? std::make_shared<RuntimeState>()
@@ -10545,7 +10546,8 @@ public:
         capabilities_(capabilities), effects_(effects),
         trace_recorder_(std::move(trace_recorder)),
         native_registry_(native_registry), module_registry_(module_registry),
-        type_registry_(type_registry), dispatch_registry_(dispatch_registry) {
+        type_registry_(type_registry), dispatch_registry_(dispatch_registry),
+        error_registry_(error_registry) {
     state_->initialize_for_module(module_);
     resolve_numeric_policy();
     if (native_registry_ == nullptr) {
@@ -10567,6 +10569,9 @@ public:
     if (dispatch_registry_ == nullptr) {
       owned_dispatch_registry_.import_native_handlers(*native_registry_);
       dispatch_registry_ = &owned_dispatch_registry_;
+    }
+    if (error_registry_ == nullptr) {
+      error_registry_ = &owned_error_registry_;
     }
     resolve_native_bindings();
   }
@@ -10963,6 +10968,10 @@ private:
     return *dispatch_registry_;
   }
 
+  const RuntimeErrorRegistry &error_registry() const {
+    return *error_registry_;
+  }
+
   const NativeRegistry *child_native_registry() const {
     return native_registry_ == &owned_native_registry_ ? nullptr
                                                       : native_registry_;
@@ -10980,6 +10989,11 @@ private:
   const RuntimeDispatchRegistry *child_dispatch_registry() const {
     return dispatch_registry_ == &owned_dispatch_registry_ ? nullptr
                                                            : dispatch_registry_;
+  }
+
+  const RuntimeErrorRegistry *child_error_registry() const {
+    return error_registry_ == &owned_error_registry_ ? nullptr
+                                                     : error_registry_;
   }
 
   ExecutionResult with_runtime_names(ExecutionResult result) const {
@@ -12091,7 +12105,8 @@ private:
                                child_native_registry(),
                                child_module_registry(),
                                child_type_registry(),
-                               child_dispatch_registry());
+                               child_dispatch_registry(),
+                               child_error_registry());
       // Block results flow through final_value_; nobody reads the completed
       // register snapshot, so skip the per-return register copy.
       lease.vm->capture_completed_frames_ = false;
@@ -12385,7 +12400,8 @@ private:
   // unwind the current frame reference may no longer be the active frame.
   void raise_runtime_error(const Frame &frame, const std::string &error_name,
                            const std::string &message) {
-    const std::optional<std::uint16_t> error_id = runtime_error_id(error_name);
+    const std::optional<std::uint16_t> error_id =
+        error_registry().error_id(error_name);
     if (!error_id.has_value()) {
       set_fault(frame, error_name, message);
       return;
@@ -14940,7 +14956,8 @@ private:
   std::optional<Value>
   lookup_native_prelude_constant(const std::vector<std::string> &segments) {
     const std::string path = join_path_segments(segments);
-    if (const std::optional<std::uint16_t> error_id = runtime_error_id(path)) {
+    if (const std::optional<std::uint16_t> error_id =
+            error_registry().error_id(path)) {
       return Value::native_error_class(*error_id);
     }
     // Registered prelude/module paths resolve through the world-owned module
@@ -18420,7 +18437,7 @@ private:
       const std::shared_ptr<ErrorInstanceValue> instance =
           exception.as_error_instance();
       if (instance != nullptr) {
-        return runtime_error_name(instance->error_id);
+        return error_registry().error_name(instance->error_id);
       }
     }
     if (exception.is_instance_object()) {
@@ -18833,8 +18850,9 @@ private:
     if (matcher.is_native_error_class()) {
       *out = value.is_error_instance() &&
              value.as_error_instance() != nullptr &&
-             runtime_error_is_a(value.as_error_instance()->error_id,
-                                matcher.as_native_error_class().error_id);
+             error_registry().error_is_a(
+                 value.as_error_instance()->error_id,
+                 matcher.as_native_error_class().error_id);
       return true;
     }
     if (matcher.is_class_object()) {
@@ -19709,7 +19727,7 @@ private:
       const std::uint32_t field_bit = runtime_error_field_bit(name);
       if (field_bit == 0U || (field_mask & field_bit) == 0U) {
         set_fault(frame, "KeywordArgumentError",
-                  std::string(runtime_error_name(error_id)) +
+                  std::string(error_registry().error_name(error_id)) +
                       " does not accept keyword `" + name + "`");
         return SendStatus::Faulted;
       }
@@ -20914,6 +20932,7 @@ private:
     const RuntimeModuleRegistry *child_modules = child_module_registry();
     const RuntimeTypeRegistry *child_types = child_type_registry();
     const RuntimeDispatchRegistry *child_dispatch = child_dispatch_registry();
+    const RuntimeErrorRegistry *child_errors = child_error_registry();
 
     return [module_template = std::move(module_template),
             runtime_state = std::move(runtime_state),
@@ -20921,7 +20940,8 @@ private:
             captures = std::move(captures), self = std::move(self), task,
             inherited_stdout, inherited_stderr, world_options, capabilities,
             effects, trace_recorder = std::move(trace_recorder),
-            child_registry, child_modules, child_types, child_dispatch](
+            child_registry, child_modules, child_types, child_dispatch,
+            child_errors](
                std::vector<Value> args) mutable -> std::function<Value()> {
       // The persistent VM owns its own copy of the module, so the entry frame's
       // code pointer (into vm->module_) stays valid for the task's whole life,
@@ -20930,7 +20950,7 @@ private:
                                     world_options, capabilities, effects,
                                     trace_recorder, child_registry,
                                     child_modules, child_types,
-                                    child_dispatch));
+                                    child_dispatch, child_errors));
       vm->parkable_ = true;
       const BcCode *code = find_code(vm->module_, code_id);
       if (code == nullptr) {
@@ -25828,7 +25848,7 @@ private:
       const std::string nested_error_path =
           std::string(native_type_name(kind)) + "." + selector;
       if (const std::optional<std::uint16_t> nested_error_id =
-              runtime_error_id(nested_error_path)) {
+              error_registry().error_id(nested_error_path)) {
         if (args.empty() && kw_args.empty() && block.is_null()) {
           *out = Value::native_error_class(*nested_error_id);
           return SendStatus::Matched;
@@ -31175,8 +31195,8 @@ private:
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
         }
-        *out =
-            Value::string(intern_runtime_string(runtime_error_name(error_id)));
+        *out = Value::string(
+            intern_runtime_string(error_registry().error_name(error_id)));
         return SendStatus::Matched;
       }
       if (selector == "===") {
@@ -31186,8 +31206,8 @@ private:
         *out = Value::boolean(
             args[0].is_error_instance() &&
             args[0].as_error_instance() != nullptr &&
-            runtime_error_is_a(args[0].as_error_instance()->error_id,
-                               error_id));
+            error_registry().error_is_a(
+                args[0].as_error_instance()->error_id, error_id));
         return SendStatus::Matched;
       }
     }
@@ -31211,7 +31231,8 @@ private:
           return SendStatus::Faulted;
         }
         *out = Value::string(
-            intern_runtime_string(runtime_error_name(instance->error_id)));
+            intern_runtime_string(error_registry().error_name(
+                instance->error_id)));
         return SendStatus::Matched;
       }
       if (selector == "to_str" || selector == "inspect") {
@@ -31219,8 +31240,8 @@ private:
           return SendStatus::Faulted;
         }
         *out = Value::string(intern_runtime_string(
-            std::string(runtime_error_name(instance->error_id)) + ": " +
-            instance->message));
+            std::string(error_registry().error_name(instance->error_id)) +
+            ": " + instance->message));
         return SendStatus::Matched;
       }
       if (selector == "class") {
@@ -34758,7 +34779,7 @@ private:
           std::string(native_type_name(receiver.as_native_type().kind)) + "." +
           *selector;
       if (const std::optional<std::uint16_t> nested_error_id =
-              runtime_error_id(nested_error_path)) {
+              error_registry().error_id(nested_error_path)) {
         Value result = Value::null();
         if (construct_native_error_instance(frame, *nested_error_id, args,
                                             kw_args, block,
@@ -37156,6 +37177,11 @@ private:
   // World-owned dispatch registry, or `owned_dispatch_registry_` for direct VM
   // entry points.
   const RuntimeDispatchRegistry *dispatch_registry_ = nullptr;
+  // Direct VM fallback for builtin runtime error lookup/matching.
+  RuntimeErrorRegistry owned_error_registry_;
+  // World-owned error registry, or `owned_error_registry_` for direct VM entry
+  // points.
+  const RuntimeErrorRegistry *error_registry_ = nullptr;
   // Native-extension dispatch (native-packages 5c-ii): entry code object ->
   // {is_method, logical-symbol}, lowered from `amber.native.bind:<code_id>`
   // module attrs. A registered thunk for the logical name (native build) runs
@@ -37393,6 +37419,7 @@ struct RuntimeWorld::Impl {
   RuntimeModuleRegistry module_registry;
   RuntimeTypeRegistry type_registry;
   RuntimeDispatchRegistry dispatch_registry;
+  RuntimeErrorRegistry error_registry;
   RuntimeWorldOptions options;
   RuntimeCapabilityResolution capabilities;
   RuntimeEffectValidation effects;
@@ -37499,7 +37526,8 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
           impl->record_event(std::move(event));
         },
         &impl_->native_registry, &impl_->module_registry,
-        &impl_->type_registry, &impl_->dispatch_registry);
+        &impl_->type_registry, &impl_->dispatch_registry,
+        &impl_->error_registry);
   ExecutionResult result =
       vm.execute(code_id, args, std::move(self), std::move(block));
   if (result.ok()) {

@@ -42,7 +42,11 @@ as `print`, `Ok`, `task`, and `task.flow`, into `RuntimeModuleRegistry`. The VM
 no longer falls back to `NativeRegistry::kind_for_path` for prelude lookup. The
 current slice adds a `RuntimeDispatchRegistry` adapter for migrated native
 handler dispatch; `Vm::try_apply_native_stdlib_send` now asks that adapter
-instead of calling `NativeRegistry::handler_for` directly.
+instead of calling `NativeRegistry::handler_for` directly. The error-registry
+slice adds `RuntimeErrorRegistry` as a world/direct-VM adapter for builtin error
+id/name/inheritance lookup; VM prelude lookup, rescue matching, and native
+error SEND selectors now ask that adapter while field/default-message metadata
+remains on the legacy generated table.
 
 ## 2. Current Pressure Points
 
@@ -74,7 +78,7 @@ instead of calling `NativeRegistry::handler_for` directly.
   `RuntimeTypeRegistry`, and its migrated handlers feed
   `RuntimeDispatchRegistry`. These adapters still point at
   `RuntimeNativeTypeKind`; the next pressure point is replacing those imported
-  entries with descriptor-backed module/type/dispatch registrations.
+  entries with descriptor-backed module/type/dispatch/error registrations.
 
 In the current checkout, `PoolTimeoutError` is already present in
 `spec/registries/runtime_errors.yaml` and `spec/registries/runtime_errors.def`,
@@ -208,9 +212,10 @@ descriptor registration.
 
 - Introduce `RuntimeModuleRegistry`, `RuntimeTypeRegistry`,
   `RuntimeDispatchRegistry`, and `RuntimeErrorRegistry` under `RuntimeWorld`.
-  `RuntimeModuleRegistry`, `RuntimeTypeRegistry`, and
-  `RuntimeDispatchRegistry` have landed first as compatibility adapters over
-  legacy native paths, native type calls, and migrated native handlers.
+  `RuntimeModuleRegistry`, `RuntimeTypeRegistry`, `RuntimeDispatchRegistry`,
+  and `RuntimeErrorRegistry` have landed first as compatibility adapters over
+  legacy native paths, native type calls, migrated native handlers, and builtin
+  runtime error lookup.
 - Add descriptor structs for paths, types, constructors, methods, properties,
   and errors.
 - Teach `lookup_native_prelude_constant` to ask the module registry. This is
@@ -223,6 +228,10 @@ descriptor registration.
 - Teach migrated native SEND dispatch to use the dispatch registry instead of
   calling `NativeRegistry::handler_for` from the VM. This is landed as a
   compatibility adapter over the legacy handler table.
+- Teach prelude error lookup, native error matching, and native error class
+  selectors to use the error registry adapter. This is landed for id/name/is-a
+  lookup; error field/default metadata still comes from the generated legacy
+  table until module error descriptors land.
 - Keep `NativeRegistry` as a compatibility facade until all current stdlib
   modules have moved to the richer descriptor API.
 

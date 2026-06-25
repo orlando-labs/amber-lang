@@ -469,6 +469,14 @@ private:
       native_handlers_;
 };
 
+class RuntimeErrorRegistry {
+public:
+  std::optional<std::uint16_t> error_id(const std::string &name) const;
+  const char *error_name(std::uint16_t error_id) const;
+  bool error_is_a(std::uint16_t error_id,
+                  std::uint16_t ancestor_error_id) const;
+};
+
 // Two tables, populated once during VM construction (no static initializers, to
 // avoid static-init-order fiascos): `kind -> handler` for dispatch and
 // `path -> kind` for prelude name resolution.

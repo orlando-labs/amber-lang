@@ -19,6 +19,7 @@ using amber::runtime::NativeStdlibHandler;
 using amber::runtime::RuntimeBindingKind;
 using amber::runtime::RuntimeBindingRef;
 using amber::runtime::RuntimeDispatchRegistry;
+using amber::runtime::RuntimeErrorRegistry;
 using amber::runtime::RuntimeModuleRegistry;
 using amber::runtime::RuntimeNativeFunctionKind;
 using amber::runtime::RuntimeNativeTypeKind;
@@ -426,39 +427,37 @@ void test_math_faults(const NativeRegistry &registry) {
 }
 
 void test_runtime_error_registry() {
-  const auto exception = amber::runtime::runtime_error_id("Exception");
-  const auto parse_error =
-      amber::runtime::runtime_error_id("ArgParser.ParseError");
-  const auto invalid_value =
-      amber::runtime::runtime_error_id("ArgParser.InvalidValue");
-  const auto unknown_option =
-      amber::runtime::runtime_error_id("ArgParser.UnknownOption");
-  const auto help = amber::runtime::runtime_error_id("ArgParser.HelpRequested");
+  RuntimeErrorRegistry errors;
+  const auto exception = errors.error_id("Exception");
+  const auto parse_error = errors.error_id("ArgParser.ParseError");
+  const auto invalid_value = errors.error_id("ArgParser.InvalidValue");
+  const auto unknown_option = errors.error_id("ArgParser.UnknownOption");
+  const auto help = errors.error_id("ArgParser.HelpRequested");
   expect(exception.has_value() && parse_error.has_value() &&
              invalid_value.has_value() && unknown_option.has_value() &&
              help.has_value(),
          "dotted ArgParser errors are registered");
-  expect(std::string(amber::runtime::runtime_error_name(*invalid_value)) ==
+  expect(std::string(errors.error_name(*invalid_value)) ==
              "ArgParser.InvalidValue",
          "dotted runtime error name round-trips");
-  expect(amber::runtime::runtime_error_is_a(*invalid_value, *parse_error),
+  expect(errors.error_is_a(*invalid_value, *parse_error),
          "ArgParser subclass inherits ParseError");
-  expect(amber::runtime::runtime_error_is_a(*invalid_value, *exception),
+  expect(errors.error_is_a(*invalid_value, *exception),
          "ArgParser parse errors inherit Exception");
-  expect(amber::runtime::runtime_error_is_a(*help, *exception) &&
-             !amber::runtime::runtime_error_is_a(*help, *parse_error),
+  expect(errors.error_is_a(*help, *exception) &&
+             !errors.error_is_a(*help, *parse_error),
          "HelpRequested inherits Exception but not ParseError");
-  expect(!amber::runtime::runtime_error_is_a(*invalid_value, *unknown_option),
+  expect(!errors.error_is_a(*invalid_value, *unknown_option),
          "sibling ArgParser errors do not match");
 
-  const auto json_error = amber::runtime::runtime_error_id("JsonError");
-  const auto json_parse = amber::runtime::runtime_error_id("JsonParseError");
-  const auto type_error = amber::runtime::runtime_error_id("TypeError");
+  const auto json_error = errors.error_id("JsonError");
+  const auto json_parse = errors.error_id("JsonParseError");
+  const auto type_error = errors.error_id("TypeError");
   expect(json_error.has_value() && json_parse.has_value() &&
-             amber::runtime::runtime_error_is_a(*json_parse, *json_error),
+             errors.error_is_a(*json_parse, *json_error),
          "existing native error family keeps inherited matching");
   expect(type_error.has_value() &&
-             amber::runtime::runtime_error_is_a(*type_error, *exception),
+             errors.error_is_a(*type_error, *exception),
          "existing native errors inherit Exception");
 }
 

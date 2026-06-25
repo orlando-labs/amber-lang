@@ -75,6 +75,20 @@ void RuntimeDispatchRegistry::import_native_handlers(
   }
 }
 
+std::optional<std::uint16_t>
+RuntimeErrorRegistry::error_id(const std::string &name) const {
+  return runtime_error_id(name);
+}
+
+const char *RuntimeErrorRegistry::error_name(std::uint16_t error_id) const {
+  return runtime_error_name(error_id);
+}
+
+bool RuntimeErrorRegistry::error_is_a(
+    std::uint16_t error_id, std::uint16_t ancestor_error_id) const {
+  return runtime_error_is_a(error_id, ancestor_error_id);
+}
+
 void NativeRegistry::register_handler(RuntimeNativeTypeKind kind,
                                       NativeStdlibHandler handler) {
   handlers_[kind] = handler;
