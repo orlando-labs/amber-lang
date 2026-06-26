@@ -284,6 +284,16 @@ Slice record, 2026-06-26:
   `make -B BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`
   and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-26:
+
+- Split runtime watch/debug declarations from `runtime/vm.h` into
+  `runtime/watch.h`; `runtime/vm.h` remains the compatibility umbrella.
+- Left watch implementations in `runtime/vm.cpp`; this is still a declaration
+  split, not a behavioral move.
+- Verified with forced focused build targets:
+  `make -B build/vm_tests build/module_loader_tests`.
+- Verified focused binaries: `build/vm_tests` and `build/module_loader_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
