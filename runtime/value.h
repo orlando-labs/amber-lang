@@ -230,6 +230,8 @@ struct NativeTypeValue {
   RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
 };
 
+const char *native_type_name(RuntimeNativeTypeKind kind);
+
 enum class RuntimeNativeFunctionKind {
   Print,
   P,
@@ -242,6 +244,8 @@ enum class RuntimeNativeFunctionKind {
 struct NativeFunctionValue {
   RuntimeNativeFunctionKind kind = RuntimeNativeFunctionKind::Print;
 };
+
+const char *native_function_name(RuntimeNativeFunctionKind kind);
 
 // Builtin runtime error classes mirror spec/registries/runtime_errors.yaml.
 // `error_id` indexes the registry-ordered name table (runtime_error_name).

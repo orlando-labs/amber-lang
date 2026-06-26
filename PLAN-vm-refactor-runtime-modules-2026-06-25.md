@@ -527,6 +527,22 @@ Slice record, 2026-06-26:
 - Verified focused binaries: `build/vm_tests`, `build/native_tests`,
   `build/module_loader_tests`, and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-26:
+
+- Moved `native_type_name` and `native_function_name` from the `runtime/vm.cpp`
+  anonymous namespace into `runtime/value.cpp`, with declarations in
+  `runtime/value.h` beside the corresponding runtime native value enums.
+- Kept all native type enum cases and VM dispatch branches unchanged; these
+  helpers are only the transitional display/name surface while module-owned
+  type descriptors are still being migrated in later phases.
+- Verified compile smoke: standalone `runtime/value.cpp`, standalone tagged
+  `runtime/value.cpp`, and standalone `runtime/vm.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_registry_tests build/module_loader_tests` and `make -B
+  BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_registry_tests`,
+  `build/module_loader_tests`, and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
