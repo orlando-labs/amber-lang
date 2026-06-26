@@ -311,6 +311,24 @@ Slice record, 2026-06-26:
   `make -B BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`
   and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-26:
+
+- Split heap public declarations from `runtime/vm.h` into `runtime/heap.h`:
+  GC stats/results, write-barrier results, pin/opaque/buffer/native-wait
+  handles, `RuntimeHeap`, `RuntimePinScope`, default heap, and collection
+  allocation helpers.
+- Left heap implementation in `runtime/vm.cpp`; this remains a declaration
+  split and does not move GC/pinning behavior.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_collections_tests build/stdlib_task_tests build/native_tests
+  build/amber_ext_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
+  elevated `build/stdlib_task_tests` for loopback socket coverage,
+  `build/native_tests`, and `build/amber_ext_tests`.
+- Verified tagged representation smoke in a separate build directory:
+  `make -B BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`
+  and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
