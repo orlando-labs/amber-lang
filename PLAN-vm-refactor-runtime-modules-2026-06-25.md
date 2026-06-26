@@ -264,6 +264,26 @@ Slice record, 2026-06-26:
   `build/amber_ext_tests`, `build/module_loader_tests`, `build/native_tests`,
   `build/stdlib_argparser_tests`, and `build/iamber_tests`.
 
+Slice record, 2026-06-26:
+
+- Split the `Value` public declaration surface from `runtime/vm.h` into
+  `runtime/value.h`: `IntrusivePtr`, small scalar/native payload wrappers,
+  `RuntimeNativeTypeKind`, BigInt/time/uuid payload structs, and both variant
+  and tagged `Value` declarations.
+- Left `Value` method implementations in `runtime/vm.cpp`; this slice is a
+  declaration split and does not change `Value` storage or ABI.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_registry_tests build/amber_ext_tests build/module_loader_tests
+  build/native_tests build/stdlib_argparser_tests build/stdlib_time_tests
+  build/stdlib_uuid_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_registry_tests`,
+  `build/amber_ext_tests`, `build/module_loader_tests`, `build/native_tests`,
+  `build/stdlib_argparser_tests`, `build/stdlib_time_tests`, and
+  `build/stdlib_uuid_tests`.
+- Verified tagged representation smoke in a separate build directory:
+  `make -B BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`
+  and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
