@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bytecode/format.h"
-#include "runtime/vm.h"
+#include "runtime/world.h"
 
 #include <cstdint>
 #include <memory>

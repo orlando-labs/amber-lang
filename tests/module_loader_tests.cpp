@@ -1,4 +1,5 @@
 #include "runtime/module_loader.h"
+#include "runtime/vm.h"
 
 #include "bytecode/format.h"
 

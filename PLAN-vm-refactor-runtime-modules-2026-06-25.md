@@ -350,6 +350,29 @@ Slice record, 2026-06-26:
 - Verified include smoke: standalone `runtime/concurrency.h` compile and
   `runtime/context.cpp` compile.
 
+Slice record, 2026-06-26:
+
+- Split `RuntimeWorld` public declarations from `runtime/vm.h` into
+  `runtime/world.h`: world transactions, mirrors, capability/effect/replay
+  aliases, IO provider options, `Fault`, `ExecutionLocal`, `ExecutionResult`,
+  and the `RuntimeWorld` API.
+- Left `RuntimeWorld` implementation in `runtime/vm.cpp`; this remains a
+  declaration split and does not move world execution or registry ownership
+  behavior.
+- Updated `runtime/native_bridge.h` and `runtime/module_loader.h` to include
+  `runtime/world.h` directly. Updated `tests/module_loader_tests.cpp` to include
+  `runtime/vm.h` explicitly for `value_to_debug_string` after the production
+  header stopped providing that helper transitively.
+- Verified with standalone `runtime/world.h` compile smoke.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests build/native_tests build/frozen_image_tests
+  build/amber_ext_tests`. The first attempt exposed the missing explicit
+  `runtime/vm.h` include in `tests/module_loader_tests.cpp`; after fixing that,
+  the listed targets rebuilt successfully.
+- Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`,
+  `build/native_tests`, `build/frozen_image_tests`, and
+  `build/amber_ext_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 

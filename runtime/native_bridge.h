@@ -1,7 +1,7 @@
 #pragma once
 
 #include "optimizer/native.h"
-#include "runtime/vm.h"
+#include "runtime/world.h"
 
 namespace amber::runtime {
 
