@@ -543,11 +543,35 @@ Slice record, 2026-06-26:
 - Verified focused binaries: `build/vm_tests`, `build/stdlib_registry_tests`,
   `build/module_loader_tests`, and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-26:
+
+- Split builtin runtime error metadata helpers from `runtime/vm.cpp` into
+  `runtime/errors.h` / `runtime/errors.cpp`: generated error name/id/is-a
+  lookup, inherited default messages/exit codes, and structured error field
+  masks.
+- Kept `RuntimeErrorRegistry` as the existing world/direct-VM adapter in
+  `runtime/stdlib_registry.*`; this slice is only a mechanical home for the
+  bootstrap generated error table, not the Phase 4 descriptor migration.
+- Added `runtime/errors.cpp` to `RUNTIME_SRCS` and both error files to
+  `FORMAT_FILES`. `runtime/vm.h` includes `runtime/errors.h` so existing
+  umbrella includes keep working.
+- Verified compile smoke: standalone `runtime/errors.cpp`, `runtime/vm.cpp`,
+  `runtime/stdlib_registry.cpp`, and `runtime/stdlib_argparser.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_registry_tests build/stdlib_argparser_tests
+  build/amber_ext_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_registry_tests`,
+  `build/stdlib_argparser_tests`, and `build/amber_ext_tests`.
+- Tagged `VALUE_REPR=tagged` was not rerun for this slice because it does not
+  touch `Value` layout, object layout, or representation-specific code.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
 - `runtime/value.h` / `runtime/value.cpp`: `Value`, value helpers, value display
   basics, intrinsic type naming;
+- `runtime/errors.h` / `runtime/errors.cpp`: generated builtin runtime error
+  metadata and field/default lookup helpers;
 - `runtime/objects.h`: heap object structs and runtime object handles;
 - `runtime/heap.h` / `runtime/heap.cpp`: heap allocation, string table, pinning,
   and lifecycle helpers;
