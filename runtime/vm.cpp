@@ -6408,29 +6408,6 @@ RuntimeUnpinResult RuntimePinScope::unpin() {
   return out;
 }
 
-RuntimeHeap &default_runtime_heap() {
-  static RuntimeHeap heap;
-  return heap;
-}
-
-Value make_list_value(std::vector<Value> items, bool frozen) {
-  return default_runtime_heap().make_list_value(std::move(items), frozen);
-}
-
-Value make_tuple_value(std::vector<Value> items) {
-  return default_runtime_heap().make_tuple_value(std::move(items));
-}
-
-Value make_set_value(std::vector<Value> items, bool frozen) {
-  return default_runtime_heap().make_set_value(std::move(items), frozen);
-}
-
-Value make_symbol_map_value(std::vector<MapEntry> entries, bool frozen,
-                            bool strict) {
-  return default_runtime_heap().make_symbol_map_value(std::move(entries),
-                                                      frozen, strict);
-}
-
 Value make_result_value(bool is_ok, Value payload) {
   auto result = std::make_shared<ResultValue>();
   result->is_ok = is_ok;

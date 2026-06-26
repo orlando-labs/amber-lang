@@ -443,6 +443,21 @@ Slice record, 2026-06-26:
 - Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
   and `build/module_loader_tests`.
 
+Slice record, 2026-06-26:
+
+- Started `runtime/heap.cpp` with the low-coupling default heap facade:
+  `default_runtime_heap`, `make_list_value`, `make_tuple_value`,
+  `make_set_value`, and `make_symbol_map_value`.
+- Kept `make_result_value` in `runtime/vm.cpp`; it depends on the VM-level
+  `ResultValue` helper surface rather than the collection heap facade.
+- Added `runtime/heap.cpp` to `RUNTIME_SRCS` and `FORMAT_FILES`.
+- Verified compile smoke: standalone `runtime/heap.cpp` compile, standalone
+  tagged `runtime/heap.cpp` compile, and standalone `runtime/vm.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_collections_tests build/module_loader_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
+  and `build/module_loader_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
