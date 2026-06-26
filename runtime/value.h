@@ -276,13 +276,13 @@ struct RuntimeTimePeriodValue {
 // at build time by the VALUE_REPR Makefile flag (PLAN Phase 4 value-repr
 // prototype). Both expose an identical public API -- the factories, `is_X()`
 // predicates, and `as_X()` accessors below -- so the VM is source-compatible
-// across either; only the storage and the method bodies (in vm.cpp) differ. The
-// three call sites that previously read the variant directly now go through
+// across either; only the storage and the method bodies (in value.cpp) differ.
+// The three call sites that previously read the variant directly now go through
 // `kind_index()` / `integer_if()`, which both reps implement.
 //
 // X-macros listing every (factory, is_fn, as_fn, ElementType, TagEnumerator)
 // tuple so the tagged rep can generate its factory/predicate/accessor bodies in
-// lockstep (vm.cpp). Heap kinds (the six ObjHeader-bearing types, stored
+// lockstep (value.cpp). Heap kinds (the six ObjHeader-bearing types, stored
 // inline) take a ValueTag enumerator; tail kinds (the cold shared_ptr types,
 // boxed) take a ValueTailKind enumerator.
 #define AMBER_VALUE_HEAP_KINDS(X)                                              \
@@ -524,7 +524,7 @@ enum class ValueTailKind : std::uint8_t {
   ForeignHandle,
 };
 
-struct ValueTailBox; // refcounted tail box; defined in vm.cpp
+struct ValueTailBox; // refcounted tail box; defined in value.cpp
 
 struct Value {
   Value() noexcept : tag_(ValueTag::Null) { u_.i = 0; }

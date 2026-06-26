@@ -409,6 +409,27 @@ Slice record, 2026-06-26:
 - Verified focused binaries: `build/vm_tests` and
   `build/module_loader_tests`.
 
+Slice record, 2026-06-26:
+
+- Moved the variant and tagged `Value` method bodies from `runtime/vm.cpp` into
+  `runtime/value.cpp`, beside the `runtime/value.h` declaration split.
+- Added `runtime/value.cpp` to `RUNTIME_SRCS` and `FORMAT_FILES`, and updated
+  `runtime/value.h` comments to point at the new implementation file.
+- Kept `MapEntry` constructors, default-heap collection helpers, and
+  `make_result_value` in `runtime/vm.cpp`; those still belong to the later
+  object/heap split rather than the pure `Value` representation slice.
+- Verified compile smoke: standalone `runtime/value.cpp` compile, standalone
+  `runtime/vm.cpp` compile, and standalone tagged `runtime/value.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests build/native_tests build/amber_ext_tests`, `make -B
+  build/stdlib_registry_tests build/stdlib_time_tests build/stdlib_uuid_tests
+  build/stdlib_argparser_tests`, and `make -B BUILD_DIR=build-tagged
+  VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`,
+  `build/native_tests`, `build/amber_ext_tests`, `build/stdlib_registry_tests`,
+  `build/stdlib_time_tests`, `build/stdlib_uuid_tests`,
+  `build/stdlib_argparser_tests`, and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
