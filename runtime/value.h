@@ -258,6 +258,8 @@ struct BigIntValue {
   std::vector<std::uint64_t> magnitude;
 };
 
+std::string big_int_to_decimal_string(const BigIntValue &value);
+
 struct RuntimeTimeValue {
   std::int64_t epoch_seconds = 0;
   std::uint32_t nanosecond = 0;

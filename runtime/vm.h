@@ -117,7 +117,6 @@ const char *runtime_error_name(std::uint16_t error_id);
 std::optional<std::uint16_t> runtime_error_id(const std::string &name);
 bool runtime_error_is_a(std::uint16_t error_id,
                         std::uint16_t ancestor_error_id);
-std::string big_int_to_decimal_string(const BigIntValue &value);
 std::string runtime_uuid_to_string(const RuntimeUuidValue &value);
 std::string runtime_time_to_iso8601(const RuntimeTimeValue &value);
 std::string runtime_time_period_to_string(const RuntimeTimePeriodValue &value);

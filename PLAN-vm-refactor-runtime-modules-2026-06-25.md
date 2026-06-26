@@ -511,6 +511,22 @@ Slice record, 2026-06-26:
   `build/native_tests`, `build/module_loader_tests`, and
   `build-tagged/vm_tests`.
 
+Slice record, 2026-06-26:
+
+- Moved the public BigInt decimal string helper from `runtime/vm.cpp` into
+  `runtime/value.cpp`, with its declaration beside `BigIntValue` in
+  `runtime/value.h`.
+- Kept BigInt arithmetic/parsing helpers in `runtime/vm.cpp` for now because
+  they are still tightly coupled to VM SEND/conversion branches; this slice only
+  moves the low-coupling value display helper.
+- Verified compile smoke: standalone `runtime/value.cpp`, standalone tagged
+  `runtime/value.cpp`, and standalone `runtime/vm.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/native_tests build/module_loader_tests` and `make -B
+  BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/native_tests`,
+  `build/module_loader_tests`, and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 

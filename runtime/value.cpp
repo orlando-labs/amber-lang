@@ -7,6 +7,45 @@
 
 namespace amber::runtime {
 
+std::string big_int_to_decimal_string(const BigIntValue &value) {
+  if (value.magnitude.empty()) {
+    return "0";
+  }
+  // Work in base-2^32 half-limbs so the long division by 10^9 only needs
+  // 64-bit accumulators (keeps -Wpedantic builds free of __int128).
+  std::vector<std::uint32_t> mag;
+  mag.reserve(value.magnitude.size() * 2U);
+  for (std::uint64_t limb : value.magnitude) {
+    mag.push_back(static_cast<std::uint32_t>(limb & 0xFFFFFFFFULL));
+    mag.push_back(static_cast<std::uint32_t>(limb >> 32U));
+  }
+  while (!mag.empty() && mag.back() == 0U) {
+    mag.pop_back();
+  }
+  constexpr std::uint64_t kChunk = 1000000000ULL;
+  std::vector<std::uint32_t> chunks;
+  while (!mag.empty()) {
+    std::uint64_t remainder = 0;
+    for (std::size_t i = mag.size(); i-- > 0;) {
+      const std::uint64_t acc = (remainder << 32U) | mag[i];
+      mag[i] = static_cast<std::uint32_t>(acc / kChunk);
+      remainder = acc % kChunk;
+    }
+    while (!mag.empty() && mag.back() == 0U) {
+      mag.pop_back();
+    }
+    chunks.push_back(static_cast<std::uint32_t>(remainder));
+  }
+  std::string out = value.negative ? "-" : "";
+  out += std::to_string(chunks.back());
+  for (std::size_t i = chunks.size() - 1; i-- > 0;) {
+    const std::string part = std::to_string(chunks[i]);
+    out += std::string(9U - part.size(), '0');
+    out += part;
+  }
+  return out;
+}
+
 #ifndef AMBER_VALUE_REPR_TAGGED
 // ==== Variant Value method bodies (default 24-byte representation) =========
 Value Value::null() { return {std::monostate{}}; }
