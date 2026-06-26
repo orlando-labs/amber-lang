@@ -44,9 +44,9 @@ class RuntimeWatchHandle;
 // Intrusive strong-reference smart pointer for the six ObjHeader-bearing heap
 // kinds (RESEARCH 7.2). The count lives in the object's ObjHeader, so this is
 // a single 8-byte pointer with no separate control block. All element-touching
-// logic is out-of-line in vm.cpp (declared here, explicitly instantiated there)
-// so IntrusivePtr<T> works with an incomplete T at the many include sites, just
-// like std::shared_ptr does.
+// logic is out-of-line in heap.cpp (declared here, explicitly instantiated
+// there) so IntrusivePtr<T> works with an incomplete T at the many include
+// sites, just like std::shared_ptr does.
 template <class T> void runtime_heap_add_ref(T *obj) noexcept;
 template <class T> void runtime_heap_release(T *obj) noexcept;
 
@@ -145,7 +145,8 @@ private:
 // heap = null) wrapped in an IntrusivePtr. For white-box tests that build heap
 // objects directly; on drop such an object is plain-deleted (no RuntimeHeap
 // bookkeeping), matching how a bare `new`/`make_shared` object behaved before.
-// Declared here, defined + explicitly instantiated for the six kinds in vm.cpp.
+// Declared here, defined + explicitly instantiated for the six kinds in
+// heap.cpp.
 template <class T> IntrusivePtr<T> make_intrusive();
 
 struct SymbolValue {

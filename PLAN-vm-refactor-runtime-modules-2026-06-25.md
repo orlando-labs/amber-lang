@@ -488,6 +488,29 @@ Slice record, 2026-06-26:
 - Verified focused binaries: `build/vm_tests`, `build/native_tests`, and
   `build/module_loader_tests`.
 
+Slice record, 2026-06-26:
+
+- Moved intrusive refcount implementation from `runtime/vm.cpp` into
+  `runtime/heap.cpp`: `runtime_heap_add_ref`, `runtime_heap_release`,
+  `make_intrusive`, the heap object deleter, and the six explicit
+  instantiations for ObjHeader-bearing runtime objects.
+- Updated `runtime/value.h` comments to point at `runtime/heap.cpp` for those
+  out-of-line definitions.
+- Kept `RuntimeHeap::drop_object` in `runtime/vm.cpp` for now because it still
+  names private `RuntimeHeap::Impl`; this can move with the full heap
+  implementation slice.
+- Verified compile smoke: standalone `runtime/heap.cpp` compile, standalone
+  tagged `runtime/heap.cpp` compile, standalone `runtime/vm.cpp` compile,
+  standalone `runtime/value.cpp` compile, and standalone tagged
+  `runtime/value.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_collections_tests build/native_tests build/module_loader_tests`
+  and `make -B BUILD_DIR=build-tagged VALUE_REPR=tagged
+  build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
+  `build/native_tests`, `build/module_loader_tests`, and
+  `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
