@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -125,5 +126,14 @@ struct ClosureValue {
   std::vector<Value> captures;
   Value self = Value::null();
 };
+
+bool value_has_heap_payload_tag(const Value &value);
+const ObjHeader *heap_header_from_value(const Value &value);
+ObjHeader *mutable_heap_header_from_value(const Value &value);
+bool header_is_deallocated(const ObjHeader &header);
+bool header_is_destroyed(const ObjHeader &header);
+std::optional<std::string> lifecycle_access_error_name(const ObjHeader &header);
+std::string lifecycle_access_error_message(const std::string &error_name);
+std::string lifecycle_debug_label(const ObjHeader &header);
 
 } // namespace amber::runtime
