@@ -373,6 +373,27 @@ Slice record, 2026-06-26:
   `build/native_tests`, `build/frozen_image_tests`, and
   `build/amber_ext_tests`.
 
+Slice record, 2026-06-26:
+
+- Started the private `runtime/vm_internal.h` split by moving interpreter-only
+  state declarations out of `runtime/vm.cpp`: prepared pattern state, lazy
+  sequence state, quickened opcode/instruction caches, `PendingThrow`, frame
+  register maps, `Frame`, method/class runtime tables, and `RuntimeState`.
+- Left the `Vm` class body and implementations in `runtime/vm.cpp`; this slice
+  only establishes the private internal header and avoids converting the large
+  inline `Vm` method body set in one risky step.
+- Verified include/compile smoke: standalone `runtime/vm_internal.h` compile
+  and standalone `runtime/vm.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests build/stdlib_task_tests build/native_tests
+  build/amber_ext_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`,
+  `build/native_tests`, and `build/amber_ext_tests`. A sandboxed
+  `build/stdlib_task_tests` attempt failed first at `cooperative socket read`,
+  matching the known loopback sandbox limitation; the elevated retry could not
+  be run in this session because the approval request was rejected by the
+  automatic reviewer.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
