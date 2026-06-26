@@ -430,6 +430,19 @@ Slice record, 2026-06-26:
   `build/stdlib_time_tests`, `build/stdlib_uuid_tests`,
   `build/stdlib_argparser_tests`, and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-26:
+
+- Moved the low-coupling `MapEntry` constructors from `runtime/vm.cpp` into
+  `runtime/objects.cpp`, beside the `runtime/objects.h` declarations.
+- Added `runtime/objects.cpp` to `RUNTIME_SRCS` and `FORMAT_FILES`.
+- Verified compile smoke: standalone `runtime/objects.cpp` compile, standalone
+  tagged `runtime/objects.cpp` compile, and standalone `runtime/vm.cpp`
+  compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_collections_tests build/module_loader_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
+  and `build/module_loader_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 

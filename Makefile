@@ -111,7 +111,7 @@ IO_SRCS := runtime/io.cpp runtime/reactor.cpp
 DIGEST_SRCS := runtime/digest.cpp
 HTTP_SRCS := runtime/http_codec.cpp runtime/net_http.cpp runtime/net_http_transport.cpp
 STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_math.cpp runtime/stdlib_json.cpp runtime/stdlib_codecs.cpp runtime/stdlib_digest.cpp runtime/stdlib_secure_random.cpp runtime/stdlib_argparser.cpp runtime/stdlib_uuid.cpp runtime/stdlib_time.cpp runtime/stdlib_url.cpp
-RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp runtime/watch.cpp runtime/value.cpp $(IO_SRCS) $(DIGEST_SRCS) $(HTTP_SRCS) runtime/vm.cpp $(STDLIB_SRCS) runtime/amber_ext.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
+RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp runtime/watch.cpp runtime/value.cpp runtime/objects.cpp $(IO_SRCS) $(DIGEST_SRCS) $(HTTP_SRCS) runtime/vm.cpp $(STDLIB_SRCS) runtime/amber_ext.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
 FRONTEND_SRCS := $(LEXER_SRCS) $(AST_SRCS) $(PARSER_SRCS) $(PATTERN_SRCS) $(BINDER_SRCS) $(CHECKER_SRCS) $(HIR_SRCS)
@@ -217,6 +217,8 @@ FORMAT_FILES := \
 	runtime/text.cpp \
 	runtime/value.cpp \
 	runtime/value.h \
+	runtime/objects.cpp \
+	runtime/objects.h \
 	runtime/frozen_image.cpp \
 	runtime/frozen_image.h \
 	runtime/vm.cpp \
