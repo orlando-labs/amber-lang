@@ -394,6 +394,21 @@ Slice record, 2026-06-26:
   be run in this session because the approval request was rejected by the
   automatic reviewer.
 
+Slice record, 2026-06-26:
+
+- Moved watch implementation island from `runtime/vm.cpp` into
+  `runtime/watch.cpp`: `RuntimeWatchCell`, `RuntimeWatchObjectState`, and
+  `RuntimeWatchHandle` implementations now live beside `runtime/watch.h`.
+- Kept VM-local helpers such as `watch_cell_from_value` in `runtime/vm.cpp`
+  because they are tied to value unwrapping and dependency recording.
+- Added `runtime/watch.cpp` to `RUNTIME_SRCS`.
+- Verified compile smoke: standalone `runtime/watch.cpp` compile and
+  standalone `runtime/vm.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests`.
+- Verified focused binaries: `build/vm_tests` and
+  `build/module_loader_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
