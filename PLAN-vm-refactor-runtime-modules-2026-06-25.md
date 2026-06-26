@@ -294,6 +294,23 @@ Slice record, 2026-06-26:
   `make -B build/vm_tests build/module_loader_tests`.
 - Verified focused binaries: `build/vm_tests` and `build/module_loader_tests`.
 
+Slice record, 2026-06-26:
+
+- Split heap object layout declarations from `runtime/vm.h` into
+  `runtime/objects.h`: object ownership/lifetime metadata, `ObjHeader`,
+  `ShapeDescriptor`, and `Instance/List/Tuple/Set/Map/Closure` payload structs.
+- Left heap allocation, pinning, GC stats/results, and `RuntimeHeap` APIs in
+  `runtime/vm.h`; those remain for a later `runtime/heap.h` slice.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_collections_tests build/stdlib_json_tests
+  build/stdlib_task_tests build/native_tests build/amber_ext_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
+  `build/stdlib_json_tests`, elevated `build/stdlib_task_tests` for loopback
+  socket coverage, `build/native_tests`, and `build/amber_ext_tests`.
+- Verified tagged representation smoke in a separate build directory:
+  `make -B BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`
+  and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
