@@ -477,6 +477,17 @@ Slice record, 2026-06-26:
   `build/native_tests`, `build/module_loader_tests`, and
   `build-tagged/vm_tests`.
 
+Slice record, 2026-06-26:
+
+- Moved `RuntimePinScope` method bodies from `runtime/vm.cpp` into
+  `runtime/heap.cpp`, beside the low-coupling default heap facade.
+- Verified compile smoke: standalone `runtime/heap.cpp` compile, standalone
+  tagged `runtime/heap.cpp` compile, and standalone `runtime/vm.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/native_tests build/module_loader_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/native_tests`, and
+  `build/module_loader_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 

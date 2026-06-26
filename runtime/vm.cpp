@@ -6355,52 +6355,6 @@ template IntrusivePtr<TupleValue> make_intrusive<TupleValue>();
 template IntrusivePtr<SetValue> make_intrusive<SetValue>();
 template IntrusivePtr<MapValue> make_intrusive<MapValue>();
 
-RuntimePinScope::RuntimePinScope(RuntimeHeap &heap, const Value &value,
-                                 RuntimePinViewKind view_kind,
-                                 RuntimePinPermission permissions)
-    : heap_(&heap), result_(heap.pin(value, view_kind, permissions)) {}
-
-RuntimePinScope::RuntimePinScope(RuntimePinScope &&other) noexcept
-    : heap_(other.heap_), result_(other.result_) {
-  other.heap_ = nullptr;
-  other.result_.token.active = false;
-}
-
-RuntimePinScope &RuntimePinScope::operator=(RuntimePinScope &&other) noexcept {
-  if (this == &other) {
-    return *this;
-  }
-  (void)unpin();
-  heap_ = other.heap_;
-  result_ = other.result_;
-  other.heap_ = nullptr;
-  other.result_.token.active = false;
-  return *this;
-}
-
-RuntimePinScope::~RuntimePinScope() { (void)unpin(); }
-
-bool RuntimePinScope::active() const {
-  return heap_ != nullptr && result_.ok && result_.token.active;
-}
-
-const RuntimePinResult &RuntimePinScope::result() const { return result_; }
-
-const RuntimePinToken &RuntimePinScope::token() const { return result_.token; }
-
-RuntimeUnpinResult RuntimePinScope::unpin() {
-  if (heap_ == nullptr || !result_.token.active) {
-    RuntimeUnpinResult out;
-    out.stale = true;
-    return out;
-  }
-  RuntimeUnpinResult out = heap_->unpin(&result_.token);
-  if (out.unpinned || out.stale) {
-    heap_ = nullptr;
-  }
-  return out;
-}
-
 Value make_result_value(bool is_ok, Value payload) {
   auto result = std::make_shared<ResultValue>();
   result->is_ok = is_ok;
