@@ -1,6 +1,7 @@
 #pragma once
 
-#include "runtime/vm.h"
+#include "runtime/concurrency.h"
+#include "runtime/text.h"
 
 #include <atomic>
 #include <chrono>

@@ -329,6 +329,27 @@ Slice record, 2026-06-26:
   `make -B BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`
   and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-26:
+
+- Split concurrency/task/sync public declarations from `runtime/vm.h` into
+  `runtime/concurrency.h`: IO wait observation records, scheduler/task handle
+  APIs, awaitable/move-slot/channel/select, mutex/atomic/barrier, flow, threaded
+  collections, shareability helper, and cooperative park observability hook.
+- Left implementations in `runtime/vm.cpp`; this remains a declaration split
+  and does not move scheduler/channel/flow behavior.
+- Updated `runtime/context.h` to include `runtime/concurrency.h` and
+  `runtime/text.h` directly instead of depending on the full `runtime/vm.h`
+  umbrella.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_task_tests build/native_tests build/amber_ext_tests`.
+- Verified focused binaries: `build/vm_tests`, elevated
+  `build/stdlib_task_tests` for loopback socket coverage, `build/native_tests`,
+  and `build/amber_ext_tests`. A sandboxed `build/stdlib_task_tests` attempt
+  failed first at `cooperative socket read`, matching the known loopback
+  sandbox limitation.
+- Verified include smoke: standalone `runtime/concurrency.h` compile and
+  `runtime/context.cpp` compile.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
