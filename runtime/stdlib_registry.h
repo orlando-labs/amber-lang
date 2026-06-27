@@ -567,6 +567,9 @@ void register_net_runtime_module(RuntimeModuleRegistry &modules,
 void register_net_http_runtime_module(RuntimeModuleRegistry &modules,
                                       RuntimeDispatchRegistry &dispatch,
                                       RuntimeTypeRegistry &types);
+void register_task_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types);
 void register_math(NativeRegistry &registry);
 void register_math_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,

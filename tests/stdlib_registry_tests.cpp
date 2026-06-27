@@ -286,10 +286,8 @@ void test_module_registry_imports_native_paths(const NativeRegistry &registry) {
 
   const std::optional<RuntimeBindingRef> sync_channel =
       modules.binding_for_path("sync.Channel");
-  expect(sync_channel.has_value() &&
-             sync_channel->kind == RuntimeBindingKind::NativeType &&
-             sync_channel->native_type == RuntimeNativeTypeKind::Channel,
-         "module registry resolves sync.Channel alias");
+  expect(!sync_channel.has_value(),
+         "legacy module registry no longer owns sync.Channel alias");
 
   expect(!modules.binding_for_path("NotALibrary").has_value(),
          "module registry reports unknown paths");
@@ -398,6 +396,19 @@ void test_builtin_runtime_module_descriptors() {
               RuntimeNativeTypeKind::NetHttpJsonPostJson);
   expect_path("net.http.form", RuntimeNativeTypeKind::NetHttpForm);
   expect_path("net.http.form.FormBody", RuntimeNativeTypeKind::NetHttpFormBody);
+  expect_path("Flow", RuntimeNativeTypeKind::Flow);
+  expect_path("task.flow.Flow", RuntimeNativeTypeKind::Flow);
+  expect_path("Channel", RuntimeNativeTypeKind::Channel);
+  expect_path("sync.Channel", RuntimeNativeTypeKind::Channel);
+  expect_path("Mutex", RuntimeNativeTypeKind::Mutex);
+  expect_path("sync.Mutex", RuntimeNativeTypeKind::Mutex);
+  expect_path("Atomic", RuntimeNativeTypeKind::Atomic);
+  expect_path("sync.Atomic", RuntimeNativeTypeKind::Atomic);
+  expect_path("Barrier", RuntimeNativeTypeKind::Barrier);
+  expect_path("sync.Barrier", RuntimeNativeTypeKind::Barrier);
+  expect_path("ThreadedCollection", RuntimeNativeTypeKind::ThreadedCollection);
+  expect_path("task.flow.ThreadedCollection",
+              RuntimeNativeTypeKind::ThreadedCollection);
   expect_path("Json", RuntimeNativeTypeKind::Json);
   expect_path("Base64Url", RuntimeNativeTypeKind::Base64Url);
   expect_path("Digest", RuntimeNativeTypeKind::Digest);

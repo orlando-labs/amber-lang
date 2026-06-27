@@ -940,6 +940,27 @@ Slice record, 2026-06-27:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-27:
+
+- Added descriptor-only `runtime/stdlib_task.cpp` for task/sync native type
+  module metadata.
+- Moved task/sync path metadata for `Flow`, `task.flow.Flow`, `Channel`,
+  `sync.Channel`, `Mutex`, `sync.Mutex`, `Atomic`, `sync.Atomic`, `Barrier`,
+  `sync.Barrier`, `ThreadedCollection`, and `task.flow.ThreadedCollection`
+  out of `register_legacy_native_type_paths` and into the task/sync
+  descriptor.
+- Added `runtime/stdlib_task.cpp` to `STDLIB_SRCS` and `FORMAT_FILES`.
+- Large task/sync behavior remains in `runtime/concurrency.cpp` and the VM
+  selector/type-call paths for later dispatch descriptor slices.
+- Verified compile smoke: standalone `runtime/stdlib_task.cpp`, standalone
+  `runtime/stdlib_registry.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/stdlib_task_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and elevated `build/stdlib_task_tests`.
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

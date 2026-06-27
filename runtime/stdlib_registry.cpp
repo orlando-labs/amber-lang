@@ -191,6 +191,7 @@ void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
   register_fs_runtime_module(modules, dispatch, types);
   register_net_runtime_module(modules, dispatch, types);
   register_net_http_runtime_module(modules, dispatch, types);
+  register_task_runtime_module(modules, dispatch, types);
   register_math_runtime_module(modules, dispatch, types);
   register_json_runtime_module(modules, dispatch, types);
   register_codecs_runtime_module(modules, dispatch, types);
@@ -237,25 +238,6 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
   registry.register_native_type_path("Range", RuntimeNativeTypeKind::Range);
   registry.register_native_type_path("Null", RuntimeNativeTypeKind::Null);
   registry.register_native_type_path("Object", RuntimeNativeTypeKind::Object);
-  registry.register_native_type_path("Flow", RuntimeNativeTypeKind::Flow);
-  registry.register_native_type_path("task.flow.Flow",
-                                     RuntimeNativeTypeKind::Flow);
-  registry.register_native_type_path("Channel", RuntimeNativeTypeKind::Channel);
-  registry.register_native_type_path("sync.Channel",
-                                     RuntimeNativeTypeKind::Channel);
-  registry.register_native_type_path("Mutex", RuntimeNativeTypeKind::Mutex);
-  registry.register_native_type_path("sync.Mutex",
-                                     RuntimeNativeTypeKind::Mutex);
-  registry.register_native_type_path("Atomic", RuntimeNativeTypeKind::Atomic);
-  registry.register_native_type_path("sync.Atomic",
-                                     RuntimeNativeTypeKind::Atomic);
-  registry.register_native_type_path("Barrier", RuntimeNativeTypeKind::Barrier);
-  registry.register_native_type_path("sync.Barrier",
-                                     RuntimeNativeTypeKind::Barrier);
-  registry.register_native_type_path("ThreadedCollection",
-                                     RuntimeNativeTypeKind::ThreadedCollection);
-  registry.register_native_type_path("task.flow.ThreadedCollection",
-                                     RuntimeNativeTypeKind::ThreadedCollection);
 }
 
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry) {
