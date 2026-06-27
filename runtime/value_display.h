@@ -24,6 +24,13 @@ std::string runtime_uuid_to_string(const RuntimeUuidValue &value);
 std::string runtime_time_to_iso8601(const RuntimeTimeValue &value);
 std::string runtime_time_period_to_string(const RuntimeTimePeriodValue &value);
 
+std::string runtime_stringify_value(
+    const Value &value, RuntimeStringifyMode mode,
+    const bytecode::BcModule *module = nullptr,
+    const std::vector<std::string> *runtime_strings = nullptr,
+    const std::vector<std::string> *runtime_symbols = nullptr,
+    RuntimePrettyPrintOptions options = {});
+
 std::string value_to_debug_string(
     const Value &value, const bytecode::BcModule *module = nullptr,
     const std::vector<std::string> *runtime_strings = nullptr,
