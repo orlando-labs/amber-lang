@@ -375,6 +375,9 @@ void test_builtin_runtime_module_descriptors() {
   expect_path("Bytes", RuntimeNativeTypeKind::Bytes);
   expect_path("io.ByteBuffer", RuntimeNativeTypeKind::ByteBuffer);
   expect_path("io.Pipe", RuntimeNativeTypeKind::IoPipe);
+  expect_path("fs", RuntimeNativeTypeKind::Fs);
+  expect_path("fs.Path", RuntimeNativeTypeKind::FsPath);
+  expect_path("fs.File", RuntimeNativeTypeKind::FsFile);
   expect_path("Json", RuntimeNativeTypeKind::Json);
   expect_path("Base64Url", RuntimeNativeTypeKind::Base64Url);
   expect_path("Digest", RuntimeNativeTypeKind::Digest);
@@ -397,6 +400,7 @@ void test_builtin_runtime_module_descriptors() {
   expect_type_call(RuntimeNativeTypeKind::ByteBuffer, "new",
                    "io.ByteBuffer.new");
   expect_type_call(RuntimeNativeTypeKind::IoPipe, "__call__", "io.Pipe()");
+  expect_type_call(RuntimeNativeTypeKind::FsPath, "new", "fs.Path.new");
   expect_type_call(RuntimeNativeTypeKind::ArgParser, "new", "ArgParser.new");
 
   const std::optional<NativeStdlibHandler> math_handler =
@@ -426,10 +430,13 @@ void test_type_call_registry() {
   expect(!registry.native_type_call(RuntimeNativeTypeKind::IoPipe).has_value(),
          "IoPipe type call moved out of the legacy registry");
 
-  const std::optional<RuntimeTypeCallDescriptor> fs_path =
-      registry.native_type_call(RuntimeNativeTypeKind::FsPath);
-  expect(fs_path.has_value() && fs_path->selector == "new",
-         "FsPath type call still routes through legacy new");
+  expect(!registry.native_type_call(RuntimeNativeTypeKind::FsPath).has_value(),
+         "FsPath type call moved out of the legacy registry");
+
+  const std::optional<RuntimeTypeCallDescriptor> net_endpoint =
+      registry.native_type_call(RuntimeNativeTypeKind::NetEndpoint);
+  expect(net_endpoint.has_value() && net_endpoint->selector == "new",
+         "NetEndpoint type call still routes through legacy new");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::Math).has_value(),
          "Math is not directly callable as a constructor");

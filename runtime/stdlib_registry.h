@@ -558,6 +558,9 @@ void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
 void register_io_runtime_module(RuntimeModuleRegistry &modules,
                                 RuntimeDispatchRegistry &dispatch,
                                 RuntimeTypeRegistry &types);
+void register_fs_runtime_module(RuntimeModuleRegistry &modules,
+                                RuntimeDispatchRegistry &dispatch,
+                                RuntimeTypeRegistry &types);
 void register_math(NativeRegistry &registry);
 void register_math_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,

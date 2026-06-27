@@ -877,6 +877,26 @@ Slice record, 2026-06-27:
 - Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
   and `build/stdlib_collections_tests`.
 
+Slice record, 2026-06-27:
+
+- Added descriptor-only `runtime/stdlib_fs.cpp` for filesystem native type
+  module metadata.
+- Moved filesystem path metadata for `fs`, `fs.Path`, and `fs.File` out of
+  `register_legacy_native_type_paths` and into the filesystem descriptor.
+- Moved constructor metadata for `fs.Path.new` out of
+  `register_legacy_native_type_calls` and into the filesystem descriptor. Large
+  VM filesystem selector bodies remain in `runtime/vm.cpp` for a later
+  selector-dispatch descriptor slice.
+- Added `runtime/stdlib_fs.cpp` to `STDLIB_SRCS` and `FORMAT_FILES`.
+- Verified compile smoke: standalone `runtime/stdlib_fs.cpp`, standalone
+  `runtime/stdlib_registry.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests` and
+  `build/vm_tests`.
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.
