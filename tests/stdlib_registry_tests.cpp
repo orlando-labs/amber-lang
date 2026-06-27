@@ -378,6 +378,10 @@ void test_builtin_runtime_module_descriptors() {
   expect_path("fs", RuntimeNativeTypeKind::Fs);
   expect_path("fs.Path", RuntimeNativeTypeKind::FsPath);
   expect_path("fs.File", RuntimeNativeTypeKind::FsFile);
+  expect_path("net", RuntimeNativeTypeKind::Net);
+  expect_path("net.Endpoint", RuntimeNativeTypeKind::NetEndpoint);
+  expect_path("net.tcp", RuntimeNativeTypeKind::NetTcp);
+  expect_path("net.udp", RuntimeNativeTypeKind::NetUdp);
   expect_path("Json", RuntimeNativeTypeKind::Json);
   expect_path("Base64Url", RuntimeNativeTypeKind::Base64Url);
   expect_path("Digest", RuntimeNativeTypeKind::Digest);
@@ -401,6 +405,8 @@ void test_builtin_runtime_module_descriptors() {
                    "io.ByteBuffer.new");
   expect_type_call(RuntimeNativeTypeKind::IoPipe, "__call__", "io.Pipe()");
   expect_type_call(RuntimeNativeTypeKind::FsPath, "new", "fs.Path.new");
+  expect_type_call(RuntimeNativeTypeKind::NetEndpoint, "new",
+                   "net.Endpoint.new");
   expect_type_call(RuntimeNativeTypeKind::ArgParser, "new", "ArgParser.new");
 
   const std::optional<NativeStdlibHandler> math_handler =
@@ -433,10 +439,14 @@ void test_type_call_registry() {
   expect(!registry.native_type_call(RuntimeNativeTypeKind::FsPath).has_value(),
          "FsPath type call moved out of the legacy registry");
 
-  const std::optional<RuntimeTypeCallDescriptor> net_endpoint =
-      registry.native_type_call(RuntimeNativeTypeKind::NetEndpoint);
-  expect(net_endpoint.has_value() && net_endpoint->selector == "new",
-         "NetEndpoint type call still routes through legacy new");
+  expect(!registry.native_type_call(RuntimeNativeTypeKind::NetEndpoint)
+              .has_value(),
+         "NetEndpoint type call moved out of the legacy registry");
+
+  const std::optional<RuntimeTypeCallDescriptor> net_http_client =
+      registry.native_type_call(RuntimeNativeTypeKind::NetHttpClient);
+  expect(net_http_client.has_value() && net_http_client->selector == "new",
+         "NetHttpClient type call still routes through legacy new");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::Math).has_value(),
          "Math is not directly callable as a constructor");

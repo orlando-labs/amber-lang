@@ -189,6 +189,7 @@ void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
                                       RuntimeTypeRegistry &types) {
   register_io_runtime_module(modules, dispatch, types);
   register_fs_runtime_module(modules, dispatch, types);
+  register_net_runtime_module(modules, dispatch, types);
   register_math_runtime_module(modules, dispatch, types);
   register_json_runtime_module(modules, dispatch, types);
   register_codecs_runtime_module(modules, dispatch, types);
@@ -217,11 +218,6 @@ void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {
 
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
   registry.register_native_type_path("Kernel", RuntimeNativeTypeKind::Kernel);
-  registry.register_native_type_path("net", RuntimeNativeTypeKind::Net);
-  registry.register_native_type_path("net.Endpoint",
-                                     RuntimeNativeTypeKind::NetEndpoint);
-  registry.register_native_type_path("net.tcp", RuntimeNativeTypeKind::NetTcp);
-  registry.register_native_type_path("net.udp", RuntimeNativeTypeKind::NetUdp);
   registry.register_native_type_path("net.http",
                                      RuntimeNativeTypeKind::NetHttp);
   registry.register_native_type_path("net.http.Client",
@@ -288,7 +284,6 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
 }
 
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry) {
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetEndpoint, "new");
   registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpClient,
                                      "new");
   registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpRequest,

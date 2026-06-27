@@ -897,6 +897,27 @@ Slice record, 2026-06-27:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-27:
+
+- Added descriptor-only `runtime/stdlib_net.cpp` for core network native type
+  module metadata.
+- Moved network path metadata for `net`, `net.Endpoint`, `net.tcp`, and
+  `net.udp` out of `register_legacy_native_type_paths` and into the network
+  descriptor.
+- Moved constructor metadata for `net.Endpoint.new` out of
+  `register_legacy_native_type_calls` and into the network descriptor. The
+  `net.http*` metadata remains legacy for a dedicated net.http descriptor
+  slice.
+- Added `runtime/stdlib_net.cpp` to `STDLIB_SRCS` and `FORMAT_FILES`.
+- Verified compile smoke: standalone `runtime/stdlib_net.cpp`, standalone
+  `runtime/stdlib_registry.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and elevated `build/vm_net_http_tests` (`566 checks`).
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.
