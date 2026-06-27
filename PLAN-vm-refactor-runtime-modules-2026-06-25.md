@@ -717,6 +717,25 @@ Slice record, 2026-06-27:
   failed first at `cooperative socket read`, matching the known loopback
   sandbox limitation.
 
+Slice record, 2026-06-27:
+
+- Started `runtime/world.cpp` with the low-coupling `RuntimeIoProvider` default
+  method bodies from `runtime/vm.cpp`, beside the `runtime/world.h` declaration
+  split.
+- Kept `RuntimeWorld` and `execute_code` implementations in `runtime/vm.cpp`
+  for now because `RuntimeWorld::execute` still constructs the private `Vm`
+  implementation directly. The full world move needs a VM-internal seam first.
+- Added `runtime/world.cpp` to `RUNTIME_SRCS` and `FORMAT_FILES`.
+- Verified compile smoke: standalone `runtime/world.cpp` and standalone
+  `runtime/vm.cpp` compile after formatting.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests build/frozen_image_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`,
+  and `build/frozen_image_tests`.
+- Tagged `VALUE_REPR=tagged` was not rerun for this slice because it only moves
+  `RuntimeIoProvider` default methods and does not touch `Value` layout,
+  object layout, or representation-specific code.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
