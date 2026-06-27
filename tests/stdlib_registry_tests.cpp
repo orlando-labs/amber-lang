@@ -344,7 +344,8 @@ void test_dispatch_registry_imports_native_handlers(
 void test_builtin_runtime_module_descriptors() {
   RuntimeModuleRegistry modules;
   RuntimeDispatchRegistry dispatch;
-  amber::runtime::register_builtin_runtime_modules(modules, dispatch);
+  RuntimeTypeRegistry types;
+  amber::runtime::register_builtin_runtime_modules(modules, dispatch, types);
 
   const auto expect_path = [&](const std::string &path,
                                RuntimeNativeTypeKind kind) {
@@ -359,6 +360,14 @@ void test_builtin_runtime_module_descriptors() {
                                   const std::string &name) {
     expect(dispatch.native_handler(kind).has_value(),
            "builtin descriptor registers " + name + " dispatch handler");
+  };
+  const auto expect_type_call = [&](RuntimeNativeTypeKind kind,
+                                    const std::string &selector,
+                                    const std::string &name) {
+    const std::optional<RuntimeTypeCallDescriptor> descriptor =
+        types.native_type_call(kind);
+    expect(descriptor.has_value() && descriptor->selector == selector,
+           "builtin descriptor registers " + name + " type call");
   };
 
   expect_path("Math", RuntimeNativeTypeKind::Math);
@@ -380,10 +389,14 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::Uuid, "Uuid");
   expect_handler(RuntimeNativeTypeKind::Time, "Time");
   expect_handler(RuntimeNativeTypeKind::Url, "Url");
+  expect_type_call(RuntimeNativeTypeKind::ArgParser, "new", "ArgParser.new");
+  expect(!types.native_type_call(RuntimeNativeTypeKind::Bytes).has_value(),
+         "builtin descriptors do not register legacy Bytes.new type call yet");
 
   const std::optional<NativeStdlibHandler> math_handler =
       dispatch.native_handler(RuntimeNativeTypeKind::Math);
-  expect(math_handler.has_value(), "Math descriptor registers dispatch handler");
+  expect(math_handler.has_value(),
+         "Math descriptor registers dispatch handler");
 
   MockHost host;
   Value out = Value::null();
@@ -401,8 +414,8 @@ void test_type_call_registry() {
 
   const std::optional<RuntimeTypeCallDescriptor> argparser =
       registry.native_type_call(RuntimeNativeTypeKind::ArgParser);
-  expect(argparser.has_value() && argparser->selector == "new",
-         "ArgParser type call routes through new");
+  expect(!argparser.has_value(),
+         "ArgParser type call moved out of the legacy registry");
 
   const std::optional<RuntimeTypeCallDescriptor> pipe =
       registry.native_type_call(RuntimeNativeTypeKind::IoPipe);
@@ -517,8 +530,7 @@ void test_runtime_error_registry() {
   expect(json_error.has_value() && json_parse.has_value() &&
              errors.error_is_a(*json_parse, *json_error),
          "existing native error family keeps inherited matching");
-  expect(type_error.has_value() &&
-             errors.error_is_a(*type_error, *exception),
+  expect(type_error.has_value() && errors.error_is_a(*type_error, *exception),
          "existing native errors inherit Exception");
 }
 

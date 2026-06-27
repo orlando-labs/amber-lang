@@ -64,7 +64,8 @@ SendStatus digest_dispatch(NativeStdlibCall &call) {
 
 RuntimeNativeModuleDescriptor digest_module_descriptor() {
   return {{{"Digest", RuntimeNativeTypeKind::Digest}},
-          {{RuntimeNativeTypeKind::Digest, &digest_dispatch}}};
+          {{RuntimeNativeTypeKind::Digest, &digest_dispatch}},
+          {}};
 }
 
 } // namespace
@@ -74,10 +75,12 @@ void register_digest(NativeRegistry &registry) {
 }
 
 void register_digest_runtime_module(RuntimeModuleRegistry &modules,
-                                    RuntimeDispatchRegistry &dispatch) {
+                                    RuntimeDispatchRegistry &dispatch,
+                                    RuntimeTypeRegistry &types) {
   const RuntimeNativeModuleDescriptor descriptor = digest_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
+  register_runtime_type_descriptor(types, descriptor);
 }
 
 } // namespace amber::runtime

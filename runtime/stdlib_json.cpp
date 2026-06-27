@@ -12,8 +12,8 @@
 
 #include "runtime/stdlib_registry.h"
 
-#include <cerrno>
 #include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -460,8 +460,8 @@ struct PathWalker {
       }
       if (step.index >= 0 &&
           static_cast<std::uint64_t>(step.index) < items.size()) {
-        return walk(items[static_cast<std::size_t>(step.index)],
-                    step_index + 1, stopped);
+        return walk(items[static_cast<std::size_t>(step.index)], step_index + 1,
+                    stopped);
       }
       return true;
     }
@@ -1260,13 +1260,13 @@ SendStatus json_path(NativeStdlibCall &call) {
   }
   Value first = Value::null();
   bool found = false;
-  const bool ok = walk_path(
-      call, call.args[0], steps, [&](const Value &value, bool *stopped) {
-        first = value;
-        found = true;
-        *stopped = true;
-        return true;
-      });
+  const bool ok = walk_path(call, call.args[0], steps,
+                            [&](const Value &value, bool *stopped) {
+                              first = value;
+                              found = true;
+                              *stopped = true;
+                              return true;
+                            });
   if (!ok) {
     return SendStatus::Faulted;
   }
@@ -1287,12 +1287,12 @@ SendStatus json_paths(NativeStdlibCall &call) {
       return SendStatus::Faulted;
     }
     std::vector<Value> matches;
-    const bool ok = walk_path(
-        call, call.args[0], steps, [&](const Value &value, bool *stopped) {
-          (void)stopped;
-          matches.push_back(value);
-          return true;
-        });
+    const bool ok = walk_path(call, call.args[0], steps,
+                              [&](const Value &value, bool *stopped) {
+                                (void)stopped;
+                                matches.push_back(value);
+                                return true;
+                              });
     if (!ok) {
       return SendStatus::Faulted;
     }
@@ -1307,25 +1307,25 @@ SendStatus json_paths(NativeStdlibCall &call) {
     return SendStatus::Faulted;
   }
   Value accumulator = call.args[2];
-  const bool ok = walk_path(
-      call, call.args[0], steps, [&](const Value &value, bool *stopped) {
-        const StdlibBlockResult block =
-            call.call_path_block(value, accumulator);
-        if (block.status == StdlibBlockStatus::Returned) {
-          if (!block.value.is_null()) {
-            accumulator = block.value;
-          }
-          return true;
-        }
-        if (block.status == StdlibBlockStatus::Stopped) {
-          if (block.stop_value_present) {
-            accumulator = block.value;
-          }
-          *stopped = true;
-          return true;
-        }
-        return false;
-      });
+  const bool ok = walk_path(call, call.args[0], steps,
+                            [&](const Value &value, bool *stopped) {
+                              const StdlibBlockResult block =
+                                  call.call_path_block(value, accumulator);
+                              if (block.status == StdlibBlockStatus::Returned) {
+                                if (!block.value.is_null()) {
+                                  accumulator = block.value;
+                                }
+                                return true;
+                              }
+                              if (block.status == StdlibBlockStatus::Stopped) {
+                                if (block.stop_value_present) {
+                                  accumulator = block.value;
+                                }
+                                *stopped = true;
+                                return true;
+                              }
+                              return false;
+                            });
   if (!ok) {
     return SendStatus::Faulted;
   }
@@ -1571,7 +1571,8 @@ SendStatus json_dispatch(NativeStdlibCall &call) {
 
 RuntimeNativeModuleDescriptor json_module_descriptor() {
   return {{{"Json", RuntimeNativeTypeKind::Json}},
-          {{RuntimeNativeTypeKind::Json, &json_dispatch}}};
+          {{RuntimeNativeTypeKind::Json, &json_dispatch}},
+          {}};
 }
 
 } // namespace
@@ -1581,10 +1582,12 @@ void register_json(NativeRegistry &registry) {
 }
 
 void register_json_runtime_module(RuntimeModuleRegistry &modules,
-                                  RuntimeDispatchRegistry &dispatch) {
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types) {
   const RuntimeNativeModuleDescriptor descriptor = json_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
+  register_runtime_type_descriptor(types, descriptor);
 }
 
 } // namespace amber::runtime

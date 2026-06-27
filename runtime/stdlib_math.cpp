@@ -171,7 +171,8 @@ SendStatus math_dispatch(NativeStdlibCall &call) {
 
 RuntimeNativeModuleDescriptor math_module_descriptor() {
   return {{{"Math", RuntimeNativeTypeKind::Math}},
-          {{RuntimeNativeTypeKind::Math, &math_dispatch}}};
+          {{RuntimeNativeTypeKind::Math, &math_dispatch}},
+          {}};
 }
 
 } // namespace
@@ -181,10 +182,12 @@ void register_math(NativeRegistry &registry) {
 }
 
 void register_math_runtime_module(RuntimeModuleRegistry &modules,
-                                  RuntimeDispatchRegistry &dispatch) {
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types) {
   const RuntimeNativeModuleDescriptor descriptor = math_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
+  register_runtime_type_descriptor(types, descriptor);
 }
 
 } // namespace amber::runtime

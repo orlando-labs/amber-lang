@@ -9,8 +9,7 @@ void RuntimeModuleRegistry::register_native_type_path(
 
 void RuntimeModuleRegistry::register_native_function_path(
     std::string path, RuntimeNativeFunctionKind kind) {
-  bindings_[std::move(path)] =
-      RuntimeBindingRef::native_function_binding(kind);
+  bindings_[std::move(path)] = RuntimeBindingRef::native_function_binding(kind);
 }
 
 void RuntimeModuleRegistry::register_task_module_path(std::string path) {
@@ -37,8 +36,8 @@ void RuntimeModuleRegistry::import_native_paths(
   }
 }
 
-void RuntimeTypeRegistry::register_native_type_call(
-    RuntimeNativeTypeKind kind, std::string selector) {
+void RuntimeTypeRegistry::register_native_type_call(RuntimeNativeTypeKind kind,
+                                                    std::string selector) {
   RuntimeTypeCallDescriptor descriptor;
   descriptor.kind = kind;
   descriptor.selector = std::move(selector);
@@ -84,8 +83,8 @@ const char *RuntimeErrorRegistry::error_name(std::uint16_t error_id) const {
   return runtime_error_name(error_id);
 }
 
-bool RuntimeErrorRegistry::error_is_a(
-    std::uint16_t error_id, std::uint16_t ancestor_error_id) const {
+bool RuntimeErrorRegistry::error_is_a(std::uint16_t error_id,
+                                      std::uint16_t ancestor_error_id) const {
   return runtime_error_is_a(error_id, ancestor_error_id);
 }
 
@@ -162,6 +161,15 @@ void register_runtime_dispatch_descriptor(
   }
 }
 
+void register_runtime_type_descriptor(
+    RuntimeTypeRegistry &types,
+    const RuntimeNativeModuleDescriptor &descriptor) {
+  for (const RuntimeNativeModuleTypeCallDescriptor &type_call :
+       descriptor.type_calls) {
+    types.register_native_type_call(type_call.kind, type_call.selector);
+  }
+}
+
 // The single list of builtin libraries. New libraries add one line here and
 // ship as `runtime/stdlib_<name>.{cpp}` — no further edit to `vm.cpp`.
 void register_builtin_stdlib(NativeRegistry &registry) {
@@ -177,16 +185,17 @@ void register_builtin_stdlib(NativeRegistry &registry) {
 }
 
 void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
-                                      RuntimeDispatchRegistry &dispatch) {
-  register_math_runtime_module(modules, dispatch);
-  register_json_runtime_module(modules, dispatch);
-  register_codecs_runtime_module(modules, dispatch);
-  register_digest_runtime_module(modules, dispatch);
-  register_secure_random_runtime_module(modules, dispatch);
-  register_argparser_runtime_module(modules, dispatch);
-  register_uuid_runtime_module(modules, dispatch);
-  register_time_runtime_module(modules, dispatch);
-  register_url_runtime_module(modules, dispatch);
+                                      RuntimeDispatchRegistry &dispatch,
+                                      RuntimeTypeRegistry &types) {
+  register_math_runtime_module(modules, dispatch, types);
+  register_json_runtime_module(modules, dispatch, types);
+  register_codecs_runtime_module(modules, dispatch, types);
+  register_digest_runtime_module(modules, dispatch, types);
+  register_secure_random_runtime_module(modules, dispatch, types);
+  register_argparser_runtime_module(modules, dispatch, types);
+  register_uuid_runtime_module(modules, dispatch, types);
+  register_time_runtime_module(modules, dispatch, types);
+  register_url_runtime_module(modules, dispatch, types);
 }
 
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {
@@ -231,8 +240,8 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
                                      RuntimeNativeTypeKind::NetHttpClient);
   registry.register_native_type_path("net.http.Request",
                                      RuntimeNativeTypeKind::NetHttpRequest);
-  registry.register_native_type_path(
-      "net.http.RequestBody", RuntimeNativeTypeKind::NetHttpRequestBody);
+  registry.register_native_type_path("net.http.RequestBody",
+                                     RuntimeNativeTypeKind::NetHttpRequestBody);
   registry.register_native_type_path("net.http.Headers",
                                      RuntimeNativeTypeKind::NetHttpHeaders);
   registry.register_native_type_path("net.http.Server",
@@ -243,8 +252,8 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
       "net.http.ServerResponse", RuntimeNativeTypeKind::NetHttpServerResponse);
   registry.register_native_type_path("net.http.json",
                                      RuntimeNativeTypeKind::NetHttpJson);
-  registry.register_native_type_path(
-      "net.http.json.get_json", RuntimeNativeTypeKind::NetHttpJsonGetJson);
+  registry.register_native_type_path("net.http.json.get_json",
+                                     RuntimeNativeTypeKind::NetHttpJsonGetJson);
   registry.register_native_type_path(
       "net.http.json.post_json", RuntimeNativeTypeKind::NetHttpJsonPostJson);
   registry.register_native_type_path("net.http.form",
@@ -272,8 +281,7 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
   registry.register_native_type_path("Flow", RuntimeNativeTypeKind::Flow);
   registry.register_native_type_path("task.flow.Flow",
                                      RuntimeNativeTypeKind::Flow);
-  registry.register_native_type_path("Channel",
-                                     RuntimeNativeTypeKind::Channel);
+  registry.register_native_type_path("Channel", RuntimeNativeTypeKind::Channel);
   registry.register_native_type_path("sync.Channel",
                                      RuntimeNativeTypeKind::Channel);
   registry.register_native_type_path("Mutex", RuntimeNativeTypeKind::Mutex);
@@ -285,11 +293,10 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
   registry.register_native_type_path("Barrier", RuntimeNativeTypeKind::Barrier);
   registry.register_native_type_path("sync.Barrier",
                                      RuntimeNativeTypeKind::Barrier);
-  registry.register_native_type_path(
-      "ThreadedCollection", RuntimeNativeTypeKind::ThreadedCollection);
-  registry.register_native_type_path(
-      "task.flow.ThreadedCollection",
-      RuntimeNativeTypeKind::ThreadedCollection);
+  registry.register_native_type_path("ThreadedCollection",
+                                     RuntimeNativeTypeKind::ThreadedCollection);
+  registry.register_native_type_path("task.flow.ThreadedCollection",
+                                     RuntimeNativeTypeKind::ThreadedCollection);
 }
 
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry) {
@@ -310,13 +317,12 @@ void register_legacy_native_type_calls(RuntimeTypeRegistry &registry) {
                                      "new");
   registry.register_native_type_call(
       RuntimeNativeTypeKind::NetHttpServerResponse, "new");
-  registry.register_native_type_call(
-      RuntimeNativeTypeKind::NetHttpJsonGetJson, "__call__");
-  registry.register_native_type_call(
-      RuntimeNativeTypeKind::NetHttpJsonPostJson, "__call__");
+  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpJsonGetJson,
+                                     "__call__");
+  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpJsonPostJson,
+                                     "__call__");
   registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpFormBody,
                                      "__call__");
-  registry.register_native_type_call(RuntimeNativeTypeKind::ArgParser, "new");
 }
 
 } // namespace amber::runtime

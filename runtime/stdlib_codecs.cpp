@@ -324,11 +324,11 @@ SendStatus codec_decode(NativeStdlibCall &call, CodecKind kind) {
   if (!mode_keyword(call, &mode)) {
     return SendStatus::Faulted;
   }
-  const std::string context = kind == CodecKind::Hex
-                                  ? "Hex.decode"
-                                  : (kind == CodecKind::Base64Url
-                                         ? "Base64Url.decode"
-                                         : "Base64.decode");
+  const std::string context =
+      kind == CodecKind::Hex
+          ? "Hex.decode"
+          : (kind == CodecKind::Base64Url ? "Base64Url.decode"
+                                          : "Base64.decode");
   const std::optional<std::string> text = required_string_arg(call, context);
   if (!text.has_value()) {
     return SendStatus::Faulted;
@@ -373,7 +373,8 @@ RuntimeNativeModuleDescriptor codecs_module_descriptor() {
            {"Hex", RuntimeNativeTypeKind::Hex}},
           {{RuntimeNativeTypeKind::Base64, &codec_dispatch},
            {RuntimeNativeTypeKind::Base64Url, &codec_dispatch},
-           {RuntimeNativeTypeKind::Hex, &codec_dispatch}}};
+           {RuntimeNativeTypeKind::Hex, &codec_dispatch}},
+          {}};
 }
 
 } // namespace
@@ -383,10 +384,12 @@ void register_codecs(NativeRegistry &registry) {
 }
 
 void register_codecs_runtime_module(RuntimeModuleRegistry &modules,
-                                    RuntimeDispatchRegistry &dispatch) {
+                                    RuntimeDispatchRegistry &dispatch,
+                                    RuntimeTypeRegistry &types) {
   const RuntimeNativeModuleDescriptor descriptor = codecs_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
+  register_runtime_type_descriptor(types, descriptor);
 }
 
 } // namespace amber::runtime

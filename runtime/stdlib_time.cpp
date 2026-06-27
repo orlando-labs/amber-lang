@@ -78,8 +78,7 @@ std::int64_t days_from_civil(std::int64_t y, int m, int d) {
   const unsigned yoe = static_cast<unsigned>(y - era * 400);
   const unsigned mp = static_cast<unsigned>(m + (m > 2 ? -3 : 9));
   const unsigned doy = (153U * mp + 2U) / 5U + static_cast<unsigned>(d) - 1U;
-  const unsigned doe =
-      yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
   return era * 146097 + static_cast<std::int64_t>(doe) - 719468;
 }
 
@@ -137,8 +136,7 @@ Value time_value(RuntimeTimeValue time) {
 }
 
 Value period_value(RuntimeTimePeriodValue period) {
-  return Value::time_period(
-      std::make_shared<RuntimeTimePeriodValue>(period));
+  return Value::time_period(std::make_shared<RuntimeTimePeriodValue>(period));
 }
 
 UtcFields utc_fields(const RuntimeTimeValue &time) {
@@ -153,9 +151,9 @@ UtcFields utc_fields(const RuntimeTimeValue &time) {
   return out;
 }
 
-std::optional<RuntimeTimeValue> time_from_utc_fields(
-    std::int64_t year, int month, int day, int hour, int minute, int second,
-    int nanosecond) {
+std::optional<RuntimeTimeValue>
+time_from_utc_fields(std::int64_t year, int month, int day, int hour,
+                     int minute, int second, int nanosecond) {
   if (!valid_date(year, month, day) || hour < 0 || hour > 23 || minute < 0 ||
       minute > 59 || second < 0 || second > 59 || nanosecond < 0 ||
       nanosecond >= kNanosPerSecond) {
@@ -167,16 +165,15 @@ std::optional<RuntimeTimeValue> time_from_utc_fields(
   return make_time_from_parts(seconds, nanosecond);
 }
 
-std::optional<RuntimeTimeValue> apply_period_to_time(
-    const RuntimeTimeValue &time, const RuntimeTimePeriodValue &period) {
+std::optional<RuntimeTimeValue>
+apply_period_to_time(const RuntimeTimeValue &time,
+                     const RuntimeTimePeriodValue &period) {
   UtcFields fields = utc_fields(time);
   if (period.months != 0) {
-    const __int128 total_month =
-        static_cast<__int128>(fields.date.year) * 12 +
-        (fields.date.month - 1) + period.months;
+    const __int128 total_month = static_cast<__int128>(fields.date.year) * 12 +
+                                 (fields.date.month - 1) + period.months;
     const __int128 year = floor_div_i128(total_month, 12);
-    const int month =
-        static_cast<int>(total_month - year * 12) + 1;
+    const int month = static_cast<int>(total_month - year * 12) + 1;
     const std::optional<std::int64_t> checked_year = checked_i128(year);
     if (!checked_year.has_value()) {
       return std::nullopt;
@@ -190,19 +187,19 @@ std::optional<RuntimeTimeValue> apply_period_to_time(
       static_cast<__int128>(days_from_civil(fields.date.year, fields.date.month,
                                             fields.date.day)) +
       period.days;
-  const __int128 seconds =
-      base_days * kSecondsPerDay + fields.hour * 3600 + fields.minute * 60 +
-      fields.second;
-  return make_time_from_parts(seconds, static_cast<__int128>(fields.nanosecond) +
-                                           period.nanoseconds);
+  const __int128 seconds = base_days * kSecondsPerDay + fields.hour * 3600 +
+                           fields.minute * 60 + fields.second;
+  return make_time_from_parts(
+      seconds, static_cast<__int128>(fields.nanosecond) + period.nanoseconds);
 }
 
 std::optional<RuntimeTimePeriodValue>
-period_add(const RuntimeTimePeriodValue &lhs,
-           const RuntimeTimePeriodValue &rhs, int sign = 1) {
+period_add(const RuntimeTimePeriodValue &lhs, const RuntimeTimePeriodValue &rhs,
+           int sign = 1) {
   RuntimeTimePeriodValue out;
-  const std::optional<std::int64_t> months = checked_i128(
-      static_cast<__int128>(lhs.months) + sign * static_cast<__int128>(rhs.months));
+  const std::optional<std::int64_t> months =
+      checked_i128(static_cast<__int128>(lhs.months) +
+                   sign * static_cast<__int128>(rhs.months));
   const std::optional<std::int64_t> days = checked_i128(
       static_cast<__int128>(lhs.days) + sign * static_cast<__int128>(rhs.days));
   const std::optional<std::int64_t> nanos =
@@ -219,12 +216,12 @@ period_add(const RuntimeTimePeriodValue &lhs,
 
 std::optional<RuntimeTimePeriodValue>
 period_between(const RuntimeTimeValue &lhs, const RuntimeTimeValue &rhs) {
-  const __int128 lhs_ns = static_cast<__int128>(lhs.epoch_seconds) *
-                              kNanosPerSecond +
-                          lhs.nanosecond;
-  const __int128 rhs_ns = static_cast<__int128>(rhs.epoch_seconds) *
-                              kNanosPerSecond +
-                          rhs.nanosecond;
+  const __int128 lhs_ns =
+      static_cast<__int128>(lhs.epoch_seconds) * kNanosPerSecond +
+      lhs.nanosecond;
+  const __int128 rhs_ns =
+      static_cast<__int128>(rhs.epoch_seconds) * kNanosPerSecond +
+      rhs.nanosecond;
   const std::optional<std::int64_t> nanos = checked_i128(lhs_ns - rhs_ns);
   if (!nanos.has_value()) {
     return std::nullopt;
@@ -232,13 +229,12 @@ period_between(const RuntimeTimeValue &lhs, const RuntimeTimeValue &rhs) {
   return RuntimeTimePeriodValue{0, 0, *nanos};
 }
 
-std::optional<__int128> fixed_period_nanoseconds(
-    const RuntimeTimePeriodValue &period) {
+std::optional<__int128>
+fixed_period_nanoseconds(const RuntimeTimePeriodValue &period) {
   if (period.months != 0) {
     return std::nullopt;
   }
-  return static_cast<__int128>(period.days) * kSecondsPerDay *
-             kNanosPerSecond +
+  return static_cast<__int128>(period.days) * kSecondsPerDay * kNanosPerSecond +
          period.nanoseconds;
 }
 
@@ -411,9 +407,9 @@ std::optional<RuntimeTimeValue> parse_iso8601_utc(const std::string &text) {
   if (!local.has_value()) {
     return std::nullopt;
   }
-  return make_time_from_parts(
-      static_cast<__int128>(local->epoch_seconds) - offset_seconds,
-      local->nanosecond);
+  return make_time_from_parts(static_cast<__int128>(local->epoch_seconds) -
+                                  offset_seconds,
+                              local->nanosecond);
 }
 
 SendStatus time_now(NativeStdlibCall &call) {
@@ -453,8 +449,8 @@ SendStatus time_epoch(NativeStdlibCall &call) {
 
 SendStatus time_utc(NativeStdlibCall &call) {
   if (!call.require_no_block() || call.args.size() != 3U ||
-      !call.reject_unknown_keywords({"hour", "minute", "second",
-                                     "nanosecond"})) {
+      !call.reject_unknown_keywords(
+          {"hour", "minute", "second", "nanosecond"})) {
     if (call.args.size() != 3U) {
       call.fault("TypeError", "Time.utc expects year, month, and day");
     }
@@ -463,7 +459,8 @@ SendStatus time_utc(NativeStdlibCall &call) {
   std::int64_t year = 0;
   std::int64_t month64 = 0;
   std::int64_t day64 = 0;
-  if (!require_int(call.args[0], &year) || !require_int(call.args[1], &month64) ||
+  if (!require_int(call.args[0], &year) ||
+      !require_int(call.args[1], &month64) ||
       !require_int(call.args[2], &day64)) {
     return call.fault("TypeError", "Time.utc date components must be Int");
   }
@@ -476,10 +473,9 @@ SendStatus time_utc(NativeStdlibCall &call) {
       !nanosecond.has_value()) {
     return SendStatus::Faulted;
   }
-  if (month64 < 1 || month64 > 12 || day64 < 1 || day64 > 31 ||
-      *hour < 0 || *hour > 23 || *minute < 0 || *minute > 59 ||
-      *second < 0 || *second > 59 || *nanosecond < 0 ||
-      *nanosecond >= kNanosPerSecond) {
+  if (month64 < 1 || month64 > 12 || day64 < 1 || day64 > 31 || *hour < 0 ||
+      *hour > 23 || *minute < 0 || *minute > 59 || *second < 0 ||
+      *second > 59 || *nanosecond < 0 || *nanosecond >= kNanosPerSecond) {
     return invalid_time_fault(call, "Time.utc component out of range");
   }
   const std::optional<RuntimeTimeValue> time = time_from_utc_fields(
@@ -510,8 +506,8 @@ SendStatus time_from_unix(NativeStdlibCall &call) {
   if (*nanosecond < 0 || *nanosecond >= kNanosPerSecond) {
     return invalid_time_fault(call, "nanosecond must be in 0...999999999");
   }
-  *call.out = time_value(RuntimeTimeValue{
-      seconds, static_cast<std::uint32_t>(*nanosecond)});
+  *call.out = time_value(
+      RuntimeTimeValue{seconds, static_cast<std::uint32_t>(*nanosecond)});
   return SendStatus::Matched;
 }
 
@@ -526,8 +522,8 @@ SendStatus time_from_unix_ms(NativeStdlibCall &call) {
   }
   const std::int64_t seconds = floor_div_i64(milliseconds, 1000);
   const int millis = floor_mod_i64(milliseconds, 1000);
-  *call.out = time_value(RuntimeTimeValue{
-      seconds, static_cast<std::uint32_t>(millis * 1000000)});
+  *call.out = time_value(
+      RuntimeTimeValue{seconds, static_cast<std::uint32_t>(millis * 1000000)});
   return SendStatus::Matched;
 }
 
@@ -577,9 +573,8 @@ SendStatus time_epoch_component(NativeStdlibCall &call,
     return SendStatus::Matched;
   }
   if (call.selector == "unix_milliseconds") {
-    const __int128 value =
-        static_cast<__int128>(time.epoch_seconds) * 1000 +
-        time.nanosecond / 1000000;
+    const __int128 value = static_cast<__int128>(time.epoch_seconds) * 1000 +
+                           time.nanosecond / 1000000;
     const std::optional<std::int64_t> checked = checked_i128(value);
     if (!checked.has_value()) {
       return overflow_fault(call, "unix_milliseconds overflow");
@@ -622,12 +617,10 @@ SendStatus time_field(NativeStdlibCall &call, const RuntimeTimeValue &time) {
   } else if (call.selector == "nanosecond") {
     *call.out = Value::integer(fields.nanosecond);
   } else if (call.selector == "weekday") {
-    const std::int64_t days =
-        floor_div_i64(time.epoch_seconds, kSecondsPerDay);
+    const std::int64_t days = floor_div_i64(time.epoch_seconds, kSecondsPerDay);
     *call.out = Value::integer(floor_mod_i64(days + 3, 7) + 1);
   } else if (call.selector == "yearday") {
-    const std::int64_t jan1 =
-        days_from_civil(fields.date.year, 1, 1);
+    const std::int64_t jan1 = days_from_civil(fields.date.year, 1, 1);
     const std::int64_t today =
         days_from_civil(fields.date.year, fields.date.month, fields.date.day);
     *call.out = Value::integer(today - jan1 + 1);
@@ -677,8 +670,7 @@ SendStatus time_instance_dispatch(NativeStdlibCall &call) {
     *call.out = call.string_value(runtime_time_to_iso8601(*time));
     return SendStatus::Matched;
   }
-  if (call.selector == "unix_seconds" ||
-      call.selector == "unix_milliseconds" ||
+  if (call.selector == "unix_seconds" || call.selector == "unix_milliseconds" ||
       call.selector == "unix_nanoseconds") {
     return time_epoch_component(call, *time);
   }
@@ -857,9 +849,8 @@ SendStatus period_instance_dispatch(NativeStdlibCall &call) {
       return call.fault("TypeError",
                         "TimePeriod arithmetic expects TimePeriod");
     }
-    const std::optional<RuntimeTimePeriodValue> result =
-        period_add(*period, *call.args[0].as_time_period(),
-                   call.selector == "-" ? -1 : 1);
+    const std::optional<RuntimeTimePeriodValue> result = period_add(
+        *period, *call.args[0].as_time_period(), call.selector == "-" ? -1 : 1);
     if (!result.has_value()) {
       return overflow_fault(call, "TimePeriod overflow");
     }
@@ -924,8 +915,7 @@ std::string runtime_time_to_iso8601(const RuntimeTimeValue &value) {
   out << std::setw(4) << std::setfill('0') << fields.date.year << "-"
       << std::setw(2) << fields.date.month << "-" << std::setw(2)
       << fields.date.day << "T" << std::setw(2) << fields.hour << ":"
-      << std::setw(2) << fields.minute << ":" << std::setw(2)
-      << fields.second;
+      << std::setw(2) << fields.minute << ":" << std::setw(2) << fields.second;
   if (fields.nanosecond != 0) {
     std::string fraction = std::to_string(fields.nanosecond);
     fraction.insert(fraction.begin(), 9U - fraction.size(), '0');
@@ -964,7 +954,8 @@ RuntimeNativeModuleDescriptor time_module_descriptor() {
   return {{{"Time", RuntimeNativeTypeKind::Time},
            {"TimePeriod", RuntimeNativeTypeKind::TimePeriod}},
           {{RuntimeNativeTypeKind::Time, &time_dispatch},
-           {RuntimeNativeTypeKind::TimePeriod, &time_dispatch}}};
+           {RuntimeNativeTypeKind::TimePeriod, &time_dispatch}},
+          {}};
 }
 
 void register_time(NativeRegistry &registry) {
@@ -972,10 +963,12 @@ void register_time(NativeRegistry &registry) {
 }
 
 void register_time_runtime_module(RuntimeModuleRegistry &modules,
-                                  RuntimeDispatchRegistry &dispatch) {
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types) {
   const RuntimeNativeModuleDescriptor descriptor = time_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
+  register_runtime_type_descriptor(types, descriptor);
 }
 
 } // namespace amber::runtime

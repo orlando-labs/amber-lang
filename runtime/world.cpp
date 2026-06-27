@@ -230,8 +230,9 @@ struct RuntimeWorld::Impl {
     register_builtin_stdlib(native_registry);
     register_core_prelude_bindings(module_registry);
     register_legacy_native_type_paths(module_registry);
-    register_builtin_runtime_modules(module_registry, dispatch_registry);
     register_legacy_native_type_calls(type_registry);
+    register_builtin_runtime_modules(module_registry, dispatch_registry,
+                                     type_registry);
     capabilities = capability::resolve_capabilities(module->capabilities,
                                                     options.capability_grants);
     effects = effect::validate_effect_summaries(

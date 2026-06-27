@@ -210,7 +210,8 @@ SendStatus secure_random_dispatch(NativeStdlibCall &call) {
 
 RuntimeNativeModuleDescriptor secure_random_module_descriptor() {
   return {{{"SecureRandom", RuntimeNativeTypeKind::SecureRandom}},
-          {{RuntimeNativeTypeKind::SecureRandom, &secure_random_dispatch}}};
+          {{RuntimeNativeTypeKind::SecureRandom, &secure_random_dispatch}},
+          {}};
 }
 
 } // namespace
@@ -221,11 +222,13 @@ void register_secure_random(NativeRegistry &registry) {
 }
 
 void register_secure_random_runtime_module(RuntimeModuleRegistry &modules,
-                                           RuntimeDispatchRegistry &dispatch) {
+                                           RuntimeDispatchRegistry &dispatch,
+                                           RuntimeTypeRegistry &types) {
   const RuntimeNativeModuleDescriptor descriptor =
       secure_random_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
+  register_runtime_type_descriptor(types, descriptor);
 }
 
 } // namespace amber::runtime

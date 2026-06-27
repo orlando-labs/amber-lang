@@ -377,8 +377,7 @@ enum class RuntimeBindingKind {
 struct RuntimeBindingRef {
   RuntimeBindingKind kind = RuntimeBindingKind::NativeType;
   RuntimeNativeTypeKind native_type = RuntimeNativeTypeKind::TaskModule;
-  RuntimeNativeFunctionKind native_function =
-      RuntimeNativeFunctionKind::Print;
+  RuntimeNativeFunctionKind native_function = RuntimeNativeFunctionKind::Print;
 
   static RuntimeBindingRef native_type_binding(RuntimeNativeTypeKind kind) {
     RuntimeBindingRef ref;
@@ -410,8 +409,7 @@ struct RuntimeBindingRef {
 
 class RuntimeModuleRegistry {
 public:
-  void register_native_type_path(std::string path,
-                                 RuntimeNativeTypeKind kind);
+  void register_native_type_path(std::string path, RuntimeNativeTypeKind kind);
   void register_native_function_path(std::string path,
                                      RuntimeNativeFunctionKind kind);
   void register_task_module_path(std::string path);
@@ -487,14 +485,20 @@ struct RuntimeNativeModuleHandlerDescriptor {
   NativeStdlibHandler handler = nullptr;
 };
 
+struct RuntimeNativeModuleTypeCallDescriptor {
+  RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
+  const char *selector = "";
+};
+
 struct RuntimeNativeModuleDescriptor {
   std::vector<RuntimeNativeModulePathDescriptor> paths;
   std::vector<RuntimeNativeModuleHandlerDescriptor> handlers;
+  std::vector<RuntimeNativeModuleTypeCallDescriptor> type_calls;
 };
 
-// Two tables, populated once during VM construction (no static initializers, to
-// avoid static-init-order fiascos): `kind -> handler` for dispatch and
-// `path -> kind` for prelude name resolution.
+// Compatibility facade populated once during VM construction (no static
+// initializers, to avoid static-init-order fiascos). New runtime paths register
+// module/dispatch/type-call descriptors directly on the world registries.
 class NativeRegistry {
 public:
   void register_handler(RuntimeNativeTypeKind kind,
@@ -532,7 +536,8 @@ private:
 // that lists them.
 void register_builtin_stdlib(NativeRegistry &registry);
 void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
-                                      RuntimeDispatchRegistry &dispatch);
+                                      RuntimeDispatchRegistry &dispatch,
+                                      RuntimeTypeRegistry &types);
 void register_native_module_descriptor(
     NativeRegistry &registry, const RuntimeNativeModuleDescriptor &descriptor);
 void register_runtime_module_descriptor(
@@ -540,6 +545,9 @@ void register_runtime_module_descriptor(
     const RuntimeNativeModuleDescriptor &descriptor);
 void register_runtime_dispatch_descriptor(
     RuntimeDispatchRegistry &dispatch,
+    const RuntimeNativeModuleDescriptor &descriptor);
+void register_runtime_type_descriptor(
+    RuntimeTypeRegistry &types,
     const RuntimeNativeModuleDescriptor &descriptor);
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry);
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry);
@@ -549,30 +557,39 @@ void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
 // `runtime/stdlib_<name>.cpp`).
 void register_math(NativeRegistry &registry);
 void register_math_runtime_module(RuntimeModuleRegistry &modules,
-                                  RuntimeDispatchRegistry &dispatch);
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types);
 void register_json(NativeRegistry &registry);
 void register_json_runtime_module(RuntimeModuleRegistry &modules,
-                                  RuntimeDispatchRegistry &dispatch);
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types);
 void register_codecs(NativeRegistry &registry);
 void register_codecs_runtime_module(RuntimeModuleRegistry &modules,
-                                    RuntimeDispatchRegistry &dispatch);
+                                    RuntimeDispatchRegistry &dispatch,
+                                    RuntimeTypeRegistry &types);
 void register_digest(NativeRegistry &registry);
 void register_digest_runtime_module(RuntimeModuleRegistry &modules,
-                                    RuntimeDispatchRegistry &dispatch);
+                                    RuntimeDispatchRegistry &dispatch,
+                                    RuntimeTypeRegistry &types);
 void register_secure_random(NativeRegistry &registry);
 void register_secure_random_runtime_module(RuntimeModuleRegistry &modules,
-                                           RuntimeDispatchRegistry &dispatch);
+                                           RuntimeDispatchRegistry &dispatch,
+                                           RuntimeTypeRegistry &types);
 void register_argparser(NativeRegistry &registry);
 void register_argparser_runtime_module(RuntimeModuleRegistry &modules,
-                                       RuntimeDispatchRegistry &dispatch);
+                                       RuntimeDispatchRegistry &dispatch,
+                                       RuntimeTypeRegistry &types);
 void register_uuid(NativeRegistry &registry);
 void register_uuid_runtime_module(RuntimeModuleRegistry &modules,
-                                  RuntimeDispatchRegistry &dispatch);
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types);
 void register_time(NativeRegistry &registry);
 void register_time_runtime_module(RuntimeModuleRegistry &modules,
-                                  RuntimeDispatchRegistry &dispatch);
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types);
 void register_url(NativeRegistry &registry);
 void register_url_runtime_module(RuntimeModuleRegistry &modules,
-                                 RuntimeDispatchRegistry &dispatch);
+                                 RuntimeDispatchRegistry &dispatch,
+                                 RuntimeTypeRegistry &types);
 
 } // namespace amber::runtime

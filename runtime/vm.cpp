@@ -909,7 +909,8 @@ public:
     if (module_registry_ == &owned_module_registry_ &&
         dispatch_registry_ == &owned_dispatch_registry_) {
       register_builtin_runtime_modules(owned_module_registry_,
-                                       owned_dispatch_registry_);
+                                       owned_dispatch_registry_,
+                                       owned_type_registry_);
     }
     if (error_registry_ == nullptr) {
       error_registry_ = &owned_error_registry_;

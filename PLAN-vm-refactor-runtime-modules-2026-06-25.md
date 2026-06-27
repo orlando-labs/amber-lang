@@ -838,6 +838,26 @@ Acceptance criterion for each migrated slice: no path lookup, constructor
 allowlist, or selector dispatch for that module remains in `Vm` except through
 the registry interface.
 
+Slice record, 2026-06-27:
+
+- Extended `RuntimeNativeModuleDescriptor` with descriptor-owned type-call
+  metadata and registration through `RuntimeTypeRegistry`, beside the existing
+  path and dispatch-handler descriptor registration.
+- Updated builtin runtime module registration to pass `RuntimeTypeRegistry`
+  through each descriptor registration function for both `RuntimeWorld` and
+  direct-VM fallback registries.
+- Migrated `ArgParser.new` type-call metadata out of
+  `register_legacy_native_type_calls` and into the `ArgParser` module
+  descriptor. Other constructor/call metadata remains in the legacy list until
+  the owning module descriptors move in later Phase 3 slices.
+- Verified compile smoke: standalone `runtime/stdlib_registry.cpp`,
+  `runtime/stdlib_argparser.cpp`, `runtime/world.cpp`, and `runtime/vm.cpp`
+  compile after formatting; `git diff --check` is clean.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/stdlib_argparser_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and `build/stdlib_argparser_tests`.
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

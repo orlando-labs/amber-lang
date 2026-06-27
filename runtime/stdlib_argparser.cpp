@@ -1101,7 +1101,8 @@ SendStatus parser_dispatch(NativeStdlibCall &call) {
 
 RuntimeNativeModuleDescriptor argparser_module_descriptor() {
   return {{{"ArgParser", RuntimeNativeTypeKind::ArgParser}},
-          {{RuntimeNativeTypeKind::ArgParser, &parser_dispatch}}};
+          {{RuntimeNativeTypeKind::ArgParser, &parser_dispatch}},
+          {{RuntimeNativeTypeKind::ArgParser, "new"}}};
 }
 
 } // namespace
@@ -1111,10 +1112,13 @@ void register_argparser(NativeRegistry &registry) {
 }
 
 void register_argparser_runtime_module(RuntimeModuleRegistry &modules,
-                                       RuntimeDispatchRegistry &dispatch) {
-  const RuntimeNativeModuleDescriptor descriptor = argparser_module_descriptor();
+                                       RuntimeDispatchRegistry &dispatch,
+                                       RuntimeTypeRegistry &types) {
+  const RuntimeNativeModuleDescriptor descriptor =
+      argparser_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
+  register_runtime_type_descriptor(types, descriptor);
 }
 
 } // namespace amber::runtime

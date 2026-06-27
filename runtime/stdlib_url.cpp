@@ -30,8 +30,8 @@ RuntimeUrlQueryValue RuntimeUrlQueryValue::string(std::string value) {
   return out;
 }
 
-RuntimeUrlQueryValue RuntimeUrlQueryValue::list_value(
-    std::vector<RuntimeUrlQueryValue> values) {
+RuntimeUrlQueryValue
+RuntimeUrlQueryValue::list_value(std::vector<RuntimeUrlQueryValue> values) {
   RuntimeUrlQueryValue out;
   out.kind = Kind::List;
   out.list = std::move(values);
@@ -62,8 +62,7 @@ bool is_scheme_char(char c) {
 
 bool is_unreserved(unsigned char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-         (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
-         c == '~';
+         (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
 }
 
 bool has_forbidden_url_byte(const std::string &text) {
@@ -217,22 +216,21 @@ Value query_value_to_amber(NativeStdlibCall &call,
 Value parts_to_map(NativeStdlibCall &call, const RuntimeUrlParts &parts) {
   std::vector<std::pair<std::string, Value>> entries;
   entries.reserve(10U);
-  entries.push_back({"scheme", null_or_string(call, !parts.scheme.empty(),
-                                               parts.scheme)});
   entries.push_back(
-      {"authority", null_or_string(call, parts.has_authority, parts.authority)});
+      {"scheme", null_or_string(call, !parts.scheme.empty(), parts.scheme)});
+  entries.push_back({"authority", null_or_string(call, parts.has_authority,
+                                                 parts.authority)});
   entries.push_back({"userinfo", null_or_string(call, !parts.userinfo.empty(),
                                                 parts.userinfo)});
   entries.push_back(
       {"host", null_or_string(call, parts.has_authority, parts.host)});
-  entries.push_back({"port", parts.has_port ? Value::integer(parts.port)
-                                             : Value::null()});
+  entries.push_back(
+      {"port", parts.has_port ? Value::integer(parts.port) : Value::null()});
   entries.push_back({"path", call.string_value(parts.path)});
   entries.push_back(
       {"query", null_or_string(call, parts.has_query, parts.query)});
   entries.push_back(
-      {"fragment",
-       null_or_string(call, parts.has_fragment, parts.fragment)});
+      {"fragment", null_or_string(call, parts.has_fragment, parts.fragment)});
   if (parts.has_query) {
     std::vector<std::pair<std::string, RuntimeUrlQueryValue>> query;
     std::string error;
@@ -247,9 +245,9 @@ Value parts_to_map(NativeStdlibCall &call, const RuntimeUrlParts &parts) {
   return call.make_object(std::move(entries));
 }
 
-std::optional<Value> map_lookup(
-    const std::vector<std::pair<std::string, Value>> &entries,
-    const std::string &name) {
+std::optional<Value>
+map_lookup(const std::vector<std::pair<std::string, Value>> &entries,
+           const std::string &name) {
   for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
     if (it->first == name) {
       return it->second;
@@ -391,8 +389,7 @@ bool parts_from_map(NativeStdlibCall &call, const Value &value,
   if ((!parts->has_query || parts->query.empty()) && query_map.has_value() &&
       !query_map->is_null()) {
     std::vector<std::pair<std::string, RuntimeUrlQueryValue>> parsed;
-    if (!query_entries_from_amber_map(call, *query_map, &parsed,
-                                      "query_map")) {
+    if (!query_entries_from_amber_map(call, *query_map, &parsed, "query_map")) {
       return false;
     }
     parts->query = runtime_url_build_query(parsed);
@@ -582,10 +579,9 @@ bool runtime_url_parse(const std::string &text, RuntimeUrlParts *out,
     parts.has_authority = true;
     pos += 2U;
     const std::size_t authority_end = text.find_first_of("/?#", pos);
-    const std::string authority =
-        authority_end == std::string::npos
-            ? text.substr(pos)
-            : text.substr(pos, authority_end - pos);
+    const std::string authority = authority_end == std::string::npos
+                                      ? text.substr(pos)
+                                      : text.substr(pos, authority_end - pos);
     if (!parse_authority(authority, &parts, error)) {
       return false;
     }
@@ -605,7 +601,8 @@ bool runtime_url_parse(const std::string &text, RuntimeUrlParts *out,
   }
   if (has_query) {
     parts.has_query = true;
-    parts.query = text.substr(query_pos + 1U, query_search_end - query_pos - 1U);
+    parts.query =
+        text.substr(query_pos + 1U, query_search_end - query_pos - 1U);
   }
   if (fragment_pos != std::string::npos) {
     parts.has_fragment = true;
@@ -628,7 +625,8 @@ bool runtime_url_validate_parts(const RuntimeUrlParts &parts,
     return false;
   }
   if (has_forbidden_url_byte(parts.userinfo) ||
-      has_forbidden_url_byte(parts.host) || has_forbidden_url_byte(parts.path) ||
+      has_forbidden_url_byte(parts.host) ||
+      has_forbidden_url_byte(parts.path) ||
       has_forbidden_url_byte(parts.query) ||
       has_forbidden_url_byte(parts.fragment)) {
     *error = "URL part contains raw ASCII whitespace or controls";
@@ -810,17 +808,19 @@ bool ensure_query_map(RuntimeUrlQueryValue *slot, std::string *error) {
   return false;
 }
 
-RuntimeUrlQueryValue container_for_next_segment(
-    const std::vector<std::string> &segments, std::size_t next_index) {
+RuntimeUrlQueryValue
+container_for_next_segment(const std::vector<std::string> &segments,
+                           std::size_t next_index) {
   if (next_index < segments.size() && segments[next_index].empty()) {
     return RuntimeUrlQueryValue::list_value();
   }
   return RuntimeUrlQueryValue::map_value();
 }
 
-bool insert_query_value(
-    RuntimeUrlQueryValue *slot, const std::vector<std::string> &segments,
-    std::size_t index, const std::string &value, std::string *error);
+bool insert_query_value(RuntimeUrlQueryValue *slot,
+                        const std::vector<std::string> &segments,
+                        std::size_t index, const std::string &value,
+                        std::string *error);
 
 bool insert_query_map_entry(
     std::vector<std::pair<std::string, RuntimeUrlQueryValue>> *entries,
@@ -842,16 +842,16 @@ bool insert_query_map_entry(
   }
 
   if (slot == nullptr) {
-    entries->push_back(
-        {key, container_for_next_segment(segments, index + 1U)});
+    entries->push_back({key, container_for_next_segment(segments, index + 1U)});
     slot = &entries->back().second;
   }
   return insert_query_value(slot, segments, index + 1U, value, error);
 }
 
-bool insert_query_value(
-    RuntimeUrlQueryValue *slot, const std::vector<std::string> &segments,
-    std::size_t index, const std::string &value, std::string *error) {
+bool insert_query_value(RuntimeUrlQueryValue *slot,
+                        const std::vector<std::string> &segments,
+                        std::size_t index, const std::string &value,
+                        std::string *error) {
   if (index >= segments.size()) {
     if (slot->kind == RuntimeUrlQueryValue::Kind::Map) {
       *error = "query key mixes map and scalar shapes";
@@ -934,8 +934,7 @@ bool runtime_url_parse_query(
     if (end != pos) {
       const std::size_t eq = text.find('=', pos);
       const bool has_eq = eq != std::string::npos && eq < end;
-      const std::string raw_key =
-          text.substr(pos, (has_eq ? eq : end) - pos);
+      const std::string raw_key = text.substr(pos, (has_eq ? eq : end) - pos);
       const std::string raw_value =
           has_eq ? text.substr(eq + 1U, end - eq - 1U) : std::string{};
       std::string key;
@@ -974,7 +973,8 @@ std::string runtime_url_build_query(
 
 RuntimeNativeModuleDescriptor url_module_descriptor() {
   return {{{"Url", RuntimeNativeTypeKind::Url}},
-          {{RuntimeNativeTypeKind::Url, &url_dispatch}}};
+          {{RuntimeNativeTypeKind::Url, &url_dispatch}},
+          {}};
 }
 
 void register_url(NativeRegistry &registry) {
@@ -982,10 +982,12 @@ void register_url(NativeRegistry &registry) {
 }
 
 void register_url_runtime_module(RuntimeModuleRegistry &modules,
-                                 RuntimeDispatchRegistry &dispatch) {
+                                 RuntimeDispatchRegistry &dispatch,
+                                 RuntimeTypeRegistry &types) {
   const RuntimeNativeModuleDescriptor descriptor = url_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
+  register_runtime_type_descriptor(types, descriptor);
 }
 
 } // namespace amber::runtime
