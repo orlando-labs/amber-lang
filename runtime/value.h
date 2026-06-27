@@ -3,8 +3,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -277,6 +279,60 @@ struct RuntimeTimePeriodValue {
   std::int64_t months = 0;
   std::int64_t days = 0;
   std::int64_t nanoseconds = 0;
+};
+
+// Backs a `native class` instance: an opaque host pointer plus the
+// deterministic lifetime model from the native-packages design (§7). Teardown
+// runs through destroy!/memory.dealloc; the GC never runs an `owned` destructor
+// (no implicit finalizer), and only a `collected` handle opts into GC
+// reclamation. Held only via shared_ptr (single owner), so copying is disabled
+// to prevent double-free.
+struct RuntimeForeignHandle {
+  enum class Ownership { Owned, Borrowed, Collected };
+
+  std::string tag;     // per-(package,type) dispatch identity
+  void *ptr = nullptr; // the wrapped foreign resource
+  Ownership ownership = Ownership::Borrowed;
+  // Reclaim callback: the context-free reclaim for `collected`, a ctx-bound
+  // closure supplied by the ABI layer for `owned`, and empty for `borrowed`.
+  // The ctx is the AmberCtx supplied at deterministic destroy!-time,
+  // type-erased to void* so this header stays free of the amber_ext.h C ABI
+  // types; an `owned` destructor uses it, a `collected` reclaim ignores it. The
+  // GC reclaim path passes nullptr (collected only, context-free by
+  // construction).
+  std::function<void(void *ctx, void *ptr)> teardown;
+  bool live = true; // tombstone: cleared once destroyed
+
+  RuntimeForeignHandle() = default;
+  RuntimeForeignHandle(const RuntimeForeignHandle &) = delete;
+  RuntimeForeignHandle &operator=(const RuntimeForeignHandle &) = delete;
+
+  // Deterministic destroy! / memory.dealloc: runs teardown once for an owning
+  // handle, flips the tombstone, and reports whether this call destroyed it.
+  // `ctx` is the live AmberCtx the destructor may use (owned); a collected
+  // reclaim ignores it. A bytecode-only destroy! with no extension context
+  // passes nullptr.
+  bool destroy(void *ctx = nullptr) {
+    if (!live) {
+      return false;
+    }
+    live = false;
+    if (ownership != Ownership::Borrowed && teardown) {
+      teardown(ctx, ptr);
+    }
+    return true;
+  }
+
+  // GC reclamation: only a `collected` handle runs teardown here (the opt-in
+  // finalizer). An `owned` handle never runs its destructor from the collector
+  // (the leak is surfaced by a backstop diagnostic elsewhere); `borrowed` never
+  // frees. The collector has no AmberCtx, so it passes nullptr -- sound because
+  // a `collected` reclaim is context-free by construction (design §7.4).
+  ~RuntimeForeignHandle() {
+    if (live && ownership == Ownership::Collected && teardown) {
+      teardown(nullptr, ptr);
+    }
+  }
 };
 
 // The runtime `Value` has two interchangeable storage representations selected
@@ -691,6 +747,12 @@ static_assert(sizeof(Value) <= 16, "tagged Value must fit in 16 bytes");
 struct ResultValue {
   bool is_ok = false;
   Value payload = Value::null();
+};
+
+struct ErrorInstanceValue {
+  std::uint16_t error_id = 0;
+  std::string message;
+  std::vector<std::pair<std::string, Value>> fields;
 };
 
 // Wrap a payload into an Ok (is_ok=true) or Err (is_ok=false) Result value.

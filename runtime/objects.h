@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -34,6 +35,9 @@ inline constexpr std::uint32_t kObjectFlagDead = 0x4U;
 inline constexpr std::uint32_t kObjectFlagDestroyed = 0x8U;
 inline constexpr std::uint32_t kObjectFlagDestroying = 0x10U;
 inline constexpr std::uint32_t kObjectFlagPinned = 0x20U;
+inline constexpr std::uint32_t kNativeSyntheticClassIndex =
+    std::numeric_limits<std::uint32_t>::max();
+inline constexpr const char *kNativeRangeMarker = "__amber_range";
 
 struct ShapeDescriptor {
   std::uint64_t shape_id = 0;
@@ -135,5 +139,6 @@ bool header_is_destroyed(const ObjHeader &header);
 std::optional<std::string> lifecycle_access_error_name(const ObjHeader &header);
 std::string lifecycle_access_error_message(const std::string &error_name);
 std::string lifecycle_debug_label(const ObjHeader &header);
+bool instance_is_native_range(const IntrusivePtr<InstanceValue> &instance);
 
 } // namespace amber::runtime

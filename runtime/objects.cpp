@@ -112,4 +112,14 @@ std::string lifecycle_debug_label(const ObjHeader &header) {
   return "";
 }
 
+bool instance_is_native_range(const IntrusivePtr<InstanceValue> &instance) {
+  if (instance == nullptr ||
+      instance->class_index != kNativeSyntheticClassIndex) {
+    return false;
+  }
+  const auto marker = instance->ivars.find(kNativeRangeMarker);
+  return marker != instance->ivars.end() && marker->second.is_bool() &&
+         marker->second.as_bool();
+}
+
 } // namespace amber::runtime

@@ -6331,21 +6331,8 @@ constexpr std::uint32_t kMethodFlagClauseFallback =
 constexpr std::uint32_t kMethodFlagRuntimePreservedMask =
     kMethodFlagPropertyGetter | kMethodFlagPropertySetter |
     kMethodFlagClauseFallback;
-constexpr std::uint32_t kNativeSyntheticClassIndex =
-    std::numeric_limits<std::uint32_t>::max();
-constexpr const char *kNativeRangeMarker = "__amber_range";
 constexpr std::int64_t kPatternFailModeSoft = 0;
 constexpr std::int64_t kPatternFailModeMatchError = 1;
-
-bool instance_is_native_range(const IntrusivePtr<InstanceValue> &instance) {
-  if (instance == nullptr ||
-      instance->class_index != kNativeSyntheticClassIndex) {
-    return false;
-  }
-  const auto marker = instance->ivars.find(kNativeRangeMarker);
-  return marker != instance->ivars.end() && marker->second.is_bool() &&
-         marker->second.as_bool();
-}
 
 struct RuntimeStringifyContext {
   const BcModule *module = nullptr;
