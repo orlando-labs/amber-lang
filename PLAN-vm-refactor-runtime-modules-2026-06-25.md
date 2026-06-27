@@ -601,11 +601,29 @@ Slice record, 2026-06-27:
 - Verified focused binaries: `build/vm_tests`, `build/native_tests`,
   `build/stdlib_argparser_tests`, and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-27:
+
+- Split value display/debug declarations from `runtime/vm.h` into
+  `runtime/value_display.h`: `RuntimeStringifyMode`,
+  `RuntimePrettyPrintOptions`, and the public `value_to_debug_string` helper.
+- Kept value display implementations in `runtime/vm.cpp` for this slice; the
+  new header is the narrow declaration seam for a later implementation move.
+- Added `runtime/value_display.h` to `FORMAT_FILES`. `runtime/vm.h` includes it
+  so existing umbrella includes keep working.
+- Verified compile smoke: standalone `runtime/value_display.h` header compile
+  and standalone `runtime/vm.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests`.
+- Verified focused binaries: `build/vm_tests` and `build/module_loader_tests`.
+- Tagged `VALUE_REPR=tagged` was not rerun for this declaration-only slice
+  because it does not touch `Value` layout or representation-specific code.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
 - `runtime/value.h` / `runtime/value.cpp`: `Value`, value helpers, value display
   basics, intrinsic type naming;
+- `runtime/value_display.h`: public value display/debug declarations;
 - `runtime/errors.h` / `runtime/errors.cpp`: generated builtin runtime error
   metadata and field/default lookup helpers;
 - `runtime/numeric.h` / `runtime/numeric.cpp`: numeric profile lookup and

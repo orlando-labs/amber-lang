@@ -217,6 +217,7 @@ FORMAT_FILES := \
 	runtime/text.cpp \
 	runtime/value.cpp \
 	runtime/value.h \
+	runtime/value_display.h \
 	runtime/errors.cpp \
 	runtime/errors.h \
 	runtime/numeric.cpp \

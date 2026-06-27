@@ -9,6 +9,7 @@
 #include "runtime/numeric.h"
 #include "runtime/text.h"
 #include "runtime/value.h"
+#include "runtime/value_display.h"
 #include "runtime/watch.h"
 #include "runtime/objects.h"
 #include "runtime/world.h"
@@ -152,23 +153,10 @@ struct RuntimeArgParserValue {
   std::vector<Spec> specs;
 };
 
-enum class RuntimeStringifyMode { Display, Inspect, Pretty };
-
-struct RuntimePrettyPrintOptions {
-  std::size_t max_width = 80;
-  std::size_t max_depth = 20;
-  std::size_t max_items = 100;
-};
-
 ExecutionResult execute_code(const bytecode::BcModule &module,
                              std::uint32_t code_id,
                              const std::vector<Value> &args = {},
                              Value self = Value::null(),
                              Value block = Value::null());
-
-std::string value_to_debug_string(
-    const Value &value, const bytecode::BcModule *module = nullptr,
-    const std::vector<std::string> *runtime_strings = nullptr,
-    const std::vector<std::string> *runtime_symbols = nullptr);
 
 } // namespace amber::runtime
