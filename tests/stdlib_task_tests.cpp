@@ -1427,10 +1427,12 @@ void test_std017_source_level_task_sync_stack_compiles_and_runs() {
 
 void test_std017_source_level_flow_and_threaded_collection_compile_and_run() {
   const amber::runtime::ExecutionResult exec = execute_source_or_die(
-      "from task.flow import Flow\n"
+      "from task.flow import Flow, ThreadedCollection\n"
       "\n"
       "flowed = Flow.new().scatter_map([1, 2, 3]): _1 * 10 + _2\n"
       "threaded = [1, 2, 3].threaded(2).map: _1 + 5\n"
+      "constructed = ThreadedCollection.new([1, 2, 3], 2, scatter: :items).map:"
+      " _1 * 6\n"
       "filtered = [1, 2, 3, 4].threaded(2).filter_map |x|:\n"
       "  if x % 2 == 0:\n"
       "    x * 5\n"
@@ -1440,27 +1442,30 @@ void test_std017_source_level_flow_and_threaded_collection_compile_and_run() {
       "chunks = [1, 2, 3, 4].threaded(2, scatter: :chunks).map: _1 * 3\n"
       "parallel = [1, 2, 3, 4].parallel(2, scatter: :chunks).map: _1 * 4\n"
       "pairs = [1, 2, 3].threaded(2).combination(2)\n"
-      "[flowed, threaded, filtered, atomic, chunks, parallel, pairs]\n");
+      "[flowed, threaded, constructed, filtered, atomic, chunks, parallel, "
+      "pairs]\n");
 
   expect(exec.ok(), "source-level flow/threaded stack should execute");
   expect(exec.value.is_list(), "source-level flow result should be list");
   const amber::runtime::IntrusivePtr<amber::runtime::ListValue> values =
       exec.value.as_list();
-  expect(values != nullptr && values->items.size() == 7,
+  expect(values != nullptr && values->items.size() == 8,
          "source-level flow result shape");
   expect_integer_list_value(values->items[0], {10, 21, 32},
                             "source-level Flow.scatter_map");
   expect_integer_list_value(values->items[1], {6, 7, 8},
                             "source-level threaded map");
-  expect_integer_list_value(values->items[2], {10, 20},
+  expect_integer_list_value(values->items[2], {6, 12, 18},
+                            "source-level ThreadedCollection.new map");
+  expect_integer_list_value(values->items[3], {10, 20},
                             "source-level threaded filter_map");
-  expect_integer_list_value(values->items[3], {2, 4, 6, 8},
+  expect_integer_list_value(values->items[4], {2, 4, 6, 8},
                             "source-level threaded atomic scatter");
-  expect_integer_list_value(values->items[4], {3, 6, 9, 12},
+  expect_integer_list_value(values->items[5], {3, 6, 9, 12},
                             "source-level threaded chunk scatter");
-  expect_integer_list_value(values->items[5], {4, 8, 12, 16},
+  expect_integer_list_value(values->items[6], {4, 8, 12, 16},
                             "source-level parallel chunk scatter");
-  expect_integer_list_values(values->items[6].as_list()->items,
+  expect_integer_list_values(values->items[7].as_list()->items,
                              {{1, 2}, {1, 3}, {2, 3}},
                              "source-level threaded combination");
 }
@@ -1632,10 +1637,10 @@ void test_strand_confinement_rejects_cross_strand() {
       "from io import ByteBuffer\n"
       "\n"
       "buf = ByteBuffer.new(4)\n"
-      "buf.put_all!(\"hi\".bytes())\n"        // usable on the owner (main) strand
+      "buf.put_all!(\"hi\".bytes())\n" // usable on the owner (main) strand
       "\n"
       "worker = task.spawn:\n"
-      "  buf.put!(120)\n"                     // cross-strand access -> rejected
+      "  buf.put!(120)\n" // cross-strand access -> rejected
       "  \"reached\"\n"
       "\n"
       "worker.wait()\n");
@@ -1656,17 +1661,16 @@ void test_strand_confinement_handoff_to_task() {
       "import task\n"
       "from io import ByteBuffer\n"
       "\n"
-      "buf = ByteBuffer.new(4)\n"             // created/owned on the main strand
+      "buf = ByteBuffer.new(4)\n" // created/owned on the main strand
       "\n"
       "worker = task.spawn:\n"
-      "  buf.adopt!()\n"                      // explicit handoff to this strand
+      "  buf.adopt!()\n" // explicit handoff to this strand
       "  buf.put_all!(\"pong\".bytes())\n"
       "  buf.flip!()\n"
       "  buf.bytes().to_str()\n"
       "\n"
       "worker.wait() == \"pong\"\n");
-  expect(exec.ok(),
-         "handoff to task: source program should execute");
+  expect(exec.ok(), "handoff to task: source program should execute");
   expect_bool(exec.value, true,
               "handoff to task: an adopted buffer must be usable on the task "
               "strand");
@@ -1687,10 +1691,10 @@ void test_strand_confinement_socket_handoff_read_in_task() {
       "port = listener.local_endpoint().port()\n"
       "client = net.tcp.connect(\"127.0.0.1\", port)\n"
       "client.write_all!(\"ping\".bytes())\n"
-      "server = listener.accept!()\n"          // accepted on the MAIN strand
+      "server = listener.accept!()\n" // accepted on the MAIN strand
       "\n"
       "worker = task.spawn:\n"
-      "  server.adopt!()\n"                     // hand the socket to this task
+      "  server.adopt!()\n" // hand the socket to this task
       "  buf = ByteBuffer.new(4)\n"
       "  server.read!(buf)\n"
       "  payload = buf.bytes().to_str()\n"
@@ -1701,8 +1705,7 @@ void test_strand_confinement_socket_handoff_read_in_task() {
       "client.close!()\n"
       "listener.close!()\n"
       "out == \"ping\"\n");
-  expect(exec.ok(),
-         "socket handoff: source program should execute");
+  expect(exec.ok(), "socket handoff: source program should execute");
   expect_bool(exec.value, true,
               "socket handoff: a task that adopts an accepted socket must read "
               "the payload");

@@ -1161,6 +1161,18 @@ public:
     *out = list->items;
     return true;
   }
+  bool stdlib_sequence_items(const void *frame, const Value &value,
+                             std::vector<Value> *out) override {
+    const Frame &active = *static_cast<const Frame *>(frame);
+    bool source_was_tuple = false;
+    const std::optional<std::vector<Value>> items =
+        extract_sequence_items(active, value, &source_was_tuple);
+    if (!items.has_value()) {
+      return false;
+    }
+    *out = *items;
+    return true;
+  }
   StdlibBlockResult stdlib_call_stream_block(const void *frame,
                                              const Value &block,
                                              Value value) override {
@@ -17595,112 +17607,6 @@ private:
           return SendStatus::Faulted;
         }
         *out = converted.value;
-        return SendStatus::Matched;
-      }
-      if (selector != "new") {
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::Channel) {
-        if (!reject_unknown_keywords(frame, kw_args, {"capacity"}) ||
-            !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        std::size_t capacity = 0;
-        if (!capacity_from_args(frame, args, kw_args, &capacity)) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::channel(std::make_shared<RuntimeChannel>(capacity));
-        return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::Mutex) {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError", "Mutex.new does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        *out = Value::mutex(std::make_shared<RuntimeMutex>());
-        return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::Atomic) {
-        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "Atomic.new does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        try {
-          *out = Value::atomic(std::make_shared<RuntimeAtomic>(args[0]));
-        } catch (const RuntimeTaskFailure &failure) {
-          set_fault(frame, failure.error_name(), failure.message());
-          return SendStatus::Faulted;
-        }
-        return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::Barrier) {
-        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "Barrier.new does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        if (!args[0].is_integer() || args[0].as_integer() <= 0) {
-          set_fault(frame, "TypeError", "barrier parties must be positive");
-          return SendStatus::Faulted;
-        }
-        try {
-          *out = Value::barrier(std::make_shared<RuntimeBarrier>(
-              static_cast<std::size_t>(args[0].as_integer())));
-        } catch (const RuntimeTaskFailure &failure) {
-          set_fault(frame, failure.error_name(), failure.message());
-          return SendStatus::Faulted;
-        }
-        return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::Flow) {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError", "Flow.new does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        *out = Value::flow_module(std::make_shared<RuntimeFlowModule>());
-        return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::ThreadedCollection) {
-        if ((args.size() < 1 || args.size() > 2) || !require_no_block()) {
-          set_fault(frame, "TypeError",
-                    "ThreadedCollection.new expects items and workers");
-          return SendStatus::Faulted;
-        }
-        RuntimeFlowPartitionPolicy scatter_policy =
-            RuntimeFlowPartitionPolicy::Atomic;
-        if (!threaded_scatter_policy_from_keywords(frame, kw_args,
-                                                   &scatter_policy)) {
-          return SendStatus::Faulted;
-        }
-        bool source_was_tuple = false;
-        std::optional<std::vector<Value>> items =
-            extract_sequence_items(frame, args[0], &source_was_tuple);
-        if (!items.has_value()) {
-          set_fault(frame, "TypeError",
-                    "ThreadedCollection.new expects sequence items");
-          return SendStatus::Faulted;
-        }
-        std::size_t workers = 0;
-        if (args.size() == 2) {
-          if (!args[1].is_integer() || args[1].as_integer() < 0) {
-            set_fault(frame, "TypeError",
-                      "ThreadedCollection workers must be non-negative");
-            return SendStatus::Faulted;
-          }
-          workers = static_cast<std::size_t>(args[1].as_integer());
-        }
-        *out = Value::threaded_collection(
-            std::make_shared<RuntimeThreadedCollection>(
-                *items, workers, RuntimeFlowOptions{}, scatter_policy));
         return SendStatus::Matched;
       }
     }

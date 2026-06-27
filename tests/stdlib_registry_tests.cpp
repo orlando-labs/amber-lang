@@ -118,6 +118,10 @@ struct MockHost : StdlibHost {
                          std::vector<Value> * /*out*/) override {
     return false;
   }
+  bool stdlib_sequence_items(const void * /*frame*/, const Value & /*value*/,
+                             std::vector<Value> * /*out*/) override {
+    return false;
+  }
   amber::runtime::StdlibBlockResult
   stdlib_call_stream_block(const void * /*frame*/, const Value & /*block*/,
                            Value /*value*/) override {
@@ -427,6 +431,13 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::Uuid, "Uuid");
   expect_handler(RuntimeNativeTypeKind::Time, "Time");
   expect_handler(RuntimeNativeTypeKind::Url, "Url");
+  expect_handler(RuntimeNativeTypeKind::Channel, "Channel");
+  expect_handler(RuntimeNativeTypeKind::Mutex, "Mutex");
+  expect_handler(RuntimeNativeTypeKind::Atomic, "Atomic");
+  expect_handler(RuntimeNativeTypeKind::Barrier, "Barrier");
+  expect_handler(RuntimeNativeTypeKind::Flow, "Flow");
+  expect_handler(RuntimeNativeTypeKind::ThreadedCollection,
+                 "ThreadedCollection");
   expect_type_call(RuntimeNativeTypeKind::Bytes, "new", "Bytes.new");
   expect_type_call(RuntimeNativeTypeKind::ByteBuffer, "new",
                    "io.ByteBuffer.new");

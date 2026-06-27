@@ -143,6 +143,8 @@ public:
                                  std::vector<Value> *out) = 0;
   virtual bool stdlib_list_items(const void *frame, const Value &value,
                                  std::vector<Value> *out) = 0;
+  virtual bool stdlib_sequence_items(const void *frame, const Value &value,
+                                     std::vector<Value> *out) = 0;
 
   // Invoke the block supplied to a streaming stdlib method with one value. A
   // `Json.stop` escaped throw is reported as Stopped; other throws/exceptions
@@ -316,6 +318,10 @@ struct NativeStdlibCall {
 
   bool list_items(const Value &value, std::vector<Value> *out) const {
     return host.stdlib_list_items(frame, value, out);
+  }
+
+  bool sequence_items(const Value &value, std::vector<Value> *out) const {
+    return host.stdlib_sequence_items(frame, value, out);
   }
 
   StdlibBlockResult call_stream_block(Value value) const {

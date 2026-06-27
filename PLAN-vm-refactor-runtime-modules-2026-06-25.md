@@ -961,6 +961,31 @@ Slice record, 2026-06-27:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-27:
+
+- Promoted `runtime/stdlib_task.cpp` from path-only metadata to descriptor
+  dispatch ownership for task/sync type constructors: `Channel.new`,
+  `Mutex.new`, `Atomic.new`, `Barrier.new`, `Flow.new`, and
+  `ThreadedCollection.new`.
+- Added a narrow `StdlibHost::stdlib_sequence_items` facade so the
+  `ThreadedCollection` descriptor handler can preserve the VM's existing
+  List/Tuple/Set/finite-Range extraction behavior without depending on VM
+  internals.
+- Removed the corresponding task/sync constructor SEND island from
+  `Vm::try_apply_native_stdlib_send`; unknown selectors still fall through via
+  the registry handler's `NotHandled` status.
+- Added source-level task tests for descriptor-routed
+  `ThreadedCollection.new`.
+- Verified compile smoke: standalone `runtime/stdlib_task.cpp`, standalone
+  `runtime/vm.cpp`, standalone `runtime/stdlib_registry.cpp`, and
+  `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/stdlib_task_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and elevated `build/stdlib_task_tests`.
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.
