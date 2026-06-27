@@ -581,6 +581,26 @@ Slice record, 2026-06-27:
 - Verified focused binaries: `build/vm_tests`, `build/stdlib_argparser_tests`,
   and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-27:
+
+- Split fixed-width numeric profile helpers from `runtime/vm.h` /
+  `runtime/vm.cpp` into `runtime/numeric.h` / `runtime/numeric.cpp`:
+  `NumericPolicy`, profile lookup, floor division/modulo, bit operations, and
+  checked/wrapping/saturating Int arithmetic helpers.
+- Kept BigInt arithmetic/parsing in `runtime/vm.cpp` for now because it remains
+  coupled to VM conversion and SEND branches; this slice only moves the
+  VM-state-free fixed-width numeric helper layer.
+- Added `runtime/numeric.cpp` to `RUNTIME_SRCS` and both numeric files to
+  `FORMAT_FILES`. `runtime/vm.h` includes `runtime/numeric.h` so existing
+  umbrella includes keep working.
+- Verified compile smoke: standalone `runtime/numeric.cpp`, `runtime/vm.cpp`,
+  `runtime/value.cpp`, and standalone tagged `runtime/value.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/native_tests build/stdlib_argparser_tests` and `make -B
+  BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/native_tests`,
+  `build/stdlib_argparser_tests`, and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
@@ -588,6 +608,8 @@ declarations and low-coupling implementation islands into smaller files:
   basics, intrinsic type naming;
 - `runtime/errors.h` / `runtime/errors.cpp`: generated builtin runtime error
   metadata and field/default lookup helpers;
+- `runtime/numeric.h` / `runtime/numeric.cpp`: numeric profile lookup and
+  fixed-width Int arithmetic helpers;
 - `runtime/objects.h`: heap object structs and runtime object handles;
 - `runtime/heap.h` / `runtime/heap.cpp`: heap allocation, string table, pinning,
   and lifecycle helpers;

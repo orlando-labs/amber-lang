@@ -6,6 +6,7 @@
 #include "runtime/errors.h"
 #include "runtime/heap.h"
 #include "runtime/concurrency.h"
+#include "runtime/numeric.h"
 #include "runtime/text.h"
 #include "runtime/value.h"
 #include "runtime/watch.h"
@@ -117,27 +118,6 @@ private:
 std::string runtime_uuid_to_string(const RuntimeUuidValue &value);
 std::string runtime_time_to_iso8601(const RuntimeTimeValue &value);
 std::string runtime_time_period_to_string(const RuntimeTimePeriodValue &value);
-
-// Overflow policy for fixed-width Int arithmetic (amber.numeric-profile.v1).
-// `checked` raises OverflowError; `wrapping` wraps two's-complement;
-// `saturating` clamps to the type bounds.
-enum class NumericOverflowMode : std::uint8_t { Checked, Wrapping, Saturating };
-
-// Resolved module numeric profile: the selected overflow mode plus the bounds
-// of the concrete `Int` width. Defaults describe the default profile
-// (`int: Int64`, `overflow: checked`). `min == 0` marks unsigned widths.
-struct NumericPolicy {
-  NumericOverflowMode mode = NumericOverflowMode::Checked;
-  std::int64_t min = std::numeric_limits<std::int64_t>::min();
-  std::int64_t max = std::numeric_limits<std::int64_t>::max();
-  std::uint32_t bits = 64;
-};
-
-// Maps a numeric profile `int` type name (e.g. "Int32", "UInt8") to bounds.
-// Returns nullopt for types the reference VM cannot represent (UInt64,
-// BigInt-as-Int) or unknown names.
-std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
-                                                const std::string &overflow);
 
 struct ErrorInstanceValue {
   std::uint16_t error_id = 0;
