@@ -776,6 +776,23 @@ Slice record, 2026-06-27:
   translation-unit move of `RuntimeWorld` implementation and does not touch
   `Value` storage, object layout, or representation-specific code.
 
+Slice record, 2026-06-27:
+
+- Moved BigInt arithmetic/parsing helpers from `runtime/vm.cpp` into
+  `runtime/numeric.cpp`, beside the existing numeric-profile fixed-width Int
+  helpers.
+- Added `runtime/numeric.h` declarations for the VM-facing BigInt helpers:
+  Int64 conversion, signed compare/add/negate/multiply/division/modulo/power,
+  and decimal parsing. Magnitude limb helpers remain file-local in
+  `runtime/numeric.cpp`.
+- Verified compile smoke: standalone `runtime/numeric.cpp`, standalone
+  `runtime/vm.cpp`, standalone tagged `runtime/numeric.cpp`, and
+  `git diff --check`.
+- Verified with forced focused build target: `make -B build/vm_tests`.
+- Verified focused binaries: `build/vm_tests` and `build-tagged/vm_tests`.
+- Verified tagged representation smoke: `make -B BUILD_DIR=build-tagged
+  VALUE_REPR=tagged build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 

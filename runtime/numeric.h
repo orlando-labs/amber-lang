@@ -1,7 +1,10 @@
 #pragma once
 
+#include "runtime/value.h"
+
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -54,5 +57,24 @@ bool numeric_shl_int64(std::int64_t lhs, std::int64_t rhs,
                        const NumericPolicy &policy, std::int64_t *out);
 bool numeric_pow_int64(std::int64_t lhs, std::int64_t rhs,
                        const NumericPolicy &policy, std::int64_t *out);
+
+std::shared_ptr<BigIntValue> big_from_int64(std::int64_t value);
+std::optional<std::int64_t> big_to_int64(const BigIntValue &value);
+int big_compare_signed(const BigIntValue &lhs, const BigIntValue &rhs);
+std::shared_ptr<BigIntValue> big_add_signed(const BigIntValue &lhs,
+                                            const BigIntValue &rhs);
+std::shared_ptr<BigIntValue> big_negate(const BigIntValue &value);
+std::shared_ptr<BigIntValue> big_mul_signed(const BigIntValue &lhs,
+                                            const BigIntValue &rhs);
+void big_divmod_trunc(const BigIntValue &lhs, const BigIntValue &rhs,
+                      std::shared_ptr<BigIntValue> *quotient,
+                      std::shared_ptr<BigIntValue> *remainder);
+std::shared_ptr<BigIntValue> big_floor_mod(const BigIntValue &lhs,
+                                           const BigIntValue &rhs);
+std::shared_ptr<BigIntValue> big_floor_div(const BigIntValue &lhs,
+                                           const BigIntValue &rhs);
+std::shared_ptr<BigIntValue> big_pow(const BigIntValue &base,
+                                     std::uint64_t exponent);
+std::optional<BigIntValue> big_from_decimal_text(const std::string &text);
 
 } // namespace amber::runtime
