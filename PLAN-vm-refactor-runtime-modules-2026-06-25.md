@@ -918,6 +918,28 @@ Slice record, 2026-06-27:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-27:
+
+- Added descriptor-only `runtime/stdlib_net_http.cpp` for `net.http*` native
+  type module metadata.
+- Moved `net.http`, client/request/body/headers/server/server request/server
+  response, json helper, and form helper path metadata out of
+  `register_legacy_native_type_paths` and into the net.http descriptor.
+- Moved constructor/call metadata for net.http client/request/body/headers/
+  server/server response/json helpers/form body out of
+  `register_legacy_native_type_calls` and into the net.http descriptor. Large VM
+  net.http selector bodies and module error handling remain in `runtime/vm.cpp`
+  for later selector-dispatch and error-descriptor slices.
+- Added `runtime/stdlib_net_http.cpp` to `STDLIB_SRCS` and `FORMAT_FILES`.
+- Verified compile smoke: standalone `runtime/stdlib_net_http.cpp`,
+  standalone `runtime/stdlib_registry.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and elevated `build/vm_net_http_tests` (`566 checks`).
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

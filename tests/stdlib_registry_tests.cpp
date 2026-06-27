@@ -274,10 +274,8 @@ void test_module_registry_imports_native_paths(const NativeRegistry &registry) {
 
   const std::optional<RuntimeBindingRef> http_client =
       modules.binding_for_path("net.http.Client");
-  expect(http_client.has_value() &&
-             http_client->kind == RuntimeBindingKind::NativeType &&
-             http_client->native_type == RuntimeNativeTypeKind::NetHttpClient,
-         "module registry resolves legacy net.http.Client binding");
+  expect(!http_client.has_value(),
+         "legacy module registry no longer owns net.http.Client binding");
 
   const std::optional<RuntimeBindingRef> strict_hash =
       modules.binding_for_path("StrictHashMap");
@@ -382,6 +380,24 @@ void test_builtin_runtime_module_descriptors() {
   expect_path("net.Endpoint", RuntimeNativeTypeKind::NetEndpoint);
   expect_path("net.tcp", RuntimeNativeTypeKind::NetTcp);
   expect_path("net.udp", RuntimeNativeTypeKind::NetUdp);
+  expect_path("net.http", RuntimeNativeTypeKind::NetHttp);
+  expect_path("net.http.Client", RuntimeNativeTypeKind::NetHttpClient);
+  expect_path("net.http.Request", RuntimeNativeTypeKind::NetHttpRequest);
+  expect_path("net.http.RequestBody",
+              RuntimeNativeTypeKind::NetHttpRequestBody);
+  expect_path("net.http.Headers", RuntimeNativeTypeKind::NetHttpHeaders);
+  expect_path("net.http.Server", RuntimeNativeTypeKind::NetHttpServer);
+  expect_path("net.http.ServerRequest",
+              RuntimeNativeTypeKind::NetHttpServerRequest);
+  expect_path("net.http.ServerResponse",
+              RuntimeNativeTypeKind::NetHttpServerResponse);
+  expect_path("net.http.json", RuntimeNativeTypeKind::NetHttpJson);
+  expect_path("net.http.json.get_json",
+              RuntimeNativeTypeKind::NetHttpJsonGetJson);
+  expect_path("net.http.json.post_json",
+              RuntimeNativeTypeKind::NetHttpJsonPostJson);
+  expect_path("net.http.form", RuntimeNativeTypeKind::NetHttpForm);
+  expect_path("net.http.form.FormBody", RuntimeNativeTypeKind::NetHttpFormBody);
   expect_path("Json", RuntimeNativeTypeKind::Json);
   expect_path("Base64Url", RuntimeNativeTypeKind::Base64Url);
   expect_path("Digest", RuntimeNativeTypeKind::Digest);
@@ -407,6 +423,24 @@ void test_builtin_runtime_module_descriptors() {
   expect_type_call(RuntimeNativeTypeKind::FsPath, "new", "fs.Path.new");
   expect_type_call(RuntimeNativeTypeKind::NetEndpoint, "new",
                    "net.Endpoint.new");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpClient, "new",
+                   "net.http.Client.new");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpRequest, "new",
+                   "net.http.Request.new");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpRequestBody, "new",
+                   "net.http.RequestBody.new");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpHeaders, "new",
+                   "net.http.Headers.new");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpServer, "new",
+                   "net.http.Server.new");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpServerResponse, "new",
+                   "net.http.ServerResponse.new");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpJsonGetJson, "__call__",
+                   "net.http.json.get_json()");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpJsonPostJson, "__call__",
+                   "net.http.json.post_json()");
+  expect_type_call(RuntimeNativeTypeKind::NetHttpFormBody, "__call__",
+                   "net.http.form.FormBody()");
   expect_type_call(RuntimeNativeTypeKind::ArgParser, "new", "ArgParser.new");
 
   const std::optional<NativeStdlibHandler> math_handler =
@@ -443,10 +477,9 @@ void test_type_call_registry() {
               .has_value(),
          "NetEndpoint type call moved out of the legacy registry");
 
-  const std::optional<RuntimeTypeCallDescriptor> net_http_client =
-      registry.native_type_call(RuntimeNativeTypeKind::NetHttpClient);
-  expect(net_http_client.has_value() && net_http_client->selector == "new",
-         "NetHttpClient type call still routes through legacy new");
+  expect(!registry.native_type_call(RuntimeNativeTypeKind::NetHttpClient)
+              .has_value(),
+         "NetHttpClient type call moved out of the legacy registry");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::Math).has_value(),
          "Math is not directly callable as a constructor");

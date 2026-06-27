@@ -190,6 +190,7 @@ void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
   register_io_runtime_module(modules, dispatch, types);
   register_fs_runtime_module(modules, dispatch, types);
   register_net_runtime_module(modules, dispatch, types);
+  register_net_http_runtime_module(modules, dispatch, types);
   register_math_runtime_module(modules, dispatch, types);
   register_json_runtime_module(modules, dispatch, types);
   register_codecs_runtime_module(modules, dispatch, types);
@@ -218,32 +219,6 @@ void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {
 
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
   registry.register_native_type_path("Kernel", RuntimeNativeTypeKind::Kernel);
-  registry.register_native_type_path("net.http",
-                                     RuntimeNativeTypeKind::NetHttp);
-  registry.register_native_type_path("net.http.Client",
-                                     RuntimeNativeTypeKind::NetHttpClient);
-  registry.register_native_type_path("net.http.Request",
-                                     RuntimeNativeTypeKind::NetHttpRequest);
-  registry.register_native_type_path("net.http.RequestBody",
-                                     RuntimeNativeTypeKind::NetHttpRequestBody);
-  registry.register_native_type_path("net.http.Headers",
-                                     RuntimeNativeTypeKind::NetHttpHeaders);
-  registry.register_native_type_path("net.http.Server",
-                                     RuntimeNativeTypeKind::NetHttpServer);
-  registry.register_native_type_path(
-      "net.http.ServerRequest", RuntimeNativeTypeKind::NetHttpServerRequest);
-  registry.register_native_type_path(
-      "net.http.ServerResponse", RuntimeNativeTypeKind::NetHttpServerResponse);
-  registry.register_native_type_path("net.http.json",
-                                     RuntimeNativeTypeKind::NetHttpJson);
-  registry.register_native_type_path("net.http.json.get_json",
-                                     RuntimeNativeTypeKind::NetHttpJsonGetJson);
-  registry.register_native_type_path(
-      "net.http.json.post_json", RuntimeNativeTypeKind::NetHttpJsonPostJson);
-  registry.register_native_type_path("net.http.form",
-                                     RuntimeNativeTypeKind::NetHttpForm);
-  registry.register_native_type_path("net.http.form.FormBody",
-                                     RuntimeNativeTypeKind::NetHttpFormBody);
   registry.register_native_type_path("Amber", RuntimeNativeTypeKind::Amber);
   registry.register_native_type_path("Str", RuntimeNativeTypeKind::Str);
   registry.register_native_type_path("Int", RuntimeNativeTypeKind::Int);
@@ -284,24 +259,7 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
 }
 
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry) {
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpClient,
-                                     "new");
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpRequest,
-                                     "new");
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpRequestBody,
-                                     "new");
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpHeaders,
-                                     "new");
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpServer,
-                                     "new");
-  registry.register_native_type_call(
-      RuntimeNativeTypeKind::NetHttpServerResponse, "new");
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpJsonGetJson,
-                                     "__call__");
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpJsonPostJson,
-                                     "__call__");
-  registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpFormBody,
-                                     "__call__");
+  (void)registry;
 }
 
 } // namespace amber::runtime
