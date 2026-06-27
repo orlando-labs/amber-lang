@@ -371,6 +371,10 @@ void test_builtin_runtime_module_descriptors() {
   };
 
   expect_path("Math", RuntimeNativeTypeKind::Math);
+  expect_path("io", RuntimeNativeTypeKind::Io);
+  expect_path("Bytes", RuntimeNativeTypeKind::Bytes);
+  expect_path("io.ByteBuffer", RuntimeNativeTypeKind::ByteBuffer);
+  expect_path("io.Pipe", RuntimeNativeTypeKind::IoPipe);
   expect_path("Json", RuntimeNativeTypeKind::Json);
   expect_path("Base64Url", RuntimeNativeTypeKind::Base64Url);
   expect_path("Digest", RuntimeNativeTypeKind::Digest);
@@ -389,9 +393,11 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::Uuid, "Uuid");
   expect_handler(RuntimeNativeTypeKind::Time, "Time");
   expect_handler(RuntimeNativeTypeKind::Url, "Url");
+  expect_type_call(RuntimeNativeTypeKind::Bytes, "new", "Bytes.new");
+  expect_type_call(RuntimeNativeTypeKind::ByteBuffer, "new",
+                   "io.ByteBuffer.new");
+  expect_type_call(RuntimeNativeTypeKind::IoPipe, "__call__", "io.Pipe()");
   expect_type_call(RuntimeNativeTypeKind::ArgParser, "new", "ArgParser.new");
-  expect(!types.native_type_call(RuntimeNativeTypeKind::Bytes).has_value(),
-         "builtin descriptors do not register legacy Bytes.new type call yet");
 
   const std::optional<NativeStdlibHandler> math_handler =
       dispatch.native_handler(RuntimeNativeTypeKind::Math);
@@ -417,10 +423,13 @@ void test_type_call_registry() {
   expect(!argparser.has_value(),
          "ArgParser type call moved out of the legacy registry");
 
-  const std::optional<RuntimeTypeCallDescriptor> pipe =
-      registry.native_type_call(RuntimeNativeTypeKind::IoPipe);
-  expect(pipe.has_value() && pipe->selector == "__call__",
-         "IoPipe type call routes through __call__");
+  expect(!registry.native_type_call(RuntimeNativeTypeKind::IoPipe).has_value(),
+         "IoPipe type call moved out of the legacy registry");
+
+  const std::optional<RuntimeTypeCallDescriptor> fs_path =
+      registry.native_type_call(RuntimeNativeTypeKind::FsPath);
+  expect(fs_path.has_value() && fs_path->selector == "new",
+         "FsPath type call still routes through legacy new");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::Math).has_value(),
          "Math is not directly callable as a constructor");

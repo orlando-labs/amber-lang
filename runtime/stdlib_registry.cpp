@@ -187,6 +187,7 @@ void register_builtin_stdlib(NativeRegistry &registry) {
 void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
                                       RuntimeDispatchRegistry &dispatch,
                                       RuntimeTypeRegistry &types) {
+  register_io_runtime_module(modules, dispatch, types);
   register_math_runtime_module(modules, dispatch, types);
   register_json_runtime_module(modules, dispatch, types);
   register_codecs_runtime_module(modules, dispatch, types);
@@ -215,17 +216,6 @@ void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {
 
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
   registry.register_native_type_path("Kernel", RuntimeNativeTypeKind::Kernel);
-  registry.register_native_type_path("io", RuntimeNativeTypeKind::Io);
-  registry.register_native_type_path("io.Buffer",
-                                     RuntimeNativeTypeKind::TextBuffer);
-  registry.register_native_type_path("io.Logger",
-                                     RuntimeNativeTypeKind::Logger);
-  registry.register_native_type_path("Bytes", RuntimeNativeTypeKind::Bytes);
-  registry.register_native_type_path("io.ByteBuffer",
-                                     RuntimeNativeTypeKind::ByteBuffer);
-  registry.register_native_type_path("io.ByteSlice",
-                                     RuntimeNativeTypeKind::ByteSlice);
-  registry.register_native_type_path("io.Pipe", RuntimeNativeTypeKind::IoPipe);
   registry.register_native_type_path("fs", RuntimeNativeTypeKind::Fs);
   registry.register_native_type_path("fs.Path", RuntimeNativeTypeKind::FsPath);
   registry.register_native_type_path("fs.File", RuntimeNativeTypeKind::FsFile);
@@ -300,9 +290,6 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
 }
 
 void register_legacy_native_type_calls(RuntimeTypeRegistry &registry) {
-  registry.register_native_type_call(RuntimeNativeTypeKind::Bytes, "new");
-  registry.register_native_type_call(RuntimeNativeTypeKind::ByteBuffer, "new");
-  registry.register_native_type_call(RuntimeNativeTypeKind::IoPipe, "__call__");
   registry.register_native_type_call(RuntimeNativeTypeKind::FsPath, "new");
   registry.register_native_type_call(RuntimeNativeTypeKind::NetEndpoint, "new");
   registry.register_native_type_call(RuntimeNativeTypeKind::NetHttpClient,

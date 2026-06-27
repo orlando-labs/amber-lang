@@ -858,6 +858,25 @@ Slice record, 2026-06-27:
 - Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
   and `build/stdlib_argparser_tests`.
 
+Slice record, 2026-06-27:
+
+- Added descriptor-only `runtime/stdlib_io.cpp` for IO/data native type module
+  metadata.
+- Moved IO/data path metadata for `io`, `io.Buffer`, `io.Logger`, `Bytes`,
+  `io.ByteBuffer`, `io.ByteSlice`, and `io.Pipe` out of
+  `register_legacy_native_type_paths` and into the IO descriptor.
+- Moved constructor/call metadata for `Bytes.new`, `io.ByteBuffer.new`, and
+  `io.Pipe()` out of `register_legacy_native_type_calls` and into the IO
+  descriptor. Large VM SEND/constructor bodies remain in `runtime/vm.cpp` for a
+  later selector-dispatch descriptor slice.
+- Added `runtime/stdlib_io.cpp` to `STDLIB_SRCS` and `FORMAT_FILES`.
+- Verified compile smoke: standalone `runtime/stdlib_io.cpp`,
+  standalone `runtime/stdlib_registry.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/stdlib_collections_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and `build/stdlib_collections_tests`.
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

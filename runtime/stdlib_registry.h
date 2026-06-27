@@ -555,6 +555,9 @@ void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
 
 // Per-library registration entry points (defined in
 // `runtime/stdlib_<name>.cpp`).
+void register_io_runtime_module(RuntimeModuleRegistry &modules,
+                                RuntimeDispatchRegistry &dispatch,
+                                RuntimeTypeRegistry &types);
 void register_math(NativeRegistry &registry);
 void register_math_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
