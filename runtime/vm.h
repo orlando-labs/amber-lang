@@ -139,14 +139,6 @@ struct NumericPolicy {
 std::optional<NumericPolicy> numeric_policy_for(const std::string &int_type,
                                                 const std::string &overflow);
 
-// Value-based Result[T,E] (Ok/Err). A cold tail kind: a single payload slot
-// holds either the Ok value or the Err value, discriminated by `is_ok`. Defined
-// after Value because it embeds a Value member.
-struct ResultValue {
-  bool is_ok = false;
-  Value payload = Value::null();
-};
-
 struct ErrorInstanceValue {
   std::uint16_t error_id = 0;
   std::string message;
@@ -187,9 +179,6 @@ struct RuntimePrettyPrintOptions {
   std::size_t max_depth = 20;
   std::size_t max_items = 100;
 };
-
-// Wrap a payload into an Ok (is_ok=true) or Err (is_ok=false) Result value.
-Value make_result_value(bool is_ok, Value payload);
 
 ExecutionResult execute_code(const bytecode::BcModule &module,
                              std::uint32_t code_id,

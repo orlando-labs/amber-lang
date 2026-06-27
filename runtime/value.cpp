@@ -194,6 +194,13 @@ std::string big_int_to_decimal_string(const BigIntValue &value) {
   return out;
 }
 
+Value make_result_value(bool is_ok, Value payload) {
+  auto result = std::make_shared<ResultValue>();
+  result->is_ok = is_ok;
+  result->payload = std::move(payload);
+  return Value::result(std::move(result));
+}
+
 #ifndef AMBER_VALUE_REPR_TAGGED
 // ==== Variant Value method bodies (default 24-byte representation) =========
 Value Value::null() { return {std::monostate{}}; }

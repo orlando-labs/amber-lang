@@ -6301,13 +6301,6 @@ void RuntimeHeap::drop_object(void *obj, void (*deleter)(void *),
   impl->release_intrusive(obj, deleter, header);
 }
 
-Value make_result_value(bool is_ok, Value payload) {
-  auto result = std::make_shared<ResultValue>();
-  result->is_ok = is_ok;
-  result->payload = std::move(payload);
-  return Value::result(std::move(result));
-}
-
 namespace {
 
 using amber::bytecode::BcCode;

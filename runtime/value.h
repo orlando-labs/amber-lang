@@ -686,4 +686,14 @@ private:
 static_assert(sizeof(Value) <= 16, "tagged Value must fit in 16 bytes");
 #endif // AMBER_VALUE_REPR_TAGGED
 
+// Value-based Result[T,E] (Ok/Err). A cold tail kind: a single payload slot
+// holds either the Ok value or the Err value, discriminated by `is_ok`.
+struct ResultValue {
+  bool is_ok = false;
+  Value payload = Value::null();
+};
+
+// Wrap a payload into an Ok (is_ok=true) or Err (is_ok=false) Result value.
+Value make_result_value(bool is_ok, Value payload);
+
 } // namespace amber::runtime

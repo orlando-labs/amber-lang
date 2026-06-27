@@ -565,6 +565,22 @@ Slice record, 2026-06-26:
 - Tagged `VALUE_REPR=tagged` was not rerun for this slice because it does not
   touch `Value` layout, object layout, or representation-specific code.
 
+Slice record, 2026-06-27:
+
+- Moved the value-based `ResultValue` payload struct and `make_result_value`
+  helper from `runtime/vm.h` / `runtime/vm.cpp` into `runtime/value.h` /
+  `runtime/value.cpp`, beside the `Value::result` tail-kind API.
+- Kept VM `Ok`/`Err` call handling unchanged; this slice only moves the shared
+  result payload/value construction helper used by both VM and stdlib code.
+- Verified compile smoke: standalone `runtime/value.cpp`, standalone tagged
+  `runtime/value.cpp`, standalone `runtime/vm.cpp`, and standalone
+  `runtime/stdlib_argparser.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_argparser_tests` and `make -B BUILD_DIR=build-tagged
+  VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_argparser_tests`,
+  and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
