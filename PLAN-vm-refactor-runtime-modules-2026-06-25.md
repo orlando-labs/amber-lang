@@ -752,6 +752,30 @@ Slice record, 2026-06-27:
 - Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`,
   `build/frozen_image_tests`, and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-27:
+
+- Moved the remaining `RuntimeWorld` implementation from `runtime/vm.cpp` into
+  `runtime/world.cpp`: package image decode/reload helpers, `RuntimeWorld::Impl`,
+  execution, world mutation/freeze/reload, capability/effect/replay accessors,
+  mirror generation, dispatch stats, and heap/GC/pinning facade methods.
+- Kept direct `execute_code(...)` in `runtime/vm.cpp`; `RuntimeWorld::execute`
+  now reaches the private `Vm` only through the `execute_runtime_vm(...)` seam
+  from the previous slice.
+- Added local `runtime/world.cpp` helper copies for code-object lookup and
+  watch-cell root unwrapping so `world.cpp` does not depend on the interpreter
+  anonymous namespace in `runtime/vm.cpp`.
+- Verified compile smoke: standalone `runtime/world.cpp` and standalone
+  `runtime/vm.cpp` compile after formatting; `git diff --check` is clean.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests build/frozen_image_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`,
+  and `build/frozen_image_tests`.
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+- Tagged `VALUE_REPR=tagged` was not rerun for this slice because it is a
+  translation-unit move of `RuntimeWorld` implementation and does not touch
+  `Value` storage, object layout, or representation-specific code.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
