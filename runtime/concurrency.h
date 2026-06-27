@@ -809,6 +809,9 @@ private:
 // parks (a task body suspended at a suspension point such as task.sleep,
 // releasing its worker, rather than blocking it). Monotonic; snapshot it before
 // and after a run to assert the cooperative path was taken.
+void runtime_clear_task_parked();
+bool runtime_task_is_parked();
+void runtime_mark_task_parked();
 std::uint64_t runtime_cooperative_task_park_count();
 
 } // namespace amber::runtime

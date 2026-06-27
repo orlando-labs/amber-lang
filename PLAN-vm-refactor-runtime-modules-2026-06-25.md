@@ -692,6 +692,31 @@ Slice record, 2026-06-27:
   `build/native_tests`, `build/module_loader_tests`, and
   `build-tagged/vm_tests`.
 
+Slice record, 2026-06-27:
+
+- Moved concurrency/task/sync implementation islands from `runtime/vm.cpp` into
+  `runtime/concurrency.cpp`: shareability/move-boundary helpers,
+  `RuntimeAwaitable`, `RuntimeMoveSlot`, channels/select, mutexes, atomics,
+  barriers, the scheduler, task handles/modules, flow, and threaded
+  collections.
+- Kept VM-specific cooperative park request plumbing in `runtime/vm.cpp`, but
+  routed the shared task parked-state through small `runtime/concurrency.h`
+  helpers so TaskModule state lives beside the scheduler implementation.
+- Added `runtime/concurrency.cpp` to `RUNTIME_SRCS` and `FORMAT_FILES`.
+- Verified compile smoke: standalone `runtime/concurrency.cpp`, standalone
+  tagged `runtime/concurrency.cpp`, and standalone `runtime/vm.cpp` compile
+  after formatting.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_task_tests build/native_tests build/amber_ext_tests
+  build/module_loader_tests` and `make -B BUILD_DIR=build-tagged
+  VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, elevated
+  `build/stdlib_task_tests` for loopback cooperative socket coverage,
+  `build/native_tests`, `build/amber_ext_tests`, `build/module_loader_tests`,
+  and `build-tagged/vm_tests`. A sandboxed `build/stdlib_task_tests` attempt
+  failed first at `cooperative socket read`, matching the known loopback
+  sandbox limitation.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
