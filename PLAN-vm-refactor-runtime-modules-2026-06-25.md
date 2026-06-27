@@ -618,12 +618,50 @@ Slice record, 2026-06-27:
 - Tagged `VALUE_REPR=tagged` was not rerun for this declaration-only slice
   because it does not touch `Value` layout or representation-specific code.
 
+Slice record, 2026-06-27:
+
+- Prepared the value display implementation move by relocating shared payload
+  and object helpers out of `runtime/vm.h` / `runtime/vm.cpp`: moved
+  `RuntimeForeignHandle` and `ErrorInstanceValue` into `runtime/value.h`,
+  moved native range detection (`kNativeSyntheticClassIndex`,
+  `kNativeRangeMarker`, `instance_is_native_range`) into `runtime/objects.h` /
+  `runtime/objects.cpp`, and moved uuid/time display helper declarations into
+  `runtime/value_display.h`.
+- Kept VM native descriptor and ArgParser surfaces in `runtime/vm.h`; this
+  slice only removed the direct dependencies that would otherwise force
+  `runtime/value_display.cpp` to include the full VM umbrella.
+- Verified compile smoke: standalone `runtime/value_display.cpp`,
+  `runtime/vm.cpp`, and `runtime/value.cpp` compile.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/amber_ext_tests` and `make -B BUILD_DIR=build-tagged
+  VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/amber_ext_tests`, and
+  `build-tagged/vm_tests`.
+
+Slice record, 2026-06-27:
+
+- Moved value display/debug implementation from `runtime/vm.cpp` into
+  `runtime/value_display.cpp`: private stringification helpers,
+  `runtime_stringify_value`, and `value_to_debug_string` now live beside
+  `runtime/value_display.h`.
+- Added `runtime/value_display.cpp` to `RUNTIME_SRCS` and `FORMAT_FILES`.
+  `runtime/vm.cpp` now calls the public `runtime_stringify_value` declaration
+  from `runtime/value_display.h` instead of an anonymous-namespace helper.
+- Verified compile smoke: standalone `runtime/value_display.cpp` and
+  `runtime/vm.cpp` compile after formatting.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests` and `make -B BUILD_DIR=build-tagged
+  VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`, and
+  `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
-- `runtime/value.h` / `runtime/value.cpp`: `Value`, value helpers, value display
-  basics, intrinsic type naming;
-- `runtime/value_display.h`: public value display/debug declarations;
+- `runtime/value.h` / `runtime/value.cpp`: `Value`, value helpers, intrinsic
+  type naming;
+- `runtime/value_display.h` / `runtime/value_display.cpp`: public value
+  display/debug declarations and implementations;
 - `runtime/errors.h` / `runtime/errors.cpp`: generated builtin runtime error
   metadata and field/default lookup helpers;
 - `runtime/numeric.h` / `runtime/numeric.cpp`: numeric profile lookup and
