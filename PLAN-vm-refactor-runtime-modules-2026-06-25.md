@@ -736,6 +736,22 @@ Slice record, 2026-06-27:
   `RuntimeIoProvider` default methods and does not touch `Value` layout,
   object layout, or representation-specific code.
 
+Slice record, 2026-06-27:
+
+- Added a private VM execution seam in `runtime/vm_internal.h`:
+  `RuntimeVmExecutionContext` and `execute_runtime_vm(...)`.
+- Kept the `Vm` class body private to `runtime/vm.cpp`, but routed both
+  `execute_code` and `RuntimeWorld::execute` through the new seam so a later
+  `RuntimeWorld` implementation move no longer needs to construct `Vm`
+  directly.
+- Verified compile smoke: standalone `runtime/vm_internal.h` and standalone
+  `runtime/vm.cpp` compile after formatting.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/module_loader_tests build/frozen_image_tests` and `make -B
+  BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`,
+  `build/frozen_image_tests`, and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 

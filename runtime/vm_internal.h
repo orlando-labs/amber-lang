@@ -4,10 +4,12 @@
 #include "runtime/heap.h"
 #include "runtime/value.h"
 #include "runtime/watch.h"
+#include "runtime/world.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -19,6 +21,12 @@ namespace amber::runtime {
 
 // Private interpreter state for runtime/vm.cpp. This header exists to make the
 // VM implementation editable during the split; it is not a public runtime API.
+
+class NativeRegistry;
+class RuntimeDispatchRegistry;
+class RuntimeErrorRegistry;
+class RuntimeModuleRegistry;
+class RuntimeTypeRegistry;
 
 struct PreparedSeqState {
   std::vector<Value> items;
@@ -550,5 +558,25 @@ struct RuntimeState {
     ++world_epoch;
   }
 };
+
+struct RuntimeVmExecutionContext {
+  std::shared_ptr<RuntimeState> state;
+  std::string module_id;
+  const RuntimeWorldOptions *world_options = nullptr;
+  const RuntimeCapabilityResolution *capabilities = nullptr;
+  const RuntimeEffectValidation *effects = nullptr;
+  std::function<void(RuntimeTraceEvent)> trace_recorder;
+  const NativeRegistry *native_registry = nullptr;
+  const RuntimeModuleRegistry *module_registry = nullptr;
+  const RuntimeTypeRegistry *type_registry = nullptr;
+  const RuntimeDispatchRegistry *dispatch_registry = nullptr;
+  const RuntimeErrorRegistry *error_registry = nullptr;
+};
+
+ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,
+                                   RuntimeVmExecutionContext context,
+                                   std::uint32_t code_id,
+                                   const std::vector<Value> &args, Value self,
+                                   Value block);
 
 } // namespace amber::runtime

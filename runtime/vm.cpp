@@ -27903,6 +27903,19 @@ private:
 
 } // namespace
 
+ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,
+                                   RuntimeVmExecutionContext context,
+                                   std::uint32_t code_id,
+                                   const std::vector<Value> &args, Value self,
+                                   Value block) {
+  Vm vm(module, std::move(context.state), std::move(context.module_id),
+        context.world_options, context.capabilities, context.effects,
+        std::move(context.trace_recorder), context.native_registry,
+        context.module_registry, context.type_registry,
+        context.dispatch_registry, context.error_registry);
+  return vm.execute(code_id, args, std::move(self), std::move(block));
+}
+
 namespace {
 
 struct RuntimePackageImage {
@@ -27995,8 +28008,8 @@ ExecutionResult execute_code(const bytecode::BcModule &module,
                              std::uint32_t code_id,
                              const std::vector<Value> &args, Value self,
                              Value block) {
-  Vm vm(module);
-  return vm.execute(code_id, args, std::move(self), std::move(block));
+  return execute_runtime_vm(module, RuntimeVmExecutionContext{}, code_id, args,
+                            std::move(self), std::move(block));
 }
 
 struct RuntimeWorld::Impl {
@@ -28226,16 +28239,23 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
                                                : nullptr);
   const std::string module_id =
       impl_->package.has_value() ? impl_->package->manifest.root_module : "";
-  Vm vm(
-      *impl_->module, impl_->state, module_id, &impl_->options,
-      &impl_->capabilities, &impl_->effects,
-      [impl = impl_](RuntimeTraceEvent event) {
-        impl->record_event(std::move(event));
-      },
-      &impl_->native_registry, &impl_->module_registry, &impl_->type_registry,
-      &impl_->dispatch_registry, &impl_->error_registry);
+  RuntimeVmExecutionContext vm_context;
+  vm_context.state = impl_->state;
+  vm_context.module_id = module_id;
+  vm_context.world_options = &impl_->options;
+  vm_context.capabilities = &impl_->capabilities;
+  vm_context.effects = &impl_->effects;
+  vm_context.trace_recorder = [impl = impl_](RuntimeTraceEvent event) {
+    impl->record_event(std::move(event));
+  };
+  vm_context.native_registry = &impl_->native_registry;
+  vm_context.module_registry = &impl_->module_registry;
+  vm_context.type_registry = &impl_->type_registry;
+  vm_context.dispatch_registry = &impl_->dispatch_registry;
+  vm_context.error_registry = &impl_->error_registry;
   ExecutionResult result =
-      vm.execute(code_id, args, std::move(self), std::move(block));
+      execute_runtime_vm(*impl_->module, std::move(vm_context), code_id, args,
+                         std::move(self), std::move(block));
   if (result.ok()) {
     impl_->record_event(replay::make_event(
         "task.completed", {{"code_id", std::to_string(code_id)}}));
