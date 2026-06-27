@@ -673,6 +673,25 @@ Slice record, 2026-06-27:
 - Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
   `build/module_loader_tests`, and `build-tagged/vm_tests`.
 
+Slice record, 2026-06-27:
+
+- Moved `RuntimeHeap::Impl` and the public `RuntimeHeap` method bodies from
+  `runtime/vm.cpp` into `runtime/heap.cpp`: allocation, cross-strand remote
+  frees, write barriers, GC, pin/opaque-handle/value-buffer/native-wait APIs,
+  stats, and the intrusive `drop_object` path.
+- Kept the default heap facade and intrusive-refcount templates in
+  `runtime/heap.cpp`, now beside the full heap implementation. `runtime/vm.cpp`
+  still owns VM/interpreter heap call sites and world adapter forwarding.
+- Verified compile smoke: standalone `runtime/heap.cpp`, standalone tagged
+  `runtime/heap.cpp`, and standalone `runtime/vm.cpp` compile after formatting.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_collections_tests build/native_tests build/module_loader_tests`
+  and `make -B BUILD_DIR=build-tagged VALUE_REPR=tagged
+  build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
+  `build/native_tests`, `build/module_loader_tests`, and
+  `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 

@@ -69,7 +69,7 @@ struct ObjHeader {
   // intended -- these objects are only ever referenced through pointers.
   std::atomic<std::uint32_t> ref_count{0};
   // Type-erased keepalive for the owning RuntimeHeap::Impl (Impl is private to
-  // vm.cpp, hence shared_ptr<void>). It locates the heap on the drop path
+  // heap.cpp, hence shared_ptr<void>). It locates the heap on the drop path
   // (RuntimeHeap::drop_object) and guarantees the heap outlives its objects --
   // the same lifetime contract the old shared_ptr deleter's Impl capture gave.
   std::shared_ptr<void> heap;
