@@ -131,6 +131,11 @@ struct ClosureValue {
   Value self = Value::null();
 };
 
+struct CollectionKeyError {
+  std::string error_name;
+  std::string message;
+};
+
 bool value_has_heap_payload_tag(const Value &value);
 const ObjHeader *heap_header_from_value(const Value &value);
 ObjHeader *mutable_heap_header_from_value(const Value &value);
@@ -140,5 +145,21 @@ std::optional<std::string> lifecycle_access_error_name(const ObjHeader &header);
 std::string lifecycle_access_error_message(const std::string &error_name);
 std::string lifecycle_debug_label(const ObjHeader &header);
 bool instance_is_native_range(const IntrusivePtr<InstanceValue> &instance);
+bool value_equals(const Value &lhs, const Value &rhs);
+std::optional<Value> normalize_map_key(const Value &key,
+                                       CollectionKeyError *error);
+std::optional<Value> normalize_set_element(const Value &value,
+                                           CollectionKeyError *error);
+bool collection_keys_equal(const Value &stored, const Value &lookup);
+bool map_key_is_nameable(const Value &key);
+bool map_entry_key_equivalent(const MapEntry &entry, const Value &lookup_key,
+                              std::optional<std::uint32_t> lookup_id,
+                              bool strict);
+bool map_entries_same_key(const MapEntry &a, const MapEntry &b, bool strict);
+void upsert_normalized_map_entry(std::vector<MapEntry> *entries, MapEntry entry,
+                                 bool strict);
+std::optional<std::vector<MapEntry>>
+normalize_map_entries(std::vector<MapEntry> entries, bool strict,
+                      CollectionKeyError *error);
 
 } // namespace amber::runtime

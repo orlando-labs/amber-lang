@@ -655,6 +655,24 @@ Slice record, 2026-06-27:
 - Verified focused binaries: `build/vm_tests`, `build/module_loader_tests`, and
   `build-tagged/vm_tests`.
 
+Slice record, 2026-06-27:
+
+- Moved shared value equality and collection-key normalization helpers from
+  `runtime/vm.cpp` into `runtime/objects.cpp` / `runtime/objects.h`:
+  `value_equals`, `CollectionKeyError`, map/set key normalization,
+  name-indifferent map entry comparison, and normalized map-entry upsert.
+- Kept VM-owned canonical map-key id construction in `runtime/vm.cpp`, because
+  it depends on the active module's string/symbol interning tables. This slice
+  removes the collection helper dependency that blocked a later
+  `RuntimeHeap` implementation move.
+- Verified compile smoke: standalone `runtime/objects.cpp` and
+  `runtime/vm.cpp` compile after formatting.
+- Verified with forced focused build targets: `make -B build/vm_tests
+  build/stdlib_collections_tests build/module_loader_tests` and `make -B
+  BUILD_DIR=build-tagged VALUE_REPR=tagged build-tagged/vm_tests`.
+- Verified focused binaries: `build/vm_tests`, `build/stdlib_collections_tests`,
+  `build/module_loader_tests`, and `build-tagged/vm_tests`.
+
 Keep `runtime/vm.h` as a compatibility umbrella during the split, but move
 declarations and low-coupling implementation islands into smaller files:
 
