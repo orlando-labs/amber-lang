@@ -16590,51 +16590,6 @@ private:
             std::make_shared<RuntimeLogger>(writer, level, color_mode));
         return SendStatus::Matched;
       }
-      if (kind == RuntimeNativeTypeKind::Bytes) {
-        if (selector != "new") {
-          return SendStatus::NotHandled;
-        }
-        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        const std::optional<std::string> bytes =
-            io_bytes_from_value(frame, args[0]);
-        if (!bytes.has_value()) {
-          return SendStatus::Faulted;
-        }
-        *out = io_bytes_value(*bytes);
-        return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::ByteBuffer) {
-        if (selector != "new" && selector != "from" && selector != "wrap") {
-          return SendStatus::NotHandled;
-        }
-        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "new") {
-          if (!args[0].is_integer()) {
-            set_fault(frame, "TypeError", "ByteBuffer capacity must be Int");
-            return SendStatus::Faulted;
-          }
-          if (args[0].as_integer() < 0) {
-            set_fault(frame, "ArgumentError",
-                      "ByteBuffer capacity must be non-negative");
-            return SendStatus::Faulted;
-          }
-          *out = Value::io_value(std::make_shared<RuntimeByteBuffer>(
-              static_cast<std::size_t>(args[0].as_integer())));
-          return SendStatus::Matched;
-        }
-        const std::optional<std::string> bytes =
-            io_bytes_from_value(frame, args[0]);
-        if (!bytes.has_value()) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::io_value(
-            std::make_shared<RuntimeByteBuffer>(RuntimeBytes(*bytes)));
-        return SendStatus::Matched;
-      }
       if (kind == RuntimeNativeTypeKind::IoPipe) {
         if (selector != "new" && selector != "__call__") {
           return SendStatus::NotHandled;

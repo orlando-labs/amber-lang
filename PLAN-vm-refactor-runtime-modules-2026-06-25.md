@@ -986,6 +986,30 @@ Slice record, 2026-06-27:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-27:
+
+- Promoted the IO descriptor to own dispatch for byte data type constructors:
+  `Bytes.new`, `io.ByteBuffer.new`, `io.ByteBuffer.from`, and
+  `io.ByteBuffer.wrap`.
+- Moved the corresponding `Bytes` and `ByteBuffer` type-object SEND branches
+  out of `Vm::try_apply_native_stdlib_send` and into `runtime/stdlib_io.cpp`.
+  `io.Pipe`, `io.Buffer`, `io.Logger`, `io.with_output`, and file/network
+  dispatch remain in VM for later Phase 3 slices.
+- Preserved `Bytes.new` input compatibility for `Str`, `Bytes`, `ByteSlice`,
+  and `ByteBuffer` through public IO runtime APIs in the descriptor handler.
+- Verified compile smoke: standalone `runtime/stdlib_io.cpp`, standalone
+  `runtime/vm.cpp`, standalone `runtime/stdlib_registry.cpp`, and
+  `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/stdlib_codecs_tests
+  build/stdlib_digest_tests build/stdlib_task_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  `build/stdlib_codecs_tests`, `build/stdlib_digest_tests`, elevated
+  `build/stdlib_task_tests`, and elevated `build/vm_net_http_tests`
+  (`566 checks`).
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

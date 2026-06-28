@@ -431,6 +431,8 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::Uuid, "Uuid");
   expect_handler(RuntimeNativeTypeKind::Time, "Time");
   expect_handler(RuntimeNativeTypeKind::Url, "Url");
+  expect_handler(RuntimeNativeTypeKind::Bytes, "Bytes");
+  expect_handler(RuntimeNativeTypeKind::ByteBuffer, "io.ByteBuffer");
   expect_handler(RuntimeNativeTypeKind::Channel, "Channel");
   expect_handler(RuntimeNativeTypeKind::Mutex, "Mutex");
   expect_handler(RuntimeNativeTypeKind::Atomic, "Atomic");
