@@ -1051,6 +1051,28 @@ Slice record, 2026-06-28:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-28:
+
+- Promoted the IO descriptor to own most `io` namespace selector dispatch:
+  `io.ByteBuffer`, `io.Pipe`, `io.Buffer`, `io.Logger`, `io.stdout`,
+  `io.current_stdout`, `io.stderr`, and `io.current_stderr`.
+- Removed those namespace selector branches from
+  `Vm::try_apply_native_stdlib_send`; `io.with_output` remains in VM for a
+  dedicated block-scope dispatch slice.
+- Kept constructor behavior routed through the descriptor-owned type handlers
+  for `ByteBuffer` and `Pipe` so namespace calls and imported type calls share
+  the same implementation.
+- Verified compile smoke: standalone `runtime/stdlib_io.cpp`, standalone
+  `runtime/vm.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/iamber_tests build/io_tests
+  build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  `build/iamber_tests`, elevated `build/io_tests`, and elevated
+  `build/vm_net_http_tests` (`566 checks`).
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

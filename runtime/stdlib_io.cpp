@@ -279,6 +279,92 @@ SendStatus io_pipe_type_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus io_namespace_send(NativeStdlibCall &call) {
+  if (call.selector == "ByteBuffer") {
+    if (call.args.empty()) {
+      if (!call.kw_args.empty() || !call.require_no_block()) {
+        return SendStatus::Faulted;
+      }
+      *call.out = Value::native_type(RuntimeNativeTypeKind::ByteBuffer);
+      return SendStatus::Matched;
+    }
+    if (!call.require_arity(1) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      return SendStatus::Faulted;
+    }
+    if (!call.args[0].is_integer()) {
+      return call.fault("TypeError", "ByteBuffer capacity must be Int");
+    }
+    if (call.args[0].as_integer() < 0) {
+      return call.fault("ArgumentError",
+                        "ByteBuffer capacity must be non-negative");
+    }
+    *call.out = Value::io_value(std::make_shared<RuntimeByteBuffer>(
+        static_cast<std::size_t>(call.args[0].as_integer())));
+    return SendStatus::Matched;
+  }
+  if (call.selector == "Pipe") {
+    if (call.args.empty() && call.kw_args.empty()) {
+      if (!call.require_no_block()) {
+        return SendStatus::Faulted;
+      }
+      *call.out = Value::native_type(RuntimeNativeTypeKind::IoPipe);
+      return SendStatus::Matched;
+    }
+    const std::string call_selector = "__call__";
+    NativeStdlibCall pipe_call{
+        call.host,     call.frame, call.receiver, RuntimeNativeTypeKind::IoPipe,
+        call_selector, call.args,  call.block,    call.kw_args,
+        call.out};
+    return io_pipe_type_send(pipe_call);
+  }
+  if (call.selector == "Buffer") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "io.Buffer does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::native_type(RuntimeNativeTypeKind::TextBuffer);
+    return SendStatus::Matched;
+  }
+  if (call.selector == "Logger") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "io.Logger does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::native_type(RuntimeNativeTypeKind::Logger);
+    return SendStatus::Matched;
+  }
+  if (call.selector == "current_stdout" || call.selector == "stdout") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "io.stdout does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::text_writer(current_runtime_stdout());
+    return SendStatus::Matched;
+  }
+  if (call.selector == "current_stderr" || call.selector == "stderr") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "io.stderr does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::text_writer(current_runtime_stderr());
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
+}
+
 RuntimeNativeModuleDescriptor io_module_descriptor() {
   return {{{"io", RuntimeNativeTypeKind::Io},
            {"io.Buffer", RuntimeNativeTypeKind::TextBuffer},
@@ -287,7 +373,8 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
            {"io.ByteBuffer", RuntimeNativeTypeKind::ByteBuffer},
            {"io.ByteSlice", RuntimeNativeTypeKind::ByteSlice},
            {"io.Pipe", RuntimeNativeTypeKind::IoPipe}},
-          {{RuntimeNativeTypeKind::TextBuffer, text_buffer_type_send},
+          {{RuntimeNativeTypeKind::Io, io_namespace_send},
+           {RuntimeNativeTypeKind::TextBuffer, text_buffer_type_send},
            {RuntimeNativeTypeKind::Logger, logger_type_send},
            {RuntimeNativeTypeKind::Bytes, bytes_type_send},
            {RuntimeNativeTypeKind::ByteBuffer, byte_buffer_type_send},
