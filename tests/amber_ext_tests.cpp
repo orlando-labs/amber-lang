@@ -117,6 +117,9 @@ struct RecordingHost : StdlibHost {
   Value stdlib_make_list(std::vector<Value> /*items*/) override {
     return Value::null();
   }
+  Value stdlib_make_tuple(std::vector<Value> /*items*/) override {
+    return Value::null();
+  }
   Value
   stdlib_make_object(std::vector<std::pair<std::string, Value>> /*entries*/,
                      bool /*strict*/) override {
@@ -140,6 +143,10 @@ struct RecordingHost : StdlibHost {
                          std::vector<Value> * /*out*/) override {
     return false;
   }
+  bool stdlib_sequence_items(const void * /*frame*/, const Value & /*value*/,
+                             std::vector<Value> * /*out*/) override {
+    return false;
+  }
   amber::runtime::StdlibBlockResult
   stdlib_call_stream_block(const void * /*frame*/, const Value & /*block*/,
                            Value /*value*/) override {
@@ -160,6 +167,22 @@ struct RecordingHost : StdlibHost {
   bool
   stdlib_integer_range(const void * /*frame*/, const Value & /*value*/,
                        amber::runtime::StdlibIntegerRange * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_exists(const void * /*frame*/, const std::string & /*path*/,
+                        bool * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_file(const void * /*frame*/, const std::string & /*path*/,
+                      bool * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_dir(const void * /*frame*/, const std::string & /*path*/,
+                     bool * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_metadata(const void * /*frame*/, const std::string & /*path*/,
+                          Value * /*out*/) override {
     return false;
   }
   bool stdlib_fs_read_text(const void * /*frame*/, const std::string & /*path*/,

@@ -174,6 +174,14 @@ public:
                                     StdlibIntegerRange *out) = 0;
 
   // File access routed through the same runtime IO policy/provider layer as fs.
+  virtual bool stdlib_fs_exists(const void *frame, const std::string &path,
+                                bool *out) = 0;
+  virtual bool stdlib_fs_file(const void *frame, const std::string &path,
+                              bool *out) = 0;
+  virtual bool stdlib_fs_dir(const void *frame, const std::string &path,
+                             bool *out) = 0;
+  virtual bool stdlib_fs_metadata(const void *frame, const std::string &path,
+                                  Value *out) = 0;
   virtual bool stdlib_fs_read_text(const void *frame, const std::string &path,
                                    std::string *out) = 0;
   virtual bool stdlib_fs_write_text(const void *frame, const std::string &path,
@@ -351,6 +359,22 @@ struct NativeStdlibCall {
 
   bool integer_range(const Value &value, StdlibIntegerRange *out) const {
     return host.stdlib_integer_range(frame, value, out);
+  }
+
+  bool fs_exists(const std::string &path, bool *out) const {
+    return host.stdlib_fs_exists(frame, path, out);
+  }
+
+  bool fs_file(const std::string &path, bool *out) const {
+    return host.stdlib_fs_file(frame, path, out);
+  }
+
+  bool fs_dir(const std::string &path, bool *out) const {
+    return host.stdlib_fs_dir(frame, path, out);
+  }
+
+  bool fs_metadata(const std::string &path, Value *out) const {
+    return host.stdlib_fs_metadata(frame, path, out);
   }
 
   bool fs_read_text(const std::string &path, std::string *out) const {

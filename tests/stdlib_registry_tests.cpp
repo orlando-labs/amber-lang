@@ -147,6 +147,22 @@ struct MockHost : StdlibHost {
                        amber::runtime::StdlibIntegerRange * /*out*/) override {
     return false;
   }
+  bool stdlib_fs_exists(const void * /*frame*/, const std::string & /*path*/,
+                        bool * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_file(const void * /*frame*/, const std::string & /*path*/,
+                      bool * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_dir(const void * /*frame*/, const std::string & /*path*/,
+                     bool * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_metadata(const void * /*frame*/, const std::string & /*path*/,
+                          Value * /*out*/) override {
+    return false;
+  }
   bool stdlib_fs_read_text(const void * /*frame*/, const std::string & /*path*/,
                            std::string * /*out*/) override {
     return false;

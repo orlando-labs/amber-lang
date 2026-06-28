@@ -1203,6 +1203,26 @@ public:
     return stdlib_integer_range_descriptor(*static_cast<const Frame *>(frame),
                                            value, out);
   }
+  bool stdlib_fs_exists(const void *frame, const std::string &path,
+                        bool *out) override {
+    return stdlib_fs_metadata_bool(*static_cast<const Frame *>(frame),
+                                   "exists?", path, out);
+  }
+  bool stdlib_fs_file(const void *frame, const std::string &path,
+                      bool *out) override {
+    return stdlib_fs_metadata_bool(*static_cast<const Frame *>(frame), "file?",
+                                   path, out);
+  }
+  bool stdlib_fs_dir(const void *frame, const std::string &path,
+                     bool *out) override {
+    return stdlib_fs_metadata_bool(*static_cast<const Frame *>(frame), "dir?",
+                                   path, out);
+  }
+  bool stdlib_fs_metadata(const void *frame, const std::string &path,
+                          Value *out) override {
+    return stdlib_fs_metadata_value(*static_cast<const Frame *>(frame), path,
+                                    out);
+  }
   bool stdlib_fs_read_text(const void *frame, const std::string &path,
                            std::string *out) override {
     return stdlib_read_text_file(*static_cast<const Frame *>(frame), path, out);
@@ -12017,6 +12037,74 @@ private:
                     {{"operation", operation}, {"resource", resource}});
   }
 
+  bool stdlib_fs_metadata_bool(const Frame &frame, const std::string &operation,
+                               const std::string &path, bool *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "fs metadata output is null");
+      return false;
+    }
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_metadata", "fs.metadata", path,
+                         !provider_active)) {
+      return false;
+    }
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          operation == "exists?"
+              ? world_options_->io_provider->fs_exists(path)
+              : (operation == "file?"
+                     ? world_options_->io_provider->fs_file(path)
+                     : world_options_->io_provider->fs_dir(path));
+      if (!set_fault_from_provider_status(frame, status, operation)) {
+        return false;
+      }
+      *out = status.boolean;
+      return true;
+    }
+    RuntimePath runtime_path(path);
+    RuntimeIoStatus result =
+        operation == "exists?"
+            ? runtime_fs_exists(runtime_path, out)
+            : (operation == "file?" ? runtime_fs_file(runtime_path, out)
+                                    : runtime_fs_dir(runtime_path, out));
+    return set_fault_from_io_status(frame, result);
+  }
+
+  bool stdlib_fs_metadata_value(const Frame &frame, const std::string &path,
+                                Value *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "fs metadata output is null");
+      return false;
+    }
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_metadata", "fs.metadata", path,
+                         !provider_active)) {
+      return false;
+    }
+    auto metadata = std::make_shared<RuntimeMetadata>();
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          world_options_->io_provider->fs_metadata(path);
+      if (!set_fault_from_provider_status(frame, status, "metadata")) {
+        return false;
+      }
+      metadata->path = RuntimePath(path);
+      metadata->size = status.size;
+      metadata->file = status.file;
+      metadata->directory = status.directory;
+      metadata->symlink = status.symlink;
+      *out = Value::io_value(metadata);
+      return true;
+    }
+    RuntimeIoStatus result =
+        runtime_fs_metadata(RuntimePath(path), metadata.get());
+    if (!set_fault_from_io_status(frame, result)) {
+      return false;
+    }
+    *out = Value::io_value(metadata);
+    return true;
+  }
+
   bool stdlib_read_text_file(const Frame &frame, const std::string &path,
                              std::string *out) {
     if (out == nullptr) {
@@ -16582,9 +16670,7 @@ private:
         if (!require_no_block()) {
           return SendStatus::Faulted;
         }
-        if (selector == "exists?" || selector == "file?" ||
-            selector == "dir?" || selector == "metadata" ||
-            selector == "read_bytes" || selector == "read_text" ||
+        if (selector == "read_bytes" || selector == "read_text" ||
             selector == "mkdir" || selector == "mkdir_p" ||
             selector == "remove") {
           if (!require_arity(1)) {
@@ -16594,78 +16680,6 @@ private:
               io_path_from_value(frame, args[0]);
           if (path == nullptr) {
             return SendStatus::Faulted;
-          }
-          if (selector == "exists?" || selector == "file?" ||
-              selector == "dir?") {
-            if (!kw_args.empty()) {
-              set_fault(frame, "TypeError",
-                        selector + " does not accept keywords");
-              return SendStatus::Faulted;
-            }
-            bool value = false;
-            const bool provider_active = replay_io_provider_active();
-            if (!check_io_policy(frame, "fs_metadata", "fs.metadata",
-                                 path->string(), !provider_active)) {
-              return SendStatus::Faulted;
-            }
-            if (provider_active) {
-              RuntimeIoProviderStatus status =
-                  selector == "exists?"
-                      ? world_options_->io_provider->fs_exists(path->string())
-                      : (selector == "file?"
-                             ? world_options_->io_provider->fs_file(
-                                   path->string())
-                             : world_options_->io_provider->fs_dir(
-                                   path->string()));
-              if (!set_fault_from_provider_status(frame, status, selector)) {
-                return SendStatus::Faulted;
-              }
-              *out = Value::boolean(status.boolean);
-              return SendStatus::Matched;
-            }
-            RuntimeIoStatus result =
-                selector == "exists?"
-                    ? runtime_fs_exists(*path, &value)
-                    : (selector == "file?" ? runtime_fs_file(*path, &value)
-                                           : runtime_fs_dir(*path, &value));
-            if (!set_fault_from_io_status(frame, result)) {
-              return SendStatus::Faulted;
-            }
-            *out = Value::boolean(value);
-            return SendStatus::Matched;
-          }
-          if (selector == "metadata") {
-            if (!kw_args.empty()) {
-              set_fault(frame, "TypeError",
-                        "metadata does not accept keywords");
-              return SendStatus::Faulted;
-            }
-            const bool provider_active = replay_io_provider_active();
-            if (!check_io_policy(frame, "fs_metadata", "fs.metadata",
-                                 path->string(), !provider_active)) {
-              return SendStatus::Faulted;
-            }
-            auto metadata = std::make_shared<RuntimeMetadata>();
-            if (provider_active) {
-              RuntimeIoProviderStatus status =
-                  world_options_->io_provider->fs_metadata(path->string());
-              if (!set_fault_from_provider_status(frame, status, selector)) {
-                return SendStatus::Faulted;
-              }
-              metadata->path = *path;
-              metadata->size = status.size;
-              metadata->file = status.file;
-              metadata->directory = status.directory;
-              metadata->symlink = status.symlink;
-              *out = Value::io_value(metadata);
-              return SendStatus::Matched;
-            }
-            RuntimeIoStatus result = runtime_fs_metadata(*path, metadata.get());
-            if (!set_fault_from_io_status(frame, result)) {
-              return SendStatus::Faulted;
-            }
-            *out = Value::io_value(metadata);
-            return SendStatus::Matched;
           }
           if (selector == "read_bytes" || selector == "read_text") {
             if (!reject_unknown_keywords(frame, kw_args,

@@ -51,7 +51,42 @@ SendStatus fs_path_type_send(NativeStdlibCall &call) {
   return build_path_value(call, false);
 }
 
+SendStatus fs_metadata_send(NativeStdlibCall &call) {
+  if (call.selector != "exists?" && call.selector != "file?" &&
+      call.selector != "dir?" && call.selector != "metadata") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_no_block() || !call.require_arity(1)) {
+    return SendStatus::Faulted;
+  }
+  const std::shared_ptr<RuntimePath> path = path_from_value(call, call.args[0]);
+  if (path == nullptr) {
+    return SendStatus::Faulted;
+  }
+  if (!call.kw_args.empty()) {
+    return call.fault("TypeError", call.selector + " does not accept keywords");
+  }
+  if (call.selector == "metadata") {
+    return call.fs_metadata(path->string(), call.out) ? SendStatus::Matched
+                                                      : SendStatus::Faulted;
+  }
+  bool value = false;
+  const bool ok =
+      call.selector == "exists?" ? call.fs_exists(path->string(), &value)
+      : call.selector == "file?" ? call.fs_file(path->string(), &value)
+                                 : call.fs_dir(path->string(), &value);
+  if (!ok) {
+    return SendStatus::Faulted;
+  }
+  *call.out = Value::boolean(value);
+  return SendStatus::Matched;
+}
+
 SendStatus fs_namespace_send(NativeStdlibCall &call) {
+  if (const SendStatus status = fs_metadata_send(call);
+      status != SendStatus::NotHandled) {
+    return status;
+  }
   if (call.selector != "Path" && call.selector != "File") {
     return SendStatus::NotHandled;
   }
