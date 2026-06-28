@@ -16423,51 +16423,6 @@ private:
         }
         return SendStatus::NotHandled;
       }
-      if (kind == RuntimeNativeTypeKind::Io) {
-        if (selector == "with_output") {
-          if (!require_arity(0) ||
-              !reject_unknown_keywords(frame, kw_args, {"stdout", "stderr"})) {
-            return SendStatus::Faulted;
-          }
-          std::shared_ptr<RuntimeTextWriter> stdout_writer;
-          std::shared_ptr<RuntimeTextWriter> stderr_writer;
-          if (const std::optional<Value> stdout_kw =
-                  keyword_arg_value(kw_args, "stdout")) {
-            const std::optional<std::shared_ptr<RuntimeTextWriter>> writer =
-                text_writer_from_value(frame, *stdout_kw, "stdout:");
-            if (!writer.has_value()) {
-              return SendStatus::Faulted;
-            }
-            stdout_writer = *writer;
-          }
-          if (const std::optional<Value> stderr_kw =
-                  keyword_arg_value(kw_args, "stderr")) {
-            const std::optional<std::shared_ptr<RuntimeTextWriter>> writer =
-                text_writer_from_value(frame, *stderr_kw, "stderr:");
-            if (!writer.has_value()) {
-              return SendStatus::Faulted;
-            }
-            stderr_writer = *writer;
-          }
-          std::optional<NativeBlockInvoker> invoker =
-              make_scoped_native_block_invoker(frame, block, "io.with_output");
-          if (!invoker.has_value()) {
-            return SendStatus::Faulted;
-          }
-          try {
-            RuntimeOutputScope scope(std::move(stdout_writer),
-                                     std::move(stderr_writer));
-            *out = (*invoker)(std::vector<Value>{});
-          } catch (const NativeBlockUnwind &) {
-            return SendStatus::Faulted;
-          } catch (const RuntimeTaskFailure &failure) {
-            set_fault(frame, failure.error_name(), failure.message());
-            return SendStatus::Faulted;
-          }
-          return SendStatus::Matched;
-        }
-        return SendStatus::NotHandled;
-      }
       if (kind == RuntimeNativeTypeKind::FsPath) {
         if (selector != "new") {
           return SendStatus::NotHandled;

@@ -362,6 +362,41 @@ SendStatus io_namespace_send(NativeStdlibCall &call) {
     *call.out = Value::text_writer(current_runtime_stderr());
     return SendStatus::Matched;
   }
+  if (call.selector == "with_output") {
+    if (!call.require_arity(0) ||
+        !call.reject_unknown_keywords({"stdout", "stderr"})) {
+      return SendStatus::Faulted;
+    }
+    std::shared_ptr<RuntimeTextWriter> stdout_writer;
+    std::shared_ptr<RuntimeTextWriter> stderr_writer;
+    if (const std::optional<Value> stdout_kw = call.keyword("stdout")) {
+      const std::optional<std::shared_ptr<RuntimeTextWriter>> writer =
+          text_writer_from_value(call, *stdout_kw, "stdout:");
+      if (!writer.has_value()) {
+        return SendStatus::Faulted;
+      }
+      stdout_writer = *writer;
+    }
+    if (const std::optional<Value> stderr_kw = call.keyword("stderr")) {
+      const std::optional<std::shared_ptr<RuntimeTextWriter>> writer =
+          text_writer_from_value(call, *stderr_kw, "stderr:");
+      if (!writer.has_value()) {
+        return SendStatus::Faulted;
+      }
+      stderr_writer = *writer;
+    }
+    RuntimeOutputScope scope(std::move(stdout_writer),
+                             std::move(stderr_writer));
+    const StdlibBlockResult block = call.call_block(call.block, {});
+    if (block.status == StdlibBlockStatus::Returned) {
+      *call.out = block.value;
+      return SendStatus::Matched;
+    }
+    if (block.status == StdlibBlockStatus::Raised) {
+      return call.raise(block.exception);
+    }
+    return SendStatus::Faulted;
+  }
   return SendStatus::NotHandled;
 }
 
