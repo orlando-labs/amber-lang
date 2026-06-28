@@ -1051,6 +1051,9 @@ public:
   Value stdlib_make_list(std::vector<Value> items) override {
     return make_list_value(std::move(items));
   }
+  Value stdlib_make_tuple(std::vector<Value> items) override {
+    return make_tuple_value(std::move(items));
+  }
   Value stdlib_make_object(std::vector<std::pair<std::string, Value>> entries,
                            bool strict) override {
     std::vector<MapEntry> map_entries;
@@ -16532,42 +16535,6 @@ private:
           return SendStatus::Matched;
         }
         return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::IoPipe) {
-        if (selector != "new" && selector != "__call__") {
-          return SendStatus::NotHandled;
-        }
-        if (args.size() > 1U ||
-            !reject_unknown_keywords(frame, kw_args,
-                                     {"capacity", "isolation"}) ||
-            !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        Value capacity_value = args.empty()
-                                   ? keyword_arg_value(kw_args, "capacity")
-                                         .value_or(Value::integer(65536))
-                                   : args[0];
-        if (!capacity_value.is_integer()) {
-          set_fault(frame, "TypeError", "pipe capacity must be Int");
-          return SendStatus::Faulted;
-        }
-        const std::optional<RuntimeIsolationMode> isolation =
-            io_isolation_from_keywords(frame, kw_args);
-        if (!isolation.has_value()) {
-          return SendStatus::Faulted;
-        }
-        RuntimePipeResult pipe =
-            RuntimePipe::create(capacity_value.as_integer(), *isolation);
-        if (!set_fault_from_io_status(frame, pipe)) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "__call__") {
-          *out = Value::io_value(pipe.pipe);
-        } else {
-          *out = make_tuple_value(
-              {Value::io_value(pipe.reader), Value::io_value(pipe.writer)});
-        }
-        return SendStatus::Matched;
       }
       if (kind == RuntimeNativeTypeKind::FsPath) {
         if (selector != "new") {

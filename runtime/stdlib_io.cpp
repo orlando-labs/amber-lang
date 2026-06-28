@@ -225,6 +225,60 @@ SendStatus logger_type_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+std::optional<RuntimeIsolationMode>
+isolation_from_keywords(NativeStdlibCall &call) {
+  const std::optional<Value> value = call.keyword("isolation");
+  if (!value.has_value()) {
+    return RuntimeIsolationMode::Checked;
+  }
+  const std::optional<std::string> name = call.text_of(*value);
+  if (!name.has_value()) {
+    call.fault("TypeError", "isolation must be Symbol or Str");
+    return std::nullopt;
+  }
+  const std::optional<RuntimeIsolationMode> isolation =
+      runtime_isolation_mode_from_name(*name);
+  if (!isolation.has_value()) {
+    call.fault("ArgumentError", "unsupported isolation mode");
+  }
+  return isolation;
+}
+
+SendStatus io_pipe_type_send(NativeStdlibCall &call) {
+  if (call.selector != "new" && call.selector != "__call__") {
+    return SendStatus::NotHandled;
+  }
+  if (call.args.size() > 1U ||
+      !call.reject_unknown_keywords({"capacity", "isolation"}) ||
+      !call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  Value capacity_value =
+      call.args.empty()
+          ? call.keyword("capacity").value_or(Value::integer(65536))
+          : call.args[0];
+  if (!capacity_value.is_integer()) {
+    return call.fault("TypeError", "pipe capacity must be Int");
+  }
+  const std::optional<RuntimeIsolationMode> isolation =
+      isolation_from_keywords(call);
+  if (!isolation.has_value()) {
+    return SendStatus::Faulted;
+  }
+  RuntimePipeResult pipe =
+      RuntimePipe::create(capacity_value.as_integer(), *isolation);
+  if (!set_fault_from_io_status(call, pipe)) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "__call__") {
+    *call.out = Value::io_value(pipe.pipe);
+  } else {
+    *call.out = call.make_tuple(
+        {Value::io_value(pipe.reader), Value::io_value(pipe.writer)});
+  }
+  return SendStatus::Matched;
+}
+
 RuntimeNativeModuleDescriptor io_module_descriptor() {
   return {{{"io", RuntimeNativeTypeKind::Io},
            {"io.Buffer", RuntimeNativeTypeKind::TextBuffer},
@@ -236,7 +290,8 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
           {{RuntimeNativeTypeKind::TextBuffer, text_buffer_type_send},
            {RuntimeNativeTypeKind::Logger, logger_type_send},
            {RuntimeNativeTypeKind::Bytes, bytes_type_send},
-           {RuntimeNativeTypeKind::ByteBuffer, byte_buffer_type_send}},
+           {RuntimeNativeTypeKind::ByteBuffer, byte_buffer_type_send},
+           {RuntimeNativeTypeKind::IoPipe, io_pipe_type_send}},
           {{RuntimeNativeTypeKind::Bytes, "new"},
            {RuntimeNativeTypeKind::ByteBuffer, "new"},
            {RuntimeNativeTypeKind::IoPipe, "__call__"}}};

@@ -1030,6 +1030,27 @@ Slice record, 2026-06-28:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-28:
+
+- Promoted the IO descriptor to own dispatch for `io.Pipe.new` and
+  `io.Pipe()`.
+- Added a narrow `StdlibHost::stdlib_make_tuple` facade so descriptor handlers
+  can preserve `io.Pipe.new`'s tuple return without depending on VM internals.
+- Moved the corresponding `IoPipe` type-object SEND branch out of
+  `Vm::try_apply_native_stdlib_send` and into `runtime/stdlib_io.cpp`.
+- Preserved `capacity:` and `isolation:` keyword behavior through
+  descriptor-local parsing over public IO runtime APIs.
+- Verified compile smoke: standalone `runtime/stdlib_io.cpp`, standalone
+  `runtime/vm.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/io_tests
+  build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  elevated `build/io_tests`, and elevated `build/vm_net_http_tests`
+  (`566 checks`).
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

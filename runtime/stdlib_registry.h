@@ -122,6 +122,9 @@ public:
   // Build a List value from `items`.
   virtual Value stdlib_make_list(std::vector<Value> items) = 0;
 
+  // Build a Tuple value from `items`.
+  virtual Value stdlib_make_tuple(std::vector<Value> items) = 0;
+
   // Build a map from string-keyed entries. `strict=false` yields an ordinary
   // name-indifferent Map (keys stored as Str, canonical identity interned);
   // `strict=true` yields a StrictMap. Entry order is preserved; later duplicate
@@ -294,6 +297,10 @@ struct NativeStdlibCall {
 
   Value make_list(std::vector<Value> items) const {
     return host.stdlib_make_list(std::move(items));
+  }
+
+  Value make_tuple(std::vector<Value> items) const {
+    return host.stdlib_make_tuple(std::move(items));
   }
 
   Value make_object(std::vector<std::pair<std::string, Value>> entries,

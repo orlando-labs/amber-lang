@@ -95,6 +95,9 @@ struct MockHost : StdlibHost {
   Value stdlib_make_list(std::vector<Value> /*items*/) override {
     return Value::null();
   }
+  Value stdlib_make_tuple(std::vector<Value> /*items*/) override {
+    return Value::null();
+  }
   Value
   stdlib_make_object(std::vector<std::pair<std::string, Value>> /*entries*/,
                      bool /*strict*/) override {
@@ -435,6 +438,7 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::Logger, "io.Logger");
   expect_handler(RuntimeNativeTypeKind::Bytes, "Bytes");
   expect_handler(RuntimeNativeTypeKind::ByteBuffer, "io.ByteBuffer");
+  expect_handler(RuntimeNativeTypeKind::IoPipe, "io.Pipe");
   expect_handler(RuntimeNativeTypeKind::Channel, "Channel");
   expect_handler(RuntimeNativeTypeKind::Mutex, "Mutex");
   expect_handler(RuntimeNativeTypeKind::Atomic, "Atomic");
