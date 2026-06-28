@@ -182,6 +182,14 @@ public:
                              bool *out) = 0;
   virtual bool stdlib_fs_metadata(const void *frame, const std::string &path,
                                   Value *out) = 0;
+  virtual bool stdlib_fs_read_bytes_limited(const void *frame,
+                                            const std::string &path,
+                                            std::optional<std::size_t> limit,
+                                            std::string *out) = 0;
+  virtual bool stdlib_fs_read_text_limited(const void *frame,
+                                           const std::string &path,
+                                           std::optional<std::size_t> limit,
+                                           std::string *out) = 0;
   virtual bool stdlib_fs_read_text(const void *frame, const std::string &path,
                                    std::string *out) = 0;
   virtual bool stdlib_fs_write_text(const void *frame, const std::string &path,
@@ -375,6 +383,16 @@ struct NativeStdlibCall {
 
   bool fs_metadata(const std::string &path, Value *out) const {
     return host.stdlib_fs_metadata(frame, path, out);
+  }
+
+  bool fs_read_bytes(const std::string &path, std::optional<std::size_t> limit,
+                     std::string *out) const {
+    return host.stdlib_fs_read_bytes_limited(frame, path, limit, out);
+  }
+
+  bool fs_read_text(const std::string &path, std::optional<std::size_t> limit,
+                    std::string *out) const {
+    return host.stdlib_fs_read_text_limited(frame, path, limit, out);
   }
 
   bool fs_read_text(const std::string &path, std::string *out) const {

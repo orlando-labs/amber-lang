@@ -1,6 +1,7 @@
 #include "runtime/io.h"
 #include "runtime/stdlib_registry.h"
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -82,8 +83,61 @@ SendStatus fs_metadata_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus fs_read_send(NativeStdlibCall &call) {
+  if (call.selector != "read_bytes" && call.selector != "read_text") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_no_block() || !call.require_arity(1)) {
+    return SendStatus::Faulted;
+  }
+  const std::shared_ptr<RuntimePath> path = path_from_value(call, call.args[0]);
+  if (path == nullptr) {
+    return SendStatus::Faulted;
+  }
+  if (!call.reject_unknown_keywords({"limit", "encoding"})) {
+    return SendStatus::Faulted;
+  }
+  std::optional<std::size_t> limit;
+  if (const std::optional<Value> value = call.keyword("limit")) {
+    if (!value->is_null()) {
+      if (!value->is_integer()) {
+        return call.fault("TypeError", "limit must be Int or null");
+      }
+      if (value->as_integer() < 0) {
+        return call.fault("ArgumentError", "limit must be non-negative");
+      }
+      limit = static_cast<std::size_t>(value->as_integer());
+    }
+  }
+  if (call.selector == "read_text") {
+    if (const std::optional<Value> encoding = call.keyword("encoding")) {
+      const std::optional<std::string> name = call.text_of(*encoding);
+      if (!name.has_value()) {
+        return call.fault("TypeError", "encoding must be Symbol or Str");
+      }
+      if (*name != "utf8") {
+        return call.fault("ArgumentError", "only utf8 encoding is supported");
+      }
+    }
+  }
+  std::string bytes;
+  const bool ok = call.selector == "read_text"
+                      ? call.fs_read_text(path->string(), limit, &bytes)
+                      : call.fs_read_bytes(path->string(), limit, &bytes);
+  if (!ok) {
+    return SendStatus::Faulted;
+  }
+  *call.out = call.selector == "read_text" ? call.string_value(std::move(bytes))
+                                           : call.bytes_value(std::move(bytes));
+  return SendStatus::Matched;
+}
+
 SendStatus fs_namespace_send(NativeStdlibCall &call) {
   if (const SendStatus status = fs_metadata_send(call);
+      status != SendStatus::NotHandled) {
+    return status;
+  }
+  if (const SendStatus status = fs_read_send(call);
       status != SendStatus::NotHandled) {
     return status;
   }

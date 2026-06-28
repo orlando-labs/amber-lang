@@ -1223,6 +1223,18 @@ public:
     return stdlib_fs_metadata_value(*static_cast<const Frame *>(frame), path,
                                     out);
   }
+  bool stdlib_fs_read_bytes_limited(const void *frame, const std::string &path,
+                                    std::optional<std::size_t> limit,
+                                    std::string *out) override {
+    return stdlib_read_bytes_file(*static_cast<const Frame *>(frame), path,
+                                  std::move(limit), "read_bytes", out);
+  }
+  bool stdlib_fs_read_text_limited(const void *frame, const std::string &path,
+                                   std::optional<std::size_t> limit,
+                                   std::string *out) override {
+    return stdlib_read_bytes_file(*static_cast<const Frame *>(frame), path,
+                                  std::move(limit), "read_text", out);
+  }
   bool stdlib_fs_read_text(const void *frame, const std::string &path,
                            std::string *out) override {
     return stdlib_read_text_file(*static_cast<const Frame *>(frame), path, out);
@@ -12105,6 +12117,41 @@ private:
     return true;
   }
 
+  bool stdlib_read_bytes_file(const Frame &frame, const std::string &path,
+                              std::optional<std::size_t> limit,
+                              const std::string &operation, std::string *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "fs read output is null");
+      return false;
+    }
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_read", "fs.read", path, !provider_active)) {
+      return false;
+    }
+    record_io_wait("fs.read", path);
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          world_options_->io_provider->fs_read_bytes(path, limit);
+      if (!set_fault_from_provider_status(frame, status, operation)) {
+        return false;
+      }
+      if (limit.has_value() && status.bytes.size() > *limit) {
+        set_fault(frame, "ArgumentError", "read_bytes limit exceeded");
+        return false;
+      }
+      *out = std::move(status.bytes);
+      return true;
+    }
+    std::shared_ptr<RuntimeBytes> bytes;
+    RuntimeIoStatus status =
+        runtime_fs_read_bytes(RuntimePath(path), limit, &bytes);
+    if (!set_fault_from_io_status(frame, status)) {
+      return false;
+    }
+    *out = bytes == nullptr ? std::string{} : bytes->string();
+    return true;
+  }
+
   bool stdlib_read_text_file(const Frame &frame, const std::string &path,
                              std::string *out) {
     if (out == nullptr) {
@@ -16670,8 +16717,7 @@ private:
         if (!require_no_block()) {
           return SendStatus::Faulted;
         }
-        if (selector == "read_bytes" || selector == "read_text" ||
-            selector == "mkdir" || selector == "mkdir_p" ||
+        if (selector == "mkdir" || selector == "mkdir_p" ||
             selector == "remove") {
           if (!require_arity(1)) {
             return SendStatus::Faulted;
@@ -16680,77 +16726,6 @@ private:
               io_path_from_value(frame, args[0]);
           if (path == nullptr) {
             return SendStatus::Faulted;
-          }
-          if (selector == "read_bytes" || selector == "read_text") {
-            if (!reject_unknown_keywords(frame, kw_args,
-                                         {"limit", "encoding"})) {
-              return SendStatus::Faulted;
-            }
-            std::optional<std::size_t> limit;
-            if (const std::optional<Value> value =
-                    keyword_arg_value(kw_args, "limit")) {
-              if (!value->is_null()) {
-                if (!value->is_integer()) {
-                  set_fault(frame, "TypeError", "limit must be Int or null");
-                  return SendStatus::Faulted;
-                }
-                if (value->as_integer() < 0) {
-                  set_fault(frame, "ArgumentError",
-                            "limit must be non-negative");
-                  return SendStatus::Faulted;
-                }
-                limit = static_cast<std::size_t>(value->as_integer());
-              }
-            }
-            if (selector == "read_text") {
-              if (const std::optional<Value> encoding =
-                      keyword_arg_value(kw_args, "encoding")) {
-                const std::optional<std::string> name =
-                    text_from_symbol_or_string(*encoding);
-                if (!name.has_value()) {
-                  set_fault(frame, "TypeError",
-                            "encoding must be Symbol or Str");
-                  return SendStatus::Faulted;
-                }
-                if (*name != "utf8") {
-                  set_fault(frame, "ArgumentError",
-                            "only utf8 encoding is supported");
-                  return SendStatus::Faulted;
-                }
-              }
-            }
-            const bool provider_active = replay_io_provider_active();
-            if (!check_io_policy(frame, "fs_read", "fs.read", path->string(),
-                                 !provider_active)) {
-              return SendStatus::Faulted;
-            }
-            record_io_wait("fs.read", path->string());
-            if (provider_active) {
-              RuntimeIoProviderStatus status =
-                  world_options_->io_provider->fs_read_bytes(path->string(),
-                                                             limit);
-              if (!set_fault_from_provider_status(frame, status, selector)) {
-                return SendStatus::Faulted;
-              }
-              if (limit.has_value() && status.bytes.size() > *limit) {
-                set_fault(frame, "ArgumentError", "read_bytes limit exceeded");
-                return SendStatus::Faulted;
-              }
-              *out = selector == "read_text"
-                         ? string_value_from_text(std::move(status.bytes))
-                         : io_bytes_value(std::move(status.bytes));
-              return SendStatus::Matched;
-            }
-            std::shared_ptr<RuntimeBytes> bytes;
-            RuntimeIoStatus result =
-                runtime_fs_read_bytes(*path, limit, &bytes);
-            if (!set_fault_from_io_status(frame, result)) {
-              return SendStatus::Faulted;
-            }
-            *out = selector == "read_text"
-                       ? string_value_from_text(bytes->string())
-                       : Value::io_value(bytes);
-            return SendStatus::Matched;
           }
           if (!kw_args.empty()) {
             set_fault(frame, "TypeError",

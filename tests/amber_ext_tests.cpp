@@ -185,6 +185,18 @@ struct RecordingHost : StdlibHost {
                           Value * /*out*/) override {
     return false;
   }
+  bool stdlib_fs_read_bytes_limited(const void * /*frame*/,
+                                    const std::string & /*path*/,
+                                    std::optional<std::size_t> /*limit*/,
+                                    std::string * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_read_text_limited(const void * /*frame*/,
+                                   const std::string & /*path*/,
+                                   std::optional<std::size_t> /*limit*/,
+                                   std::string * /*out*/) override {
+    return false;
+  }
   bool stdlib_fs_read_text(const void * /*frame*/, const std::string & /*path*/,
                            std::string * /*out*/) override {
     return false;

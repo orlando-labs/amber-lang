@@ -8676,18 +8676,21 @@ void test_runtime_io_v2_source_surface() {
                            "fs.File.open(path, :read) |f|:\n"
                            "  [fs.exists?(path), fs.file?(path), "
                            "fs.dir?(path), meta.file?(), meta.dir?(), "
-                           "meta.size(), f.size!(), f.read_all!().to_str()]\n");
+                           "meta.size(), fs.read_text(path), "
+                           "fs.read_bytes(path, limit: 5).to_str(), "
+                           "f.size!(), f.read_all!().to_str()]\n");
   expect(file.ok(), "File v2 source execution failed");
   expect(file.value.is_list(), "File source result should be Array");
   const auto file_items = file.value.as_list()->items;
-  expect(file_items.size() == 8 && file_items[0].is_bool() &&
+  expect(file_items.size() == 10 && file_items[0].is_bool() &&
              file_items[0].as_bool() && file_items[1].is_bool() &&
              file_items[1].as_bool() && file_items[2].is_bool() &&
              !file_items[2].as_bool() && file_items[3].is_bool() &&
              file_items[3].as_bool() && file_items[4].is_bool() &&
              !file_items[4].as_bool() && file_items[5].is_integer() &&
-             file_items[5].as_integer() == 5 && file_items[6].is_integer() &&
-             file_items[6].as_integer() == 5 && file_items[7].is_string(),
+             file_items[5].as_integer() == 5 && file_items[6].is_string() &&
+             file_items[7].is_string() && file_items[8].is_integer() &&
+             file_items[8].as_integer() == 5 && file_items[9].is_string(),
          "File v2 source contract mismatch");
   ::unlink(file_path.c_str());
 }
