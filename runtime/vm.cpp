@@ -16423,21 +16423,6 @@ private:
         }
         return SendStatus::NotHandled;
       }
-      if (kind == RuntimeNativeTypeKind::FsPath) {
-        if (selector != "new") {
-          return SendStatus::NotHandled;
-        }
-        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        const std::shared_ptr<RuntimePath> path =
-            io_path_from_value(frame, args[0]);
-        if (path == nullptr) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::io_value(path);
-        return SendStatus::Matched;
-      }
       if (kind == RuntimeNativeTypeKind::FsFile && selector == "open") {
         if ((args.size() != 1U && args.size() != 2U) ||
             !reject_unknown_keywords(frame, kw_args,
@@ -16678,25 +16663,6 @@ private:
       if (kind == RuntimeNativeTypeKind::Fs) {
         if (!require_no_block()) {
           return SendStatus::Faulted;
-        }
-        if (selector == "Path" || selector == "File") {
-          const RuntimeNativeTypeKind member_kind =
-              selector == "Path" ? RuntimeNativeTypeKind::FsPath
-                                 : RuntimeNativeTypeKind::FsFile;
-          if (args.empty()) {
-            if (!kw_args.empty()) {
-              return SendStatus::Faulted;
-            }
-            *out = Value::native_type(member_kind);
-            return SendStatus::Matched;
-          }
-          if (selector == "File") {
-            set_fault(frame, "TypeError", "fs.File is not directly callable");
-            return SendStatus::Faulted;
-          }
-          return try_apply_native_stdlib_send(frame,
-                                              Value::native_type(member_kind),
-                                              "new", args, block, kw_args, out);
         }
         if (selector == "exists?" || selector == "file?" ||
             selector == "dir?" || selector == "metadata" ||

@@ -1093,6 +1093,33 @@ Slice record, 2026-06-28:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-28:
+
+- Promoted the filesystem descriptor to own dispatch for `fs.Path.new` and the
+  namespace selectors `fs.Path` and `fs.File`.
+- Removed the corresponding `FsPath` constructor and `fs` namespace
+  `Path`/`File` branches from `Vm::try_apply_native_stdlib_send`. The policy-
+  and provider-heavy filesystem operations, including `fs.File.open`,
+  `fs.exists?`, `fs.read_text`, and `fs.write_*`, remain in VM for later Phase 3
+  slices.
+- Kept path coercion behavior descriptor-local and equivalent to the legacy
+  helper: `Str` becomes a `RuntimePath`; existing `fs.Path` IO values pass
+  through; other values fault with `expected fs.Path or Str`.
+- Verified compile smoke: standalone `runtime/stdlib_fs.cpp`, standalone
+  `runtime/vm.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/io_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests` and
+  `build/vm_tests`.
+- Sandboxed `build/io_tests` was blocked by loopback listen policy
+  (`PermissionDeniedError listen: Operation not permitted`). Elevated rerun was
+  not available in this environment because auto-approval hit the usage limit.
+- Sandboxed `make conformance` rebuilt `build/ambertest` and reached
+  `137 passed, 3 failed, 0 skipped for M11`; the three failures were the known
+  loopback corpus cases (`net_socket_handoff_to_task` twice and
+  `net_tcp_loopback`) failing with `PermissionDeniedError listen: Operation not
+  permitted`. Elevated rerun remains required when approvals are available.
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.
