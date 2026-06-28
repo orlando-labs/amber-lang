@@ -1143,6 +1143,31 @@ Slice record, 2026-06-28:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-28:
+
+- Promoted the net.http descriptor to own pure namespace/type selectors:
+  `net.http.RequestBody`, `net.http.ServerRequest`,
+  `net.http.ServerResponse` when used as a bare type reference,
+  `net.http.json`, and `net.http.form`.
+- Removed the corresponding selector branches from
+  `Vm::try_apply_native_stdlib_send`. Constructor-heavy namespace selectors
+  (`net.http.Client`, `net.http.Request`, `net.http.Headers`,
+  `net.http.Server`, and non-bare `net.http.ServerResponse`), json/form helper
+  calls, and the large net.http client/server/request bodies remain in VM for
+  later Phase 3 slices.
+- Extended source-level VM coverage to exercise descriptor-routed net.http
+  type-only selectors without opening sockets.
+- Verified compile smoke: standalone `runtime/stdlib_net_http.cpp`,
+  standalone `runtime/vm.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/io_tests
+  build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  elevated `build/io_tests`, and elevated `build/vm_net_http_tests`
+  (`566 checks`).
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

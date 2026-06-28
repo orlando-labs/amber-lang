@@ -1,8 +1,49 @@
 #include "runtime/stdlib_registry.h"
 
+#include <string>
+
 namespace amber::runtime {
 
 namespace {
+
+SendStatus net_http_namespace_send(NativeStdlibCall &call) {
+  if (call.selector == "RequestBody") {
+    if (call.args.empty() && call.kw_args.empty() && call.block.is_null()) {
+      *call.out = Value::native_type(RuntimeNativeTypeKind::NetHttpRequestBody);
+      return SendStatus::Matched;
+    }
+    return call.fault("TypeError",
+                      "net.http.RequestBody is not directly callable");
+  }
+  if (call.selector == "ServerRequest") {
+    if (call.args.empty() && call.kw_args.empty() && call.block.is_null()) {
+      *call.out =
+          Value::native_type(RuntimeNativeTypeKind::NetHttpServerRequest);
+      return SendStatus::Matched;
+    }
+    return call.fault("TypeError",
+                      "net.http.ServerRequest is not directly callable");
+  }
+  if (call.selector == "ServerResponse") {
+    if (call.args.empty() && call.kw_args.empty() && call.block.is_null()) {
+      *call.out =
+          Value::native_type(RuntimeNativeTypeKind::NetHttpServerResponse);
+      return SendStatus::Matched;
+    }
+    return SendStatus::NotHandled;
+  }
+  if (call.selector == "json" || call.selector == "form") {
+    if (!call.args.empty() || !call.kw_args.empty() || !call.block.is_null()) {
+      return call.fault("ArgumentError",
+                        "net.http." + call.selector + " takes no arguments");
+    }
+    *call.out = Value::native_type(call.selector == "json"
+                                       ? RuntimeNativeTypeKind::NetHttpJson
+                                       : RuntimeNativeTypeKind::NetHttpForm);
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
+}
 
 RuntimeNativeModuleDescriptor net_http_module_descriptor() {
   return {
@@ -20,7 +61,7 @@ RuntimeNativeModuleDescriptor net_http_module_descriptor() {
        {"net.http.json.post_json", RuntimeNativeTypeKind::NetHttpJsonPostJson},
        {"net.http.form", RuntimeNativeTypeKind::NetHttpForm},
        {"net.http.form.FormBody", RuntimeNativeTypeKind::NetHttpFormBody}},
-      {},
+      {{RuntimeNativeTypeKind::NetHttp, net_http_namespace_send}},
       {{RuntimeNativeTypeKind::NetHttpClient, "new"},
        {RuntimeNativeTypeKind::NetHttpRequest, "new"},
        {RuntimeNativeTypeKind::NetHttpRequestBody, "new"},

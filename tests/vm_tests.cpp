@@ -8624,7 +8624,11 @@ void test_runtime_io_v2_source_surface() {
       execute_emitted_init("a = net.Endpoint.new(\"localhost\", 80)\n"
                            "b = net.Endpoint.parse(\"127.0.0.1:8080\")\n"
                            "types = [net.tcp, net.udp, net.http]\n"
-                           "[a.host(), a.port(), b.to_str(), types.count]\n");
+                           "http_types = [net.http.RequestBody, "
+                           "net.http.ServerRequest, net.http.ServerResponse, "
+                           "net.http.json, net.http.form]\n"
+                           "[a.host(), a.port(), b.to_str(), types.count, "
+                           "http_types.count]\n");
   expect(endpoint.ok(),
          "Endpoint source execution failed: " +
              (endpoint.fault.has_value()
@@ -8632,11 +8636,13 @@ void test_runtime_io_v2_source_surface() {
                   : std::string{}));
   expect(endpoint.value.is_list(), "Endpoint source result should be Array");
   const auto endpoint_items = endpoint.value.as_list()->items;
-  expect(endpoint_items.size() == 4 && endpoint_items[0].is_string() &&
+  expect(endpoint_items.size() == 5 && endpoint_items[0].is_string() &&
              endpoint_items[1].is_integer() &&
              endpoint_items[1].as_integer() == 80 &&
              endpoint_items[2].is_string() && endpoint_items[3].is_integer() &&
-             endpoint_items[3].as_integer() == 3,
+             endpoint_items[3].as_integer() == 3 &&
+             endpoint_items[4].is_integer() &&
+             endpoint_items[4].as_integer() == 5,
          "Endpoint source contract mismatch");
 
   amber::runtime::ExecutionResult pipe =

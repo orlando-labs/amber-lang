@@ -16245,38 +16245,13 @@ private:
         if (selector == "Request") {
           return construct_http_request(frame, args, block, kw_args, out);
         }
-        if (selector == "RequestBody") {
-          if (args.empty() && kw_args.empty() && block.is_null()) {
-            *out =
-                Value::native_type(RuntimeNativeTypeKind::NetHttpRequestBody);
-            return SendStatus::Matched;
-          }
-          set_fault(frame, "TypeError",
-                    "net.http.RequestBody is not directly callable");
-          return SendStatus::Faulted;
-        }
         if (selector == "Headers") {
           return construct_http_headers(frame, args, block, kw_args, out);
         }
         if (selector == "Server") {
           return construct_http_server(frame, args, block, kw_args, out);
         }
-        if (selector == "ServerRequest") {
-          if (args.empty() && kw_args.empty() && block.is_null()) {
-            *out =
-                Value::native_type(RuntimeNativeTypeKind::NetHttpServerRequest);
-            return SendStatus::Matched;
-          }
-          set_fault(frame, "TypeError",
-                    "net.http.ServerRequest is not directly callable");
-          return SendStatus::Faulted;
-        }
         if (selector == "ServerResponse") {
-          if (args.empty() && kw_args.empty() && block.is_null()) {
-            *out = Value::native_type(
-                RuntimeNativeTypeKind::NetHttpServerResponse);
-            return SendStatus::Matched;
-          }
           return construct_http_server_response(frame, args, block, kw_args,
                                                 out);
         }
@@ -16292,17 +16267,6 @@ private:
             return SendStatus::Faulted;
           }
           *out = block;
-          return SendStatus::Matched;
-        }
-        if (selector == "json" || selector == "form") {
-          if (!args.empty() || !kw_args.empty() || !block.is_null()) {
-            set_fault(frame, "ArgumentError",
-                      "net.http." + selector + " takes no arguments");
-            return SendStatus::Faulted;
-          }
-          *out = Value::native_type(selector == "json"
-                                        ? RuntimeNativeTypeKind::NetHttpJson
-                                        : RuntimeNativeTypeKind::NetHttpForm);
           return SendStatus::Matched;
         }
         return SendStatus::NotHandled;
