@@ -8620,6 +8620,25 @@ void test_runtime_io_v2_source_surface() {
              path_items[2].as_bool(),
          "Path v2 source contract mismatch");
 
+  amber::runtime::ExecutionResult endpoint =
+      execute_emitted_init("a = net.Endpoint.new(\"localhost\", 80)\n"
+                           "b = net.Endpoint.parse(\"127.0.0.1:8080\")\n"
+                           "types = [net.tcp, net.udp, net.http]\n"
+                           "[a.host(), a.port(), b.to_str(), types.count]\n");
+  expect(endpoint.ok(),
+         "Endpoint source execution failed: " +
+             (endpoint.fault.has_value()
+                  ? endpoint.fault->error_name + " " + endpoint.fault->message
+                  : std::string{}));
+  expect(endpoint.value.is_list(), "Endpoint source result should be Array");
+  const auto endpoint_items = endpoint.value.as_list()->items;
+  expect(endpoint_items.size() == 4 && endpoint_items[0].is_string() &&
+             endpoint_items[1].is_integer() &&
+             endpoint_items[1].as_integer() == 80 &&
+             endpoint_items[2].is_string() && endpoint_items[3].is_integer() &&
+             endpoint_items[3].as_integer() == 3,
+         "Endpoint source contract mismatch");
+
   amber::runtime::ExecutionResult pipe =
       execute_emitted_init("pair = io.Pipe.new(capacity: 2)\n"
                            "r = pair[0]\n"

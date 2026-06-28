@@ -16614,52 +16614,6 @@ private:
         }
         return SendStatus::Matched;
       }
-      if (kind == RuntimeNativeTypeKind::NetEndpoint) {
-        if (selector == "new") {
-          if (!require_arity(2) || !kw_args.empty() || !require_no_block()) {
-            return SendStatus::Faulted;
-          }
-          if (!args[0].is_string() || !args[1].is_integer()) {
-            set_fault(frame, "TypeError", "Endpoint.new expects Str and Int");
-            return SendStatus::Faulted;
-          }
-          const std::optional<std::string> host =
-              string_text_from_id(args[0].as_string().string_id);
-          if (!host.has_value() || args[1].as_integer() < 0 ||
-              args[1].as_integer() > 65535) {
-            set_fault(frame, "ArgumentError", "invalid endpoint");
-            return SendStatus::Faulted;
-          }
-          *out = io_endpoint_value(RuntimeEndpoint{
-              *host, static_cast<std::uint16_t>(args[1].as_integer())});
-          return SendStatus::Matched;
-        }
-        if (selector == "parse") {
-          if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
-            return SendStatus::Faulted;
-          }
-          if (!args[0].is_string()) {
-            set_fault(frame, "TypeError", "Endpoint.parse expects Str");
-            return SendStatus::Faulted;
-          }
-          const std::optional<std::string> text =
-              string_text_from_id(args[0].as_string().string_id);
-          RuntimeEndpoint endpoint;
-          RuntimeIoStatus parsed =
-              text.has_value() ? RuntimeEndpoint::parse(*text, &endpoint)
-                               : RuntimeIoStatus{};
-          if (!text.has_value()) {
-            set_fault(frame, "VMError", "endpoint string ref is invalid");
-            return SendStatus::Faulted;
-          }
-          if (!set_fault_from_io_status(frame, parsed)) {
-            return SendStatus::Faulted;
-          }
-          *out = io_endpoint_value(std::move(endpoint));
-          return SendStatus::Matched;
-        }
-        return SendStatus::NotHandled;
-      }
       if (kind == RuntimeNativeTypeKind::Fs) {
         if (!require_no_block()) {
           return SendStatus::Faulted;
@@ -16977,26 +16931,6 @@ private:
           *out = selector == "copy"
                      ? Value::integer(static_cast<std::int64_t>(count))
                      : Value::null();
-          return SendStatus::Matched;
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::Net) {
-        // The `net` namespace exposes its transport/address sub-types as
-        // selectors, mirroring the `io` and `fs` namespaces (e.g. `net.tcp`,
-        // `net.udp`, `net.Endpoint`). Each yields the corresponding native
-        // type, so `net.tcp.listen(...)` is a plain selector chain.
-        if (selector == "tcp" || selector == "udp" || selector == "Endpoint" ||
-            selector == "http") {
-          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-            return SendStatus::Faulted;
-          }
-          const RuntimeNativeTypeKind member_kind =
-              selector == "tcp"    ? RuntimeNativeTypeKind::NetTcp
-              : selector == "udp"  ? RuntimeNativeTypeKind::NetUdp
-              : selector == "http" ? RuntimeNativeTypeKind::NetHttp
-                                   : RuntimeNativeTypeKind::NetEndpoint;
-          *out = Value::native_type(member_kind);
           return SendStatus::Matched;
         }
         return SendStatus::NotHandled;

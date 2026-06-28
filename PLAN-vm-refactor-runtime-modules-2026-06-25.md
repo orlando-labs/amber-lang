@@ -1120,6 +1120,29 @@ Slice record, 2026-06-28:
   `net_tcp_loopback`) failing with `PermissionDeniedError listen: Operation not
   permitted`. Elevated rerun remains required when approvals are available.
 
+Slice record, 2026-06-28:
+
+- Promoted the core network descriptor to own dispatch for `net.Endpoint.new`,
+  `net.Endpoint.parse`, and the namespace selectors `net.tcp`, `net.udp`,
+  `net.Endpoint`, and `net.http`.
+- Removed the corresponding `NetEndpoint` constructor/parser and `net`
+  namespace selector branches from `Vm::try_apply_native_stdlib_send`. The
+  policy-heavy `net.tcp` and `net.udp` operation branches, plus the larger
+  `net.http` selector bodies, remain in VM for later Phase 3 slices.
+- Added source-level coverage for descriptor-routed endpoint construction,
+  endpoint parsing, and network namespace type selectors without opening
+  sockets.
+- Verified compile smoke: standalone `runtime/stdlib_net.cpp`, standalone
+  `runtime/vm.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/io_tests
+  build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  elevated `build/io_tests`, and elevated `build/vm_net_http_tests`
+  (`566 checks`).
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

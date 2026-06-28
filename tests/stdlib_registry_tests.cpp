@@ -442,6 +442,8 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::IoPipe, "io.Pipe");
   expect_handler(RuntimeNativeTypeKind::Fs, "fs");
   expect_handler(RuntimeNativeTypeKind::FsPath, "fs.Path");
+  expect_handler(RuntimeNativeTypeKind::Net, "net");
+  expect_handler(RuntimeNativeTypeKind::NetEndpoint, "net.Endpoint");
   expect_handler(RuntimeNativeTypeKind::Channel, "Channel");
   expect_handler(RuntimeNativeTypeKind::Mutex, "Mutex");
   expect_handler(RuntimeNativeTypeKind::Atomic, "Atomic");
