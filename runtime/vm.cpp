@@ -16533,63 +16533,6 @@ private:
         }
         return SendStatus::NotHandled;
       }
-      if (kind == RuntimeNativeTypeKind::TextBuffer) {
-        if (selector != "new") {
-          return SendStatus::NotHandled;
-        }
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "io.Buffer.new does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        *out = Value::text_writer(RuntimeTextWriter::buffer());
-        return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::Logger) {
-        if (selector != "new") {
-          return SendStatus::NotHandled;
-        }
-        if (!require_arity(0) ||
-            !reject_unknown_keywords(frame, kw_args,
-                                     {"to", "level", "color"}) ||
-            !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        std::shared_ptr<RuntimeTextWriter> writer = current_runtime_stderr();
-        RuntimeLogLevel level = RuntimeLogLevel::Info;
-        RuntimeLogColorMode color_mode = RuntimeLogColorMode::Auto;
-        if (const std::optional<Value> to = keyword_arg_value(kw_args, "to")) {
-          const std::optional<std::shared_ptr<RuntimeTextWriter>>
-              explicit_writer = text_writer_from_value(frame, *to, "to:");
-          if (!explicit_writer.has_value()) {
-            return SendStatus::Faulted;
-          }
-          writer = *explicit_writer;
-        }
-        if (const std::optional<Value> level_value =
-                keyword_arg_value(kw_args, "level")) {
-          const std::optional<RuntimeLogLevel> parsed =
-              log_level_from_value(frame, *level_value, "level");
-          if (!parsed.has_value()) {
-            return SendStatus::Faulted;
-          }
-          level = *parsed;
-        }
-        if (const std::optional<Value> color_value =
-                keyword_arg_value(kw_args, "color")) {
-          const std::optional<RuntimeLogColorMode> parsed =
-              log_color_mode_from_value(frame, *color_value, "color");
-          if (!parsed.has_value()) {
-            return SendStatus::Faulted;
-          }
-          color_mode = *parsed;
-        }
-        *out = Value::logger(
-            std::make_shared<RuntimeLogger>(writer, level, color_mode));
-        return SendStatus::Matched;
-      }
       if (kind == RuntimeNativeTypeKind::IoPipe) {
         if (selector != "new" && selector != "__call__") {
           return SendStatus::NotHandled;

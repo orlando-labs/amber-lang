@@ -1010,6 +1010,26 @@ Slice record, 2026-06-27:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-28:
+
+- Promoted the IO descriptor to own dispatch for text output constructors:
+  `io.Buffer.new` and `io.Logger.new`.
+- Moved the corresponding `TextBuffer` and `Logger` type-object SEND branches
+  out of `Vm::try_apply_native_stdlib_send` and into `runtime/stdlib_io.cpp`.
+  The `io` namespace selectors (`io.Buffer`, `io.Logger`, stdout/stderr, and
+  `io.with_output`) remain in VM for later Phase 3 slices.
+- Preserved `io.Logger.new` keyword behavior for `to:`, `level:`, and `color:`
+  through descriptor-local parsers over the existing public text/runtime value
+  APIs.
+- Verified compile smoke: standalone `runtime/stdlib_io.cpp`, standalone
+  `runtime/vm.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/iamber_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and `build/iamber_tests`.
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.
