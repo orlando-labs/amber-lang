@@ -445,6 +445,27 @@ SendStatus io_pipe_instance_send(NativeStdlibCall &call) {
   return SendStatus::NotHandled;
 }
 
+SendStatus io_pipe_endpoint_instance_send(NativeStdlibCall &call) {
+  const auto reader =
+      std::dynamic_pointer_cast<RuntimePipeReader>(call.receiver.as_io_value());
+  const auto writer =
+      std::dynamic_pointer_cast<RuntimePipeWriter>(call.receiver.as_io_value());
+  if (reader == nullptr && writer == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (call.selector != "pipe") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_arity(0) || !call.kw_args.empty() ||
+      !call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  const std::shared_ptr<RuntimePipe> owner =
+      reader != nullptr ? reader->pipe() : writer->pipe();
+  *call.out = owner == nullptr ? Value::null() : Value::io_value(owner);
+  return SendStatus::Matched;
+}
+
 std::optional<std::shared_ptr<RuntimeTextWriter>>
 text_writer_from_value(NativeStdlibCall &call, const Value &value,
                        const std::string &context) {
@@ -765,7 +786,11 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
             byte_buffer_instance_send},
            {"io.ByteSlice", RuntimeNativeTypeKind::ByteSlice,
             byte_slice_instance_send},
-           {"io.Pipe", RuntimeNativeTypeKind::IoPipe, io_pipe_instance_send}},
+           {"io.Pipe", RuntimeNativeTypeKind::IoPipe, io_pipe_instance_send},
+           {"io.PipeReader", RuntimeNativeTypeKind::IoPipe,
+            io_pipe_endpoint_instance_send},
+           {"io.PipeWriter", RuntimeNativeTypeKind::IoPipe,
+            io_pipe_endpoint_instance_send}},
           {{RuntimeNativeTypeKind::Bytes, "new"},
            {RuntimeNativeTypeKind::ByteBuffer, "new"},
            {RuntimeNativeTypeKind::IoPipe, "__call__"}}};

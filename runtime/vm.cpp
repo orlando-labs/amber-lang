@@ -17649,17 +17649,6 @@ private:
         }
       }
 
-      if ((pipe_reader != nullptr || pipe_writer != nullptr) &&
-          selector == "pipe") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        const std::shared_ptr<RuntimePipe> owner =
-            pipe_reader != nullptr ? pipe_reader->pipe() : pipe_writer->pipe();
-        *out = owner == nullptr ? Value::null() : Value::io_value(owner);
-        return SendStatus::Matched;
-      }
-
       if (tcp_stream != nullptr) {
         if (selector == "local_endpoint" || selector == "remote_endpoint") {
           if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
