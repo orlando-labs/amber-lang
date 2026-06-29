@@ -17115,40 +17115,6 @@ private:
         }
       }
 
-      if (const auto pipe = std::dynamic_pointer_cast<RuntimePipe>(io_value)) {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "reader") {
-          *out = Value::io_value(pipe->reader());
-          return SendStatus::Matched;
-        }
-        if (selector == "writer") {
-          *out = Value::io_value(pipe->writer());
-          return SendStatus::Matched;
-        }
-        if (selector == "capacity") {
-          *out = Value::integer(static_cast<std::int64_t>(pipe->capacity()));
-          return SendStatus::Matched;
-        }
-        if (selector == "buffered") {
-          *out = Value::integer(static_cast<std::int64_t>(pipe->buffered()));
-          return SendStatus::Matched;
-        }
-        if (selector == "closed?") {
-          *out = Value::boolean(pipe->closed());
-          return SendStatus::Matched;
-        }
-        if (selector == "close!") {
-          RuntimeIoStatus result = pipe->close();
-          if (!set_fault_from_io_status(frame, result)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::null();
-          return SendStatus::Matched;
-        }
-      }
-
       const auto file = std::dynamic_pointer_cast<RuntimeFile>(io_value);
       const auto memory_file =
           std::dynamic_pointer_cast<RuntimeMemoryFile>(io_value);
