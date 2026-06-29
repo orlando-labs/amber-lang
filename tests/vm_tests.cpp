@@ -8693,6 +8693,34 @@ void test_runtime_io_v2_source_surface() {
              file_items[7].is_string() && file_items[8].is_integer() &&
              file_items[8].as_integer() == 5 && file_items[9].is_string(),
          "File v2 source contract mismatch");
+
+  const std::string copy_path = file_path + ".copy";
+  const std::string renamed_path = file_path + ".renamed";
+  ::unlink(copy_path.c_str());
+  ::unlink(renamed_path.c_str());
+  amber::runtime::ExecutionResult moves =
+      execute_emitted_init("source = \"" + file_path +
+                           "\"\n"
+                           "copy = \"" +
+                           copy_path +
+                           "\"\n"
+                           "renamed = \"" +
+                           renamed_path +
+                           "\"\n"
+                           "count = fs.copy(source, copy)\n"
+                           "fs.rename(copy, renamed)\n"
+                           "text = fs.read_text(renamed)\n"
+                           "fs.remove(renamed)\n"
+                           "[count, text, fs.exists?(renamed)]\n");
+  expect(moves.ok(), "File move source execution failed");
+  expect(moves.value.is_list(), "File move result should be Array");
+  const auto move_items = moves.value.as_list()->items;
+  expect(move_items.size() == 3 && move_items[0].is_integer() &&
+             move_items[0].as_integer() == 5 && move_items[1].is_string() &&
+             move_items[2].is_bool() && !move_items[2].as_bool(),
+         "File move source contract mismatch");
+  ::unlink(copy_path.c_str());
+  ::unlink(renamed_path.c_str());
   ::unlink(file_path.c_str());
 
   const std::string dir_path =

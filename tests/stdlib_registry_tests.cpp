@@ -209,6 +209,15 @@ struct MockHost : StdlibHost {
                         const std::string & /*path*/) override {
     return false;
   }
+  bool stdlib_fs_rename(const void * /*frame*/, const std::string & /*from*/,
+                        const std::string & /*to*/) override {
+    return false;
+  }
+  bool stdlib_fs_copy(const void * /*frame*/, const std::string & /*from*/,
+                      const std::string & /*to*/,
+                      std::size_t * /*count*/) override {
+    return false;
+  }
   bool stdlib_secure_random_bytes(const void * /*frame*/, std::size_t /*count*/,
                                   std::string * /*out*/) override {
     return false;

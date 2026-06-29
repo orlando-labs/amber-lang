@@ -2,6 +2,7 @@
 #include "runtime/stdlib_registry.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -252,6 +253,34 @@ SendStatus fs_write_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus fs_move_send(NativeStdlibCall &call) {
+  if (call.selector != "rename" && call.selector != "copy") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_no_block() || !call.require_arity(2) ||
+      !call.kw_args.empty()) {
+    return SendStatus::Faulted;
+  }
+  const std::shared_ptr<RuntimePath> from = path_from_value(call, call.args[0]);
+  const std::shared_ptr<RuntimePath> to = path_from_value(call, call.args[1]);
+  if (from == nullptr || to == nullptr) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "rename") {
+    if (!call.fs_rename(from->string(), to->string())) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  std::size_t count = 0;
+  if (!call.fs_copy(from->string(), to->string(), &count)) {
+    return SendStatus::Faulted;
+  }
+  *call.out = Value::integer(static_cast<std::int64_t>(count));
+  return SendStatus::Matched;
+}
+
 SendStatus fs_namespace_send(NativeStdlibCall &call) {
   if (const SendStatus status = fs_metadata_send(call);
       status != SendStatus::NotHandled) {
@@ -266,6 +295,10 @@ SendStatus fs_namespace_send(NativeStdlibCall &call) {
     return status;
   }
   if (const SendStatus status = fs_write_send(call);
+      status != SendStatus::NotHandled) {
+    return status;
+  }
+  if (const SendStatus status = fs_move_send(call);
       status != SendStatus::NotHandled) {
     return status;
   }

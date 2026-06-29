@@ -1265,6 +1265,30 @@ Slice record, 2026-06-29:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-29:
+
+- Promoted filesystem move/copy selectors into the filesystem descriptor:
+  `fs.copy` and `fs.rename`.
+- Added narrow `StdlibHost` filesystem copy/rename facades so descriptor
+  dispatch owns path coercion and selector routing while the VM continues to own
+  capability/effect checks, replay provider routing, and OS-backed copy/rename
+  operations.
+- Removed the final `RuntimeNativeTypeKind::Fs` namespace branch from
+  `Vm::try_apply_native_stdlib_send`. `fs.File.open` remains in VM as the last
+  filesystem type-specific dispatch island for a later Phase 3 slice.
+- Extended source-level VM filesystem coverage to exercise descriptor-routed
+  copy and rename operations.
+- Verified compile smoke: standalone `runtime/stdlib_fs.cpp`, standalone
+  `runtime/vm.cpp`, standalone `tests/stdlib_registry_tests.cpp`, standalone
+  `tests/amber_ext_tests.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/amber_ext_tests
+  build/io_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  `build/amber_ext_tests`, and elevated `build/io_tests`.
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

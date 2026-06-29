@@ -1268,6 +1268,15 @@ public:
     return stdlib_fs_write_unary(*static_cast<const Frame *>(frame), "remove",
                                  path);
   }
+  bool stdlib_fs_rename(const void *frame, const std::string &from,
+                        const std::string &to) override {
+    return stdlib_fs_rename_file(*static_cast<const Frame *>(frame), from, to);
+  }
+  bool stdlib_fs_copy(const void *frame, const std::string &from,
+                      const std::string &to, std::size_t *count) override {
+    return stdlib_fs_copy_file(*static_cast<const Frame *>(frame), from, to,
+                               count);
+  }
   bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
                                   std::string *out) override {
     return stdlib_secure_random_bytes_from_host(
@@ -12272,6 +12281,55 @@ private:
     return set_fault_from_io_status(frame, status);
   }
 
+  bool stdlib_fs_rename_file(const Frame &frame, const std::string &from,
+                             const std::string &to) {
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_write", "fs.write", from,
+                         !provider_active)) {
+      return false;
+    }
+    if (!check_io_policy(frame, "fs_write", "fs.write", to, !provider_active)) {
+      return false;
+    }
+    record_io_wait("fs.rename", from);
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          world_options_->io_provider->fs_rename(from, to);
+      return set_fault_from_provider_status(frame, status, "rename");
+    }
+    RuntimeIoStatus status =
+        runtime_fs_rename(RuntimePath(from), RuntimePath(to));
+    return set_fault_from_io_status(frame, status);
+  }
+
+  bool stdlib_fs_copy_file(const Frame &frame, const std::string &from,
+                           const std::string &to, std::size_t *count) {
+    if (count == nullptr) {
+      set_fault(frame, "TypeError", "fs copy output is null");
+      return false;
+    }
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_read", "fs.read", from, !provider_active)) {
+      return false;
+    }
+    if (!check_io_policy(frame, "fs_write", "fs.write", to, !provider_active)) {
+      return false;
+    }
+    record_io_wait("fs.copy", from);
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          world_options_->io_provider->fs_copy(from, to);
+      if (!set_fault_from_provider_status(frame, status, "copy")) {
+        return false;
+      }
+      *count = status.count;
+      return true;
+    }
+    RuntimeIoStatus status =
+        runtime_fs_copy(RuntimePath(from), RuntimePath(to), count);
+    return set_fault_from_io_status(frame, status);
+  }
+
   bool stdlib_secure_random_bytes_from_host(const Frame &frame,
                                             std::size_t count,
                                             std::string *out) {
@@ -16781,69 +16839,6 @@ private:
           return SendStatus::Faulted;
         }
         return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::Fs) {
-        if (!require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "rename" || selector == "copy") {
-          if (!require_arity(2) || !kw_args.empty()) {
-            return SendStatus::Faulted;
-          }
-          const std::shared_ptr<RuntimePath> from =
-              io_path_from_value(frame, args[0]);
-          const std::shared_ptr<RuntimePath> to =
-              io_path_from_value(frame, args[1]);
-          if (from == nullptr || to == nullptr) {
-            return SendStatus::Faulted;
-          }
-          const bool provider_active = replay_io_provider_active();
-          if (selector == "copy" &&
-              !check_io_policy(frame, "fs_read", "fs.read", from->string(),
-                               !provider_active)) {
-            return SendStatus::Faulted;
-          }
-          if (!check_io_policy(frame, "fs_write", "fs.write",
-                               selector == "rename" ? from->string()
-                                                    : to->string(),
-                               !provider_active)) {
-            return SendStatus::Faulted;
-          }
-          if (selector == "rename" &&
-              !check_io_policy(frame, "fs_write", "fs.write", to->string(),
-                               !provider_active)) {
-            return SendStatus::Faulted;
-          }
-          record_io_wait(selector == "rename" ? "fs.rename" : "fs.copy",
-                         from->string());
-          if (provider_active) {
-            RuntimeIoProviderStatus status =
-                selector == "rename"
-                    ? world_options_->io_provider->fs_rename(from->string(),
-                                                             to->string())
-                    : world_options_->io_provider->fs_copy(from->string(),
-                                                           to->string());
-            if (!set_fault_from_provider_status(frame, status, selector)) {
-              return SendStatus::Faulted;
-            }
-            *out = selector == "copy"
-                       ? Value::integer(static_cast<std::int64_t>(status.count))
-                       : Value::null();
-            return SendStatus::Matched;
-          }
-          std::size_t count = 0;
-          RuntimeIoStatus result = selector == "rename"
-                                       ? runtime_fs_rename(*from, *to)
-                                       : runtime_fs_copy(*from, *to, &count);
-          if (!set_fault_from_io_status(frame, result)) {
-            return SendStatus::Faulted;
-          }
-          *out = selector == "copy"
-                     ? Value::integer(static_cast<std::int64_t>(count))
-                     : Value::null();
-          return SendStatus::Matched;
-        }
-        return SendStatus::NotHandled;
       }
       if (kind == RuntimeNativeTypeKind::NetTcp) {
         if (selector != "connect" && selector != "listen") {
