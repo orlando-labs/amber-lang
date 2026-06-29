@@ -199,6 +199,180 @@ SendStatus byte_buffer_type_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus byte_buffer_instance_send(NativeStdlibCall &call) {
+  const auto buffer =
+      std::dynamic_pointer_cast<RuntimeByteBuffer>(call.receiver.as_io_value());
+  if (buffer == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  RuntimeIoStatus access = buffer->access_status();
+  if (!set_fault_from_io_status(call, access)) {
+    return SendStatus::Faulted;
+  }
+  if (!call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "capacity" || call.selector == "position" ||
+      call.selector == "limit" || call.selector == "count" ||
+      call.selector == "remaining" || call.selector == "empty?" ||
+      call.selector == "full?") {
+    if (!call.require_arity(0) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    if (call.selector == "empty?") {
+      *call.out = Value::boolean(buffer->empty());
+    } else if (call.selector == "full?") {
+      *call.out = Value::boolean(buffer->full());
+    } else {
+      const std::size_t value =
+          call.selector == "capacity"
+              ? buffer->capacity()
+              : (call.selector == "position"
+                     ? buffer->position()
+                     : (call.selector == "limit"
+                            ? buffer->limit()
+                            : (call.selector == "count"
+                                   ? buffer->count()
+                                   : buffer->remaining())));
+      *call.out = Value::integer(static_cast<std::int64_t>(value));
+    }
+    return SendStatus::Matched;
+  }
+  if (call.selector == "clear!" || call.selector == "flip!" ||
+      call.selector == "rewind!" || call.selector == "compact!") {
+    if (!call.require_arity(0) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    RuntimeIoStatus result =
+        call.selector == "clear!"
+            ? buffer->clear()
+            : (call.selector == "flip!"
+                   ? buffer->flip()
+                   : (call.selector == "rewind!" ? buffer->rewind()
+                                                 : buffer->compact()));
+    if (!set_fault_from_io_status(call, result)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = call.selector == "clear!" ? Value::null() : call.receiver;
+    return SendStatus::Matched;
+  }
+  if (call.selector == "get!" || call.selector == "get_at") {
+    if ((call.selector == "get!" && !call.require_arity(0)) ||
+        (call.selector == "get_at" && !call.require_arity(1)) ||
+        !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    if (call.selector == "get_at" && !call.args[0].is_integer()) {
+      call.fault("TypeError", "ByteBuffer index must be Int");
+      return SendStatus::Faulted;
+    }
+    RuntimeByteResult result = call.selector == "get!"
+                                   ? buffer->get()
+                                   : buffer->get_at(call.args[0].as_integer());
+    if (!set_fault_from_io_status(call, result)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::integer(result.byte);
+    return SendStatus::Matched;
+  }
+  if (call.selector == "put!" || call.selector == "put_all!") {
+    if (!call.require_arity(1) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    RuntimeIoStatus result;
+    if (call.selector == "put!") {
+      if (!call.args[0].is_integer()) {
+        call.fault("TypeError", "ByteBuffer byte must be Int");
+        return SendStatus::Faulted;
+      }
+      result = buffer->put(call.args[0].as_integer());
+    } else {
+      const std::optional<std::string> input =
+          bytes_from_value(call, call.args[0]);
+      if (!input.has_value()) {
+        return SendStatus::Faulted;
+      }
+      result = buffer->put_all(*input);
+    }
+    if (!set_fault_from_io_status(call, result)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = call.receiver;
+    return SendStatus::Matched;
+  }
+  if (call.selector == "read_slice" || call.selector == "write_slice") {
+    if (call.args.size() > 1U || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    std::optional<std::size_t> length;
+    if (!call.args.empty() && !call.args[0].is_null()) {
+      if (!call.args[0].is_integer()) {
+        call.fault("TypeError", "slice length must be Int or null");
+        return SendStatus::Faulted;
+      }
+      if (call.args[0].as_integer() < 0) {
+        call.fault("ArgumentError", "slice length must be non-negative");
+        return SendStatus::Faulted;
+      }
+      length = static_cast<std::size_t>(call.args[0].as_integer());
+    }
+    if ((call.selector == "read_slice" && !buffer->read_mode()) ||
+        (call.selector == "write_slice" && buffer->read_mode())) {
+      call.fault("ArgumentError", call.selector == "read_slice"
+                                      ? "read_slice requires read mode"
+                                      : "write_slice requires write mode");
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::io_value(call.selector == "read_slice"
+                                    ? buffer->read_slice(length)
+                                    : buffer->write_slice(length));
+    return SendStatus::Matched;
+  }
+  if (call.selector == "slice") {
+    if ((call.args.size() != 1U && call.args.size() != 2U) ||
+        !call.kw_args.empty() || !call.args[0].is_integer()) {
+      call.fault("TypeError", "ByteBuffer.slice expects Int start");
+      return SendStatus::Faulted;
+    }
+    std::optional<std::size_t> length;
+    if (call.args.size() == 2U && !call.args[1].is_null()) {
+      if (!call.args[1].is_integer()) {
+        call.fault("TypeError", "slice length must be Int or null");
+        return SendStatus::Faulted;
+      }
+      if (call.args[1].as_integer() < 0) {
+        call.fault("ArgumentError", "slice length must be non-negative");
+        return SendStatus::Faulted;
+      }
+      length = static_cast<std::size_t>(call.args[1].as_integer());
+    }
+    std::int64_t start = call.args[0].as_integer();
+    if (start < 0) {
+      start += static_cast<std::int64_t>(buffer->count());
+    }
+    if (start < 0 || static_cast<std::size_t>(start) > buffer->count()) {
+      call.fault("IndexError", "ByteBuffer slice is out of bounds");
+      return SendStatus::Faulted;
+    }
+    *call.out =
+        Value::io_value(buffer->byte_slice(call.args[0].as_integer(), length));
+    return SendStatus::Matched;
+  }
+  if (call.selector == "bytes" || call.selector == "copy_bytes" ||
+      call.selector == "freeze_bytes!") {
+    if (!call.require_arity(0) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::io_value(
+        call.selector == "bytes"
+            ? std::make_shared<RuntimeBytes>(buffer->bytes())
+            : (call.selector == "copy_bytes" ? buffer->copy_bytes()
+                                             : buffer->freeze_bytes()));
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
+}
+
 std::optional<std::shared_ptr<RuntimeTextWriter>>
 text_writer_from_value(NativeStdlibCall &call, const Value &value,
                        const std::string &context) {
@@ -514,7 +688,9 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
            {RuntimeNativeTypeKind::Bytes, bytes_type_send},
            {RuntimeNativeTypeKind::ByteBuffer, byte_buffer_type_send},
            {RuntimeNativeTypeKind::IoPipe, io_pipe_type_send}},
-          {{"Bytes", RuntimeNativeTypeKind::Bytes, bytes_instance_send}},
+          {{"Bytes", RuntimeNativeTypeKind::Bytes, bytes_instance_send},
+           {"io.ByteBuffer", RuntimeNativeTypeKind::ByteBuffer,
+            byte_buffer_instance_send}},
           {{RuntimeNativeTypeKind::Bytes, "new"},
            {RuntimeNativeTypeKind::ByteBuffer, "new"},
            {RuntimeNativeTypeKind::IoPipe, "__call__"}}};
