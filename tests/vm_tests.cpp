@@ -594,8 +594,8 @@ void test_execute_emitted_collection_literals() {
           same_name_map_result.module,
           same_name_map_result.module.init.entry_code_id);
   expect(same_name_map_exec.ok(), "same-name map literal execution failed");
-  const amber::runtime::IntrusivePtr<amber::runtime::MapValue>
-      same_name_map = same_name_map_exec.value.as_map();
+  const amber::runtime::IntrusivePtr<amber::runtime::MapValue> same_name_map =
+      same_name_map_exec.value.as_map();
   expect(same_name_map != nullptr && same_name_map->entries.size() == 2,
          "same-name map entry count");
   expect(same_name_map->entries[1].symbol_id ==
@@ -8701,20 +8701,32 @@ void test_runtime_io_v2_source_surface() {
                            "fs.dir?(path), meta.file?(), meta.dir?(), "
                            "meta.size(), fs.read_text(path), "
                            "fs.read_bytes(path, limit: 5).to_str(), "
-                           "f.size!(), f.read_all!().to_str()]\n");
+                           "f.size!(), f.read_all!().to_str(), "
+                           "f.path().to_str() == path, f.mode() == :read, "
+                           "f.closed?(), f.close!(), f.closed?()]\n");
   expect(file.ok(), "File v2 source execution failed");
   expect(file.value.is_list(), "File source result should be Array");
   const auto file_items = file.value.as_list()->items;
-  expect(file_items.size() == 10 && file_items[0].is_bool() &&
-             file_items[0].as_bool() && file_items[1].is_bool() &&
-             file_items[1].as_bool() && file_items[2].is_bool() &&
-             !file_items[2].as_bool() && file_items[3].is_bool() &&
-             file_items[3].as_bool() && file_items[4].is_bool() &&
-             !file_items[4].as_bool() && file_items[5].is_integer() &&
-             file_items[5].as_integer() == 5 && file_items[6].is_string() &&
-             file_items[7].is_string() && file_items[8].is_integer() &&
-             file_items[8].as_integer() == 5 && file_items[9].is_string(),
-         "File v2 source contract mismatch");
+  expect(file_items.size() == 15, "File v2 source result shape mismatch");
+  expect(file_items[0].is_bool() && file_items[0].as_bool() &&
+             file_items[1].is_bool() && file_items[1].as_bool() &&
+             file_items[2].is_bool() && !file_items[2].as_bool() &&
+             file_items[3].is_bool() && file_items[3].as_bool() &&
+             file_items[4].is_bool() && !file_items[4].as_bool(),
+         "File v2 source filesystem predicates mismatch");
+  expect(file_items[5].is_integer() && file_items[5].as_integer() == 5 &&
+             file_items[6].is_string() && file_items[7].is_string() &&
+             file_items[8].is_integer() && file_items[8].as_integer() == 5 &&
+             file_items[9].is_string(),
+         "File v2 source read/metadata mismatch");
+  expect(file_items[10].is_bool() && file_items[10].as_bool(),
+         "File v2 source fs.File.path mismatch");
+  expect(file_items[11].is_bool() && file_items[11].as_bool(),
+         "File v2 source fs.File.mode mismatch");
+  expect(file_items[12].is_bool() && !file_items[12].as_bool() &&
+             file_items[13].is_null() && file_items[14].is_bool() &&
+             file_items[14].as_bool(),
+         "File v2 source fs.File lifecycle mismatch");
 
   const std::string copy_path = file_path + ".copy";
   const std::string renamed_path = file_path + ".renamed";

@@ -1762,6 +1762,38 @@ Slice record, 2026-06-29:
   (`net_socket_handoff_to_task` twice and `net_tcp_loopback`) failing on
   `listen: Operation not permitted`.
 
+Slice record, 2026-06-29:
+
+- Added a descriptor-owned IO value handler for `fs.File`.
+- Promoted `fs.File` value selectors `path`, `mode`, `closed?`, and real-file
+  `close!` into the filesystem descriptor.
+- Preserved the legacy access check before closing a non-closed file resource.
+  Provider-backed `RuntimeMemoryFile.close!` still validates/access-checks and
+  then falls through as not handled, matching the previous VM fallback behavior.
+- Left file read/write/flush, seek, size, metadata, and sync selectors in VM for
+  later Phase 3 slices because they still carry filesystem policy checks and IO
+  wait behavior.
+- Removed the now-redundant `fs.File.path`, `fs.File.mode`, and real-file
+  `close!` bodies from `Vm::try_apply_native_stdlib_send`.
+- Extended source-level VM coverage to assert descriptor-routed
+  `fs.File.path`, `fs.File.mode`, `closed?`, and `close!`.
+- Verified compile smoke: standalone `runtime/stdlib_fs.cpp`, standalone
+  `runtime/vm.cpp`, standalone `tests/vm_tests.cpp`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/io_tests
+  build/vm_net_http_tests`, followed by `make -B build/vm_tests` after refining
+  the new source-level assertion.
+- Verified focused binaries: `build/stdlib_registry_tests` and
+  `build/vm_tests`.
+- Sandboxed `build/io_tests` failed with `PermissionDeniedError listen:
+  Operation not permitted`, and sandboxed `build/vm_net_http_tests` failed with
+  `PermissionDeniedError`; both failures are the known loopback/listen sandbox
+  restriction.
+- Sandboxed `make conformance` reached `137 passed, 3 failed, 0 skipped for
+  M11`; all three failures were the known loopback corpus cases
+  (`net_socket_handoff_to_task` twice and `net_tcp_loopback`) failing on
+  `listen: Operation not permitted`.
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

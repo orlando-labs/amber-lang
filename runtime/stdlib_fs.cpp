@@ -78,6 +78,20 @@ std::optional<std::string> bytes_from_value(NativeStdlibCall &call,
   return std::nullopt;
 }
 
+const char *file_mode_name(RuntimeFileMode mode) {
+  switch (mode) {
+  case RuntimeFileMode::Read:
+    return "read";
+  case RuntimeFileMode::Write:
+    return "write";
+  case RuntimeFileMode::Append:
+    return "append";
+  case RuntimeFileMode::ReadWrite:
+    return "read_write";
+  }
+  return "read";
+}
+
 SendStatus build_path_value(NativeStdlibCall &call, bool block_checked) {
   if (!call.require_arity(1) || !call.kw_args.empty() ||
       (!block_checked && !call.require_no_block())) {
@@ -147,6 +161,56 @@ SendStatus fs_path_instance_send(NativeStdlibCall &call) {
     return SendStatus::Matched;
   }
   return SendStatus::NotHandled;
+}
+
+SendStatus fs_file_instance_send(NativeStdlibCall &call) {
+  const auto file =
+      std::dynamic_pointer_cast<RuntimeFile>(call.receiver.as_io_value());
+  const auto memory_file =
+      std::dynamic_pointer_cast<RuntimeMemoryFile>(call.receiver.as_io_value());
+  if (file == nullptr && memory_file == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (call.selector != "path" && call.selector != "mode" &&
+      call.selector != "closed?" && call.selector != "close!") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_arity(0) || !call.kw_args.empty() ||
+      !call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  RuntimeIoResource *resource =
+      file != nullptr ? static_cast<RuntimeIoResource *>(file.get())
+                      : static_cast<RuntimeIoResource *>(memory_file.get());
+  if (call.selector == "closed?") {
+    *call.out = Value::boolean(resource->closed());
+    return SendStatus::Matched;
+  }
+  if (call.selector == "close!") {
+    if (!resource->closed()) {
+      const RuntimeIoStatus access = resource->access_status();
+      if (!set_fault_from_io_status(call, access)) {
+        return SendStatus::Faulted;
+      }
+    }
+    if (memory_file != nullptr) {
+      return SendStatus::NotHandled;
+    }
+    RuntimeIoStatus result = file->close();
+    if (!set_fault_from_io_status(call, result)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  if (call.selector == "path") {
+    *call.out = Value::io_value(std::make_shared<RuntimePath>(
+        file != nullptr ? file->path() : memory_file->path()));
+    return SendStatus::Matched;
+  }
+  *call.out = call.symbol_value(
+      file_mode_name(file != nullptr ? file->mode() : memory_file->mode()));
+  return SendStatus::Matched;
 }
 
 SendStatus fs_metadata_instance_send(NativeStdlibCall &call) {
@@ -520,6 +584,7 @@ RuntimeNativeModuleDescriptor fs_module_descriptor() {
        {RuntimeNativeTypeKind::FsPath, fs_path_type_send},
        {RuntimeNativeTypeKind::FsFile, fs_file_type_send}},
       {{"fs.Path", RuntimeNativeTypeKind::FsPath, fs_path_instance_send},
+       {"fs.File", RuntimeNativeTypeKind::FsFile, fs_file_instance_send},
        {"fs.Metadata", RuntimeNativeTypeKind::Fs, fs_metadata_instance_send}},
       {{RuntimeNativeTypeKind::FsPath, "new"}}};
 }

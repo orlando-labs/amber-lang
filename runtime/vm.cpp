@@ -17085,9 +17085,6 @@ private:
       auto file_like_path = [&]() -> RuntimePath {
         return file != nullptr ? file->path() : memory_file->path();
       };
-      auto file_like_mode = [&]() -> RuntimeFileMode {
-        return file != nullptr ? file->mode() : memory_file->mode();
-      };
       auto read_once = [&](RuntimeByteBuffer &buffer,
                            std::chrono::milliseconds timeout,
                            bool nonblocking) -> RuntimeIoStatus {
@@ -17547,9 +17544,9 @@ private:
       }
 
       if (is_file_like) {
-        if (selector == "path" || selector == "mode" || selector == "tell!" ||
-            selector == "size!" || selector == "metadata!" ||
-            selector == "sync!" || selector == "seek!") {
+        if (selector == "tell!" || selector == "size!" ||
+            selector == "metadata!" || selector == "sync!" ||
+            selector == "seek!") {
           if (selector == "seek!") {
             if (!require_arity(1) ||
                 !reject_unknown_keywords(frame, kw_args, {"whence"}) ||
@@ -17594,20 +17591,7 @@ private:
           if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
             return SendStatus::Faulted;
           }
-          if (selector == "path") {
-            *out = Value::io_value(
-                std::make_shared<RuntimePath>(file_like_path()));
-          } else if (selector == "mode") {
-            const char *name =
-                file_like_mode() == RuntimeFileMode::Read
-                    ? "read"
-                    : (file_like_mode() == RuntimeFileMode::Write
-                           ? "write"
-                           : (file_like_mode() == RuntimeFileMode::Append
-                                  ? "append"
-                                  : "read_write"));
-            *out = Value::symbol(intern_runtime_symbol(name));
-          } else if (selector == "metadata!") {
+          if (selector == "metadata!") {
             if (!check_io_policy(frame, "fs_metadata", "fs.metadata",
                                  file_like_path().string(),
                                  memory_file == nullptr)) {
@@ -18117,17 +18101,7 @@ private:
               !set_fault_from_io_status(frame, resource->access_status())) {
             return SendStatus::Faulted;
           }
-          RuntimeIoStatus result;
-          if (file != nullptr) {
-            result = file->close();
-          } else {
-            return SendStatus::NotHandled;
-          }
-          if (!set_fault_from_io_status(frame, result)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::null();
-          return SendStatus::Matched;
+          return SendStatus::NotHandled;
         }
       }
     }
