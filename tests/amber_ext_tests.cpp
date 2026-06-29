@@ -206,6 +206,19 @@ struct RecordingHost : StdlibHost {
                             const std::string & /*text*/) override {
     return false;
   }
+  bool stdlib_fs_write_bytes_value(const void * /*frame*/,
+                                   const std::string & /*path*/,
+                                   const std::string & /*bytes*/,
+                                   bool /*create*/,
+                                   bool /*truncate*/) override {
+    return false;
+  }
+  bool stdlib_fs_write_text_value(const void * /*frame*/,
+                                  const std::string & /*path*/,
+                                  const std::string & /*text*/, bool /*create*/,
+                                  bool /*truncate*/) override {
+    return false;
+  }
   bool stdlib_fs_mkdir(const void * /*frame*/,
                        const std::string & /*path*/) override {
     return false;

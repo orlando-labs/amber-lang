@@ -1244,6 +1244,18 @@ public:
     return stdlib_write_text_file(*static_cast<const Frame *>(frame), path,
                                   text);
   }
+  bool stdlib_fs_write_bytes_value(const void *frame, const std::string &path,
+                                   const std::string &bytes, bool create,
+                                   bool truncate) override {
+    return stdlib_write_bytes_file(*static_cast<const Frame *>(frame), path,
+                                   bytes, create, truncate, "write_bytes");
+  }
+  bool stdlib_fs_write_text_value(const void *frame, const std::string &path,
+                                  const std::string &text, bool create,
+                                  bool truncate) override {
+    return stdlib_write_bytes_file(*static_cast<const Frame *>(frame), path,
+                                   text, create, truncate, "write_text");
+  }
   bool stdlib_fs_mkdir(const void *frame, const std::string &path) override {
     return stdlib_fs_write_unary(*static_cast<const Frame *>(frame), "mkdir",
                                  path);
@@ -12215,6 +12227,26 @@ private:
     return set_fault_from_io_status(frame, status);
   }
 
+  bool stdlib_write_bytes_file(const Frame &frame, const std::string &path,
+                               const std::string &bytes, bool create,
+                               bool truncate, const std::string &operation) {
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_write", "fs.write", path,
+                         !provider_active)) {
+      return false;
+    }
+    record_io_wait("fs.write", path);
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          world_options_->io_provider->fs_write_bytes(path, bytes, create,
+                                                      truncate);
+      return set_fault_from_provider_status(frame, status, operation);
+    }
+    RuntimeIoStatus status =
+        runtime_fs_write_bytes(RuntimePath(path), bytes, create, truncate);
+    return set_fault_from_io_status(frame, status);
+  }
+
   bool stdlib_fs_write_unary(const Frame &frame, const std::string &operation,
                              const std::string &path) {
     const bool provider_active = replay_io_provider_active();
@@ -16753,71 +16785,6 @@ private:
       if (kind == RuntimeNativeTypeKind::Fs) {
         if (!require_no_block()) {
           return SendStatus::Faulted;
-        }
-        if (selector == "write_bytes" || selector == "write_text") {
-          if (!require_arity(2) ||
-              !reject_unknown_keywords(frame, kw_args,
-                                       {"create", "truncate", "encoding"})) {
-            return SendStatus::Faulted;
-          }
-          const std::shared_ptr<RuntimePath> path =
-              io_path_from_value(frame, args[0]);
-          if (path == nullptr) {
-            return SendStatus::Faulted;
-          }
-          std::optional<std::string> bytes;
-          if (selector == "write_text") {
-            if (!args[1].is_string()) {
-              set_fault(frame, "TypeError", "write_text expects Str text");
-              return SendStatus::Faulted;
-            }
-            bytes = string_text_from_id(args[1].as_string().string_id);
-            if (const std::optional<Value> encoding =
-                    keyword_arg_value(kw_args, "encoding")) {
-              const std::optional<std::string> name =
-                  text_from_symbol_or_string(*encoding);
-              if (!name.has_value() || *name != "utf8") {
-                set_fault(frame,
-                          name.has_value() ? "ArgumentError" : "TypeError",
-                          "only utf8 encoding is supported");
-                return SendStatus::Faulted;
-              }
-            }
-          } else {
-            bytes = io_bytes_from_value(frame, args[1]);
-          }
-          if (!bytes.has_value()) {
-            return SendStatus::Faulted;
-          }
-          bool create = true;
-          bool truncate = true;
-          if (!bool_keyword("create", true, &create) ||
-              !bool_keyword("truncate", true, &truncate)) {
-            return SendStatus::Faulted;
-          }
-          const bool provider_active = replay_io_provider_active();
-          if (!check_io_policy(frame, "fs_write", "fs.write", path->string(),
-                               !provider_active)) {
-            return SendStatus::Faulted;
-          }
-          record_io_wait("fs.write", path->string());
-          if (provider_active) {
-            RuntimeIoProviderStatus status =
-                world_options_->io_provider->fs_write_bytes(
-                    path->string(), *bytes, create, truncate);
-            if (!set_fault_from_provider_status(frame, status, selector)) {
-              return SendStatus::Faulted;
-            }
-            *out = Value::null();
-            return SendStatus::Matched;
-          }
-          RuntimeIoStatus result =
-              runtime_fs_write_bytes(*path, *bytes, create, truncate);
-          if (!set_fault_from_io_status(frame, result)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::null();
-          return SendStatus::Matched;
         }
         if (selector == "rename" || selector == "copy") {
           if (!require_arity(2) || !kw_args.empty()) {

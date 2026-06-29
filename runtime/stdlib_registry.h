@@ -194,6 +194,14 @@ public:
                                    std::string *out) = 0;
   virtual bool stdlib_fs_write_text(const void *frame, const std::string &path,
                                     const std::string &text) = 0;
+  virtual bool stdlib_fs_write_bytes_value(const void *frame,
+                                           const std::string &path,
+                                           const std::string &bytes,
+                                           bool create, bool truncate) = 0;
+  virtual bool stdlib_fs_write_text_value(const void *frame,
+                                          const std::string &path,
+                                          const std::string &text, bool create,
+                                          bool truncate) = 0;
   virtual bool stdlib_fs_mkdir(const void *frame, const std::string &path) = 0;
   virtual bool stdlib_fs_mkdir_p(const void *frame,
                                  const std::string &path) = 0;
@@ -405,6 +413,17 @@ struct NativeStdlibCall {
 
   bool fs_write_text(const std::string &path, const std::string &text) const {
     return host.stdlib_fs_write_text(frame, path, text);
+  }
+
+  bool fs_write_bytes(const std::string &path, const std::string &bytes,
+                      bool create, bool truncate) const {
+    return host.stdlib_fs_write_bytes_value(frame, path, bytes, create,
+                                            truncate);
+  }
+
+  bool fs_write_text(const std::string &path, const std::string &text,
+                     bool create, bool truncate) const {
+    return host.stdlib_fs_write_text_value(frame, path, text, create, truncate);
   }
 
   bool fs_mkdir(const std::string &path) const {

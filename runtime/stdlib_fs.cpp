@@ -5,10 +5,21 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace amber::runtime {
 
 namespace {
+
+bool set_fault_from_io_status(NativeStdlibCall &call,
+                              const RuntimeIoStatus &result) {
+  if (result.ok || result.would_block) {
+    return true;
+  }
+  call.fault(result.error_name.empty() ? "IOError" : result.error_name,
+             result.message.empty() ? "IO operation failed" : result.message);
+  return false;
+}
 
 std::shared_ptr<RuntimePath> path_from_value(NativeStdlibCall &call,
                                              const Value &value) {
@@ -30,6 +41,39 @@ std::shared_ptr<RuntimePath> path_from_value(NativeStdlibCall &call,
     call.fault("TypeError", "expected fs.Path or Str");
   }
   return path;
+}
+
+std::optional<std::string> bytes_from_value(NativeStdlibCall &call,
+                                            const Value &value) {
+  if (value.is_string()) {
+    const std::optional<std::string> text = call.text_of(value);
+    if (!text.has_value()) {
+      call.fault("VMError", "string ref is invalid");
+    }
+    return text;
+  }
+  if (!value.is_io_value()) {
+    call.fault("TypeError", "expected Bytes, ByteSlice, ByteBuffer, or Str");
+    return std::nullopt;
+  }
+  const std::shared_ptr<RuntimeIoValue> io_value = value.as_io_value();
+  if (const auto bytes = std::dynamic_pointer_cast<RuntimeBytes>(io_value)) {
+    return bytes->string();
+  }
+  if (const auto slice =
+          std::dynamic_pointer_cast<RuntimeByteSlice>(io_value)) {
+    return slice->bytes()->string();
+  }
+  if (const auto buffer =
+          std::dynamic_pointer_cast<RuntimeByteBuffer>(io_value)) {
+    const RuntimeIoStatus access = buffer->access_status();
+    if (!set_fault_from_io_status(call, access)) {
+      return std::nullopt;
+    }
+    return buffer->bytes();
+  }
+  call.fault("TypeError", "expected Bytes, ByteSlice, ByteBuffer, or Str");
+  return std::nullopt;
 }
 
 SendStatus build_path_value(NativeStdlibCall &call, bool block_checked) {
@@ -157,6 +201,57 @@ SendStatus fs_write_unary_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus fs_write_send(NativeStdlibCall &call) {
+  if (call.selector != "write_bytes" && call.selector != "write_text") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_no_block() || !call.require_arity(2) ||
+      !call.reject_unknown_keywords({"create", "truncate", "encoding"})) {
+    return SendStatus::Faulted;
+  }
+  const std::shared_ptr<RuntimePath> path = path_from_value(call, call.args[0]);
+  if (path == nullptr) {
+    return SendStatus::Faulted;
+  }
+  std::optional<std::string> bytes;
+  if (call.selector == "write_text") {
+    if (!call.args[1].is_string()) {
+      return call.fault("TypeError", "write_text expects Str text");
+    }
+    bytes = call.text_of(call.args[1]);
+    if (!bytes.has_value()) {
+      return call.fault("VMError", "string ref is invalid");
+    }
+    if (const std::optional<Value> encoding = call.keyword("encoding")) {
+      const std::optional<std::string> name = call.text_of(*encoding);
+      if (!name.has_value() || *name != "utf8") {
+        return call.fault(name.has_value() ? "ArgumentError" : "TypeError",
+                          "only utf8 encoding is supported");
+      }
+    }
+  } else {
+    bytes = bytes_from_value(call, call.args[1]);
+  }
+  if (!bytes.has_value()) {
+    return SendStatus::Faulted;
+  }
+  bool create = true;
+  bool truncate = true;
+  if (!call.bool_keyword("create", true, &create) ||
+      !call.bool_keyword("truncate", true, &truncate)) {
+    return SendStatus::Faulted;
+  }
+  const bool ok =
+      call.selector == "write_text"
+          ? call.fs_write_text(path->string(), *bytes, create, truncate)
+          : call.fs_write_bytes(path->string(), *bytes, create, truncate);
+  if (!ok) {
+    return SendStatus::Faulted;
+  }
+  *call.out = Value::null();
+  return SendStatus::Matched;
+}
+
 SendStatus fs_namespace_send(NativeStdlibCall &call) {
   if (const SendStatus status = fs_metadata_send(call);
       status != SendStatus::NotHandled) {
@@ -167,6 +262,10 @@ SendStatus fs_namespace_send(NativeStdlibCall &call) {
     return status;
   }
   if (const SendStatus status = fs_write_unary_send(call);
+      status != SendStatus::NotHandled) {
+    return status;
+  }
+  if (const SendStatus status = fs_write_send(call);
       status != SendStatus::NotHandled) {
     return status;
   }

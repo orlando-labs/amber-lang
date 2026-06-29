@@ -8671,6 +8671,7 @@ void test_runtime_io_v2_source_surface() {
   amber::runtime::ExecutionResult file =
       execute_emitted_init("path = \"" + file_path +
                            "\"\n"
+                           "fs.write_bytes(path, \"abc\")\n"
                            "fs.write_text(path, \"hello\")\n"
                            "meta = fs.metadata(path)\n"
                            "fs.File.open(path, :read) |f|:\n"
