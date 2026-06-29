@@ -18120,10 +18120,6 @@ private:
           RuntimeIoStatus result;
           if (file != nullptr) {
             result = file->close();
-          } else if (pipe_reader != nullptr) {
-            result = pipe_reader->close();
-          } else if (pipe_writer != nullptr) {
-            result = pipe_writer->close();
           } else if (tcp_stream != nullptr) {
             result = tcp_stream->close();
           } else if (const auto listener =

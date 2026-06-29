@@ -453,12 +453,35 @@ SendStatus io_pipe_endpoint_instance_send(NativeStdlibCall &call) {
   if (reader == nullptr && writer == nullptr) {
     return SendStatus::NotHandled;
   }
-  if (call.selector != "pipe") {
+  if (call.selector != "pipe" && call.selector != "closed?" &&
+      call.selector != "close!") {
     return SendStatus::NotHandled;
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {
     return SendStatus::Faulted;
+  }
+  if (call.selector == "closed?") {
+    *call.out =
+        Value::boolean(reader != nullptr ? reader->closed() : writer->closed());
+    return SendStatus::Matched;
+  }
+  if (call.selector == "close!") {
+    const bool closed = reader != nullptr ? reader->closed() : writer->closed();
+    if (!closed) {
+      const RuntimeIoStatus access =
+          reader != nullptr ? reader->access_status() : writer->access_status();
+      if (!set_fault_from_io_status(call, access)) {
+        return SendStatus::Faulted;
+      }
+    }
+    RuntimeIoStatus result =
+        reader != nullptr ? reader->close() : writer->close();
+    if (!set_fault_from_io_status(call, result)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
   }
   const std::shared_ptr<RuntimePipe> owner =
       reader != nullptr ? reader->pipe() : writer->pipe();
