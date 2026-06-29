@@ -1466,6 +1466,32 @@ Slice record, 2026-06-29:
   loopback corpus cases (`net_socket_handoff_to_task` twice and
   `net_tcp_loopback`) failing on `listen: Operation not permitted`.
 
+Slice record, 2026-06-29:
+
+- Promoted `io.ByteSlice` instance selectors into the IO descriptor:
+  `count`, `bytes`, `copy_bytes`, `owner`, and `shareable?`.
+- Reused the descriptor-owned IO value handler registry; the handler only
+  depends on public `RuntimeByteSlice` and `RuntimeByteBuffer` APIs.
+- Removed the corresponding `RuntimeByteSlice` instance selector branch from
+  `Vm::try_apply_native_stdlib_send`. Pipes, filesystem value, and network
+  socket instance selectors remain in VM for later Phase 3 slices.
+- Verified compile smoke: standalone `runtime/stdlib_io.cpp`, standalone
+  `runtime/vm.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/stdlib_codecs_tests
+  build/stdlib_digest_tests build/io_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  `build/stdlib_codecs_tests`, and `build/stdlib_digest_tests`.
+- Elevated `build/io_tests`, elevated `build/vm_net_http_tests`, and elevated
+  `make conformance` remain unavailable in this session because escalation is
+  blocked after the automatic reviewer hit the usage limit. Sandboxed
+  `build/io_tests` failed with `PermissionDeniedError listen: Operation not
+  permitted`, sandboxed `build/vm_net_http_tests` failed with
+  `PermissionDeniedError`, and sandboxed `make conformance` reached
+  `137 passed, 3 failed, 0 skipped for M11`; all three failures were the known
+  loopback corpus cases (`net_socket_handoff_to_task` twice and
+  `net_tcp_loopback`) failing on `listen: Operation not permitted`.
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

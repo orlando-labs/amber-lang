@@ -373,6 +373,37 @@ SendStatus byte_buffer_instance_send(NativeStdlibCall &call) {
   return SendStatus::NotHandled;
 }
 
+SendStatus byte_slice_instance_send(NativeStdlibCall &call) {
+  const auto slice =
+      std::dynamic_pointer_cast<RuntimeByteSlice>(call.receiver.as_io_value());
+  if (slice == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "count" || call.selector == "bytes" ||
+      call.selector == "copy_bytes" || call.selector == "owner" ||
+      call.selector == "shareable?") {
+    if (!call.require_arity(0) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    if (call.selector == "count") {
+      *call.out = Value::integer(static_cast<std::int64_t>(slice->count()));
+    } else if (call.selector == "shareable?") {
+      *call.out = Value::boolean(slice->shareable());
+    } else if (call.selector == "owner") {
+      const std::shared_ptr<RuntimeByteBuffer> owner = slice->owner();
+      *call.out = owner == nullptr ? Value::null() : Value::io_value(owner);
+    } else {
+      *call.out = Value::io_value(
+          call.selector == "bytes" ? slice->bytes() : slice->copy_bytes());
+    }
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
+}
+
 std::optional<std::shared_ptr<RuntimeTextWriter>>
 text_writer_from_value(NativeStdlibCall &call, const Value &value,
                        const std::string &context) {
@@ -690,7 +721,9 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
            {RuntimeNativeTypeKind::IoPipe, io_pipe_type_send}},
           {{"Bytes", RuntimeNativeTypeKind::Bytes, bytes_instance_send},
            {"io.ByteBuffer", RuntimeNativeTypeKind::ByteBuffer,
-            byte_buffer_instance_send}},
+            byte_buffer_instance_send},
+           {"io.ByteSlice", RuntimeNativeTypeKind::ByteSlice,
+            byte_slice_instance_send}},
           {{RuntimeNativeTypeKind::Bytes, "new"},
            {RuntimeNativeTypeKind::ByteBuffer, "new"},
            {RuntimeNativeTypeKind::IoPipe, "__call__"}}};

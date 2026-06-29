@@ -17068,32 +17068,6 @@ private:
                                                args, block, kw_args, out);
       }
 
-      if (const auto slice =
-              std::dynamic_pointer_cast<RuntimeByteSlice>(io_value)) {
-        if (!require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "count" || selector == "bytes" ||
-            selector == "copy_bytes" || selector == "owner" ||
-            selector == "shareable?") {
-          if (!require_arity(0) || !kw_args.empty()) {
-            return SendStatus::Faulted;
-          }
-          if (selector == "count") {
-            *out = Value::integer(static_cast<std::int64_t>(slice->count()));
-          } else if (selector == "shareable?") {
-            *out = Value::boolean(slice->shareable());
-          } else if (selector == "owner") {
-            const std::shared_ptr<RuntimeByteBuffer> owner = slice->owner();
-            *out = owner == nullptr ? Value::null() : Value::io_value(owner);
-          } else {
-            *out = Value::io_value(selector == "bytes" ? slice->bytes()
-                                                       : slice->copy_bytes());
-          }
-          return SendStatus::Matched;
-        }
-      }
-
       if (const auto path = std::dynamic_pointer_cast<RuntimePath>(io_value)) {
         if (!require_no_block()) {
           return SendStatus::Faulted;
