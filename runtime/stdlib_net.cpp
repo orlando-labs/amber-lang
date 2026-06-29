@@ -105,6 +105,30 @@ SendStatus endpoint_type_send(NativeStdlibCall &call) {
   return SendStatus::NotHandled;
 }
 
+SendStatus endpoint_instance_send(NativeStdlibCall &call) {
+  const auto endpoint =
+      std::dynamic_pointer_cast<RuntimeEndpoint>(call.receiver.as_io_value());
+  if (endpoint == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_arity(0) || !call.kw_args.empty() ||
+      !call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "host") {
+    *call.out = call.string_value(endpoint->host);
+  } else if (call.selector == "port") {
+    *call.out = Value::integer(endpoint->port);
+  } else if (call.selector == "family") {
+    *call.out = call.symbol_value(endpoint->family());
+  } else if (call.selector == "to_str") {
+    *call.out = call.string_value(endpoint->to_string());
+  } else {
+    return SendStatus::NotHandled;
+  }
+  return SendStatus::Matched;
+}
+
 std::optional<RuntimeIsolationMode>
 isolation_from_keywords(NativeStdlibCall &call) {
   const std::optional<Value> value = call.keyword("isolation");
@@ -326,7 +350,8 @@ RuntimeNativeModuleDescriptor net_module_descriptor() {
            {RuntimeNativeTypeKind::NetEndpoint, endpoint_type_send},
            {RuntimeNativeTypeKind::NetTcp, tcp_type_send},
            {RuntimeNativeTypeKind::NetUdp, udp_type_send}},
-          {},
+          {{"net.Endpoint", RuntimeNativeTypeKind::NetEndpoint,
+            endpoint_instance_send}},
           {{RuntimeNativeTypeKind::NetEndpoint, "new"}}};
 }
 

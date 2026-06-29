@@ -17649,25 +17649,6 @@ private:
         }
       }
 
-      if (const auto endpoint =
-              std::dynamic_pointer_cast<RuntimeEndpoint>(io_value)) {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "host") {
-          *out = string_value_from_text(endpoint->host);
-        } else if (selector == "port") {
-          *out = Value::integer(endpoint->port);
-        } else if (selector == "family") {
-          *out = Value::symbol(intern_runtime_symbol(endpoint->family()));
-        } else if (selector == "to_str") {
-          *out = string_value_from_text(endpoint->to_string());
-        } else {
-          return SendStatus::NotHandled;
-        }
-        return SendStatus::Matched;
-      }
-
       if ((pipe_reader != nullptr || pipe_writer != nullptr) &&
           selector == "pipe") {
         if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
