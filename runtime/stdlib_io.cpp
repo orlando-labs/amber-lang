@@ -21,6 +21,16 @@ bool set_fault_from_io_status(NativeStdlibCall &call,
   return false;
 }
 
+bool set_fault_from_text_write_result(NativeStdlibCall &call,
+                                      const RuntimeTextWriteResult &result) {
+  if (result.ok) {
+    return true;
+  }
+  call.fault(result.error_name.empty() ? "IOError" : result.error_name,
+             result.message.empty() ? "text write failed" : result.message);
+  return false;
+}
+
 std::optional<std::string> bytes_from_value(NativeStdlibCall &call,
                                             const Value &value) {
   if (value.is_string()) {
@@ -52,6 +62,19 @@ std::optional<std::string> bytes_from_value(NativeStdlibCall &call,
   }
   call.fault("TypeError", "expected Bytes, ByteSlice, ByteBuffer, or Str");
   return std::nullopt;
+}
+
+std::optional<std::string> text_writer_string_arg(NativeStdlibCall &call,
+                                                  std::size_t index) {
+  if (index >= call.args.size() || !call.args[index].is_string()) {
+    call.fault("TypeError", "text writer expects Str argument");
+    return std::nullopt;
+  }
+  const std::optional<std::string> text = call.text_of(call.args[index]);
+  if (!text.has_value()) {
+    call.fault("VMError", "string ref is invalid");
+  }
+  return text;
 }
 
 SendStatus bytes_type_send(NativeStdlibCall &call) {
@@ -559,7 +582,115 @@ log_color_mode_from_value(NativeStdlibCall &call, const Value &value,
   return std::nullopt;
 }
 
-SendStatus text_buffer_type_send(NativeStdlibCall &call) {
+SendStatus text_writer_instance_send(NativeStdlibCall &call) {
+  std::shared_ptr<RuntimeTextWriter> writer = call.receiver.as_text_writer();
+  if (writer == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (call.selector == "write_str") {
+    if (!call.require_arity(1) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "write_str does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    const std::optional<std::string> text = text_writer_string_arg(call, 0);
+    if (!text.has_value()) {
+      return SendStatus::Faulted;
+    }
+    if (!set_fault_from_text_write_result(call, writer->write_str(*text))) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  if (call.selector == "write_line") {
+    if (call.args.size() > 1U || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "write_line does not accept keywords");
+      } else if (call.args.size() > 1U) {
+        call.fault("TypeError", "write_line accepts zero or one argument");
+      }
+      return SendStatus::Faulted;
+    }
+    std::string text;
+    if (!call.args.empty()) {
+      const std::optional<std::string> argument =
+          text_writer_string_arg(call, 0);
+      if (!argument.has_value()) {
+        return SendStatus::Faulted;
+      }
+      text = *argument;
+    }
+    if (!set_fault_from_text_write_result(call, writer->write_line(text))) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  if (call.selector == "flush") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "flush does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    if (!set_fault_from_text_write_result(call, writer->flush())) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  if (call.selector == "close") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "close does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    if (!set_fault_from_text_write_result(call, writer->close())) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  if (call.selector == "closed?") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "closed? does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::boolean(writer->closed());
+    return SendStatus::Matched;
+  }
+  if (call.selector == "to_str" || call.selector == "str") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "to_str does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    if (!writer->buffered()) {
+      call.fault("TypeError", "to_str requires buffered writer");
+      return SendStatus::Faulted;
+    }
+    *call.out = call.string_value(writer->to_string());
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus text_buffer_send(NativeStdlibCall &call) {
+  if (call.receiver.is_text_writer()) {
+    return text_writer_instance_send(call);
+  }
   if (call.selector != "new") {
     return SendStatus::NotHandled;
   }
@@ -799,7 +930,7 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
            {"io.ByteSlice", RuntimeNativeTypeKind::ByteSlice},
            {"io.Pipe", RuntimeNativeTypeKind::IoPipe}},
           {{RuntimeNativeTypeKind::Io, io_namespace_send},
-           {RuntimeNativeTypeKind::TextBuffer, text_buffer_type_send},
+           {RuntimeNativeTypeKind::TextBuffer, text_buffer_send},
            {RuntimeNativeTypeKind::Logger, logger_type_send},
            {RuntimeNativeTypeKind::Bytes, bytes_type_send},
            {RuntimeNativeTypeKind::ByteBuffer, byte_buffer_type_send},

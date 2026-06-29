@@ -18107,115 +18107,17 @@ private:
     }
 
     if (receiver.is_text_writer()) {
-      std::shared_ptr<RuntimeTextWriter> writer = receiver.as_text_writer();
-      if (writer == nullptr) {
-        set_fault(frame, "TypeError", "text writer is null");
-        return SendStatus::Faulted;
-      }
-      auto require_string_arg = [&](std::size_t index,
-                                    std::string *text) -> bool {
-        if (index >= args.size() || !args[index].is_string()) {
-          set_fault(frame, "TypeError", "text writer expects Str argument");
-          return false;
+      if (const std::optional<NativeStdlibHandler> handler =
+              dispatch_registry().native_handler(
+                  RuntimeNativeTypeKind::TextBuffer)) {
+        NativeStdlibCall call{
+            *this,    &frame, receiver, RuntimeNativeTypeKind::TextBuffer,
+            selector, args,   block,    kw_args,
+            out};
+        const SendStatus status = (*handler)(call);
+        if (status != SendStatus::NotHandled) {
+          return status;
         }
-        const std::optional<std::string> raw =
-            string_text_from_id(args[index].as_string().string_id);
-        if (!raw.has_value()) {
-          set_fault(frame, "VMError", "string ref is invalid");
-          return false;
-        }
-        *text = *raw;
-        return true;
-      };
-
-      if (selector == "write_str") {
-        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError", "write_str does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        std::string text;
-        if (!require_string_arg(0, &text)) {
-          return SendStatus::Faulted;
-        }
-        if (!set_fault_from_text_write_result(frame, writer->write_str(text))) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::null();
-        return SendStatus::Matched;
-      }
-      if (selector == "write_line") {
-        if ((args.size() > 1U) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "write_line does not accept keywords");
-          } else if (args.size() > 1U) {
-            set_fault(frame, "TypeError",
-                      "write_line accepts zero or one argument");
-          }
-          return SendStatus::Faulted;
-        }
-        std::string text;
-        if (!args.empty() && !require_string_arg(0, &text)) {
-          return SendStatus::Faulted;
-        }
-        if (!set_fault_from_text_write_result(frame,
-                                              writer->write_line(text))) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::null();
-        return SendStatus::Matched;
-      }
-      if (selector == "flush") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError", "flush does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        if (!set_fault_from_text_write_result(frame, writer->flush())) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::null();
-        return SendStatus::Matched;
-      }
-      if (selector == "close") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError", "close does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        if (!set_fault_from_text_write_result(frame, writer->close())) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::null();
-        return SendStatus::Matched;
-      }
-      if (selector == "closed?") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError", "closed? does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        *out = Value::boolean(writer->closed());
-        return SendStatus::Matched;
-      }
-      if (selector == "to_str" || selector == "str") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError", "to_str does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        if (!writer->buffered()) {
-          set_fault(frame, "TypeError", "to_str requires buffered writer");
-          return SendStatus::Faulted;
-        }
-        *out = string_value_from_text(writer->to_string());
-        return SendStatus::Matched;
       }
     }
 
