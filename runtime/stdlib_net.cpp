@@ -148,6 +148,23 @@ SendStatus tcp_stream_instance_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus tcp_listener_instance_send(NativeStdlibCall &call) {
+  const auto listener = std::dynamic_pointer_cast<RuntimeTcpListener>(
+      call.receiver.as_io_value());
+  if (listener == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (call.selector != "local_endpoint") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_arity(0) || !call.kw_args.empty() ||
+      !call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  *call.out = endpoint_value(listener->local_endpoint());
+  return SendStatus::Matched;
+}
+
 std::optional<RuntimeIsolationMode>
 isolation_from_keywords(NativeStdlibCall &call) {
   const std::optional<Value> value = call.keyword("isolation");
@@ -372,7 +389,9 @@ RuntimeNativeModuleDescriptor net_module_descriptor() {
           {{"net.Endpoint", RuntimeNativeTypeKind::NetEndpoint,
             endpoint_instance_send},
            {"net.TcpStream", RuntimeNativeTypeKind::NetTcp,
-            tcp_stream_instance_send}},
+            tcp_stream_instance_send},
+           {"net.TcpListener", RuntimeNativeTypeKind::NetTcp,
+            tcp_listener_instance_send}},
           {{RuntimeNativeTypeKind::NetEndpoint, "new"}}};
 }
 

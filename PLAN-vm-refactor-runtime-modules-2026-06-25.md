@@ -1657,6 +1657,32 @@ Slice record, 2026-06-29:
   loopback corpus cases (`net_socket_handoff_to_task` twice and
   `net_tcp_loopback`) failing on `listen: Operation not permitted`.
 
+Slice record, 2026-06-29:
+
+- Promoted side-effect-free `net.TcpListener.local_endpoint` into the network
+  descriptor.
+- Reused the descriptor-owned IO value handler registry. TCP listener
+  `accept!`, socket option, and close selectors remain in VM because they still
+  carry capability/effect checks and IO wait behavior for later Phase 3 slices.
+- Removed the corresponding `RuntimeTcpListener` endpoint selector sub-branch
+  from `Vm::try_apply_native_stdlib_send`.
+- Verified compile smoke: standalone `runtime/stdlib_net.cpp`, standalone
+  `runtime/vm.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/io_tests
+  build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests` and
+  `build/vm_tests`.
+- Elevated `build/io_tests`, elevated `build/vm_net_http_tests`, and elevated
+  `make conformance` remain unavailable in this session because escalation is
+  blocked after the automatic reviewer hit the usage limit. Sandboxed
+  `build/io_tests` failed with `PermissionDeniedError listen: Operation not
+  permitted`, sandboxed `build/vm_net_http_tests` failed with
+  `PermissionDeniedError`, and sandboxed `make conformance` reached
+  `137 passed, 3 failed, 0 skipped for M11`; all three failures were the known
+  loopback corpus cases (`net_socket_handoff_to_task` twice and
+  `net_tcp_loopback`) failing on `listen: Operation not permitted`.
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

@@ -17800,13 +17800,6 @@ private:
                                     : Value::io_value(result.stream);
           return SendStatus::Matched;
         }
-        if (selector == "local_endpoint") {
-          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-            return SendStatus::Faulted;
-          }
-          *out = io_endpoint_value(listener->local_endpoint());
-          return SendStatus::Matched;
-        }
         if (selector == "set_option!" || selector == "get_option") {
           if ((selector == "set_option!" && !require_arity(2)) ||
               (selector == "get_option" && !require_arity(1)) ||
