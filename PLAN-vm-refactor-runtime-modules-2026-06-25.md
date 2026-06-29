@@ -1215,6 +1215,30 @@ Slice record, 2026-06-28:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-29:
+
+- Promoted unary filesystem write selectors into the filesystem descriptor:
+  `fs.mkdir`, `fs.mkdir_p`, and `fs.remove`.
+- Added narrow `StdlibHost` filesystem write facades so descriptor dispatch owns
+  selector routing and argument validation while the VM continues to own
+  capability/effect checks, replay provider routing, and OS-backed directory
+  operations.
+- Removed the corresponding unary write selector branch from
+  `Vm::try_apply_native_stdlib_send`. File open, `fs.write_*`, and
+  `fs.copy`/`fs.rename` remain in VM for later Phase 3 slices.
+- Extended source-level VM filesystem coverage to exercise descriptor-routed
+  directory create/remove operations.
+- Verified compile smoke: standalone `runtime/stdlib_fs.cpp`, standalone
+  `runtime/vm.cpp`, standalone `tests/stdlib_registry_tests.cpp`, standalone
+  `tests/amber_ext_tests.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/amber_ext_tests
+  build/io_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  `build/amber_ext_tests`, and elevated `build/io_tests`.
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

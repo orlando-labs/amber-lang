@@ -1244,6 +1244,18 @@ public:
     return stdlib_write_text_file(*static_cast<const Frame *>(frame), path,
                                   text);
   }
+  bool stdlib_fs_mkdir(const void *frame, const std::string &path) override {
+    return stdlib_fs_write_unary(*static_cast<const Frame *>(frame), "mkdir",
+                                 path);
+  }
+  bool stdlib_fs_mkdir_p(const void *frame, const std::string &path) override {
+    return stdlib_fs_write_unary(*static_cast<const Frame *>(frame), "mkdir_p",
+                                 path);
+  }
+  bool stdlib_fs_remove(const void *frame, const std::string &path) override {
+    return stdlib_fs_write_unary(*static_cast<const Frame *>(frame), "remove",
+                                 path);
+  }
   bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
                                   std::string *out) override {
     return stdlib_secure_random_bytes_from_host(
@@ -12203,6 +12215,31 @@ private:
     return set_fault_from_io_status(frame, status);
   }
 
+  bool stdlib_fs_write_unary(const Frame &frame, const std::string &operation,
+                             const std::string &path) {
+    const bool provider_active = replay_io_provider_active();
+    if (!check_io_policy(frame, "fs_write", "fs.write", path,
+                         !provider_active)) {
+      return false;
+    }
+    record_io_wait("fs.write", path);
+    if (provider_active) {
+      RuntimeIoProviderStatus status =
+          operation == "mkdir"
+              ? world_options_->io_provider->fs_mkdir(path)
+              : (operation == "mkdir_p"
+                     ? world_options_->io_provider->fs_mkdir_p(path)
+                     : world_options_->io_provider->fs_remove(path));
+      return set_fault_from_provider_status(frame, status, operation);
+    }
+    RuntimeIoStatus status =
+        operation == "mkdir"
+            ? runtime_fs_mkdir(RuntimePath(path))
+            : (operation == "mkdir_p" ? runtime_fs_mkdir_p(RuntimePath(path))
+                                      : runtime_fs_remove(RuntimePath(path)));
+    return set_fault_from_io_status(frame, status);
+  }
+
   bool stdlib_secure_random_bytes_from_host(const Frame &frame,
                                             std::size_t count,
                                             std::string *out) {
@@ -16716,53 +16753,6 @@ private:
       if (kind == RuntimeNativeTypeKind::Fs) {
         if (!require_no_block()) {
           return SendStatus::Faulted;
-        }
-        if (selector == "mkdir" || selector == "mkdir_p" ||
-            selector == "remove") {
-          if (!require_arity(1)) {
-            return SendStatus::Faulted;
-          }
-          const std::shared_ptr<RuntimePath> path =
-              io_path_from_value(frame, args[0]);
-          if (path == nullptr) {
-            return SendStatus::Faulted;
-          }
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      selector + " does not accept keywords");
-            return SendStatus::Faulted;
-          }
-          const bool provider_active = replay_io_provider_active();
-          if (!check_io_policy(frame, "fs_write", "fs.write", path->string(),
-                               !provider_active)) {
-            return SendStatus::Faulted;
-          }
-          record_io_wait("fs.write", path->string());
-          if (provider_active) {
-            RuntimeIoProviderStatus status =
-                selector == "mkdir"
-                    ? world_options_->io_provider->fs_mkdir(path->string())
-                    : (selector == "mkdir_p"
-                           ? world_options_->io_provider->fs_mkdir_p(
-                                 path->string())
-                           : world_options_->io_provider->fs_remove(
-                                 path->string()));
-            if (!set_fault_from_provider_status(frame, status, selector)) {
-              return SendStatus::Faulted;
-            }
-            *out = Value::null();
-            return SendStatus::Matched;
-          }
-          RuntimeIoStatus result =
-              selector == "mkdir"
-                  ? runtime_fs_mkdir(*path)
-                  : (selector == "mkdir_p" ? runtime_fs_mkdir_p(*path)
-                                           : runtime_fs_remove(*path));
-          if (!set_fault_from_io_status(frame, result)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::null();
-          return SendStatus::Matched;
         }
         if (selector == "write_bytes" || selector == "write_text") {
           if (!require_arity(2) ||

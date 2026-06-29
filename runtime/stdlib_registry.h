@@ -194,6 +194,10 @@ public:
                                    std::string *out) = 0;
   virtual bool stdlib_fs_write_text(const void *frame, const std::string &path,
                                     const std::string &text) = 0;
+  virtual bool stdlib_fs_mkdir(const void *frame, const std::string &path) = 0;
+  virtual bool stdlib_fs_mkdir_p(const void *frame,
+                                 const std::string &path) = 0;
+  virtual bool stdlib_fs_remove(const void *frame, const std::string &path) = 0;
 
   // OS-backed cryptographic entropy. The VM owns capability/effect/replay
   // policy for this host resource; stdlib handlers only request byte counts.
@@ -401,6 +405,18 @@ struct NativeStdlibCall {
 
   bool fs_write_text(const std::string &path, const std::string &text) const {
     return host.stdlib_fs_write_text(frame, path, text);
+  }
+
+  bool fs_mkdir(const std::string &path) const {
+    return host.stdlib_fs_mkdir(frame, path);
+  }
+
+  bool fs_mkdir_p(const std::string &path) const {
+    return host.stdlib_fs_mkdir_p(frame, path);
+  }
+
+  bool fs_remove(const std::string &path) const {
+    return host.stdlib_fs_remove(frame, path);
   }
 
   bool secure_random_bytes(std::size_t count, std::string *out) const {

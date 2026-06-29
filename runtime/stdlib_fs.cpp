@@ -132,12 +132,41 @@ SendStatus fs_read_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus fs_write_unary_send(NativeStdlibCall &call) {
+  if (call.selector != "mkdir" && call.selector != "mkdir_p" &&
+      call.selector != "remove") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_no_block() || !call.require_arity(1)) {
+    return SendStatus::Faulted;
+  }
+  const std::shared_ptr<RuntimePath> path = path_from_value(call, call.args[0]);
+  if (path == nullptr) {
+    return SendStatus::Faulted;
+  }
+  if (!call.kw_args.empty()) {
+    return call.fault("TypeError", call.selector + " does not accept keywords");
+  }
+  const bool ok = call.selector == "mkdir"     ? call.fs_mkdir(path->string())
+                  : call.selector == "mkdir_p" ? call.fs_mkdir_p(path->string())
+                                               : call.fs_remove(path->string());
+  if (!ok) {
+    return SendStatus::Faulted;
+  }
+  *call.out = Value::null();
+  return SendStatus::Matched;
+}
+
 SendStatus fs_namespace_send(NativeStdlibCall &call) {
   if (const SendStatus status = fs_metadata_send(call);
       status != SendStatus::NotHandled) {
     return status;
   }
   if (const SendStatus status = fs_read_send(call);
+      status != SendStatus::NotHandled) {
+    return status;
+  }
+  if (const SendStatus status = fs_write_unary_send(call);
       status != SendStatus::NotHandled) {
     return status;
   }

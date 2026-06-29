@@ -8693,6 +8693,42 @@ void test_runtime_io_v2_source_surface() {
              file_items[8].as_integer() == 5 && file_items[9].is_string(),
          "File v2 source contract mismatch");
   ::unlink(file_path.c_str());
+
+  const std::string dir_path =
+      "/tmp/amber_vm_io_dir_" + std::to_string(::getpid());
+  const std::string parent_path = dir_path + "/a";
+  const std::string nested_path = parent_path + "/b";
+  ::rmdir(nested_path.c_str());
+  ::rmdir(parent_path.c_str());
+  ::rmdir(dir_path.c_str());
+  amber::runtime::ExecutionResult dirs =
+      execute_emitted_init("root = \"" + dir_path +
+                           "\"\n"
+                           "parent = \"" +
+                           parent_path +
+                           "\"\n"
+                           "nested = \"" +
+                           nested_path +
+                           "\"\n"
+                           "fs.mkdir(root)\n"
+                           "fs.mkdir_p(nested)\n"
+                           "a = fs.dir?(root)\n"
+                           "b = fs.dir?(nested)\n"
+                           "fs.remove(nested)\n"
+                           "fs.remove(parent)\n"
+                           "fs.remove(root)\n"
+                           "[a, b, fs.exists?(root)]\n");
+  expect(dirs.ok(), "Directory v2 source execution failed");
+  expect(dirs.value.is_list(), "Directory source result should be Array");
+  const auto dir_items = dirs.value.as_list()->items;
+  expect(dir_items.size() == 3 && dir_items[0].is_bool() &&
+             dir_items[0].as_bool() && dir_items[1].is_bool() &&
+             dir_items[1].as_bool() && dir_items[2].is_bool() &&
+             !dir_items[2].as_bool(),
+         "Directory source contract mismatch");
+  ::rmdir(nested_path.c_str());
+  ::rmdir(parent_path.c_str());
+  ::rmdir(dir_path.c_str());
 }
 
 void test_runtime_io_v2_policy_and_replay() {

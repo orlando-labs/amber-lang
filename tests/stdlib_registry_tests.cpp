@@ -184,6 +184,18 @@ struct MockHost : StdlibHost {
                             const std::string & /*text*/) override {
     return false;
   }
+  bool stdlib_fs_mkdir(const void * /*frame*/,
+                       const std::string & /*path*/) override {
+    return false;
+  }
+  bool stdlib_fs_mkdir_p(const void * /*frame*/,
+                         const std::string & /*path*/) override {
+    return false;
+  }
+  bool stdlib_fs_remove(const void * /*frame*/,
+                        const std::string & /*path*/) override {
+    return false;
+  }
   bool stdlib_secure_random_bytes(const void * /*frame*/, std::size_t /*count*/,
                                   std::string * /*out*/) override {
     return false;
