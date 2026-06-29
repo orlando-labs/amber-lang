@@ -100,6 +100,11 @@ public:
   // touching the module string/symbol tables directly.
   virtual std::optional<std::string> stdlib_text_of(const Value &value) = 0;
 
+  // Render a value the way logger methods have historically displayed their
+  // payloads.
+  virtual std::string stdlib_display_string(const void *frame,
+                                            const Value &value) = 0;
+
   // Raw immutable byte extraction/construction for pure binary codecs. This is
   // intentionally narrower than `Bytes.new`: String is not accepted here, so
   // codec encoders must be fed an explicit Bytes/ByteSlice/ByteBuffer value.
@@ -382,6 +387,10 @@ struct NativeStdlibCall {
 
   std::optional<std::string> text_of(const Value &value) const {
     return host.stdlib_text_of(value);
+  }
+
+  std::string display_string(const Value &value) const {
+    return host.stdlib_display_string(frame, value);
   }
 
   std::optional<std::string> bytes_of(const Value &value) const {

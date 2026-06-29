@@ -705,7 +705,108 @@ SendStatus text_buffer_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
-SendStatus logger_type_send(NativeStdlibCall &call) {
+SendStatus logger_instance_send(NativeStdlibCall &call) {
+  std::shared_ptr<RuntimeLogger> logger = call.receiver.as_logger();
+  if (logger == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  auto apply_logger_log = [&](RuntimeLogLevel level) -> SendStatus {
+    if (!call.require_arity(1) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "logger level method does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    const std::string message = call.display_string(call.args[0]);
+    if (!set_fault_from_text_write_result(call, logger->log(level, message))) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  };
+
+  if (call.selector == "fatal") {
+    return apply_logger_log(RuntimeLogLevel::Fatal);
+  }
+  if (call.selector == "error") {
+    return apply_logger_log(RuntimeLogLevel::Error);
+  }
+  if (call.selector == "warn" || call.selector == "warning") {
+    return apply_logger_log(RuntimeLogLevel::Warn);
+  }
+  if (call.selector == "info") {
+    return apply_logger_log(RuntimeLogLevel::Info);
+  }
+  if (call.selector == "debug") {
+    return apply_logger_log(RuntimeLogLevel::Debug);
+  }
+  if (call.selector == "log") {
+    if (!call.require_arity(2) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "logger.log does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    const std::optional<RuntimeLogLevel> level =
+        log_level_from_value(call, call.args[0], "logger.log level");
+    if (!level.has_value()) {
+      return SendStatus::Faulted;
+    }
+    const std::string message = call.display_string(call.args[1]);
+    if (!set_fault_from_text_write_result(call, logger->log(*level, message))) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  if (call.selector == "flush") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "logger.flush does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    if (!set_fault_from_text_write_result(call, logger->flush())) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  if (call.selector == "close") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "logger.close does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    if (!set_fault_from_text_write_result(call, logger->close())) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::null();
+    return SendStatus::Matched;
+  }
+  if (call.selector == "closed?") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "logger.closed? does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::boolean(logger->closed());
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus logger_send(NativeStdlibCall &call) {
+  if (call.receiver.is_logger()) {
+    return logger_instance_send(call);
+  }
   if (call.selector != "new") {
     return SendStatus::NotHandled;
   }
@@ -931,7 +1032,7 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
            {"io.Pipe", RuntimeNativeTypeKind::IoPipe}},
           {{RuntimeNativeTypeKind::Io, io_namespace_send},
            {RuntimeNativeTypeKind::TextBuffer, text_buffer_send},
-           {RuntimeNativeTypeKind::Logger, logger_type_send},
+           {RuntimeNativeTypeKind::Logger, logger_send},
            {RuntimeNativeTypeKind::Bytes, bytes_type_send},
            {RuntimeNativeTypeKind::ByteBuffer, byte_buffer_type_send},
            {RuntimeNativeTypeKind::IoPipe, io_pipe_type_send}},

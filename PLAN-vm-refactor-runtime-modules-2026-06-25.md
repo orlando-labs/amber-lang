@@ -1822,6 +1822,36 @@ Slice record, 2026-06-29:
   (`net_socket_handoff_to_task` twice and `net_tcp_loopback`) failing on
   `listen: Operation not permitted`.
 
+Slice record, 2026-06-29:
+
+- Added a narrow `StdlibHost` display-string facade so descriptor-owned stdlib
+  handlers can preserve VM logger message rendering for arbitrary Values.
+- Promoted `io.Logger` instance selectors into the IO descriptor: `fatal`,
+  `error`, `warn`/`warning`, `info`, `debug`, `log`, `flush`, `close`, and
+  `closed?`.
+- Reused the existing `Logger` descriptor handler for both `io.Logger.new` and
+  logger instance dispatch, with the VM now routing logger sends through
+  `RuntimeDispatchRegistry` instead of owning the selector bodies.
+- Removed the old logger selector branch from
+  `Vm::try_apply_native_stdlib_send`.
+- Updated `StdlibHost` test doubles for the new display-string facade.
+- Verified compile smoke: standalone `runtime/stdlib_io.cpp`, standalone
+  `runtime/vm.cpp`, standalone `tests/stdlib_registry_tests.cpp`, and
+  standalone `tests/amber_ext_tests.cpp`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/amber_ext_tests
+  build/io_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and `build/amber_ext_tests`.
+- Sandboxed `build/io_tests` failed with `PermissionDeniedError listen:
+  Operation not permitted`, and sandboxed `build/vm_net_http_tests` failed with
+  `PermissionDeniedError`; both failures are the known loopback/listen sandbox
+  restriction.
+- Sandboxed `make conformance` reached `137 passed, 3 failed, 0 skipped for
+  M11`; all three failures were the known loopback corpus cases
+  (`net_socket_handoff_to_task` twice and `net_tcp_loopback`) failing on
+  `listen: Operation not permitted`.
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

@@ -81,6 +81,10 @@ struct MockHost : StdlibHost {
   std::optional<std::string> stdlib_text_of(const Value & /*value*/) override {
     return std::nullopt;
   }
+  std::string stdlib_display_string(const void * /*frame*/,
+                                    const Value & /*value*/) override {
+    return "";
+  }
   std::optional<std::string> stdlib_bytes_of(const void * /*frame*/,
                                              const Value & /*value*/) override {
     return std::nullopt;

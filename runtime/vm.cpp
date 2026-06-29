@@ -970,6 +970,12 @@ public:
     }
     return std::nullopt;
   }
+  std::string stdlib_display_string(const void * /*frame*/,
+                                    const Value &value) override {
+    return runtime_stringify_value(value, RuntimeStringifyMode::Display,
+                                   &module_, nullptr, nullptr,
+                                   RuntimePrettyPrintOptions{});
+  }
   std::optional<std::string> stdlib_bytes_of(const void *frame,
                                              const Value &value) override {
     const Frame &active = *static_cast<const Frame *>(frame);
@@ -18122,107 +18128,17 @@ private:
     }
 
     if (receiver.is_logger()) {
-      std::shared_ptr<RuntimeLogger> logger = receiver.as_logger();
-      if (logger == nullptr) {
-        set_fault(frame, "TypeError", "logger is null");
-        return SendStatus::Faulted;
-      }
-
-      auto apply_logger_log = [&](RuntimeLogLevel level) -> SendStatus {
-        if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "logger level method does not accept keywords");
-          }
-          return SendStatus::Faulted;
+      if (const std::optional<NativeStdlibHandler> handler =
+              dispatch_registry().native_handler(
+                  RuntimeNativeTypeKind::Logger)) {
+        NativeStdlibCall call{
+            *this,    &frame, receiver, RuntimeNativeTypeKind::Logger,
+            selector, args,   block,    kw_args,
+            out};
+        const SendStatus status = (*handler)(call);
+        if (status != SendStatus::NotHandled) {
+          return status;
         }
-        const std::string message = runtime_stringify_value(
-            args[0], RuntimeStringifyMode::Display, &module_, nullptr, nullptr,
-            RuntimePrettyPrintOptions{});
-        if (!set_fault_from_text_write_result(frame,
-                                              logger->log(level, message))) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::null();
-        return SendStatus::Matched;
-      };
-
-      if (selector == "fatal") {
-        return apply_logger_log(RuntimeLogLevel::Fatal);
-      }
-      if (selector == "error") {
-        return apply_logger_log(RuntimeLogLevel::Error);
-      }
-      if (selector == "warn" || selector == "warning") {
-        return apply_logger_log(RuntimeLogLevel::Warn);
-      }
-      if (selector == "info") {
-        return apply_logger_log(RuntimeLogLevel::Info);
-      }
-      if (selector == "debug") {
-        return apply_logger_log(RuntimeLogLevel::Debug);
-      }
-      if (selector == "log") {
-        if (!require_arity(2) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "logger.log does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        const std::optional<RuntimeLogLevel> level =
-            log_level_from_value(frame, args[0], "logger.log level");
-        if (!level.has_value()) {
-          return SendStatus::Faulted;
-        }
-        const std::string message = runtime_stringify_value(
-            args[1], RuntimeStringifyMode::Display, &module_, nullptr, nullptr,
-            RuntimePrettyPrintOptions{});
-        if (!set_fault_from_text_write_result(frame,
-                                              logger->log(*level, message))) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::null();
-        return SendStatus::Matched;
-      }
-      if (selector == "flush") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "logger.flush does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        if (!set_fault_from_text_write_result(frame, logger->flush())) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::null();
-        return SendStatus::Matched;
-      }
-      if (selector == "close") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "logger.close does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        if (!set_fault_from_text_write_result(frame, logger->close())) {
-          return SendStatus::Faulted;
-        }
-        *out = Value::null();
-        return SendStatus::Matched;
-      }
-      if (selector == "closed?") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "logger.closed? does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        *out = Value::boolean(logger->closed());
-        return SendStatus::Matched;
       }
     }
 

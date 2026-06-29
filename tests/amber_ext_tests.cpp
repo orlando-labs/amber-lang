@@ -92,6 +92,13 @@ struct RecordingHost : StdlibHost {
     }
     return std::nullopt;
   }
+  std::string stdlib_display_string(const void * /*frame*/,
+                                    const Value &value) override {
+    if (const std::optional<std::string> text = stdlib_text_of(value)) {
+      return *text;
+    }
+    return "";
+  }
   std::optional<std::string> stdlib_bytes_of(const void * /*frame*/,
                                              const Value & /*value*/) override {
     return std::nullopt;
