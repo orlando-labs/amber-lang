@@ -223,6 +223,7 @@ RuntimeNativeModuleDescriptor task_module_descriptor() {
            {RuntimeNativeTypeKind::Barrier, task_type_send},
            {RuntimeNativeTypeKind::Flow, task_type_send},
            {RuntimeNativeTypeKind::ThreadedCollection, task_type_send}},
+          {},
           {}};
 }
 

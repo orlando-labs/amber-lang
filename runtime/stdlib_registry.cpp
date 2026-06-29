@@ -67,6 +67,25 @@ RuntimeDispatchRegistry::native_handler(RuntimeNativeTypeKind kind) const {
   return it->second;
 }
 
+void RuntimeDispatchRegistry::register_io_value_handler(
+    std::string type_name, RuntimeNativeTypeKind kind,
+    NativeStdlibHandler handler) {
+  RuntimeIoValueHandlerDescriptor descriptor;
+  descriptor.type_name = type_name;
+  descriptor.kind = kind;
+  descriptor.handler = handler;
+  io_value_handlers_[std::move(type_name)] = std::move(descriptor);
+}
+
+std::optional<RuntimeIoValueHandlerDescriptor>
+RuntimeDispatchRegistry::io_value_handler(const std::string &type_name) const {
+  const auto it = io_value_handlers_.find(type_name);
+  if (it == io_value_handlers_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
 void RuntimeDispatchRegistry::import_native_handlers(
     const NativeRegistry &registry) {
   for (const auto &[kind, handler] : registry.registered_handlers()) {
@@ -158,6 +177,11 @@ void register_runtime_dispatch_descriptor(
   for (const RuntimeNativeModuleHandlerDescriptor &handler :
        descriptor.handlers) {
     dispatch.register_native_handler(handler.kind, handler.handler);
+  }
+  for (const RuntimeNativeModuleIoHandlerDescriptor &handler :
+       descriptor.io_handlers) {
+    dispatch.register_io_value_handler(handler.type_name, handler.kind,
+                                       handler.handler);
   }
 }
 

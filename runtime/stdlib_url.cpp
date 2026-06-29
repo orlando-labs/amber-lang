@@ -974,6 +974,7 @@ std::string runtime_url_build_query(
 RuntimeNativeModuleDescriptor url_module_descriptor() {
   return {{{"Url", RuntimeNativeTypeKind::Url}},
           {{RuntimeNativeTypeKind::Url, &url_dispatch}},
+          {},
           {}};
 }
 

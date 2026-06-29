@@ -1102,6 +1102,7 @@ SendStatus parser_dispatch(NativeStdlibCall &call) {
 RuntimeNativeModuleDescriptor argparser_module_descriptor() {
   return {{{"ArgParser", RuntimeNativeTypeKind::ArgParser}},
           {{RuntimeNativeTypeKind::ArgParser, &parser_dispatch}},
+          {},
           {{RuntimeNativeTypeKind::ArgParser, "new"}}};
 }
 

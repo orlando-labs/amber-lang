@@ -16,6 +16,7 @@
 #include "runtime/io.h"
 #include "runtime/vm.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
@@ -225,6 +226,60 @@ public:
   virtual bool stdlib_net_udp_open(const void *frame, const std::string &family,
                                    RuntimeIsolationMode isolation,
                                    Value *out) = 0;
+  virtual bool stdlib_net_tcp_connect(const void *frame,
+                                      const RuntimeEndpoint &endpoint,
+                                      std::chrono::milliseconds timeout,
+                                      RuntimeIsolationMode isolation,
+                                      Value *out) = 0;
+  virtual bool stdlib_net_tcp_listen(const void *frame,
+                                     const RuntimeEndpoint &endpoint,
+                                     int backlog, bool reuse_addr,
+                                     RuntimeIsolationMode isolation,
+                                     Value *out) = 0;
+  virtual bool stdlib_net_tcp_close(const void *frame, const Value &resource,
+                                    bool report_fault) = 0;
+  virtual SendStatus stdlib_net_http_construct_client(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_construct_request(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_construct_headers(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_construct_server(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_construct_server_response(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_construct_form_body(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_json_get(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_json_post(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_request_body_type_send(
+      const void *frame, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_net_http_server_response_type_send(
+      const void *frame, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
 
   // OS-backed cryptographic entropy. The VM owns capability/effect/replay
   // policy for this host resource; stdlib handlers only request byte counts.
@@ -486,6 +541,72 @@ struct NativeStdlibCall {
     return host.stdlib_net_udp_open(frame, family, isolation, out);
   }
 
+  bool net_tcp_connect(const RuntimeEndpoint &endpoint,
+                       std::chrono::milliseconds timeout,
+                       RuntimeIsolationMode isolation, Value *out) const {
+    return host.stdlib_net_tcp_connect(frame, endpoint, timeout, isolation,
+                                       out);
+  }
+
+  bool net_tcp_listen(const RuntimeEndpoint &endpoint, int backlog,
+                      bool reuse_addr, RuntimeIsolationMode isolation,
+                      Value *out) const {
+    return host.stdlib_net_tcp_listen(frame, endpoint, backlog, reuse_addr,
+                                      isolation, out);
+  }
+
+  bool net_tcp_close(const Value &resource, bool report_fault) const {
+    return host.stdlib_net_tcp_close(frame, resource, report_fault);
+  }
+
+  SendStatus net_http_construct_client() const {
+    return host.stdlib_net_http_construct_client(frame, args, block, kw_args,
+                                                 out);
+  }
+
+  SendStatus net_http_construct_request() const {
+    return host.stdlib_net_http_construct_request(frame, args, block, kw_args,
+                                                  out);
+  }
+
+  SendStatus net_http_construct_headers() const {
+    return host.stdlib_net_http_construct_headers(frame, args, block, kw_args,
+                                                  out);
+  }
+
+  SendStatus net_http_construct_server() const {
+    return host.stdlib_net_http_construct_server(frame, args, block, kw_args,
+                                                 out);
+  }
+
+  SendStatus net_http_construct_server_response() const {
+    return host.stdlib_net_http_construct_server_response(frame, args, block,
+                                                          kw_args, out);
+  }
+
+  SendStatus net_http_construct_form_body() const {
+    return host.stdlib_net_http_construct_form_body(frame, args, block, kw_args,
+                                                    out);
+  }
+
+  SendStatus net_http_json_get() const {
+    return host.stdlib_net_http_json_get(frame, args, block, kw_args, out);
+  }
+
+  SendStatus net_http_json_post() const {
+    return host.stdlib_net_http_json_post(frame, args, block, kw_args, out);
+  }
+
+  SendStatus net_http_request_body_type_send() const {
+    return host.stdlib_net_http_request_body_type_send(frame, selector, args,
+                                                       block, kw_args, out);
+  }
+
+  SendStatus net_http_server_response_type_send() const {
+    return host.stdlib_net_http_server_response_type_send(frame, selector, args,
+                                                          block, kw_args, out);
+  }
+
   bool secure_random_bytes(std::size_t count, std::string *out) const {
     return host.stdlib_secure_random_bytes(frame, count, out);
   }
@@ -567,6 +688,12 @@ struct RuntimeTypeCallDescriptor {
   std::string selector;
 };
 
+struct RuntimeIoValueHandlerDescriptor {
+  std::string type_name;
+  RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
+  NativeStdlibHandler handler = nullptr;
+};
+
 class RuntimeTypeRegistry {
 public:
   void register_native_type_call(RuntimeNativeTypeKind kind,
@@ -593,6 +720,13 @@ public:
   std::optional<NativeStdlibHandler>
   native_handler(RuntimeNativeTypeKind kind) const;
 
+  void register_io_value_handler(std::string type_name,
+                                 RuntimeNativeTypeKind kind,
+                                 NativeStdlibHandler handler);
+
+  std::optional<RuntimeIoValueHandlerDescriptor>
+  io_value_handler(const std::string &type_name) const;
+
   void import_native_handlers(const NativeRegistry &registry);
 
 private:
@@ -603,6 +737,8 @@ private:
   };
   std::unordered_map<RuntimeNativeTypeKind, NativeStdlibHandler, KindHash>
       native_handlers_;
+  std::unordered_map<std::string, RuntimeIoValueHandlerDescriptor>
+      io_value_handlers_;
 };
 
 class RuntimeErrorRegistry {
@@ -623,6 +759,12 @@ struct RuntimeNativeModuleHandlerDescriptor {
   NativeStdlibHandler handler = nullptr;
 };
 
+struct RuntimeNativeModuleIoHandlerDescriptor {
+  const char *type_name = "";
+  RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
+  NativeStdlibHandler handler = nullptr;
+};
+
 struct RuntimeNativeModuleTypeCallDescriptor {
   RuntimeNativeTypeKind kind = RuntimeNativeTypeKind::TaskModule;
   const char *selector = "";
@@ -631,6 +773,7 @@ struct RuntimeNativeModuleTypeCallDescriptor {
 struct RuntimeNativeModuleDescriptor {
   std::vector<RuntimeNativeModulePathDescriptor> paths;
   std::vector<RuntimeNativeModuleHandlerDescriptor> handlers;
+  std::vector<RuntimeNativeModuleIoHandlerDescriptor> io_handlers;
   std::vector<RuntimeNativeModuleTypeCallDescriptor> type_calls;
 };
 

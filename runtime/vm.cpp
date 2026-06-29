@@ -1301,6 +1301,100 @@ public:
     return stdlib_net_udp_open(*static_cast<const Frame *>(frame), family,
                                isolation, out);
   }
+  bool stdlib_net_tcp_connect(const void *frame,
+                              const RuntimeEndpoint &endpoint,
+                              std::chrono::milliseconds timeout,
+                              RuntimeIsolationMode isolation,
+                              Value *out) override {
+    return stdlib_net_tcp_connect(*static_cast<const Frame *>(frame), endpoint,
+                                  timeout, isolation, out);
+  }
+  bool stdlib_net_tcp_listen(const void *frame, const RuntimeEndpoint &endpoint,
+                             int backlog, bool reuse_addr,
+                             RuntimeIsolationMode isolation,
+                             Value *out) override {
+    return stdlib_net_tcp_listen(*static_cast<const Frame *>(frame), endpoint,
+                                 backlog, reuse_addr, isolation, out);
+  }
+  bool stdlib_net_tcp_close(const void *frame, const Value &resource,
+                            bool report_fault) override {
+    return stdlib_net_tcp_close(*static_cast<const Frame *>(frame), resource,
+                                report_fault);
+  }
+  SendStatus stdlib_net_http_construct_client(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return construct_http_client(*static_cast<const Frame *>(frame), args,
+                                 block, kw_args, out);
+  }
+  SendStatus stdlib_net_http_construct_request(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return construct_http_request(*static_cast<const Frame *>(frame), args,
+                                  block, kw_args, out);
+  }
+  SendStatus stdlib_net_http_construct_headers(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return construct_http_headers(*static_cast<const Frame *>(frame), args,
+                                  block, kw_args, out);
+  }
+  SendStatus stdlib_net_http_construct_server(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return construct_http_server(*static_cast<const Frame *>(frame), args,
+                                 block, kw_args, out);
+  }
+  SendStatus stdlib_net_http_construct_server_response(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return construct_http_server_response(*static_cast<const Frame *>(frame),
+                                          args, block, kw_args, out);
+  }
+  SendStatus stdlib_net_http_construct_form_body(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return construct_http_form_body(*static_cast<const Frame *>(frame), args,
+                                    block, kw_args, out);
+  }
+  SendStatus stdlib_net_http_json_get(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return http_json_get_helper(*static_cast<const Frame *>(frame), args, block,
+                                kw_args, out);
+  }
+  SendStatus stdlib_net_http_json_post(
+      const void *frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return http_json_post_helper(*static_cast<const Frame *>(frame), args,
+                                 block, kw_args, out);
+  }
+  SendStatus stdlib_net_http_request_body_type_send(
+      const void *frame, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return apply_http_request_body_type_send(*static_cast<const Frame *>(frame),
+                                             selector, args, block, kw_args,
+                                             out);
+  }
+  SendStatus stdlib_net_http_server_response_type_send(
+      const void *frame, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    return apply_http_server_response_type_send(
+        *static_cast<const Frame *>(frame), selector, args, block, kw_args,
+        out);
+  }
   bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
                                   std::string *out) override {
     return stdlib_secure_random_bytes_from_host(
@@ -12488,6 +12582,69 @@ private:
     return true;
   }
 
+  bool stdlib_net_tcp_connect(const Frame &frame,
+                              const RuntimeEndpoint &endpoint,
+                              std::chrono::milliseconds timeout,
+                              RuntimeIsolationMode isolation, Value *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "tcp connect output is null");
+      return false;
+    }
+    if (!check_io_policy(frame, "net_connect", "net.connect",
+                         endpoint.to_string())) {
+      return false;
+    }
+    record_io_wait("tcp.connect", endpoint.to_string());
+    RuntimeTcpConnectResult connected =
+        RuntimeTcpStream::connect(endpoint, timeout, isolation);
+    if (!set_fault_from_io_status(frame, connected)) {
+      return false;
+    }
+    *out = Value::io_value(connected.stream);
+    return true;
+  }
+
+  bool stdlib_net_tcp_listen(const Frame &frame,
+                             const RuntimeEndpoint &endpoint, int backlog,
+                             bool reuse_addr, RuntimeIsolationMode isolation,
+                             Value *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "tcp listen output is null");
+      return false;
+    }
+    if (!check_io_policy(frame, "net_listen", "net.listen",
+                         endpoint.to_string())) {
+      return false;
+    }
+    record_io_wait("tcp.listen", endpoint.to_string());
+    RuntimeTcpListenResult listening =
+        RuntimeTcpListener::listen(endpoint, backlog, reuse_addr, isolation);
+    if (!set_fault_from_io_status(frame, listening)) {
+      return false;
+    }
+    *out = Value::io_value(listening.listener);
+    return true;
+  }
+
+  bool stdlib_net_tcp_close(const Frame &frame, const Value &resource,
+                            bool report_fault) {
+    std::shared_ptr<RuntimeIoResource> opened_resource;
+    if (report_fault) {
+      opened_resource =
+          io_value_as<RuntimeIoResource>(frame, resource, "net.tcp resource");
+      if (opened_resource == nullptr) {
+        return false;
+      }
+    } else if (resource.is_io_value()) {
+      opened_resource =
+          std::dynamic_pointer_cast<RuntimeIoResource>(resource.as_io_value());
+    }
+    RuntimeIoStatus close_result = opened_resource == nullptr
+                                       ? RuntimeIoStatus{}
+                                       : opened_resource->close();
+    return report_fault ? set_fault_from_io_status(frame, close_result) : true;
+  }
+
   bool stdlib_secure_random_bytes_from_host(const Frame &frame,
                                             std::size_t count,
                                             std::string *out) {
@@ -16653,112 +16810,6 @@ private:
           return status;
         }
       }
-      if (kind == RuntimeNativeTypeKind::NetHttp) {
-        // `net.http.Client(...)` is a method-send of `Client` to the namespace,
-        // so it constructs directly (there is no separate CALL to disambiguate
-        // a bare reference from a call here). The `from net.http import Client`
-        // alias resolves `Client` to the NetHttpClient type object instead,
-        // whose CALL routes through "new" below.
-        if (selector == "Client") {
-          return construct_http_client(frame, args, block, kw_args, out);
-        }
-        if (selector == "Request") {
-          return construct_http_request(frame, args, block, kw_args, out);
-        }
-        if (selector == "Headers") {
-          return construct_http_headers(frame, args, block, kw_args, out);
-        }
-        if (selector == "Server") {
-          return construct_http_server(frame, args, block, kw_args, out);
-        }
-        if (selector == "ServerResponse") {
-          return construct_http_server_response(frame, args, block, kw_args,
-                                                out);
-        }
-        if (selector == "trace") {
-          if (!args.empty() || !kw_args.empty() || block.is_null()) {
-            set_fault(frame, "ArgumentError",
-                      "net.http.trace requires a block and no arguments");
-            return SendStatus::Faulted;
-          }
-          if (!block.is_closure()) {
-            set_fault(frame, "TypeError",
-                      "net.http.trace block must be closure");
-            return SendStatus::Faulted;
-          }
-          *out = block;
-          return SendStatus::Matched;
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpJson) {
-        if (selector == "get_json") {
-          return http_json_get_helper(frame, args, block, kw_args, out);
-        }
-        if (selector == "post_json") {
-          return http_json_post_helper(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpJsonGetJson) {
-        if (selector == "__call__" || selector == "new") {
-          return http_json_get_helper(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpJsonPostJson) {
-        if (selector == "__call__" || selector == "new") {
-          return http_json_post_helper(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpForm) {
-        if (selector == "FormBody") {
-          return construct_http_form_body(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpFormBody) {
-        if (selector == "__call__" || selector == "new") {
-          return construct_http_form_body(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpClient) {
-        if (selector == "new" || selector == "__call__") {
-          return construct_http_client(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpRequest) {
-        if (selector == "new" || selector == "__call__") {
-          return construct_http_request(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpRequestBody) {
-        return apply_http_request_body_type_send(frame, selector, args, block,
-                                                 kw_args, out);
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpHeaders) {
-        if (selector == "new" || selector == "__call__") {
-          return construct_http_headers(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpServer) {
-        if (selector == "new" || selector == "__call__") {
-          return construct_http_server(frame, args, block, kw_args, out);
-        }
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpServerRequest) {
-        return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetHttpServerResponse) {
-        return apply_http_server_response_type_send(frame, selector, args,
-                                                    block, kw_args, out);
-      }
       if (kind == RuntimeNativeTypeKind::Amber) {
         if (selector != "stringify") {
           return SendStatus::NotHandled;
@@ -16806,147 +16857,6 @@ private:
               frame, RuntimeNativeFunctionKind::Pp, args, block, kw_args, out);
         }
         return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::NetTcp) {
-        if (selector != "connect" && selector != "listen") {
-          return SendStatus::NotHandled;
-        }
-        const bool keywords_ok =
-            selector == "connect"
-                ? reject_unknown_keywords(frame, kw_args,
-                                          {"timeout", "isolation"})
-                : reject_unknown_keywords(
-                      frame, kw_args, {"backlog", "reuse_addr", "isolation"});
-        if (!keywords_ok) {
-          return SendStatus::Faulted;
-        }
-        RuntimeEndpoint endpoint;
-        if (selector == "connect" && args.size() == 1U) {
-          const std::shared_ptr<RuntimeEndpoint> parsed =
-              io_endpoint_from_value(frame, args[0]);
-          if (parsed == nullptr) {
-            return SendStatus::Faulted;
-          }
-          endpoint = *parsed;
-        } else {
-          if (args.size() != 2U || !args[0].is_string() ||
-              !args[1].is_integer()) {
-            set_fault(frame, "TypeError", selector + " expects host and port");
-            return SendStatus::Faulted;
-          }
-          const std::optional<std::string> host =
-              string_text_from_id(args[0].as_string().string_id);
-          if (!host.has_value() || args[1].as_integer() < 0 ||
-              args[1].as_integer() > 65535) {
-            set_fault(frame, "ArgumentError", "invalid network endpoint");
-            return SendStatus::Faulted;
-          }
-          endpoint = RuntimeEndpoint{
-              *host, static_cast<std::uint16_t>(args[1].as_integer())};
-        }
-        const std::optional<RuntimeIsolationMode> isolation =
-            io_isolation_from_keywords(frame, kw_args);
-        if (!isolation.has_value()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "connect") {
-          const std::optional<std::chrono::milliseconds> timeout =
-              io_timeout_from_keywords(frame, kw_args);
-          if (!timeout.has_value()) {
-            return SendStatus::Faulted;
-          }
-          if (!check_io_policy(frame, "net_connect", "net.connect",
-                               endpoint.to_string())) {
-            return SendStatus::Faulted;
-          }
-          record_io_wait("tcp.connect", endpoint.to_string());
-          RuntimeTcpConnectResult connected =
-              RuntimeTcpStream::connect(endpoint, *timeout, *isolation);
-          if (!set_fault_from_io_status(frame, connected)) {
-            return SendStatus::Faulted;
-          }
-          Value stream_value = Value::io_value(connected.stream);
-          if (block.is_null()) {
-            *out = std::move(stream_value);
-            return SendStatus::Matched;
-          }
-          std::optional<NativeBlockInvoker> invoker =
-              make_scoped_native_block_invoker(frame, block, "net.tcp.connect");
-          if (!invoker.has_value()) {
-            connected.stream->close();
-            return SendStatus::Faulted;
-          }
-          try {
-            Value block_result = (*invoker)({stream_value});
-            RuntimeIoStatus close_result = connected.stream->close();
-            if (!set_fault_from_io_status(frame, close_result)) {
-              return SendStatus::Faulted;
-            }
-            *out = std::move(block_result);
-          } catch (const NativeBlockUnwind &) {
-            connected.stream->close();
-            return SendStatus::Faulted;
-          } catch (const RuntimeTaskFailure &failure) {
-            connected.stream->close();
-            set_fault(frame, failure.error_name(), failure.message());
-            return SendStatus::Faulted;
-          }
-          return SendStatus::Matched;
-        }
-        int backlog = 128;
-        if (const std::optional<Value> value =
-                keyword_arg_value(kw_args, "backlog")) {
-          if (!value->is_integer()) {
-            set_fault(frame, "TypeError", "backlog must be Int");
-            return SendStatus::Faulted;
-          }
-          backlog = static_cast<int>(value->as_integer());
-        }
-        if (backlog <= 0) {
-          set_fault(frame, "ArgumentError", "backlog must be positive");
-          return SendStatus::Faulted;
-        }
-        bool reuse_addr = false;
-        if (!bool_keyword("reuse_addr", false, &reuse_addr)) {
-          return SendStatus::Faulted;
-        }
-        if (!check_io_policy(frame, "net_listen", "net.listen",
-                             endpoint.to_string())) {
-          return SendStatus::Faulted;
-        }
-        record_io_wait("tcp.listen", endpoint.to_string());
-        RuntimeTcpListenResult listening = RuntimeTcpListener::listen(
-            endpoint, backlog, reuse_addr, *isolation);
-        if (!set_fault_from_io_status(frame, listening)) {
-          return SendStatus::Faulted;
-        }
-        Value listener_value = Value::io_value(listening.listener);
-        if (block.is_null()) {
-          *out = std::move(listener_value);
-          return SendStatus::Matched;
-        }
-        std::optional<NativeBlockInvoker> invoker =
-            make_scoped_native_block_invoker(frame, block, "net.tcp.listen");
-        if (!invoker.has_value()) {
-          listening.listener->close();
-          return SendStatus::Faulted;
-        }
-        try {
-          Value block_result = (*invoker)({listener_value});
-          RuntimeIoStatus close_result = listening.listener->close();
-          if (!set_fault_from_io_status(frame, close_result)) {
-            return SendStatus::Faulted;
-          }
-          *out = std::move(block_result);
-        } catch (const NativeBlockUnwind &) {
-          listening.listener->close();
-          return SendStatus::Faulted;
-        } catch (const RuntimeTaskFailure &failure) {
-          listening.listener->close();
-          set_fault(frame, failure.error_name(), failure.message());
-          return SendStatus::Faulted;
-        }
-        return SendStatus::Matched;
       }
       if (kind == RuntimeNativeTypeKind::Range) {
         if (selector != "new") {
@@ -17089,6 +16999,19 @@ private:
         return SendStatus::Matched;
       }
 
+      if (const std::optional<RuntimeIoValueHandlerDescriptor> handler =
+              dispatch_registry().io_value_handler(io_value->type_name())) {
+        if (handler->handler != nullptr) {
+          NativeStdlibCall call{*this,         &frame,   receiver,
+                                handler->kind, selector, args,
+                                block,         kw_args,  out};
+          const SendStatus status = (*handler->handler)(call);
+          if (status != SendStatus::NotHandled) {
+            return status;
+          }
+        }
+      }
+
       if (const auto client =
               std::dynamic_pointer_cast<RuntimeHttpClient>(io_value)) {
         return apply_http_client_send(frame, client, selector, args, block,
@@ -17143,103 +17066,6 @@ private:
               std::dynamic_pointer_cast<RuntimeHttpServerResponse>(io_value)) {
         return apply_http_server_response_send(frame, server_response, selector,
                                                args, block, kw_args, out);
-      }
-
-      if (const auto bytes =
-              std::dynamic_pointer_cast<RuntimeBytes>(io_value)) {
-        if (!require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "count") {
-          if (!require_arity(0) || !kw_args.empty()) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::integer(static_cast<std::int64_t>(bytes->count()));
-          return SendStatus::Matched;
-        }
-        if (selector == "empty?") {
-          if (!require_arity(0) || !kw_args.empty()) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::boolean(bytes->empty());
-          return SendStatus::Matched;
-        }
-        if (selector == "[]") {
-          if (!require_arity(1) || !kw_args.empty() || !args[0].is_integer()) {
-            if (!args.empty() && !args[0].is_integer()) {
-              set_fault(frame, "TypeError", "Bytes index must be Int");
-            }
-            return SendStatus::Faulted;
-          }
-          RuntimeByteResult result = bytes->at(args[0].as_integer());
-          if (!set_fault_from_io_status(frame, result)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::integer(result.byte);
-          return SendStatus::Matched;
-        }
-        if (selector == "slice") {
-          if ((args.size() != 1U && args.size() != 2U) || !kw_args.empty() ||
-              !args[0].is_integer() ||
-              (args.size() == 2U && !args[1].is_null() &&
-               !args[1].is_integer())) {
-            set_fault(frame, "TypeError",
-                      "Bytes.slice expects Int start/length");
-            return SendStatus::Faulted;
-          }
-          std::optional<std::size_t> length;
-          if (args.size() == 2U && !args[1].is_null()) {
-            if (args[1].as_integer() < 0) {
-              set_fault(frame, "ArgumentError",
-                        "slice length must be non-negative");
-              return SendStatus::Faulted;
-            }
-            length = static_cast<std::size_t>(args[1].as_integer());
-          }
-          std::int64_t start = args[0].as_integer();
-          if (start < 0) {
-            start += static_cast<std::int64_t>(bytes->count());
-          }
-          if (start < 0 || static_cast<std::size_t>(start) > bytes->count()) {
-            set_fault(frame, "IndexError", "Bytes slice is out of bounds");
-            return SendStatus::Faulted;
-          }
-          *out = Value::io_value(bytes->slice(args[0].as_integer(), length));
-          return SendStatus::Matched;
-        }
-        if (selector == "to_str") {
-          if (args.size() > 1U ||
-              !reject_unknown_keywords(frame, kw_args, {"encoding"})) {
-            return SendStatus::Faulted;
-          }
-          Value encoding = !args.empty()
-                               ? args[0]
-                               : keyword_arg_value(kw_args, "encoding")
-                                     .value_or(Value::null());
-          std::string name = "utf8";
-          if (!encoding.is_null()) {
-            const std::optional<std::string> parsed =
-                text_from_symbol_or_string(encoding);
-            if (!parsed.has_value()) {
-              set_fault(frame, "TypeError", "encoding must be Symbol or Str");
-              return SendStatus::Faulted;
-            }
-            name = *parsed;
-          }
-          RuntimeIoStatus result = bytes->to_string(name);
-          if (!set_fault_from_io_status(frame, result)) {
-            return SendStatus::Faulted;
-          }
-          *out = string_value_from_text(result.bytes);
-          return SendStatus::Matched;
-        }
-        if (selector == "hex") {
-          if (!require_arity(0) || !kw_args.empty()) {
-            return SendStatus::Faulted;
-          }
-          *out = string_value_from_text(bytes->hex());
-          return SendStatus::Matched;
-        }
       }
 
       if (const auto buffer =

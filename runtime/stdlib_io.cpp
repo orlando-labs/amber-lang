@@ -2,6 +2,7 @@
 #include "runtime/stdlib_registry.h"
 #include "runtime/text.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -67,6 +68,105 @@ SendStatus bytes_type_send(NativeStdlibCall &call) {
   }
   *call.out = Value::io_value(std::make_shared<RuntimeBytes>(*bytes));
   return SendStatus::Matched;
+}
+
+SendStatus bytes_instance_send(NativeStdlibCall &call) {
+  const auto bytes =
+      std::dynamic_pointer_cast<RuntimeBytes>(call.receiver.as_io_value());
+  if (bytes == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "count") {
+    if (!call.require_arity(0) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::integer(static_cast<std::int64_t>(bytes->count()));
+    return SendStatus::Matched;
+  }
+  if (call.selector == "empty?") {
+    if (!call.require_arity(0) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::boolean(bytes->empty());
+    return SendStatus::Matched;
+  }
+  if (call.selector == "[]") {
+    if (!call.require_arity(1) || !call.kw_args.empty() ||
+        !call.args[0].is_integer()) {
+      if (!call.args.empty() && !call.args[0].is_integer()) {
+        call.fault("TypeError", "Bytes index must be Int");
+      }
+      return SendStatus::Faulted;
+    }
+    RuntimeByteResult result = bytes->at(call.args[0].as_integer());
+    if (!set_fault_from_io_status(call, result)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::integer(result.byte);
+    return SendStatus::Matched;
+  }
+  if (call.selector == "slice") {
+    if ((call.args.size() != 1U && call.args.size() != 2U) ||
+        !call.kw_args.empty() || !call.args[0].is_integer() ||
+        (call.args.size() == 2U && !call.args[1].is_null() &&
+         !call.args[1].is_integer())) {
+      call.fault("TypeError", "Bytes.slice expects Int start/length");
+      return SendStatus::Faulted;
+    }
+    std::optional<std::size_t> length;
+    if (call.args.size() == 2U && !call.args[1].is_null()) {
+      if (call.args[1].as_integer() < 0) {
+        call.fault("ArgumentError", "slice length must be non-negative");
+        return SendStatus::Faulted;
+      }
+      length = static_cast<std::size_t>(call.args[1].as_integer());
+    }
+    std::int64_t start = call.args[0].as_integer();
+    if (start < 0) {
+      start += static_cast<std::int64_t>(bytes->count());
+    }
+    if (start < 0 || static_cast<std::size_t>(start) > bytes->count()) {
+      call.fault("IndexError", "Bytes slice is out of bounds");
+      return SendStatus::Faulted;
+    }
+    *call.out =
+        Value::io_value(bytes->slice(call.args[0].as_integer(), length));
+    return SendStatus::Matched;
+  }
+  if (call.selector == "to_str") {
+    if (call.args.size() > 1U || !call.reject_unknown_keywords({"encoding"})) {
+      return SendStatus::Faulted;
+    }
+    Value encoding = !call.args.empty()
+                         ? call.args[0]
+                         : call.keyword("encoding").value_or(Value::null());
+    std::string name = "utf8";
+    if (!encoding.is_null()) {
+      const std::optional<std::string> parsed = call.text_of(encoding);
+      if (!parsed.has_value()) {
+        call.fault("TypeError", "encoding must be Symbol or Str");
+        return SendStatus::Faulted;
+      }
+      name = *parsed;
+    }
+    RuntimeIoStatus result = bytes->to_string(name);
+    if (!set_fault_from_io_status(call, result)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = call.string_value(result.bytes);
+    return SendStatus::Matched;
+  }
+  if (call.selector == "hex") {
+    if (!call.require_arity(0) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    *call.out = call.string_value(bytes->hex());
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
 }
 
 SendStatus byte_buffer_type_send(NativeStdlibCall &call) {
@@ -414,6 +514,7 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
            {RuntimeNativeTypeKind::Bytes, bytes_type_send},
            {RuntimeNativeTypeKind::ByteBuffer, byte_buffer_type_send},
            {RuntimeNativeTypeKind::IoPipe, io_pipe_type_send}},
+          {{"Bytes", RuntimeNativeTypeKind::Bytes, bytes_instance_send}},
           {{RuntimeNativeTypeKind::Bytes, "new"},
            {RuntimeNativeTypeKind::ByteBuffer, "new"},
            {RuntimeNativeTypeKind::IoPipe, "__call__"}}};

@@ -1,10 +1,15 @@
 #include "runtime/io.h"
 #include "runtime/stdlib_registry.h"
 
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace amber::runtime {
 
@@ -23,6 +28,38 @@ bool set_fault_from_io_status(NativeStdlibCall &call,
 Value endpoint_value(RuntimeEndpoint endpoint) {
   return Value::io_value(
       std::make_shared<RuntimeEndpoint>(std::move(endpoint)));
+}
+
+std::optional<RuntimeEndpoint> endpoint_from_value(NativeStdlibCall &call,
+                                                   const Value &value) {
+  if (!value.is_io_value()) {
+    call.fault("TypeError", "expected net.Endpoint");
+    return std::nullopt;
+  }
+  const std::shared_ptr<RuntimeEndpoint> endpoint =
+      std::dynamic_pointer_cast<RuntimeEndpoint>(value.as_io_value());
+  if (endpoint == nullptr) {
+    call.fault("TypeError", "expected net.Endpoint");
+    return std::nullopt;
+  }
+  return *endpoint;
+}
+
+std::optional<RuntimeEndpoint>
+endpoint_from_host_port(NativeStdlibCall &call, const std::string &selector) {
+  if (call.args.size() != 2U || !call.args[0].is_string() ||
+      !call.args[1].is_integer()) {
+    call.fault("TypeError", selector + " expects host and port");
+    return std::nullopt;
+  }
+  const std::optional<std::string> host = call.text_of(call.args[0]);
+  if (!host.has_value() || call.args[1].as_integer() < 0 ||
+      call.args[1].as_integer() > 65535) {
+    call.fault("ArgumentError", "invalid network endpoint");
+    return std::nullopt;
+  }
+  return RuntimeEndpoint{*host,
+                         static_cast<std::uint16_t>(call.args[1].as_integer())};
 }
 
 SendStatus endpoint_type_send(NativeStdlibCall &call) {
@@ -85,6 +122,129 @@ isolation_from_keywords(NativeStdlibCall &call) {
     call.fault("ArgumentError", "unsupported isolation mode");
   }
   return isolation;
+}
+
+std::optional<std::chrono::milliseconds>
+timeout_from_value(NativeStdlibCall &call, const Value &value) {
+  if (value.is_null()) {
+    return std::chrono::milliseconds::max();
+  }
+  double seconds = 0.0;
+  if (value.is_integer()) {
+    seconds = static_cast<double>(value.as_integer());
+  } else if (value.is_float()) {
+    seconds = value.as_float();
+  } else {
+    call.fault("TypeError", "timeout must be numeric or null");
+    return std::nullopt;
+  }
+  if (!std::isfinite(seconds) || seconds < 0.0) {
+    call.fault("ArgumentError", "timeout must be non-negative");
+    return std::nullopt;
+  }
+  const double milliseconds = seconds * 1000.0;
+  if (milliseconds >
+      static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+    return std::chrono::milliseconds::max();
+  }
+  return std::chrono::milliseconds(static_cast<std::int64_t>(milliseconds));
+}
+
+std::optional<std::chrono::milliseconds>
+timeout_from_keywords(NativeStdlibCall &call) {
+  return timeout_from_value(call,
+                            call.keyword("timeout").value_or(Value::null()));
+}
+
+SendStatus tcp_block_result(NativeStdlibCall &call, const Value &resource) {
+  if (call.block.is_null()) {
+    *call.out = resource;
+    return SendStatus::Matched;
+  }
+  if (!call.block.is_closure()) {
+    call.net_tcp_close(resource, false);
+    return call.fault("TypeError",
+                      call.selector == "connect"
+                          ? "net.tcp.connect block must be closure"
+                          : "net.tcp.listen block must be closure");
+  }
+
+  StdlibBlockResult block =
+      call.call_block(call.block, std::vector<Value>{resource});
+  if (block.status == StdlibBlockStatus::Returned) {
+    if (!call.net_tcp_close(resource, true)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = std::move(block.value);
+    return SendStatus::Matched;
+  }
+  call.net_tcp_close(resource, false);
+  if (block.status == StdlibBlockStatus::Raised) {
+    return call.raise(block.exception);
+  }
+  return SendStatus::Faulted;
+}
+
+SendStatus tcp_type_send(NativeStdlibCall &call) {
+  if (call.selector != "connect" && call.selector != "listen") {
+    return SendStatus::NotHandled;
+  }
+  const bool keywords_ok =
+      call.selector == "connect"
+          ? call.reject_unknown_keywords({"timeout", "isolation"})
+          : call.reject_unknown_keywords(
+                {"backlog", "reuse_addr", "isolation"});
+  if (!keywords_ok) {
+    return SendStatus::Faulted;
+  }
+
+  std::optional<RuntimeEndpoint> endpoint;
+  if (call.selector == "connect" && call.args.size() == 1U) {
+    endpoint = endpoint_from_value(call, call.args[0]);
+  } else {
+    endpoint = endpoint_from_host_port(call, call.selector);
+  }
+  if (!endpoint.has_value()) {
+    return SendStatus::Faulted;
+  }
+  const std::optional<RuntimeIsolationMode> isolation =
+      isolation_from_keywords(call);
+  if (!isolation.has_value()) {
+    return SendStatus::Faulted;
+  }
+
+  Value resource = Value::null();
+  if (call.selector == "connect") {
+    const std::optional<std::chrono::milliseconds> timeout =
+        timeout_from_keywords(call);
+    if (!timeout.has_value()) {
+      return SendStatus::Faulted;
+    }
+    if (!call.net_tcp_connect(*endpoint, *timeout, *isolation, &resource)) {
+      return SendStatus::Faulted;
+    }
+    return tcp_block_result(call, resource);
+  }
+
+  int backlog = 128;
+  if (const std::optional<Value> value = call.keyword("backlog")) {
+    if (!value->is_integer()) {
+      return call.fault("TypeError", "backlog must be Int");
+    }
+    backlog = static_cast<int>(value->as_integer());
+  }
+  if (backlog <= 0) {
+    return call.fault("ArgumentError", "backlog must be positive");
+  }
+  bool reuse_addr = false;
+  if (!call.bool_keyword("reuse_addr", false, &reuse_addr)) {
+    return SendStatus::Faulted;
+  }
+  if (!call.net_tcp_listen(*endpoint, backlog, reuse_addr, *isolation,
+                           &resource)) {
+    return SendStatus::Faulted;
+  }
+  return tcp_block_result(call, resource);
 }
 
 SendStatus udp_type_send(NativeStdlibCall &call) {
@@ -164,7 +324,9 @@ RuntimeNativeModuleDescriptor net_module_descriptor() {
            {"net.udp", RuntimeNativeTypeKind::NetUdp}},
           {{RuntimeNativeTypeKind::Net, net_namespace_send},
            {RuntimeNativeTypeKind::NetEndpoint, endpoint_type_send},
+           {RuntimeNativeTypeKind::NetTcp, tcp_type_send},
            {RuntimeNativeTypeKind::NetUdp, udp_type_send}},
+          {},
           {{RuntimeNativeTypeKind::NetEndpoint, "new"}}};
 }
 

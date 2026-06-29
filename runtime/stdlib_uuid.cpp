@@ -203,6 +203,7 @@ RuntimeNativeModuleDescriptor uuid_module_descriptor() {
   return {{{"Uuid", RuntimeNativeTypeKind::Uuid},
            {"UUID", RuntimeNativeTypeKind::Uuid}},
           {{RuntimeNativeTypeKind::Uuid, &uuid_dispatch}},
+          {},
           {}};
 }
 

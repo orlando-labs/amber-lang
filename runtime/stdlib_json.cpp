@@ -1572,6 +1572,7 @@ SendStatus json_dispatch(NativeStdlibCall &call) {
 RuntimeNativeModuleDescriptor json_module_descriptor() {
   return {{{"Json", RuntimeNativeTypeKind::Json}},
           {{RuntimeNativeTypeKind::Json, &json_dispatch}},
+          {},
           {}};
 }
 

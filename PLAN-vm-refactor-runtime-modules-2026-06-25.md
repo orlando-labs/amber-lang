@@ -1338,6 +1338,103 @@ Slice record, 2026-06-29:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-29:
+
+- Promoted core TCP type selectors into the network descriptor:
+  `net.tcp.connect` and `net.tcp.listen`.
+- Added narrow `StdlibHost` TCP connect/listen/close facades so descriptor
+  dispatch owns endpoint, timeout, backlog, reuse-address, isolation, and
+  block-form cleanup while the VM continues to own network capability/effect
+  checks, IO wait tracing, and OS-backed TCP stream/listener creation.
+- Removed the corresponding `RuntimeNativeTypeKind::NetTcp` branch from
+  `Vm::try_apply_native_stdlib_send`. TCP/UDP socket instance selectors remain
+  in VM for later Phase 3 slices.
+- Added source-level VM coverage for descriptor-routed TCP validation paths
+  without opening sockets in the non-elevated `vm_tests` gate.
+- Verified compile smoke: standalone `runtime/stdlib_net.cpp`, standalone
+  `runtime/vm.cpp`, standalone `tests/stdlib_registry_tests.cpp`, standalone
+  `tests/amber_ext_tests.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/amber_ext_tests
+  build/io_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and `build/amber_ext_tests`.
+- Elevated `build/io_tests`, elevated `build/vm_net_http_tests`, and elevated
+  `make conformance` could not be run in this session because the approval
+  request was rejected by the automatic reviewer after hitting the usage limit.
+  Sandboxed `build/io_tests` failed with `PermissionDeniedError listen:
+  Operation not permitted`, sandboxed `build/vm_net_http_tests` failed with
+  `PermissionDeniedError`, and sandboxed `make conformance` reached
+  `137 passed, 3 failed, 0 skipped for M11`; all three failures were the known
+  loopback corpus cases (`net_socket_handoff_to_task` twice and
+  `net_tcp_loopback`) failing on `listen: Operation not permitted`.
+
+Slice record, 2026-06-29:
+
+- Promoted net.http namespace/type selector routing into the net.http
+  descriptor for `net.http.Client`, `Request`, `Headers`, `Server`,
+  `ServerResponse`, `trace`, json helpers, form helpers, request body type
+  selectors, and server response type selectors.
+- Added narrow `StdlibHost` net.http construction/helper facades so descriptor
+  dispatch owns selector routing while the VM continues to own the existing
+  constructor/helper bodies, HTTP value construction, JSON/form conversion, and
+  network policy-heavy request/server behavior.
+- Removed the corresponding `RuntimeNativeTypeKind::NetHttp*` selector
+  branches from `Vm::try_apply_native_stdlib_send`. Net.http instance selector
+  dispatch remains in VM for later Phase 3 slices.
+- Verified compile smoke: standalone `runtime/stdlib_net_http.cpp`,
+  standalone `runtime/stdlib_net.cpp`, standalone `runtime/vm.cpp`, standalone
+  `tests/stdlib_registry_tests.cpp`, standalone `tests/amber_ext_tests.cpp`,
+  and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/amber_ext_tests
+  build/io_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and `build/amber_ext_tests`.
+- Elevated `build/io_tests`, elevated `build/vm_net_http_tests`, and elevated
+  `make conformance` could not be run in this session because escalation
+  remained unavailable after the automatic reviewer hit the usage limit.
+  Sandboxed `build/io_tests` failed with `PermissionDeniedError listen:
+  Operation not permitted`, sandboxed `build/vm_net_http_tests` failed with
+  `PermissionDeniedError`, and sandboxed `make conformance` reached
+  `137 passed, 3 failed, 0 skipped for M11`; all three failures were the known
+  loopback corpus cases (`net_socket_handoff_to_task` twice and
+  `net_tcp_loopback`) failing on `listen: Operation not permitted`.
+
+Slice record, 2026-06-29:
+
+- Extended `RuntimeNativeModuleDescriptor` with descriptor-owned IO value
+  instance handlers, registered through `RuntimeDispatchRegistry` by runtime IO
+  value `type_name()`.
+- Added the VM-side IO value registry hook after `adopt!` and before the legacy
+  per-type `dynamic_pointer_cast` chain, so migrated IO value selectors can move
+  behind module descriptors while unmigrated types continue to fall through.
+- Promoted `Bytes` instance selectors into the IO descriptor:
+  `count`, `empty?`, `[]`, `slice`, `to_str`, and `hex`.
+- Removed the corresponding `RuntimeBytes` instance selector branch from
+  `Vm::try_apply_native_stdlib_send`. `ByteBuffer`, `ByteSlice`, pipes,
+  filesystem value, and network socket instance selectors remain in VM for
+  later Phase 3 slices.
+- Verified compile smoke: standalone `runtime/stdlib_registry.cpp`,
+  standalone `runtime/stdlib_io.cpp`, standalone `runtime/stdlib_net.cpp`,
+  standalone `runtime/stdlib_net_http.cpp`, standalone `runtime/vm.cpp`,
+  standalone `tests/stdlib_registry_tests.cpp`, standalone
+  `tests/amber_ext_tests.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/amber_ext_tests
+  build/io_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  and `build/amber_ext_tests`.
+- Elevated `build/io_tests`, elevated `build/vm_net_http_tests`, and elevated
+  `make conformance` remain unavailable in this session because escalation is
+  blocked after the automatic reviewer hit the usage limit. Sandboxed
+  `build/io_tests` failed with `PermissionDeniedError listen: Operation not
+  permitted`, sandboxed `build/vm_net_http_tests` failed with
+  `PermissionDeniedError`, and sandboxed `make conformance` reached
+  `137 passed, 3 failed, 0 skipped for M11`; all three failures were the known
+  loopback corpus cases (`net_socket_handoff_to_task` twice and
+  `net_tcp_loopback`) failing on `listen: Operation not permitted`.
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.

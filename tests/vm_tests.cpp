@@ -8655,6 +8655,17 @@ void test_runtime_io_v2_source_surface() {
   expect(!udp_endpoint.ok() && udp_endpoint.fault.has_value() &&
              udp_endpoint.fault->error_name == "ArgumentError",
          "UDP bind source validation should reject invalid endpoint");
+  amber::runtime::ExecutionResult tcp_timeout =
+      execute_emitted_init("endpoint = net.Endpoint.new(\"127.0.0.1\", 1)\n"
+                           "net.tcp.connect(endpoint, timeout: -1)\n");
+  expect(!tcp_timeout.ok() && tcp_timeout.fault.has_value() &&
+             tcp_timeout.fault->error_name == "ArgumentError",
+         "TCP connect source validation should reject invalid timeout");
+  amber::runtime::ExecutionResult tcp_backlog =
+      execute_emitted_init("net.tcp.listen(\"127.0.0.1\", 0, backlog: 0)\n");
+  expect(!tcp_backlog.ok() && tcp_backlog.fault.has_value() &&
+             tcp_backlog.fault->error_name == "ArgumentError",
+         "TCP listen source validation should reject invalid backlog");
 
   amber::runtime::ExecutionResult pipe =
       execute_emitted_init("pair = io.Pipe.new(capacity: 2)\n"

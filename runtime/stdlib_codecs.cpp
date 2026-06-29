@@ -374,6 +374,7 @@ RuntimeNativeModuleDescriptor codecs_module_descriptor() {
           {{RuntimeNativeTypeKind::Base64, &codec_dispatch},
            {RuntimeNativeTypeKind::Base64Url, &codec_dispatch},
            {RuntimeNativeTypeKind::Hex, &codec_dispatch}},
+          {},
           {}};
 }
 

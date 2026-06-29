@@ -65,6 +65,7 @@ SendStatus digest_dispatch(NativeStdlibCall &call) {
 RuntimeNativeModuleDescriptor digest_module_descriptor() {
   return {{{"Digest", RuntimeNativeTypeKind::Digest}},
           {{RuntimeNativeTypeKind::Digest, &digest_dispatch}},
+          {},
           {}};
 }
 

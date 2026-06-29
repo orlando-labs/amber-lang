@@ -10,6 +10,7 @@
 #include "runtime/io.h"
 #include "runtime/stdlib_registry.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -23,6 +24,7 @@ using amber::runtime::NativeTagRegistry;
 using amber::runtime::NativeTypeDescriptor;
 using amber::runtime::RuntimeBytes;
 using amber::runtime::RuntimeForeignHandle;
+using amber::runtime::SendStatus;
 using amber::runtime::StdlibHost;
 using amber::runtime::Value;
 
@@ -262,6 +264,96 @@ struct RecordingHost : StdlibHost {
                            amber::runtime::RuntimeIsolationMode /*isolation*/,
                            Value * /*out*/) override {
     return false;
+  }
+  bool
+  stdlib_net_tcp_connect(const void * /*frame*/,
+                         const amber::runtime::RuntimeEndpoint & /*endpoint*/,
+                         std::chrono::milliseconds /*timeout*/,
+                         amber::runtime::RuntimeIsolationMode /*isolation*/,
+                         Value * /*out*/) override {
+    return false;
+  }
+  bool
+  stdlib_net_tcp_listen(const void * /*frame*/,
+                        const amber::runtime::RuntimeEndpoint & /*endpoint*/,
+                        int /*backlog*/, bool /*reuse_addr*/,
+                        amber::runtime::RuntimeIsolationMode /*isolation*/,
+                        Value * /*out*/) override {
+    return false;
+  }
+  bool stdlib_net_tcp_close(const void * /*frame*/, const Value & /*resource*/,
+                            bool /*report_fault*/) override {
+    return false;
+  }
+  SendStatus stdlib_net_http_construct_client(
+      const void * /*frame*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_construct_request(
+      const void * /*frame*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_construct_headers(
+      const void * /*frame*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_construct_server(
+      const void * /*frame*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_construct_server_response(
+      const void * /*frame*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_construct_form_body(
+      const void * /*frame*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_json_get(
+      const void * /*frame*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_json_post(
+      const void * /*frame*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_request_body_type_send(
+      const void * /*frame*/, const std::string & /*selector*/,
+      const std::vector<Value> & /*args*/, const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_net_http_server_response_type_send(
+      const void * /*frame*/, const std::string & /*selector*/,
+      const std::vector<Value> & /*args*/, const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
   }
   bool stdlib_secure_random_bytes(const void * /*frame*/, std::size_t /*count*/,
                                   std::string * /*out*/) override {

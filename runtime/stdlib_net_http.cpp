@@ -30,7 +30,7 @@ SendStatus net_http_namespace_send(NativeStdlibCall &call) {
           Value::native_type(RuntimeNativeTypeKind::NetHttpServerResponse);
       return SendStatus::Matched;
     }
-    return SendStatus::NotHandled;
+    return call.net_http_construct_server_response();
   }
   if (call.selector == "json" || call.selector == "form") {
     if (!call.args.empty() || !call.kw_args.empty() || !call.block.is_null()) {
@@ -42,7 +42,108 @@ SendStatus net_http_namespace_send(NativeStdlibCall &call) {
                                        : RuntimeNativeTypeKind::NetHttpForm);
     return SendStatus::Matched;
   }
+  if (call.selector == "trace") {
+    if (!call.args.empty() || !call.kw_args.empty() || call.block.is_null()) {
+      return call.fault("ArgumentError",
+                        "net.http.trace requires a block and no arguments");
+    }
+    if (!call.block.is_closure()) {
+      return call.fault("TypeError", "net.http.trace block must be closure");
+    }
+    *call.out = call.block;
+    return SendStatus::Matched;
+  }
+  if (call.selector == "Client") {
+    return call.net_http_construct_client();
+  }
+  if (call.selector == "Request") {
+    return call.net_http_construct_request();
+  }
+  if (call.selector == "Headers") {
+    return call.net_http_construct_headers();
+  }
+  if (call.selector == "Server") {
+    return call.net_http_construct_server();
+  }
   return SendStatus::NotHandled;
+}
+
+SendStatus net_http_json_send(NativeStdlibCall &call) {
+  if (call.selector == "get_json") {
+    return call.net_http_json_get();
+  }
+  if (call.selector == "post_json") {
+    return call.net_http_json_post();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_json_get_send(NativeStdlibCall &call) {
+  if (call.selector == "__call__" || call.selector == "new") {
+    return call.net_http_json_get();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_json_post_send(NativeStdlibCall &call) {
+  if (call.selector == "__call__" || call.selector == "new") {
+    return call.net_http_json_post();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_form_send(NativeStdlibCall &call) {
+  if (call.selector == "FormBody") {
+    return call.net_http_construct_form_body();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_form_body_send(NativeStdlibCall &call) {
+  if (call.selector == "__call__" || call.selector == "new") {
+    return call.net_http_construct_form_body();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_client_type_send(NativeStdlibCall &call) {
+  if (call.selector == "new" || call.selector == "__call__") {
+    return call.net_http_construct_client();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_request_type_send(NativeStdlibCall &call) {
+  if (call.selector == "new" || call.selector == "__call__") {
+    return call.net_http_construct_request();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_headers_type_send(NativeStdlibCall &call) {
+  if (call.selector == "new" || call.selector == "__call__") {
+    return call.net_http_construct_headers();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_server_type_send(NativeStdlibCall &call) {
+  if (call.selector == "new" || call.selector == "__call__") {
+    return call.net_http_construct_server();
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_request_body_type_send(NativeStdlibCall &call) {
+  return call.net_http_request_body_type_send();
+}
+
+SendStatus net_http_server_request_type_send(NativeStdlibCall & /*call*/) {
+  return SendStatus::NotHandled;
+}
+
+SendStatus net_http_server_response_type_send(NativeStdlibCall &call) {
+  return call.net_http_server_response_type_send();
 }
 
 RuntimeNativeModuleDescriptor net_http_module_descriptor() {
@@ -61,7 +162,23 @@ RuntimeNativeModuleDescriptor net_http_module_descriptor() {
        {"net.http.json.post_json", RuntimeNativeTypeKind::NetHttpJsonPostJson},
        {"net.http.form", RuntimeNativeTypeKind::NetHttpForm},
        {"net.http.form.FormBody", RuntimeNativeTypeKind::NetHttpFormBody}},
-      {{RuntimeNativeTypeKind::NetHttp, net_http_namespace_send}},
+      {{RuntimeNativeTypeKind::NetHttp, net_http_namespace_send},
+       {RuntimeNativeTypeKind::NetHttpJson, net_http_json_send},
+       {RuntimeNativeTypeKind::NetHttpJsonGetJson, net_http_json_get_send},
+       {RuntimeNativeTypeKind::NetHttpJsonPostJson, net_http_json_post_send},
+       {RuntimeNativeTypeKind::NetHttpForm, net_http_form_send},
+       {RuntimeNativeTypeKind::NetHttpFormBody, net_http_form_body_send},
+       {RuntimeNativeTypeKind::NetHttpClient, net_http_client_type_send},
+       {RuntimeNativeTypeKind::NetHttpRequest, net_http_request_type_send},
+       {RuntimeNativeTypeKind::NetHttpRequestBody,
+        net_http_request_body_type_send},
+       {RuntimeNativeTypeKind::NetHttpHeaders, net_http_headers_type_send},
+       {RuntimeNativeTypeKind::NetHttpServer, net_http_server_type_send},
+       {RuntimeNativeTypeKind::NetHttpServerRequest,
+        net_http_server_request_type_send},
+       {RuntimeNativeTypeKind::NetHttpServerResponse,
+        net_http_server_response_type_send}},
+      {},
       {{RuntimeNativeTypeKind::NetHttpClient, "new"},
        {RuntimeNativeTypeKind::NetHttpRequest, "new"},
        {RuntimeNativeTypeKind::NetHttpRequestBody, "new"},

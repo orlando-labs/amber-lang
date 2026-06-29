@@ -441,6 +441,7 @@ RuntimeNativeModuleDescriptor fs_module_descriptor() {
           {{RuntimeNativeTypeKind::Fs, fs_namespace_send},
            {RuntimeNativeTypeKind::FsPath, fs_path_type_send},
            {RuntimeNativeTypeKind::FsFile, fs_file_type_send}},
+          {},
           {{RuntimeNativeTypeKind::FsPath, "new"}}};
 }
 

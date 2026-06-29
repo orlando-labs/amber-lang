@@ -955,6 +955,7 @@ RuntimeNativeModuleDescriptor time_module_descriptor() {
            {"TimePeriod", RuntimeNativeTypeKind::TimePeriod}},
           {{RuntimeNativeTypeKind::Time, &time_dispatch},
            {RuntimeNativeTypeKind::TimePeriod, &time_dispatch}},
+          {},
           {}};
 }
 

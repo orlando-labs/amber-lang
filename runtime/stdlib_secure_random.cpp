@@ -211,6 +211,7 @@ SendStatus secure_random_dispatch(NativeStdlibCall &call) {
 RuntimeNativeModuleDescriptor secure_random_module_descriptor() {
   return {{{"SecureRandom", RuntimeNativeTypeKind::SecureRandom}},
           {{RuntimeNativeTypeKind::SecureRandom, &secure_random_dispatch}},
+          {},
           {}};
 }
 
