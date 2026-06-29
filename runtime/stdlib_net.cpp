@@ -30,6 +30,33 @@ Value endpoint_value(RuntimeEndpoint endpoint) {
       std::make_shared<RuntimeEndpoint>(std::move(endpoint)));
 }
 
+SendStatus resource_lifecycle_send(NativeStdlibCall &call,
+                                   RuntimeIoResource &resource) {
+  if (call.selector != "closed?" && call.selector != "close!") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_arity(0) || !call.kw_args.empty() ||
+      !call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "closed?") {
+    *call.out = Value::boolean(resource.closed());
+    return SendStatus::Matched;
+  }
+  if (!resource.closed()) {
+    const RuntimeIoStatus access = resource.access_status();
+    if (!set_fault_from_io_status(call, access)) {
+      return SendStatus::Faulted;
+    }
+  }
+  RuntimeIoStatus result = resource.close();
+  if (!set_fault_from_io_status(call, result)) {
+    return SendStatus::Faulted;
+  }
+  *call.out = Value::null();
+  return SendStatus::Matched;
+}
+
 std::optional<RuntimeEndpoint> endpoint_from_value(NativeStdlibCall &call,
                                                    const Value &value) {
   if (!value.is_io_value()) {
@@ -135,6 +162,9 @@ SendStatus tcp_stream_instance_send(NativeStdlibCall &call) {
   if (stream == nullptr) {
     return SendStatus::NotHandled;
   }
+  if (call.selector == "closed?" || call.selector == "close!") {
+    return resource_lifecycle_send(call, *stream);
+  }
   if (call.selector != "local_endpoint" && call.selector != "remote_endpoint") {
     return SendStatus::NotHandled;
   }
@@ -154,6 +184,9 @@ SendStatus tcp_listener_instance_send(NativeStdlibCall &call) {
   if (listener == nullptr) {
     return SendStatus::NotHandled;
   }
+  if (call.selector == "closed?" || call.selector == "close!") {
+    return resource_lifecycle_send(call, *listener);
+  }
   if (call.selector != "local_endpoint") {
     return SendStatus::NotHandled;
   }
@@ -170,6 +203,9 @@ SendStatus udp_socket_instance_send(NativeStdlibCall &call) {
       std::dynamic_pointer_cast<RuntimeUdpSocket>(call.receiver.as_io_value());
   if (socket == nullptr) {
     return SendStatus::NotHandled;
+  }
+  if (call.selector == "closed?" || call.selector == "close!") {
+    return resource_lifecycle_send(call, *socket);
   }
   if (call.selector != "local_endpoint") {
     return SendStatus::NotHandled;

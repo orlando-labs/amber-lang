@@ -18120,16 +18120,6 @@ private:
           RuntimeIoStatus result;
           if (file != nullptr) {
             result = file->close();
-          } else if (tcp_stream != nullptr) {
-            result = tcp_stream->close();
-          } else if (const auto listener =
-                         std::dynamic_pointer_cast<RuntimeTcpListener>(
-                             io_value)) {
-            result = listener->close();
-          } else if (const auto udp =
-                         std::dynamic_pointer_cast<RuntimeUdpSocket>(
-                             io_value)) {
-            result = udp->close();
           } else {
             return SendStatus::NotHandled;
           }
