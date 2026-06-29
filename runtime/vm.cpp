@@ -17068,53 +17068,6 @@ private:
                                                args, block, kw_args, out);
       }
 
-      if (const auto path = std::dynamic_pointer_cast<RuntimePath>(io_value)) {
-        if (!require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "/" || selector == "join") {
-          if (args.empty() || !kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "path join expects at least one part");
-            return SendStatus::Faulted;
-          }
-          RuntimePath joined = *path;
-          for (const Value &argument : args) {
-            const std::shared_ptr<RuntimePath> part =
-                io_path_from_value(frame, argument);
-            if (part == nullptr) {
-              return SendStatus::Faulted;
-            }
-            joined = joined.join(*part);
-          }
-          *out = Value::io_value(std::make_shared<RuntimePath>(joined));
-          return SendStatus::Matched;
-        }
-        if (selector == "basename" || selector == "extname" ||
-            selector == "parent" || selector == "absolute?" ||
-            selector == "normalize" || selector == "to_str") {
-          if (!require_arity(0) || !kw_args.empty()) {
-            return SendStatus::Faulted;
-          }
-          if (selector == "absolute?") {
-            *out = Value::boolean(path->absolute());
-          } else if (selector == "parent") {
-            *out =
-                Value::io_value(std::make_shared<RuntimePath>(path->parent()));
-          } else if (selector == "normalize") {
-            *out = Value::io_value(
-                std::make_shared<RuntimePath>(path->normalize()));
-          } else {
-            *out = string_value_from_text(selector == "basename"
-                                              ? path->basename()
-                                              : (selector == "extname"
-                                                     ? path->extname()
-                                                     : path->string()));
-          }
-          return SendStatus::Matched;
-        }
-      }
-
       const auto file = std::dynamic_pointer_cast<RuntimeFile>(io_value);
       const auto memory_file =
           std::dynamic_pointer_cast<RuntimeMemoryFile>(io_value);
@@ -18243,27 +18196,6 @@ private:
           *out = Value::null();
           return SendStatus::Matched;
         }
-      }
-
-      if (const auto metadata =
-              std::dynamic_pointer_cast<RuntimeMetadata>(io_value)) {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        if (selector == "path") {
-          *out = Value::io_value(std::make_shared<RuntimePath>(metadata->path));
-        } else if (selector == "size") {
-          *out = Value::integer(static_cast<std::int64_t>(metadata->size));
-        } else if (selector == "file?") {
-          *out = Value::boolean(metadata->file);
-        } else if (selector == "dir?") {
-          *out = Value::boolean(metadata->directory);
-        } else if (selector == "symlink?") {
-          *out = Value::boolean(metadata->symlink);
-        } else {
-          return SendStatus::NotHandled;
-        }
-        return SendStatus::Matched;
       }
     }
 

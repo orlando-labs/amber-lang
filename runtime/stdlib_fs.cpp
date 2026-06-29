@@ -98,6 +98,83 @@ SendStatus fs_path_type_send(NativeStdlibCall &call) {
   return build_path_value(call, false);
 }
 
+SendStatus fs_path_instance_send(NativeStdlibCall &call) {
+  const auto path =
+      std::dynamic_pointer_cast<RuntimePath>(call.receiver.as_io_value());
+  if (path == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "/" || call.selector == "join") {
+    if (call.args.empty() || !call.kw_args.empty()) {
+      call.fault("TypeError", "path join expects at least one part");
+      return SendStatus::Faulted;
+    }
+    RuntimePath joined = *path;
+    for (const Value &argument : call.args) {
+      const std::shared_ptr<RuntimePath> part = path_from_value(call, argument);
+      if (part == nullptr) {
+        return SendStatus::Faulted;
+      }
+      joined = joined.join(*part);
+    }
+    *call.out = Value::io_value(std::make_shared<RuntimePath>(joined));
+    return SendStatus::Matched;
+  }
+  if (call.selector == "basename" || call.selector == "extname" ||
+      call.selector == "parent" || call.selector == "absolute?" ||
+      call.selector == "normalize" || call.selector == "to_str") {
+    if (!call.require_arity(0) || !call.kw_args.empty()) {
+      return SendStatus::Faulted;
+    }
+    if (call.selector == "absolute?") {
+      *call.out = Value::boolean(path->absolute());
+    } else if (call.selector == "parent") {
+      *call.out =
+          Value::io_value(std::make_shared<RuntimePath>(path->parent()));
+    } else if (call.selector == "normalize") {
+      *call.out =
+          Value::io_value(std::make_shared<RuntimePath>(path->normalize()));
+    } else {
+      *call.out = call.string_value(call.selector == "basename"
+                                        ? path->basename()
+                                        : (call.selector == "extname"
+                                               ? path->extname()
+                                               : path->string()));
+    }
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
+}
+
+SendStatus fs_metadata_instance_send(NativeStdlibCall &call) {
+  const auto metadata =
+      std::dynamic_pointer_cast<RuntimeMetadata>(call.receiver.as_io_value());
+  if (metadata == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_arity(0) || !call.kw_args.empty() ||
+      !call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  if (call.selector == "path") {
+    *call.out = Value::io_value(std::make_shared<RuntimePath>(metadata->path));
+  } else if (call.selector == "size") {
+    *call.out = Value::integer(static_cast<std::int64_t>(metadata->size));
+  } else if (call.selector == "file?") {
+    *call.out = Value::boolean(metadata->file);
+  } else if (call.selector == "dir?") {
+    *call.out = Value::boolean(metadata->directory);
+  } else if (call.selector == "symlink?") {
+    *call.out = Value::boolean(metadata->symlink);
+  } else {
+    return SendStatus::NotHandled;
+  }
+  return SendStatus::Matched;
+}
+
 SendStatus fs_metadata_send(NativeStdlibCall &call) {
   if (call.selector != "exists?" && call.selector != "file?" &&
       call.selector != "dir?" && call.selector != "metadata") {
@@ -435,14 +512,16 @@ SendStatus fs_namespace_send(NativeStdlibCall &call) {
 }
 
 RuntimeNativeModuleDescriptor fs_module_descriptor() {
-  return {{{"fs", RuntimeNativeTypeKind::Fs},
-           {"fs.Path", RuntimeNativeTypeKind::FsPath},
-           {"fs.File", RuntimeNativeTypeKind::FsFile}},
-          {{RuntimeNativeTypeKind::Fs, fs_namespace_send},
-           {RuntimeNativeTypeKind::FsPath, fs_path_type_send},
-           {RuntimeNativeTypeKind::FsFile, fs_file_type_send}},
-          {},
-          {{RuntimeNativeTypeKind::FsPath, "new"}}};
+  return {
+      {{"fs", RuntimeNativeTypeKind::Fs},
+       {"fs.Path", RuntimeNativeTypeKind::FsPath},
+       {"fs.File", RuntimeNativeTypeKind::FsFile}},
+      {{RuntimeNativeTypeKind::Fs, fs_namespace_send},
+       {RuntimeNativeTypeKind::FsPath, fs_path_type_send},
+       {RuntimeNativeTypeKind::FsFile, fs_file_type_send}},
+      {{"fs.Path", RuntimeNativeTypeKind::FsPath, fs_path_instance_send},
+       {"fs.Metadata", RuntimeNativeTypeKind::Fs, fs_metadata_instance_send}},
+      {{RuntimeNativeTypeKind::FsPath, "new"}}};
 }
 
 } // namespace
