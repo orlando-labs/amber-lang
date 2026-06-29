@@ -8645,6 +8645,17 @@ void test_runtime_io_v2_source_surface() {
              endpoint_items[4].as_integer() == 5,
          "Endpoint source contract mismatch");
 
+  amber::runtime::ExecutionResult udp_family =
+      execute_emitted_init("net.udp.open(family: :unix)\n");
+  expect(!udp_family.ok() && udp_family.fault.has_value() &&
+             udp_family.fault->error_name == "ArgumentError",
+         "UDP open source validation should reject unsupported family");
+  amber::runtime::ExecutionResult udp_endpoint =
+      execute_emitted_init("net.udp.bind(\"127.0.0.1\", 70000)\n");
+  expect(!udp_endpoint.ok() && udp_endpoint.fault.has_value() &&
+             udp_endpoint.fault->error_name == "ArgumentError",
+         "UDP bind source validation should reject invalid endpoint");
+
   amber::runtime::ExecutionResult pipe =
       execute_emitted_init("pair = io.Pipe.new(capacity: 2)\n"
                            "r = pair[0]\n"

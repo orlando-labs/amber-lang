@@ -1289,6 +1289,18 @@ public:
     return stdlib_fs_close_file(*static_cast<const Frame *>(frame), file,
                                 report_fault);
   }
+  bool stdlib_net_udp_bind(const void *frame, const RuntimeEndpoint &endpoint,
+                           RuntimeIsolationMode isolation,
+                           Value *out) override {
+    return stdlib_net_udp_bind(*static_cast<const Frame *>(frame), endpoint,
+                               isolation, out);
+  }
+  bool stdlib_net_udp_open(const void *frame, const std::string &family,
+                           RuntimeIsolationMode isolation,
+                           Value *out) override {
+    return stdlib_net_udp_open(*static_cast<const Frame *>(frame), family,
+                               isolation, out);
+  }
   bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
                                   std::string *out) override {
     return stdlib_secure_random_bytes_from_host(
@@ -12440,6 +12452,42 @@ private:
     return report_fault ? set_fault_from_io_status(frame, close_result) : true;
   }
 
+  bool stdlib_net_udp_bind(const Frame &frame, const RuntimeEndpoint &endpoint,
+                           RuntimeIsolationMode isolation, Value *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "udp bind output is null");
+      return false;
+    }
+    if (!check_io_policy(frame, "net_udp", "net.udp", endpoint.to_string())) {
+      return false;
+    }
+    record_io_wait("udp.bind", endpoint.to_string());
+    RuntimeUdpBindResult bound = RuntimeUdpSocket::bind(endpoint, isolation);
+    if (!set_fault_from_io_status(frame, bound)) {
+      return false;
+    }
+    *out = Value::io_value(bound.socket);
+    return true;
+  }
+
+  bool stdlib_net_udp_open(const Frame &frame, const std::string &family,
+                           RuntimeIsolationMode isolation, Value *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "udp open output is null");
+      return false;
+    }
+    if (!check_io_policy(frame, "net_udp", "net.udp", family)) {
+      return false;
+    }
+    record_io_wait("udp.open", family);
+    RuntimeUdpBindResult opened = RuntimeUdpSocket::open(family, isolation);
+    if (!set_fault_from_io_status(frame, opened)) {
+      return false;
+    }
+    *out = Value::io_value(opened.socket);
+    return true;
+  }
+
   bool stdlib_secure_random_bytes_from_host(const Frame &frame,
                                             std::size_t count,
                                             std::string *out) {
@@ -16899,81 +16947,6 @@ private:
           return SendStatus::Faulted;
         }
         return SendStatus::Matched;
-      }
-      if (kind == RuntimeNativeTypeKind::NetUdp) {
-        if (selector == "bind") {
-          if (!require_arity(2) ||
-              !reject_unknown_keywords(frame, kw_args, {"isolation"}) ||
-              !require_no_block()) {
-            return SendStatus::Faulted;
-          }
-          if (!args[0].is_string() || !args[1].is_integer()) {
-            set_fault(frame, "TypeError", "udp.bind expects host and port");
-            return SendStatus::Faulted;
-          }
-          const std::optional<std::string> host =
-              string_text_from_id(args[0].as_string().string_id);
-          if (!host.has_value() || args[1].as_integer() < 0 ||
-              args[1].as_integer() > 65535) {
-            set_fault(frame, "ArgumentError", "invalid UDP endpoint");
-            return SendStatus::Faulted;
-          }
-          const std::optional<RuntimeIsolationMode> isolation =
-              io_isolation_from_keywords(frame, kw_args);
-          if (!isolation.has_value()) {
-            return SendStatus::Faulted;
-          }
-          const RuntimeEndpoint endpoint{
-              *host, static_cast<std::uint16_t>(args[1].as_integer())};
-          if (!check_io_policy(frame, "net_udp", "net.udp",
-                               endpoint.to_string())) {
-            return SendStatus::Faulted;
-          }
-          record_io_wait("udp.bind", endpoint.to_string());
-          RuntimeUdpBindResult bound =
-              RuntimeUdpSocket::bind(endpoint, *isolation);
-          if (!set_fault_from_io_status(frame, bound)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::io_value(bound.socket);
-          return SendStatus::Matched;
-        }
-        if (selector == "open") {
-          if (!args.empty() ||
-              !reject_unknown_keywords(frame, kw_args,
-                                       {"family", "isolation"}) ||
-              !require_no_block()) {
-            return SendStatus::Faulted;
-          }
-          std::string family = "inet";
-          if (const std::optional<Value> value =
-                  keyword_arg_value(kw_args, "family")) {
-            const std::optional<std::string> name =
-                text_from_symbol_or_string(*value);
-            if (!name.has_value()) {
-              set_fault(frame, "TypeError", "family must be Symbol or Str");
-              return SendStatus::Faulted;
-            }
-            family = *name;
-          }
-          const std::optional<RuntimeIsolationMode> isolation =
-              io_isolation_from_keywords(frame, kw_args);
-          if (!isolation.has_value()) {
-            return SendStatus::Faulted;
-          }
-          if (!check_io_policy(frame, "net_udp", "net.udp", family)) {
-            return SendStatus::Faulted;
-          }
-          record_io_wait("udp.open", family);
-          RuntimeUdpBindResult opened =
-              RuntimeUdpSocket::open(family, *isolation);
-          if (!set_fault_from_io_status(frame, opened)) {
-            return SendStatus::Faulted;
-          }
-          *out = Value::io_value(opened.socket);
-          return SendStatus::Matched;
-        }
-        return SendStatus::NotHandled;
       }
       if (kind == RuntimeNativeTypeKind::Range) {
         if (selector != "new") {

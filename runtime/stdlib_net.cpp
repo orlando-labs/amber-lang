@@ -68,6 +68,77 @@ SendStatus endpoint_type_send(NativeStdlibCall &call) {
   return SendStatus::NotHandled;
 }
 
+std::optional<RuntimeIsolationMode>
+isolation_from_keywords(NativeStdlibCall &call) {
+  const std::optional<Value> value = call.keyword("isolation");
+  if (!value.has_value()) {
+    return RuntimeIsolationMode::Checked;
+  }
+  const std::optional<std::string> name = call.text_of(*value);
+  if (!name.has_value()) {
+    call.fault("TypeError", "isolation must be Symbol or Str");
+    return std::nullopt;
+  }
+  const std::optional<RuntimeIsolationMode> isolation =
+      runtime_isolation_mode_from_name(*name);
+  if (!isolation.has_value()) {
+    call.fault("ArgumentError", "unsupported isolation mode");
+  }
+  return isolation;
+}
+
+SendStatus udp_type_send(NativeStdlibCall &call) {
+  if (call.selector == "bind") {
+    if (!call.require_arity(2) ||
+        !call.reject_unknown_keywords({"isolation"}) ||
+        !call.require_no_block()) {
+      return SendStatus::Faulted;
+    }
+    if (!call.args[0].is_string() || !call.args[1].is_integer()) {
+      return call.fault("TypeError", "udp.bind expects host and port");
+    }
+    const std::optional<std::string> host = call.text_of(call.args[0]);
+    if (!host.has_value() || call.args[1].as_integer() < 0 ||
+        call.args[1].as_integer() > 65535) {
+      return call.fault("ArgumentError", "invalid UDP endpoint");
+    }
+    const std::optional<RuntimeIsolationMode> isolation =
+        isolation_from_keywords(call);
+    if (!isolation.has_value()) {
+      return SendStatus::Faulted;
+    }
+    const RuntimeEndpoint endpoint{
+        *host, static_cast<std::uint16_t>(call.args[1].as_integer())};
+    return call.net_udp_bind(endpoint, *isolation, call.out)
+               ? SendStatus::Matched
+               : SendStatus::Faulted;
+  }
+  if (call.selector == "open") {
+    if (!call.args.empty() ||
+        !call.reject_unknown_keywords({"family", "isolation"}) ||
+        !call.require_no_block()) {
+      return SendStatus::Faulted;
+    }
+    std::string family = "inet";
+    if (const std::optional<Value> value = call.keyword("family")) {
+      const std::optional<std::string> name = call.text_of(*value);
+      if (!name.has_value()) {
+        return call.fault("TypeError", "family must be Symbol or Str");
+      }
+      family = *name;
+    }
+    const std::optional<RuntimeIsolationMode> isolation =
+        isolation_from_keywords(call);
+    if (!isolation.has_value()) {
+      return SendStatus::Faulted;
+    }
+    return call.net_udp_open(family, *isolation, call.out)
+               ? SendStatus::Matched
+               : SendStatus::Faulted;
+  }
+  return SendStatus::NotHandled;
+}
+
 SendStatus net_namespace_send(NativeStdlibCall &call) {
   if (call.selector != "tcp" && call.selector != "udp" &&
       call.selector != "Endpoint" && call.selector != "http") {
@@ -92,7 +163,8 @@ RuntimeNativeModuleDescriptor net_module_descriptor() {
            {"net.tcp", RuntimeNativeTypeKind::NetTcp},
            {"net.udp", RuntimeNativeTypeKind::NetUdp}},
           {{RuntimeNativeTypeKind::Net, net_namespace_send},
-           {RuntimeNativeTypeKind::NetEndpoint, endpoint_type_send}},
+           {RuntimeNativeTypeKind::NetEndpoint, endpoint_type_send},
+           {RuntimeNativeTypeKind::NetUdp, udp_type_send}},
           {{RuntimeNativeTypeKind::NetEndpoint, "new"}}};
 }
 

@@ -218,6 +218,13 @@ public:
                                    Value *out) = 0;
   virtual bool stdlib_fs_close_file(const void *frame, const Value &file,
                                     bool report_fault) = 0;
+  virtual bool stdlib_net_udp_bind(const void *frame,
+                                   const RuntimeEndpoint &endpoint,
+                                   RuntimeIsolationMode isolation,
+                                   Value *out) = 0;
+  virtual bool stdlib_net_udp_open(const void *frame, const std::string &family,
+                                   RuntimeIsolationMode isolation,
+                                   Value *out) = 0;
 
   // OS-backed cryptographic entropy. The VM owns capability/effect/replay
   // policy for this host resource; stdlib handlers only request byte counts.
@@ -467,6 +474,16 @@ struct NativeStdlibCall {
 
   bool fs_close_file(const Value &file, bool report_fault) const {
     return host.stdlib_fs_close_file(frame, file, report_fault);
+  }
+
+  bool net_udp_bind(const RuntimeEndpoint &endpoint,
+                    RuntimeIsolationMode isolation, Value *out) const {
+    return host.stdlib_net_udp_bind(frame, endpoint, isolation, out);
+  }
+
+  bool net_udp_open(const std::string &family, RuntimeIsolationMode isolation,
+                    Value *out) const {
+    return host.stdlib_net_udp_open(frame, family, isolation, out);
   }
 
   bool secure_random_bytes(std::size_t count, std::string *out) const {

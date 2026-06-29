@@ -251,6 +251,18 @@ struct RecordingHost : StdlibHost {
                             bool /*report_fault*/) override {
     return false;
   }
+  bool stdlib_net_udp_bind(const void * /*frame*/,
+                           const amber::runtime::RuntimeEndpoint & /*endpoint*/,
+                           amber::runtime::RuntimeIsolationMode /*isolation*/,
+                           Value * /*out*/) override {
+    return false;
+  }
+  bool stdlib_net_udp_open(const void * /*frame*/,
+                           const std::string & /*family*/,
+                           amber::runtime::RuntimeIsolationMode /*isolation*/,
+                           Value * /*out*/) override {
+    return false;
+  }
   bool stdlib_secure_random_bytes(const void * /*frame*/, std::size_t /*count*/,
                                   std::string * /*out*/) override {
     return false;

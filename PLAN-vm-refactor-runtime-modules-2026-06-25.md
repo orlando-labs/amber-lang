@@ -1313,6 +1313,31 @@ Slice record, 2026-06-29:
 - Verified conformance gate: elevated `make conformance`
   (`140 passed, 0 failed, 0 skipped for M11`).
 
+Slice record, 2026-06-29:
+
+- Promoted core UDP type selectors into the network descriptor:
+  `net.udp.open` and `net.udp.bind`.
+- Added narrow `StdlibHost` UDP open/bind facades so descriptor dispatch owns
+  family, endpoint, and isolation argument validation while the VM continues to
+  own network capability/effect checks, IO wait tracing, and OS-backed UDP
+  socket creation.
+- Removed the corresponding `RuntimeNativeTypeKind::NetUdp` branch from
+  `Vm::try_apply_native_stdlib_send`. TCP connect/listen and UDP socket
+  instance selectors remain in VM for later Phase 3 slices.
+- Added source-level VM coverage for descriptor-routed UDP validation paths
+  without opening sockets in the non-elevated `vm_tests` gate.
+- Verified compile smoke: standalone `runtime/stdlib_net.cpp`, standalone
+  `runtime/vm.cpp`, standalone `tests/stdlib_registry_tests.cpp`, standalone
+  `tests/amber_ext_tests.cpp`, and `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests build/amber_ext_tests
+  build/io_tests build/vm_net_http_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  `build/amber_ext_tests`, elevated `build/io_tests`, and elevated
+  `build/vm_net_http_tests` (`566 checks`).
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+
 ### Phase 4: Move errors behind descriptors
 
 - Add error descriptors to core module registration.
