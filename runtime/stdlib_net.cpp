@@ -129,6 +129,25 @@ SendStatus endpoint_instance_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus tcp_stream_instance_send(NativeStdlibCall &call) {
+  const auto stream =
+      std::dynamic_pointer_cast<RuntimeTcpStream>(call.receiver.as_io_value());
+  if (stream == nullptr) {
+    return SendStatus::NotHandled;
+  }
+  if (call.selector != "local_endpoint" && call.selector != "remote_endpoint") {
+    return SendStatus::NotHandled;
+  }
+  if (!call.require_arity(0) || !call.kw_args.empty() ||
+      !call.require_no_block()) {
+    return SendStatus::Faulted;
+  }
+  *call.out = endpoint_value(call.selector == "local_endpoint"
+                                 ? stream->local_endpoint()
+                                 : stream->remote_endpoint());
+  return SendStatus::Matched;
+}
+
 std::optional<RuntimeIsolationMode>
 isolation_from_keywords(NativeStdlibCall &call) {
   const std::optional<Value> value = call.keyword("isolation");
@@ -351,7 +370,9 @@ RuntimeNativeModuleDescriptor net_module_descriptor() {
            {RuntimeNativeTypeKind::NetTcp, tcp_type_send},
            {RuntimeNativeTypeKind::NetUdp, udp_type_send}},
           {{"net.Endpoint", RuntimeNativeTypeKind::NetEndpoint,
-            endpoint_instance_send}},
+            endpoint_instance_send},
+           {"net.TcpStream", RuntimeNativeTypeKind::NetTcp,
+            tcp_stream_instance_send}},
           {{RuntimeNativeTypeKind::NetEndpoint, "new"}}};
 }
 

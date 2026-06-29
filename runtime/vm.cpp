@@ -17650,15 +17650,6 @@ private:
       }
 
       if (tcp_stream != nullptr) {
-        if (selector == "local_endpoint" || selector == "remote_endpoint") {
-          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-            return SendStatus::Faulted;
-          }
-          *out = io_endpoint_value(selector == "local_endpoint"
-                                       ? tcp_stream->local_endpoint()
-                                       : tcp_stream->remote_endpoint());
-          return SendStatus::Matched;
-        }
         if (selector == "shutdown!" || selector == "close_read!" ||
             selector == "close_write!") {
           if ((selector == "shutdown!" && args.size() > 1U) ||
