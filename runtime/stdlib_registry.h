@@ -13,6 +13,7 @@
 // frame is type-erased to `const void *` (the host casts it back), so a stdlib
 // translation unit never has to see `Frame`, `Vm`, or their headers.
 
+#include "runtime/io.h"
 #include "runtime/vm.h"
 
 #include <cstddef>
@@ -210,6 +211,13 @@ public:
                                 const std::string &to) = 0;
   virtual bool stdlib_fs_copy(const void *frame, const std::string &from,
                               const std::string &to, std::size_t *count) = 0;
+  virtual bool stdlib_fs_open_file(const void *frame, const std::string &path,
+                                   RuntimeFileMode mode,
+                                   RuntimeFileOpenOptions options,
+                                   RuntimeIsolationMode isolation,
+                                   Value *out) = 0;
+  virtual bool stdlib_fs_close_file(const void *frame, const Value &file,
+                                    bool report_fault) = 0;
 
   // OS-backed cryptographic entropy. The VM owns capability/effect/replay
   // policy for this host resource; stdlib handlers only request byte counts.
@@ -449,6 +457,16 @@ struct NativeStdlibCall {
   bool fs_copy(const std::string &from, const std::string &to,
                std::size_t *count) const {
     return host.stdlib_fs_copy(frame, from, to, count);
+  }
+
+  bool fs_open_file(const std::string &path, RuntimeFileMode mode,
+                    RuntimeFileOpenOptions options,
+                    RuntimeIsolationMode isolation, Value *out) const {
+    return host.stdlib_fs_open_file(frame, path, mode, options, isolation, out);
+  }
+
+  bool fs_close_file(const Value &file, bool report_fault) const {
+    return host.stdlib_fs_close_file(frame, file, report_fault);
   }
 
   bool secure_random_bytes(std::size_t count, std::string *out) const {

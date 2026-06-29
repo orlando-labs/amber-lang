@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace amber::runtime {
 
@@ -281,6 +282,115 @@ SendStatus fs_move_send(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+std::optional<RuntimeIsolationMode>
+isolation_from_keywords(NativeStdlibCall &call) {
+  const std::optional<Value> value = call.keyword("isolation");
+  if (!value.has_value()) {
+    return RuntimeIsolationMode::Checked;
+  }
+  const std::optional<std::string> name = call.text_of(*value);
+  if (!name.has_value()) {
+    call.fault("TypeError", "isolation must be Symbol or Str");
+    return std::nullopt;
+  }
+  const std::optional<RuntimeIsolationMode> isolation =
+      runtime_isolation_mode_from_name(*name);
+  if (!isolation.has_value()) {
+    call.fault("ArgumentError", "unsupported isolation mode");
+  }
+  return isolation;
+}
+
+SendStatus fs_file_type_send(NativeStdlibCall &call) {
+  if (call.selector != "open") {
+    return SendStatus::NotHandled;
+  }
+  if ((call.args.size() != 1U && call.args.size() != 2U) ||
+      !call.reject_unknown_keywords({"create", "truncate", "append",
+                                     "exclusive", "permissions",
+                                     "isolation"})) {
+    return SendStatus::Faulted;
+  }
+  const std::shared_ptr<RuntimePath> path = path_from_value(call, call.args[0]);
+  if (path == nullptr) {
+    return SendStatus::Faulted;
+  }
+  RuntimeFileMode mode = RuntimeFileMode::Read;
+  if (call.args.size() == 2U) {
+    const std::optional<std::string> name = call.text_of(call.args[1]);
+    if (!name.has_value()) {
+      return call.fault("TypeError", "file mode must be Symbol or Str");
+    }
+    const std::optional<RuntimeFileMode> parsed =
+        runtime_file_mode_from_name(*name);
+    if (!parsed.has_value()) {
+      return call.fault("ArgumentError", "unsupported file mode");
+    }
+    mode = *parsed;
+  }
+  RuntimeFileOpenOptions options;
+  if (!call.bool_keyword("create", false, &options.create) ||
+      !call.bool_keyword("truncate", false, &options.truncate) ||
+      !call.bool_keyword("append", false, &options.append) ||
+      !call.bool_keyword("exclusive", false, &options.exclusive)) {
+    return SendStatus::Faulted;
+  }
+  if (const std::optional<Value> permissions = call.keyword("permissions")) {
+    if (!permissions->is_null()) {
+      if (!permissions->is_integer()) {
+        return call.fault("TypeError", "permissions must be Int or null");
+      }
+      if (permissions->as_integer() < 0 || permissions->as_integer() > 07777) {
+        return call.fault("ArgumentError", "permissions are out of range");
+      }
+      options.permissions =
+          static_cast<std::uint32_t>(permissions->as_integer());
+    }
+  }
+  const std::optional<RuntimeIsolationMode> isolation =
+      isolation_from_keywords(call);
+  if (!isolation.has_value()) {
+    return SendStatus::Faulted;
+  }
+  if ((mode == RuntimeFileMode::Read && options.truncate) ||
+      (mode == RuntimeFileMode::Append && options.truncate)) {
+    return call.fault("ArgumentError", mode == RuntimeFileMode::Read
+                                           ? "read mode cannot truncate"
+                                           : "append mode cannot truncate");
+  }
+  if (options.exclusive && !options.create) {
+    return call.fault("ArgumentError", "exclusive open requires create: true");
+  }
+  Value file_value = Value::null();
+  if (!call.fs_open_file(path->string(), mode, options, *isolation,
+                         &file_value)) {
+    return SendStatus::Faulted;
+  }
+  if (call.block.is_null()) {
+    *call.out = std::move(file_value);
+    return SendStatus::Matched;
+  }
+  if (!call.block.is_closure()) {
+    call.fs_close_file(file_value, false);
+    return call.fault("TypeError", "fs.File.open block must be closure");
+  }
+
+  StdlibBlockResult block =
+      call.call_block(call.block, std::vector<Value>{file_value});
+  if (block.status == StdlibBlockStatus::Returned) {
+    if (!call.fs_close_file(file_value, true)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = std::move(block.value);
+    return SendStatus::Matched;
+  }
+  call.fs_close_file(file_value, false);
+  if (block.status == StdlibBlockStatus::Raised) {
+    return call.raise(block.exception);
+  }
+  return SendStatus::Faulted;
+}
+
 SendStatus fs_namespace_send(NativeStdlibCall &call) {
   if (const SendStatus status = fs_metadata_send(call);
       status != SendStatus::NotHandled) {
@@ -329,7 +439,8 @@ RuntimeNativeModuleDescriptor fs_module_descriptor() {
            {"fs.Path", RuntimeNativeTypeKind::FsPath},
            {"fs.File", RuntimeNativeTypeKind::FsFile}},
           {{RuntimeNativeTypeKind::Fs, fs_namespace_send},
-           {RuntimeNativeTypeKind::FsPath, fs_path_type_send}},
+           {RuntimeNativeTypeKind::FsPath, fs_path_type_send},
+           {RuntimeNativeTypeKind::FsFile, fs_file_type_send}},
           {{RuntimeNativeTypeKind::FsPath, "new"}}};
 }
 

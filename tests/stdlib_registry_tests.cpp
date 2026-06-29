@@ -218,6 +218,17 @@ struct MockHost : StdlibHost {
                       std::size_t * /*count*/) override {
     return false;
   }
+  bool stdlib_fs_open_file(const void * /*frame*/, const std::string & /*path*/,
+                           amber::runtime::RuntimeFileMode /*mode*/,
+                           amber::runtime::RuntimeFileOpenOptions /*options*/,
+                           amber::runtime::RuntimeIsolationMode /*isolation*/,
+                           Value * /*out*/) override {
+    return false;
+  }
+  bool stdlib_fs_close_file(const void * /*frame*/, const Value & /*file*/,
+                            bool /*report_fault*/) override {
+    return false;
+  }
   bool stdlib_secure_random_bytes(const void * /*frame*/, std::size_t /*count*/,
                                   std::string * /*out*/) override {
     return false;

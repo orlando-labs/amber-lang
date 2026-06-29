@@ -1277,6 +1277,18 @@ public:
     return stdlib_fs_copy_file(*static_cast<const Frame *>(frame), from, to,
                                count);
   }
+  bool stdlib_fs_open_file(const void *frame, const std::string &path,
+                           RuntimeFileMode mode, RuntimeFileOpenOptions options,
+                           RuntimeIsolationMode isolation,
+                           Value *out) override {
+    return stdlib_fs_open_file(*static_cast<const Frame *>(frame), path, mode,
+                               options, isolation, out);
+  }
+  bool stdlib_fs_close_file(const void *frame, const Value &file,
+                            bool report_fault) override {
+    return stdlib_fs_close_file(*static_cast<const Frame *>(frame), file,
+                                report_fault);
+  }
   bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
                                   std::string *out) override {
     return stdlib_secure_random_bytes_from_host(
@@ -12330,6 +12342,104 @@ private:
     return set_fault_from_io_status(frame, status);
   }
 
+  bool stdlib_fs_open_file(const Frame &frame, const std::string &path,
+                           RuntimeFileMode mode,
+                           const RuntimeFileOpenOptions &options,
+                           RuntimeIsolationMode isolation, Value *out) {
+    if (out == nullptr) {
+      set_fault(frame, "TypeError", "fs file output is null");
+      return false;
+    }
+    const bool provider_active = replay_io_provider_active();
+    if ((mode == RuntimeFileMode::Read || mode == RuntimeFileMode::ReadWrite) &&
+        !check_io_policy(frame, "fs_read", "fs.read", path, !provider_active)) {
+      return false;
+    }
+    if ((mode == RuntimeFileMode::Write || mode == RuntimeFileMode::Append ||
+         mode == RuntimeFileMode::ReadWrite) &&
+        !check_io_policy(frame, "fs_write", "fs.write", path,
+                         !provider_active)) {
+      return false;
+    }
+    record_io_wait("file.open", path);
+    if (provider_active) {
+      std::string initial_bytes;
+      if (mode == RuntimeFileMode::Read || mode == RuntimeFileMode::ReadWrite) {
+        RuntimeIoProviderStatus status =
+            world_options_->io_provider->fs_read_bytes(path, std::nullopt);
+        if (!set_fault_from_provider_status(frame, status, "fs.File.open")) {
+          return false;
+        }
+        initial_bytes = std::move(status.bytes);
+      }
+      RuntimeMemoryFileCloseCallback close_callback;
+      if (mode == RuntimeFileMode::Write || mode == RuntimeFileMode::Append ||
+          mode == RuntimeFileMode::ReadWrite) {
+        const std::shared_ptr<RuntimeIoProvider> provider =
+            world_options_->io_provider;
+        const std::string provider_path = path;
+        const bool create = options.create;
+        const bool truncate = options.truncate;
+        const bool append = mode == RuntimeFileMode::Append;
+        close_callback = [provider, provider_path, create, truncate,
+                          append](const std::string &bytes) -> RuntimeIoStatus {
+          RuntimeIoProviderStatus status = provider->fs_write_bytes(
+              provider_path, bytes, create, truncate, append);
+          RuntimeIoStatus result;
+          if (!status.handled) {
+            result.error_name = "ReplayProviderError";
+            result.message = status.message.empty()
+                                 ? "recorded IO provider does not implement "
+                                   "fs.File.close"
+                                 : status.message;
+            return result;
+          }
+          if (!status.ok) {
+            result.error_name =
+                status.error_name.empty() ? "IOError" : status.error_name;
+            result.message = status.message.empty()
+                                 ? "recorded IO provider failed"
+                                 : status.message;
+            return result;
+          }
+          result.ok = true;
+          result.count = status.count;
+          return result;
+        };
+      }
+      *out = Value::io_value(std::make_shared<RuntimeMemoryFile>(
+          path, mode, std::move(initial_bytes), isolation,
+          std::move(close_callback)));
+      return true;
+    }
+
+    RuntimeFileOpenResult opened =
+        RuntimeFile::open(RuntimePath(path), mode, options, isolation);
+    if (!set_fault_from_io_status(frame, opened)) {
+      return false;
+    }
+    *out = Value::io_value(opened.file);
+    return true;
+  }
+
+  bool stdlib_fs_close_file(const Frame &frame, const Value &file,
+                            bool report_fault) {
+    std::shared_ptr<RuntimeIoResource> opened_resource;
+    if (report_fault) {
+      opened_resource = io_value_as<RuntimeIoResource>(frame, file, "fs.File");
+      if (opened_resource == nullptr) {
+        return false;
+      }
+    } else if (file.is_io_value()) {
+      opened_resource =
+          std::dynamic_pointer_cast<RuntimeIoResource>(file.as_io_value());
+    }
+    RuntimeIoStatus close_result = opened_resource == nullptr
+                                       ? RuntimeIoStatus{}
+                                       : opened_resource->close();
+    return report_fault ? set_fault_from_io_status(frame, close_result) : true;
+  }
+
   bool stdlib_secure_random_bytes_from_host(const Frame &frame,
                                             std::size_t count,
                                             std::string *out) {
@@ -16648,197 +16758,6 @@ private:
               frame, RuntimeNativeFunctionKind::Pp, args, block, kw_args, out);
         }
         return SendStatus::NotHandled;
-      }
-      if (kind == RuntimeNativeTypeKind::FsFile && selector == "open") {
-        if ((args.size() != 1U && args.size() != 2U) ||
-            !reject_unknown_keywords(frame, kw_args,
-                                     {"create", "truncate", "append",
-                                      "exclusive", "permissions",
-                                      "isolation"})) {
-          return SendStatus::Faulted;
-        }
-        const std::shared_ptr<RuntimePath> path =
-            io_path_from_value(frame, args[0]);
-        if (path == nullptr) {
-          return SendStatus::Faulted;
-        }
-        RuntimeFileMode mode = RuntimeFileMode::Read;
-        if (args.size() == 2U) {
-          const std::optional<std::string> name =
-              text_from_symbol_or_string(args[1]);
-          if (!name.has_value()) {
-            set_fault(frame, "TypeError", "file mode must be Symbol or Str");
-            return SendStatus::Faulted;
-          }
-          const std::optional<RuntimeFileMode> parsed =
-              runtime_file_mode_from_name(*name);
-          if (!parsed.has_value()) {
-            set_fault(frame, "ArgumentError", "unsupported file mode");
-            return SendStatus::Faulted;
-          }
-          mode = *parsed;
-        }
-        RuntimeFileOpenOptions options;
-        if (!bool_keyword("create", false, &options.create) ||
-            !bool_keyword("truncate", false, &options.truncate) ||
-            !bool_keyword("append", false, &options.append) ||
-            !bool_keyword("exclusive", false, &options.exclusive)) {
-          return SendStatus::Faulted;
-        }
-        if (const std::optional<Value> permissions =
-                keyword_arg_value(kw_args, "permissions")) {
-          if (!permissions->is_null()) {
-            if (!permissions->is_integer()) {
-              set_fault(frame, "TypeError", "permissions must be Int or null");
-              return SendStatus::Faulted;
-            }
-            if (permissions->as_integer() < 0 ||
-                permissions->as_integer() > 07777) {
-              set_fault(frame, "ArgumentError", "permissions are out of range");
-              return SendStatus::Faulted;
-            }
-            options.permissions =
-                static_cast<std::uint32_t>(permissions->as_integer());
-          }
-        }
-        const std::optional<RuntimeIsolationMode> isolation =
-            io_isolation_from_keywords(frame, kw_args);
-        if (!isolation.has_value()) {
-          return SendStatus::Faulted;
-        }
-        if ((mode == RuntimeFileMode::Read && options.truncate) ||
-            (mode == RuntimeFileMode::Append && options.truncate)) {
-          set_fault(frame, "ArgumentError",
-                    mode == RuntimeFileMode::Read
-                        ? "read mode cannot truncate"
-                        : "append mode cannot truncate");
-          return SendStatus::Faulted;
-        }
-        if (options.exclusive && !options.create) {
-          set_fault(frame, "ArgumentError",
-                    "exclusive open requires create: true");
-          return SendStatus::Faulted;
-        }
-        const bool provider_active = replay_io_provider_active();
-        if ((mode == RuntimeFileMode::Read ||
-             mode == RuntimeFileMode::ReadWrite) &&
-            !check_io_policy(frame, "fs_read", "fs.read", path->string(),
-                             !provider_active)) {
-          return SendStatus::Faulted;
-        }
-        if ((mode == RuntimeFileMode::Write ||
-             mode == RuntimeFileMode::Append ||
-             mode == RuntimeFileMode::ReadWrite) &&
-            !check_io_policy(frame, "fs_write", "fs.write", path->string(),
-                             !provider_active)) {
-          return SendStatus::Faulted;
-        }
-        record_io_wait("file.open", path->string());
-        Value file_value;
-        if (provider_active) {
-          std::string initial_bytes;
-          if (mode == RuntimeFileMode::Read ||
-              mode == RuntimeFileMode::ReadWrite) {
-            RuntimeIoProviderStatus status =
-                world_options_->io_provider->fs_read_bytes(path->string(),
-                                                           std::nullopt);
-            if (!set_fault_from_provider_status(frame, status,
-                                                "fs.File.open")) {
-              return SendStatus::Faulted;
-            }
-            initial_bytes = std::move(status.bytes);
-          }
-          RuntimeMemoryFileCloseCallback close_callback;
-          if (mode == RuntimeFileMode::Write ||
-              mode == RuntimeFileMode::Append ||
-              mode == RuntimeFileMode::ReadWrite) {
-            const std::shared_ptr<RuntimeIoProvider> provider =
-                world_options_->io_provider;
-            const std::string provider_path = path->string();
-            const bool create = options.create;
-            const bool truncate = options.truncate;
-            const bool append = mode == RuntimeFileMode::Append;
-            close_callback =
-                [provider, provider_path, create, truncate,
-                 append](const std::string &bytes) -> RuntimeIoStatus {
-              RuntimeIoProviderStatus status = provider->fs_write_bytes(
-                  provider_path, bytes, create, truncate, append);
-              RuntimeIoStatus result;
-              if (!status.handled) {
-                result.error_name = "ReplayProviderError";
-                result.message =
-                    status.message.empty()
-                        ? "recorded IO provider does not implement "
-                          "fs.File.close"
-                        : status.message;
-                return result;
-              }
-              if (!status.ok) {
-                result.error_name =
-                    status.error_name.empty() ? "IOError" : status.error_name;
-                result.message = status.message.empty()
-                                     ? "recorded IO provider failed"
-                                     : status.message;
-                return result;
-              }
-              result.ok = true;
-              result.count = status.count;
-              return result;
-            };
-          }
-          file_value = Value::io_value(std::make_shared<RuntimeMemoryFile>(
-              path->string(), mode, std::move(initial_bytes), *isolation,
-              std::move(close_callback)));
-        } else {
-          RuntimeFileOpenResult opened =
-              RuntimeFile::open(*path, mode, options, *isolation);
-          if (!set_fault_from_io_status(frame, opened)) {
-            return SendStatus::Faulted;
-          }
-          file_value = Value::io_value(opened.file);
-        }
-        if (block.is_null()) {
-          *out = std::move(file_value);
-          return SendStatus::Matched;
-        }
-        std::optional<NativeBlockInvoker> invoker =
-            make_scoped_native_block_invoker(frame, block, "fs.File.open");
-        if (!invoker.has_value()) {
-          if (const auto opened_resource =
-                  std::dynamic_pointer_cast<RuntimeIoResource>(
-                      file_value.as_io_value())) {
-            (void)opened_resource->close();
-          }
-          return SendStatus::Faulted;
-        }
-        try {
-          Value block_result = (*invoker)({file_value});
-          std::shared_ptr<RuntimeIoResource> opened_resource =
-              io_value_as<RuntimeIoResource>(frame, file_value, "fs.File");
-          RuntimeIoStatus close_result = opened_resource == nullptr
-                                             ? RuntimeIoStatus{}
-                                             : opened_resource->close();
-          if (!set_fault_from_io_status(frame, close_result)) {
-            return SendStatus::Faulted;
-          }
-          *out = std::move(block_result);
-        } catch (const NativeBlockUnwind &) {
-          if (const auto opened_resource =
-                  std::dynamic_pointer_cast<RuntimeIoResource>(
-                      file_value.as_io_value())) {
-            (void)opened_resource->close();
-          }
-          return SendStatus::Faulted;
-        } catch (const RuntimeTaskFailure &failure) {
-          if (const auto opened_resource =
-                  std::dynamic_pointer_cast<RuntimeIoResource>(
-                      file_value.as_io_value())) {
-            (void)opened_resource->close();
-          }
-          set_fault(frame, failure.error_name(), failure.message());
-          return SendStatus::Faulted;
-        }
-        return SendStatus::Matched;
       }
       if (kind == RuntimeNativeTypeKind::NetTcp) {
         if (selector != "connect" && selector != "listen") {
