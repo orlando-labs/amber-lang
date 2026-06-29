@@ -18045,13 +18045,6 @@ private:
           *out = io_bytes_value(std::move(bytes));
           return SendStatus::Matched;
         }
-        if (selector == "local_endpoint") {
-          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-            return SendStatus::Faulted;
-          }
-          *out = io_endpoint_value(udp->local_endpoint());
-          return SendStatus::Matched;
-        }
         if (selector == "set_option!" || selector == "get_option") {
           if ((selector == "set_option!" && !require_arity(2)) ||
               (selector == "get_option" && !require_arity(1)) ||
