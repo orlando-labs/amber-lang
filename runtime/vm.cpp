@@ -913,16 +913,27 @@ public:
                                        owned_type_registry_,
                                        &owned_error_registry_);
     }
-    if (dispatch_registry_ == &owned_dispatch_registry_) {
-      owned_dispatch_registry_.import_native_package_bindings(module_);
-      NativeExtRegistry::global().register_thunks(owned_dispatch_registry_);
-    }
-    if (type_registry_ == &owned_type_registry_) {
-      NativeExtRegistry::global().register_types(owned_type_registry_);
-    }
-    if (error_registry_ == nullptr) {
-      NativeExtRegistry::global().register_errors(owned_error_registry_);
+    if (dispatch_registry_ == &owned_dispatch_registry_ &&
+        type_registry_ == &owned_type_registry_ && error_registry_ == nullptr) {
+      RuntimeNativePackageDescriptor native_package =
+          runtime_native_package_descriptor_from_module(module_);
+      NativeExtRegistry::global().contribute_to(native_package);
+      register_runtime_native_package_descriptor(
+          owned_dispatch_registry_, owned_type_registry_, owned_error_registry_,
+          native_package);
       error_registry_ = &owned_error_registry_;
+    } else {
+      if (dispatch_registry_ == &owned_dispatch_registry_) {
+        owned_dispatch_registry_.import_native_package_bindings(module_);
+        NativeExtRegistry::global().register_thunks(owned_dispatch_registry_);
+      }
+      if (type_registry_ == &owned_type_registry_) {
+        NativeExtRegistry::global().register_types(owned_type_registry_);
+      }
+      if (error_registry_ == nullptr) {
+        NativeExtRegistry::global().register_errors(owned_error_registry_);
+        error_registry_ = &owned_error_registry_;
+      }
     }
   }
 

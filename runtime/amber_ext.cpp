@@ -15,6 +15,7 @@
 
 #include "runtime/io.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -331,41 +332,93 @@ namespace amber::runtime {
 // ---- process-global registration ---------------------------------------
 
 void NativeExtRegistry::register_thunk(const std::string &logical, void *fn) {
-  thunks_[logical] = fn;
+  const auto found = std::find_if(
+      descriptor_.thunks.begin(), descriptor_.thunks.end(),
+      [&](const RuntimeNativePackageThunkDescriptor &descriptor) {
+        return descriptor.logical == logical;
+      });
+  if (found != descriptor_.thunks.end()) {
+    found->fn = fn;
+    return;
+  }
+  descriptor_.thunks.push_back({logical, fn});
 }
 void NativeExtRegistry::register_type(NativeTypeDescriptor descriptor) {
-  tags_.register_type(std::move(descriptor));
+  const auto found = std::find_if(
+      descriptor_.types.begin(), descriptor_.types.end(),
+      [&](const NativeTypeDescriptor &registered) {
+        return registered.tag == descriptor.tag;
+      });
+  if (found != descriptor_.types.end()) {
+    *found = std::move(descriptor);
+    return;
+  }
+  descriptor_.types.push_back(std::move(descriptor));
 }
 void NativeExtRegistry::register_error(NativeExtErrorDescriptor descriptor) {
-  errors_.push_back(std::move(descriptor));
+  descriptor_.errors.push_back(std::move(descriptor));
+}
+void NativeExtRegistry::register_package(
+    RuntimeNativePackageDescriptor descriptor) {
+  for (const RuntimeNativePackageThunkDescriptor &thunk : descriptor.thunks) {
+    register_thunk(thunk.logical, thunk.fn);
+  }
+  for (NativeTypeDescriptor &type : descriptor.types) {
+    register_type(std::move(type));
+  }
+  for (RuntimeNativePackageCodeBindingDescriptor &binding :
+       descriptor.code_bindings) {
+    descriptor_.code_bindings.push_back(std::move(binding));
+  }
+  for (RuntimeNativePackageMethodBindingDescriptor &binding :
+       descriptor.method_bindings) {
+    descriptor_.method_bindings.push_back(std::move(binding));
+  }
+  for (RuntimeNativePackageErrorDescriptor &error : descriptor.errors) {
+    register_error(std::move(error));
+  }
+}
+void NativeExtRegistry::contribute_to(
+    RuntimeNativePackageDescriptor &descriptor) const {
+  descriptor.thunks.insert(descriptor.thunks.end(), descriptor_.thunks.begin(),
+                           descriptor_.thunks.end());
+  descriptor.types.insert(descriptor.types.end(), descriptor_.types.begin(),
+                          descriptor_.types.end());
+  descriptor.code_bindings.insert(descriptor.code_bindings.end(),
+                                  descriptor_.code_bindings.begin(),
+                                  descriptor_.code_bindings.end());
+  descriptor.method_bindings.insert(descriptor.method_bindings.end(),
+                                    descriptor_.method_bindings.begin(),
+                                    descriptor_.method_bindings.end());
+  descriptor.errors.insert(descriptor.errors.end(), descriptor_.errors.begin(),
+                           descriptor_.errors.end());
 }
 void NativeExtRegistry::register_thunks(
     RuntimeDispatchRegistry &dispatch) const {
-  for (const auto &[logical, fn] : thunks_) {
-    dispatch.register_native_package_thunk(logical, fn);
+  for (const RuntimeNativePackageThunkDescriptor &thunk : descriptor_.thunks) {
+    dispatch.register_native_package_thunk(thunk.logical, thunk.fn);
   }
 }
 void NativeExtRegistry::register_types(RuntimeTypeRegistry &types) const {
-  for (NativeTypeDescriptor descriptor : tags_.registered_types()) {
-    types.register_native_package_type(std::move(descriptor));
+  for (NativeTypeDescriptor type : descriptor_.types) {
+    types.register_native_package_type(std::move(type));
   }
 }
 void NativeExtRegistry::register_errors(RuntimeErrorRegistry &errors) const {
-  for (const NativeExtErrorDescriptor &descriptor : errors_) {
-    errors.register_error(descriptor.name,
-                          descriptor.parent.empty() ? "NativeError"
-                                                    : descriptor.parent,
-                          descriptor.default_message,
-                          descriptor.default_exit_code,
-                          descriptor.field_mask);
+  for (const RuntimeNativePackageErrorDescriptor &error : descriptor_.errors) {
+    errors.register_error(error.name,
+                          error.parent.empty() ? "NativeError" : error.parent,
+                          error.default_message, error.default_exit_code,
+                          error.field_mask);
   }
 }
 void NativeExtRegistry::register_runtime_contributions(
     RuntimeDispatchRegistry &dispatch, RuntimeTypeRegistry &types,
     RuntimeErrorRegistry &errors) const {
-  register_thunks(dispatch);
-  register_types(types);
-  register_errors(errors);
+  RuntimeNativePackageDescriptor descriptor;
+  contribute_to(descriptor);
+  register_runtime_native_package_descriptor(dispatch, types, errors,
+                                            descriptor);
 }
 NativeExtRegistry &NativeExtRegistry::global() {
   static NativeExtRegistry registry;

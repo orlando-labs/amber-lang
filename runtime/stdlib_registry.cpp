@@ -133,7 +133,8 @@ void *RuntimeDispatchRegistry::native_package_thunk(
 
 void RuntimeDispatchRegistry::register_native_package_code_binding(
     std::uint32_t code_id, bool method, std::string logical) {
-  native_package_code_bindings_[code_id] = {method, std::move(logical)};
+  native_package_code_bindings_[code_id] = {code_id, method,
+                                            std::move(logical)};
 }
 
 const RuntimeNativePackageCodeBindingDescriptor *
@@ -159,8 +160,25 @@ const std::string *RuntimeDispatchRegistry::native_package_method_binding(
 
 void RuntimeDispatchRegistry::import_native_package_bindings(
     const bytecode::BcModule &module) {
+  const RuntimeNativePackageDescriptor descriptor =
+      runtime_native_package_descriptor_from_module(module);
+  for (const RuntimeNativePackageCodeBindingDescriptor &binding :
+       descriptor.code_bindings) {
+    register_native_package_code_binding(binding.code_id, binding.method,
+                                         binding.logical);
+  }
+  for (const RuntimeNativePackageMethodBindingDescriptor &binding :
+       descriptor.method_bindings) {
+    register_native_package_method_binding(binding.tag, binding.selector,
+                                           binding.logical);
+  }
+}
+
+RuntimeNativePackageDescriptor
+runtime_native_package_descriptor_from_module(const bytecode::BcModule &module) {
   static const std::string kBindPrefix = "amber.native.bind:";
   static const std::string kMethodPrefix = "amber.native.method:";
+  RuntimeNativePackageDescriptor descriptor;
   for (const bytecode::AttrEntry &attr : module.attrs) {
     const std::string key = registry_string_or_empty(module, attr.key_str_id);
     if (key.compare(0, kBindPrefix.size(), kBindPrefix) == 0) {
@@ -173,8 +191,8 @@ void RuntimeDispatchRegistry::import_native_package_bindings(
       if (value.size() < 2U || value[1] != ':') {
         continue;
       }
-      register_native_package_code_binding(code_id, value[0] == 'M',
-                                           value.substr(2));
+      descriptor.code_bindings.push_back(
+          {code_id, value[0] == 'M', value.substr(2)});
       continue;
     }
     if (key.compare(0, kMethodPrefix.size(), kMethodPrefix) == 0) {
@@ -185,11 +203,12 @@ void RuntimeDispatchRegistry::import_native_package_bindings(
       if (separator == std::string::npos) {
         continue;
       }
-      register_native_package_method_binding(method_key.substr(0, separator),
-                                             method_key.substr(separator + 1U),
-                                             logical);
+      descriptor.method_bindings.push_back(
+          {method_key.substr(0, separator),
+           method_key.substr(separator + 1U), logical});
     }
   }
+  return descriptor;
 }
 
 void RuntimeDispatchRegistry::import_native_handlers(
@@ -436,6 +455,37 @@ void register_runtime_error_descriptor(
     const RuntimeNativeModuleDescriptor &descriptor) {
   for (const RuntimeNativeModuleErrorDescriptor &error : descriptor.errors) {
     (void)errors.register_error(error.name, error.parent,
+                                error.default_message,
+                                error.default_exit_code, error.field_mask);
+  }
+}
+
+void register_runtime_native_package_descriptor(
+    RuntimeDispatchRegistry &dispatch, RuntimeTypeRegistry &types,
+    RuntimeErrorRegistry &errors,
+    const RuntimeNativePackageDescriptor &descriptor) {
+  for (const RuntimeNativePackageThunkDescriptor &thunk : descriptor.thunks) {
+    dispatch.register_native_package_thunk(thunk.logical, thunk.fn);
+  }
+  for (const RuntimeNativePackageCodeBindingDescriptor &binding :
+       descriptor.code_bindings) {
+    dispatch.register_native_package_code_binding(binding.code_id,
+                                                  binding.method,
+                                                  binding.logical);
+  }
+  for (const RuntimeNativePackageMethodBindingDescriptor &binding :
+       descriptor.method_bindings) {
+    dispatch.register_native_package_method_binding(binding.tag,
+                                                    binding.selector,
+                                                    binding.logical);
+  }
+  for (NativeTypeDescriptor type : descriptor.types) {
+    types.register_native_package_type(std::move(type));
+  }
+  for (const RuntimeNativePackageErrorDescriptor &error : descriptor.errors) {
+    (void)errors.register_error(error.name,
+                                error.parent.empty() ? "NativeError"
+                                                     : error.parent,
                                 error.default_message,
                                 error.default_exit_code, error.field_mask);
   }

@@ -28,6 +28,7 @@ using amber::runtime::RuntimeBytes;
 using amber::runtime::RuntimeDispatchRegistry;
 using amber::runtime::RuntimeErrorRegistry;
 using amber::runtime::RuntimeForeignHandle;
+using amber::runtime::RuntimeNativePackageDescriptor;
 using amber::runtime::RuntimeTypeRegistry;
 using amber::runtime::SendStatus;
 using amber::runtime::StdlibHost;
@@ -605,20 +606,24 @@ void test_native_extension_runtime_contributions() {
   using Ownership = RuntimeForeignHandle::Ownership;
 
   NativeExtRegistry extension_registry;
+  RuntimeNativePackageDescriptor package;
   int marker = 0;
-  extension_registry.register_thunk("pkg.fn", &marker);
+  package.thunks.push_back({"pkg.fn", &marker});
+  package.code_bindings.push_back({7, false, "pkg.fn"});
+  package.method_bindings.push_back({"pkg.Handle", "bump!", "pkg.fn"});
 
   NativeTypeDescriptor owned;
   owned.tag = "pkg.Handle";
   owned.ownership = Ownership::Owned;
   owned.owned_destructor = &owned_destructor;
-  extension_registry.register_type(owned);
+  package.types.push_back(owned);
 
   NativeExtErrorDescriptor error;
   error.name = "Pkg.NativeLeafError";
   error.default_message = "package failed";
   error.default_exit_code = 23;
-  extension_registry.register_error(error);
+  package.errors.push_back(error);
+  extension_registry.register_package(std::move(package));
 
   RuntimeDispatchRegistry dispatch;
   RuntimeTypeRegistry types;
@@ -627,6 +632,14 @@ void test_native_extension_runtime_contributions() {
 
   expect(dispatch.native_package_thunk("pkg.fn") == &marker,
          "native extension contributor imports thunks");
+  const auto *code_binding = dispatch.native_package_code_binding(7);
+  expect(code_binding != nullptr && !code_binding->method &&
+             code_binding->logical == "pkg.fn",
+         "native extension contributor imports code bindings");
+  const std::string *method_binding =
+      dispatch.native_package_method_binding("pkg.Handle", "bump!");
+  expect(method_binding != nullptr && *method_binding == "pkg.fn",
+         "native extension contributor imports method bindings");
 
   const NativeTypeDescriptor *lookup =
       types.native_package_tags().lookup("pkg.Handle");

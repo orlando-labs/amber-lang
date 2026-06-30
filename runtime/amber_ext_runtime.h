@@ -16,18 +16,11 @@
 
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace amber::runtime {
 
-struct NativeExtErrorDescriptor {
-  std::string name;
-  std::string parent;
-  std::string default_message;
-  std::int64_t default_exit_code = -1;
-  std::uint32_t field_mask = 0;
-};
+using NativeExtErrorDescriptor = RuntimeNativePackageErrorDescriptor;
 
 // The native binary's logical-name -> thunk table, foreign-handle tag table,
 // and package error descriptors. Populated once at process startup by
@@ -45,6 +38,8 @@ public:
   void register_thunk(const std::string &logical, void *fn);
   void register_type(NativeTypeDescriptor descriptor);
   void register_error(NativeExtErrorDescriptor descriptor);
+  void register_package(RuntimeNativePackageDescriptor descriptor);
+  void contribute_to(RuntimeNativePackageDescriptor &descriptor) const;
 
   void register_thunks(RuntimeDispatchRegistry &dispatch) const;
   void register_types(RuntimeTypeRegistry &types) const;
@@ -58,9 +53,7 @@ public:
   static NativeExtRegistry &global();
 
 private:
-  std::unordered_map<std::string, void *> thunks_;
-  NativeTagRegistry tags_;
-  std::vector<NativeExtErrorDescriptor> errors_;
+  RuntimeNativePackageDescriptor descriptor_;
 };
 
 // Outcome of bridging a native-extension call through the C ABI. On `!ok` a

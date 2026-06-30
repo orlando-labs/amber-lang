@@ -5782,9 +5782,11 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
 
   // Native-extension registration table (native-packages 5c-ii). The build
   // manifest names the logical->symbol bindings, foreign-handle types, and
-  // package errors; emit a startup function that fills the process-global
-  // NativeExtRegistry. RuntimeWorld imports that table into its active
-  // registries before execution. Bytecode builds never run this, so a
+  // package errors; emit a startup function that builds a
+  // RuntimeNativePackageDescriptor and stages it in the process-global
+  // NativeExtRegistry. RuntimeWorld merges that startup contribution with the
+  // module's bytecode binding attrs before registering the package descriptor
+  // into its active registries. Bytecode builds never run this, so a
   // `native def` there falls back to its Amber body. Symbols are declared with
   // the free-thunk prototype and reinterpret_cast at registration: C linkage
   // matches by name, and the VM casts back to the method/destructor shape it
@@ -5840,14 +5842,14 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
       }
     }
     out << "\nstatic void amber_register_native_extensions() {\n";
-    out << "  auto &registry = amber::runtime::NativeExtRegistry::global();\n";
+    out << "  amber::runtime::RuntimeNativePackageDescriptor package;\n";
     for (const amber::pkg::PackageNativeExtension &extension :
          native_extensions) {
       std::unordered_map<std::string, std::string> logical_to_symbol;
       for (const amber::pkg::PackageNativeSymbol &symbol : extension.symbols) {
         logical_to_symbol[symbol.logical] = symbol.symbol;
-        out << "  registry.register_thunk(\"" << cpp_string(symbol.logical)
-            << "\", reinterpret_cast<void *>(&" << symbol.symbol << "));\n";
+        out << "  package.thunks.push_back({\"" << cpp_string(symbol.logical)
+            << "\", reinterpret_cast<void *>(&" << symbol.symbol << ")});\n";
       }
       for (const amber::pkg::PackageNativeType &type : extension.types) {
         out << "  {\n";
@@ -5877,12 +5879,13 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
           out << "    descriptor.ownership = amber::runtime::"
                  "RuntimeForeignHandle::Ownership::Borrowed;\n";
         }
-        out << "    registry.register_type(descriptor);\n";
+        out << "    package.types.push_back(std::move(descriptor));\n";
         out << "  }\n";
       }
       for (const amber::pkg::PackageNativeError &error : extension.errors) {
         out << "  {\n";
-        out << "    amber::runtime::NativeExtErrorDescriptor descriptor;\n";
+        out << "    amber::runtime::RuntimeNativePackageErrorDescriptor "
+               "descriptor;\n";
         out << "    descriptor.name = \"" << cpp_string(error.name) << "\";\n";
         out << "    descriptor.parent = \""
             << cpp_string(error.parent.empty() ? "NativeError" : error.parent)
@@ -5897,10 +5900,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
           out << "    descriptor.default_exit_code = " << default_exit_code
               << ";\n";
         }
-        out << "    registry.register_error(descriptor);\n";
+        out << "    package.errors.push_back(std::move(descriptor));\n";
         out << "  }\n";
       }
     }
+    out << "  amber::runtime::NativeExtRegistry::global().register_package("
+           "std::move(package));\n";
     out << "}\n\n";
   }
 

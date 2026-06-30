@@ -19,6 +19,7 @@
 using amber::runtime::NativeRegistry;
 using amber::runtime::NativeStdlibCall;
 using amber::runtime::NativeStdlibHandler;
+using amber::runtime::NativeTypeDescriptor;
 using amber::runtime::RuntimeBindingKind;
 using amber::runtime::RuntimeBindingRef;
 using amber::runtime::RuntimeDispatchRegistry;
@@ -27,6 +28,7 @@ using amber::runtime::RuntimeIoValueHandlerDescriptor;
 using amber::runtime::RuntimeModuleRegistry;
 using amber::runtime::RuntimeNativeFunctionKind;
 using amber::runtime::RuntimeNativePackageCodeBindingDescriptor;
+using amber::runtime::RuntimeNativePackageDescriptor;
 using amber::runtime::RuntimeNativeTypeKind;
 using amber::runtime::RuntimeTypeCallDescriptor;
 using amber::runtime::RuntimeTypeRegistry;
@@ -878,6 +880,20 @@ void test_dispatch_registry_imports_native_package_bindings() {
       {0, 999},
   };
 
+  const RuntimeNativePackageDescriptor descriptor =
+      amber::runtime::runtime_native_package_descriptor_from_module(module);
+  expect(descriptor.code_bindings.size() == 2U &&
+             descriptor.method_bindings.size() == 1U,
+         "native package module attrs decode into descriptor entries");
+  expect(descriptor.code_bindings[0].code_id == 7 &&
+             !descriptor.code_bindings[0].method &&
+             descriptor.code_bindings[0].logical == "pkg.free",
+         "native package descriptor preserves free binding attrs");
+  expect(descriptor.method_bindings[0].tag == "pkg.Handle" &&
+             descriptor.method_bindings[0].selector == "bump!" &&
+             descriptor.method_bindings[0].logical == "pkg.bump",
+         "native package descriptor preserves handle method attrs");
+
   RuntimeDispatchRegistry dispatch;
   dispatch.import_native_package_bindings(module);
 
@@ -904,6 +920,54 @@ void test_dispatch_registry_imports_native_package_bindings() {
                  nullptr,
          "native package binding importer preserves malformed and missing "
          "entries as misses");
+}
+
+void test_runtime_native_package_descriptor() {
+  RuntimeNativePackageDescriptor descriptor;
+  int marker = 0;
+  descriptor.thunks.push_back({"pkg.fn", &marker});
+  descriptor.code_bindings.push_back({7, false, "pkg.free"});
+  descriptor.method_bindings.push_back({"pkg.Handle", "bump!", "pkg.bump"});
+
+  NativeTypeDescriptor handle;
+  handle.tag = "pkg.Handle";
+  descriptor.types.push_back(handle);
+
+  descriptor.errors.push_back(
+      {"Pkg.NativeLeafError", "", "package failed", 23, 0});
+
+  RuntimeDispatchRegistry dispatch;
+  RuntimeTypeRegistry types;
+  RuntimeErrorRegistry errors;
+  amber::runtime::register_runtime_native_package_descriptor(dispatch, types,
+                                                             errors,
+                                                             descriptor);
+
+  expect(dispatch.native_package_thunk("pkg.fn") == &marker,
+         "native package descriptor registers thunks");
+  const RuntimeNativePackageCodeBindingDescriptor *code_binding =
+      dispatch.native_package_code_binding(7);
+  expect(code_binding != nullptr && !code_binding->method &&
+             code_binding->logical == "pkg.free",
+         "native package descriptor registers code bindings");
+  const std::string *method_binding =
+      dispatch.native_package_method_binding("pkg.Handle", "bump!");
+  expect(method_binding != nullptr && *method_binding == "pkg.bump",
+         "native package descriptor registers handle method bindings");
+  expect(types.native_package_tags().lookup("pkg.Handle") != nullptr,
+         "native package descriptor registers foreign-handle types");
+
+  const auto native_error = errors.error_id("NativeError");
+  const auto package_error = errors.error_id("Pkg.NativeLeafError");
+  expect(native_error.has_value() && package_error.has_value() &&
+             errors.error_is_a(*package_error, *native_error),
+         "native package descriptor registers default-parent errors");
+  expect(errors.error_default_exit_code(*package_error).has_value() &&
+             *errors.error_default_exit_code(*package_error) == 23,
+         "native package descriptor registers error exit codes");
+  expect(std::string(errors.error_default_message(*package_error)) ==
+             "package failed",
+         "native package descriptor registers error messages");
 }
 
 void test_math_compute(const NativeRegistry &registry) {
@@ -1127,6 +1191,7 @@ int main() {
   test_task_channel_descriptor_instance_lifecycle();
   test_type_call_registry();
   test_dispatch_registry_imports_native_package_bindings();
+  test_runtime_native_package_descriptor();
   test_math_compute(registry);
   test_math_not_handled(registry);
   test_math_faults(registry);

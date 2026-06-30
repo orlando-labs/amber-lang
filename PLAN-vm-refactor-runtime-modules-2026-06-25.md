@@ -1992,13 +1992,14 @@ Slice record, 2026-06-30:
 
 ### Phase 5: Unify third-party native packages
 
-Status: package-owned native errors, foreign-handle type descriptors, logical
-thunks, and module-native binding metadata now import into the same
-world-scoped registries used by first-party runtime modules. Generated native
-package startup still populates `NativeExtRegistry` first; the remaining Phase
-5 scope is collapsing that startup contributor into an explicit module
-descriptor shape for constructors, methods, ownership rules, and package
-errors.
+Status: finalized on 2026-06-30. Third-party native packages now enter the
+world-scoped dispatch/type/error registries through
+`RuntimeNativePackageDescriptor`: bytecode attrs contribute constructor and
+method binding metadata, generated native startup contributes thunks,
+foreign-handle ownership descriptors, and package-owned errors, and
+`RuntimeWorld` registers the merged descriptor once. `NativeExtRegistry`
+remains only as the process-global startup staging point needed before a
+runtime world exists; remaining VM reduction belongs to Phase 6.
 
 - Extend generated native package registration so it contributes a module
   descriptor, not only `NativeExtRegistry` thunks and `NativeTagRegistry` types.
@@ -2150,6 +2151,44 @@ Slice record, 2026-06-30:
   native --out-dir build/native_ext_demo_phase5_contrib/out --cache-dir
   build/native_ext_demo_phase5_contrib/cache`, native output `42`, and bytecode
   fallback output `210`.
+
+Slice record, 2026-06-30:
+
+- Introduced `RuntimeNativePackageDescriptor` as the Phase 5 package descriptor
+  for native thunks, foreign-handle type/ownership descriptors, code-object
+  constructor/method bindings, handle method bindings, and package-owned
+  errors.
+- Added `runtime_native_package_descriptor_from_module(...)` so bytecode
+  `amber.native.bind:*` and `amber.native.method:*` attrs decode into the same
+  descriptor shape instead of being a dispatch-registry-only side channel.
+- Changed generated native startup to build a `RuntimeNativePackageDescriptor`
+  and stage it through `NativeExtRegistry::register_package(...)`; the startup
+  registry now contributes descriptors rather than being queried directly.
+- Changed `RuntimeWorld` to merge the module-attr descriptor with the generated
+  startup contribution and register that package descriptor once into the
+  dispatch, type, and error registries. Direct VM fallback uses the same path
+  when it owns all three registries, while keeping granular imports for partial
+  injected-registry tests/embedders.
+- Extended registry and amber_ext coverage for descriptor decoding and
+  descriptor registration across thunks, code bindings, handle method bindings,
+  foreign-handle types, and default-parent package errors.
+- Verified focused gates: `git diff --check`, `make -B
+  build/stdlib_registry_tests build/amber_ext_tests build/vm_tests
+  build/amberc`, binaries `build/stdlib_registry_tests`,
+  `build/amber_ext_tests`, and `build/vm_tests`, native def fixture build
+  `build/amberc build tests/fixtures/native_ext_demo/amber.build.json --target
+  native --out-dir build/native_ext_demo_phase5_final/out --cache-dir
+  build/native_ext_demo_phase5_final/cache`, native output `42`, bytecode
+  fallback output `210`, native-class fixture build
+  `build/amberc build tests/fixtures/native_class_demo/amber.build.json
+  --target native --out-dir build/native_class_demo_phase5_final/out
+  --cache-dir build/native_class_demo_phase5_final/cache`, native output `24`,
+  and bytecode fallback still failing closed with `NativeRequiredError`.
+- Verified broad gates: elevated `make test` (`ambertest: 139 passed, 0
+  failed`), elevated `make conformance` (`140 passed, 0 failed, 0 skipped for
+  M11`), and `make backend-equivalence` (`80 passed, 0 failed`). Non-elevated
+  `make test` / `make conformance` attempts failed only because sandboxed
+  loopback `listen` returned `PermissionDeniedError`.
 
 ### Phase 6: Remove legacy coupling
 
