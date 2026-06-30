@@ -2061,6 +2061,30 @@ Slice record, 2026-06-30:
   --cache-dir build/native_class_demo_phase5_types/cache`, native output `24`,
   and bytecode fallback still failing closed with `NativeRequiredError`.
 
+Slice record, 2026-06-30:
+
+- Imported native package logical thunk bindings from `NativeExtRegistry` into
+  `RuntimeDispatchRegistry`, giving each runtime world/direct VM fallback an
+  active dispatch-registry view of package thunks.
+- Switched native class constructor dispatch, native def/method dispatch, and
+  foreign-handle method lookup to use
+  `dispatch_registry().native_package_thunk(...)` instead of direct
+  `NativeExtRegistry::global().lookup(...)` calls in the VM.
+- Added amber_ext registry coverage proving thunk bindings import into
+  `RuntimeDispatchRegistry` and preserve missing-thunk misses.
+- Verified focused gates: `git diff --check`, `make -B build/amber_ext_tests
+  build/vm_tests build/amberc`, binaries `build/amber_ext_tests` and
+  `build/vm_tests`, native def fixture build
+  `build/amberc build tests/fixtures/native_ext_demo/amber.build.json --target
+  native --out-dir build/native_ext_demo_phase5_dispatch/out --cache-dir
+  build/native_ext_demo_phase5_dispatch/cache`, native output `42`, bytecode
+  fallback output `210`, native-class fixture build
+  `build/amberc build tests/fixtures/native_class_demo/amber.build.json
+  --target native --out-dir build/native_class_demo_phase5_dispatch/out
+  --cache-dir build/native_class_demo_phase5_dispatch/cache`, native output
+  `24`, and native-class bytecode fallback still failing closed with
+  `NativeRequiredError`.
+
 ### Phase 6: Remove legacy coupling
 
 - Retire module-specific `RuntimeNativeTypeKind` enum values once all callers use

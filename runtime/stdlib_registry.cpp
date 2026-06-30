@@ -91,6 +91,17 @@ RuntimeDispatchRegistry::io_value_handler(const std::string &type_name) const {
   return it->second;
 }
 
+void RuntimeDispatchRegistry::register_native_package_thunk(
+    std::string logical, void *fn) {
+  native_package_thunks_[std::move(logical)] = fn;
+}
+
+void *RuntimeDispatchRegistry::native_package_thunk(
+    const std::string &logical) const {
+  const auto it = native_package_thunks_.find(logical);
+  return it == native_package_thunks_.end() ? nullptr : it->second;
+}
+
 void RuntimeDispatchRegistry::import_native_handlers(
     const NativeRegistry &registry) {
   for (const auto &[kind, handler] : registry.registered_handlers()) {

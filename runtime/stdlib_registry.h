@@ -772,6 +772,9 @@ public:
   std::optional<RuntimeIoValueHandlerDescriptor>
   io_value_handler(const std::string &type_name) const;
 
+  void register_native_package_thunk(std::string logical, void *fn);
+  void *native_package_thunk(const std::string &logical) const;
+
   void import_native_handlers(const NativeRegistry &registry);
 
 private:
@@ -784,6 +787,7 @@ private:
       native_handlers_;
   std::unordered_map<std::string, RuntimeIoValueHandlerDescriptor>
       io_value_handlers_;
+  std::unordered_map<std::string, void *> native_package_thunks_;
 };
 
 class RuntimeErrorRegistry {

@@ -913,6 +913,9 @@ public:
                                        owned_type_registry_,
                                        &owned_error_registry_);
     }
+    if (dispatch_registry_ == &owned_dispatch_registry_) {
+      NativeExtRegistry::global().register_thunks(owned_dispatch_registry_);
+    }
     if (type_registry_ == &owned_type_registry_) {
       NativeExtRegistry::global().register_types(owned_type_registry_);
     }
@@ -9876,7 +9879,7 @@ private:
     if (found == native_method_bindings_.end()) {
       return nullptr;
     }
-    return NativeExtRegistry::global().lookup(found->second);
+    return dispatch_registry().native_package_thunk(found->second);
   }
 
   // Construction of a `native class`: when the resolved `init` is native-bound
@@ -9893,8 +9896,7 @@ private:
     if (binding == nullptr) {
       return false;
     }
-    NativeExtRegistry &registry = NativeExtRegistry::global();
-    void *fn = registry.lookup(binding->second);
+    void *fn = dispatch_registry().native_package_thunk(binding->second);
     if (fn == nullptr) {
       return false; // bytecode build: a native-only ctor falls through and the
                     // synthesized NativeRequiredError body runs.
@@ -9964,8 +9966,7 @@ private:
     if (binding == nullptr) {
       return false;
     }
-    NativeExtRegistry &registry = NativeExtRegistry::global();
-    void *fn = registry.lookup(binding->second);
+    void *fn = dispatch_registry().native_package_thunk(binding->second);
     if (fn == nullptr) {
       return false; // bytecode build: fall back to the Amber body.
     }

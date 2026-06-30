@@ -339,6 +339,12 @@ void NativeExtRegistry::register_type(NativeTypeDescriptor descriptor) {
 void NativeExtRegistry::register_error(NativeExtErrorDescriptor descriptor) {
   errors_.push_back(std::move(descriptor));
 }
+void NativeExtRegistry::register_thunks(
+    RuntimeDispatchRegistry &dispatch) const {
+  for (const auto &[logical, fn] : thunks_) {
+    dispatch.register_native_package_thunk(logical, fn);
+  }
+}
 void NativeExtRegistry::register_types(RuntimeTypeRegistry &types) const {
   for (NativeTypeDescriptor descriptor : tags_.registered_types()) {
     types.register_native_package_type(std::move(descriptor));

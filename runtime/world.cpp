@@ -234,6 +234,7 @@ struct RuntimeWorld::Impl {
     register_legacy_native_type_calls(type_registry);
     register_builtin_runtime_modules(module_registry, dispatch_registry,
                                      type_registry, &error_registry);
+    NativeExtRegistry::global().register_thunks(dispatch_registry);
     NativeExtRegistry::global().register_types(type_registry);
     NativeExtRegistry::global().register_errors(error_registry);
     capabilities = capability::resolve_capabilities(module->capabilities,

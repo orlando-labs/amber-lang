@@ -24,6 +24,7 @@ using amber::runtime::NativeTagRegistry;
 using amber::runtime::NativeTypeDescriptor;
 using amber::runtime::NativeExtRegistry;
 using amber::runtime::RuntimeBytes;
+using amber::runtime::RuntimeDispatchRegistry;
 using amber::runtime::RuntimeForeignHandle;
 using amber::runtime::RuntimeTypeRegistry;
 using amber::runtime::SendStatus;
@@ -584,6 +585,20 @@ void test_native_extension_type_import() {
          "imported runtime type tags preserve unknown-tag misses");
 }
 
+void test_native_extension_thunk_import() {
+  NativeExtRegistry extension_registry;
+  int marker = 0;
+  extension_registry.register_thunk("pkg.fn", &marker);
+
+  RuntimeDispatchRegistry dispatch;
+  extension_registry.register_thunks(dispatch);
+
+  expect(dispatch.native_package_thunk("pkg.fn") == &marker,
+         "native extension thunks import into RuntimeDispatchRegistry");
+  expect(dispatch.native_package_thunk("pkg.missing") == nullptr,
+         "imported native extension thunk map preserves misses");
+}
+
 } // namespace
 
 int main() {
@@ -593,6 +608,7 @@ int main() {
   test_amber_ext_make_handle_unknown_tag();
   test_amber_ext_fault_and_version();
   test_native_extension_type_import();
+  test_native_extension_thunk_import();
   std::cout << "amber_ext_tests: ok\n";
   return 0;
 }

@@ -46,6 +46,7 @@ public:
   void register_type(NativeTypeDescriptor descriptor);
   void register_error(NativeExtErrorDescriptor descriptor);
 
+  void register_thunks(RuntimeDispatchRegistry &dispatch) const;
   void register_types(RuntimeTypeRegistry &types) const;
   void register_errors(RuntimeErrorRegistry &errors) const;
 
