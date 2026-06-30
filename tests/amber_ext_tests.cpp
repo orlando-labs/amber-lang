@@ -171,6 +171,10 @@ struct RecordingHost : StdlibHost {
                     std::vector<Value> /*args*/) override {
     return {};
   }
+  bool stdlib_block_suspension_in_property_arm(
+      const void * /*frame*/, const std::string & /*context*/) override {
+    return false;
+  }
   void stdlib_throw_json_stop(const void * /*frame*/,
                               std::optional<Value> /*value*/) override {}
   bool
@@ -292,6 +296,14 @@ struct RecordingHost : StdlibHost {
                             bool /*report_fault*/) override {
     return false;
   }
+  SendStatus stdlib_io_value_runtime_send(
+      const void * /*frame*/, const Value & /*receiver*/,
+      const std::string & /*selector*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
   SendStatus stdlib_net_http_construct_client(
       const void * /*frame*/, const std::vector<Value> & /*args*/,
       const Value & /*block*/,
@@ -358,6 +370,14 @@ struct RecordingHost : StdlibHost {
   SendStatus stdlib_net_http_server_response_type_send(
       const void * /*frame*/, const std::string & /*selector*/,
       const std::vector<Value> & /*args*/, const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_task_runtime_send(
+      const void * /*frame*/, const Value & /*receiver*/,
+      const std::string & /*selector*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
       const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
       Value * /*out*/) override {
     return SendStatus::NotHandled;

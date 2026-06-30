@@ -478,7 +478,7 @@ SendStatus io_pipe_endpoint_instance_send(NativeStdlibCall &call) {
   }
   if (call.selector != "pipe" && call.selector != "closed?" &&
       call.selector != "close!") {
-    return SendStatus::NotHandled;
+    return call.io_value_runtime_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {
@@ -1048,7 +1048,8 @@ RuntimeNativeModuleDescriptor io_module_descriptor() {
             io_pipe_endpoint_instance_send}},
           {{RuntimeNativeTypeKind::Bytes, "new"},
            {RuntimeNativeTypeKind::ByteBuffer, "new"},
-           {RuntimeNativeTypeKind::IoPipe, "__call__"}}};
+           {RuntimeNativeTypeKind::IoPipe, "__call__"}},
+          {}};
 }
 
 } // namespace

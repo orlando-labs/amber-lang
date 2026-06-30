@@ -375,7 +375,9 @@ RuntimeNativeModuleDescriptor codecs_module_descriptor() {
            {RuntimeNativeTypeKind::Base64Url, &codec_dispatch},
            {RuntimeNativeTypeKind::Hex, &codec_dispatch}},
           {},
-          {}};
+          {},
+          {{"CodecError", "Exception"},
+           {"CodecDecodeError", "CodecError"}}};
 }
 
 } // namespace
@@ -386,11 +388,15 @@ void register_codecs(NativeRegistry &registry) {
 
 void register_codecs_runtime_module(RuntimeModuleRegistry &modules,
                                     RuntimeDispatchRegistry &dispatch,
-                                    RuntimeTypeRegistry &types) {
+                                    RuntimeTypeRegistry &types,
+                                    RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor = codecs_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime

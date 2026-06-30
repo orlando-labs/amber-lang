@@ -66,6 +66,7 @@ RuntimeNativeModuleDescriptor digest_module_descriptor() {
   return {{{"Digest", RuntimeNativeTypeKind::Digest}},
           {{RuntimeNativeTypeKind::Digest, &digest_dispatch}},
           {},
+          {},
           {}};
 }
 

@@ -8,5 +8,18 @@ export main
 native def doubled(n as Int) -> Int from "demo.doubled":
   n * 10
 
+# The Amber body keeps bytecode fallback portable. A native build calls the C
+# thunk, which raises Demo.NativeLeafError through amber_fault.
+native def fail_leaf() -> Int from "demo.fail_leaf":
+  1
+
 def main():
-  doubled(21)
+  exact = try:
+    fail_leaf()
+  rescue Demo.NativeLeafError |e|:
+    1
+  parent = try:
+    fail_leaf()
+  rescue Demo.NativeError |e|:
+    1
+  doubled(21) + exact - 1 + parent - 1

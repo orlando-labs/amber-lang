@@ -42,6 +42,15 @@ struct PackageNativeType {
   std::string destructor;
 };
 
+// A `[[native.errors]]` entry: a package-owned runtime error class registered
+// into the active runtime error registry so typed rescue can match it.
+struct PackageNativeError {
+  std::string name;
+  std::string parent;
+  std::string default_message;
+  std::string default_exit_code;
+};
+
 // A `[[native]]` extension unit: the build facts behind a package's native
 // bindings (sources/flags/libs), the logical-name->symbol map, and the
 // foreign-handle type table. The Amber surface declares which defs are native;
@@ -58,6 +67,7 @@ struct PackageNativeExtension {
   std::vector<std::string> capabilities;
   std::vector<PackageNativeSymbol> symbols;
   std::vector<PackageNativeType> types;
+  std::vector<PackageNativeError> errors;
 };
 
 struct PackageManifest {

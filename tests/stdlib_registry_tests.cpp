@@ -3,12 +3,14 @@
 // NativeStdlibCall facade ABI, exercised through the migrated Math handler with
 // a mock host -- no full VM required, which is the point of the seam.
 
+#include "runtime/concurrency.h"
 #include "runtime/stdlib_registry.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -21,6 +23,7 @@ using amber::runtime::RuntimeBindingKind;
 using amber::runtime::RuntimeBindingRef;
 using amber::runtime::RuntimeDispatchRegistry;
 using amber::runtime::RuntimeErrorRegistry;
+using amber::runtime::RuntimeIoValueHandlerDescriptor;
 using amber::runtime::RuntimeModuleRegistry;
 using amber::runtime::RuntimeNativeFunctionKind;
 using amber::runtime::RuntimeNativeTypeKind;
@@ -145,6 +148,10 @@ struct MockHost : StdlibHost {
                     std::vector<Value> /*args*/) override {
     return {};
   }
+  bool stdlib_block_suspension_in_property_arm(
+      const void * /*frame*/, const std::string & /*context*/) override {
+    return false;
+  }
   void stdlib_throw_json_stop(const void * /*frame*/,
                               std::optional<Value> /*value*/) override {}
   bool
@@ -266,6 +273,14 @@ struct MockHost : StdlibHost {
                             bool /*report_fault*/) override {
     return false;
   }
+  SendStatus stdlib_io_value_runtime_send(
+      const void * /*frame*/, const Value & /*receiver*/,
+      const std::string & /*selector*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
   SendStatus stdlib_net_http_construct_client(
       const void * /*frame*/, const std::vector<Value> & /*args*/,
       const Value & /*block*/,
@@ -332,6 +347,14 @@ struct MockHost : StdlibHost {
   SendStatus stdlib_net_http_server_response_type_send(
       const void * /*frame*/, const std::string & /*selector*/,
       const std::vector<Value> & /*args*/, const Value & /*block*/,
+      const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
+      Value * /*out*/) override {
+    return SendStatus::NotHandled;
+  }
+  SendStatus stdlib_task_runtime_send(
+      const void * /*frame*/, const Value & /*receiver*/,
+      const std::string & /*selector*/, const std::vector<Value> & /*args*/,
+      const Value & /*block*/,
       const std::vector<std::pair<std::uint32_t, Value>> & /*kw_args*/,
       Value * /*out*/) override {
     return SendStatus::NotHandled;
@@ -552,6 +575,13 @@ void test_builtin_runtime_module_descriptors() {
     expect(descriptor.has_value() && descriptor->selector == selector,
            "builtin descriptor registers " + name + " type call");
   };
+  const auto expect_io_handler = [&](const std::string &type_name,
+                                     const std::string &name) {
+    const std::optional<RuntimeIoValueHandlerDescriptor> descriptor =
+        dispatch.io_value_handler(type_name);
+    expect(descriptor.has_value() && descriptor->handler != nullptr,
+           "builtin descriptor registers " + name + " IO value handler");
+  };
 
   expect_path("Math", RuntimeNativeTypeKind::Math);
   expect_path("io", RuntimeNativeTypeKind::Io);
@@ -625,6 +655,7 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::Net, "net");
   expect_handler(RuntimeNativeTypeKind::NetEndpoint, "net.Endpoint");
   expect_handler(RuntimeNativeTypeKind::NetHttp, "net.http");
+  expect_handler(RuntimeNativeTypeKind::TaskModule, "task");
   expect_handler(RuntimeNativeTypeKind::Channel, "Channel");
   expect_handler(RuntimeNativeTypeKind::Mutex, "Mutex");
   expect_handler(RuntimeNativeTypeKind::Atomic, "Atomic");
@@ -659,6 +690,22 @@ void test_builtin_runtime_module_descriptors() {
                    "net.http.form.FormBody()");
   expect_type_call(RuntimeNativeTypeKind::ArgParser, "new", "ArgParser.new");
 
+  expect_io_handler("io.PipeReader", "io.PipeReader");
+  expect_io_handler("io.PipeWriter", "io.PipeWriter");
+  expect_io_handler("fs.File", "fs.File");
+  expect_io_handler("net.TcpStream", "net.TcpStream");
+  expect_io_handler("net.TcpListener", "net.TcpListener");
+  expect_io_handler("net.UdpSocket", "net.UdpSocket");
+  expect_io_handler("net.http.Client", "net.http.Client");
+  expect_io_handler("net.http.Request", "net.http.Request");
+  expect_io_handler("net.http.Response", "net.http.Response");
+  expect_io_handler("net.http.RequestHandle", "net.http.RequestHandle");
+  expect_io_handler("net.http.ResponseBody", "net.http.ResponseBody");
+  expect_io_handler("net.http.Headers", "net.http.Headers");
+  expect_io_handler("net.http.Server", "net.http.Server");
+  expect_io_handler("net.http.ServerRequest", "net.http.ServerRequest");
+  expect_io_handler("net.http.ServerResponse", "net.http.ServerResponse");
+
   const std::optional<NativeStdlibHandler> math_handler =
       dispatch.native_handler(RuntimeNativeTypeKind::Math);
   expect(math_handler.has_value(),
@@ -672,6 +719,108 @@ void test_builtin_runtime_module_descriptors() {
          "Math descriptor dispatches through runtime registry");
   expect(out.is_float() && std::fabs(out.as_float() - 5.0) < 1e-12,
          "Math.sqrt(25.0) == 5.0 through descriptor");
+}
+
+void test_task_channel_descriptor_instance_lifecycle() {
+  RuntimeModuleRegistry modules;
+  RuntimeDispatchRegistry dispatch;
+  RuntimeTypeRegistry types;
+  amber::runtime::register_builtin_runtime_modules(modules, dispatch, types);
+
+  const std::optional<NativeStdlibHandler> handler =
+      dispatch.native_handler(RuntimeNativeTypeKind::Channel);
+  expect(handler.has_value(), "Channel descriptor registers dispatch handler");
+
+  MockHost host;
+  int frame_marker = 0;
+  const std::vector<Value> args;
+  const Value block = Value::null();
+  const std::vector<std::pair<std::uint32_t, Value>> kw_args;
+  const Value receiver =
+      Value::channel(std::make_shared<amber::runtime::RuntimeChannel>(1));
+
+  std::string closed_selector = "closed?";
+  Value out = Value::null();
+  NativeStdlibCall closed_call{host,
+                               &frame_marker,
+                               receiver,
+                               RuntimeNativeTypeKind::Channel,
+                               closed_selector,
+                               args,
+                               block,
+                               kw_args,
+                               &out};
+  expect((*handler)(closed_call) == SendStatus::Matched,
+         "Channel.closed? descriptor dispatches");
+  expect(out.is_bool() && !out.as_bool(),
+         "Channel.closed? starts false through descriptor");
+
+  std::string close_selector = "close";
+  out = Value::null();
+  NativeStdlibCall close_call{host,
+                              &frame_marker,
+                              receiver,
+                              RuntimeNativeTypeKind::Channel,
+                              close_selector,
+                              args,
+                              block,
+                              kw_args,
+                              &out};
+  expect((*handler)(close_call) == SendStatus::Matched,
+         "Channel.close descriptor dispatches");
+  expect(out.is_bool() && out.as_bool(),
+         "Channel.close returns true on first close through descriptor");
+
+  out = Value::null();
+  expect((*handler)(closed_call) == SendStatus::Matched,
+         "Channel.closed? descriptor dispatches after close");
+  expect(out.is_bool() && out.as_bool(),
+         "Channel.closed? returns true after descriptor close");
+
+  out = Value::null();
+  expect((*handler)(close_call) == SendStatus::Matched,
+         "Channel.close descriptor dispatches idempotent close");
+  expect(out.is_bool() && !out.as_bool(),
+         "Channel.close returns false on second close through descriptor");
+  expect(!host.faulted,
+         "Channel lifecycle descriptor dispatch should not fault");
+
+  const Value buffered =
+      Value::channel(std::make_shared<amber::runtime::RuntimeChannel>(1));
+  const std::vector<Value> send_args{Value::integer(42)};
+  std::string send_selector = "send";
+  out = Value::null();
+  NativeStdlibCall send_call{host,
+                             &frame_marker,
+                             buffered,
+                             RuntimeNativeTypeKind::Channel,
+                             send_selector,
+                             send_args,
+                             block,
+                             kw_args,
+                             &out};
+  expect((*handler)(send_call) == SendStatus::Matched,
+         "Channel.send descriptor dispatches");
+  expect(out.is_bool() && out.as_bool(),
+         "Channel.send returns true through descriptor");
+
+  std::string recv_selector = "recv";
+  out = Value::null();
+  NativeStdlibCall recv_call{host,
+                             &frame_marker,
+                             buffered,
+                             RuntimeNativeTypeKind::Channel,
+                             recv_selector,
+                             args,
+                             block,
+                             kw_args,
+                             &out};
+  expect((*handler)(recv_call) == SendStatus::Matched,
+         "Channel.recv descriptor dispatches");
+  expect(out.is_integer() && out.as_integer() == 42,
+         "Channel.recv returns sent value through descriptor");
+  expect(!host.faulted,
+         "Channel send/recv descriptor dispatch should not fault");
 }
 
 void test_type_call_registry() {
@@ -796,6 +945,14 @@ void test_runtime_error_registry() {
   expect(errors.error_is_a(*help, *exception) &&
              !errors.error_is_a(*help, *parse_error),
          "HelpRequested inherits Exception but not ParseError");
+  expect(errors.error_default_exit_code(*help).has_value() &&
+             *errors.error_default_exit_code(*help) == 0,
+         "runtime error registry exposes default exit code");
+  expect(std::string(errors.error_default_message(*help)) == "help requested",
+         "runtime error registry exposes default message");
+  expect((errors.error_effective_field_mask(*help) &
+          amber::runtime::kRuntimeErrorFieldHelp) != 0U,
+         "runtime error registry exposes inherited field masks");
   expect(!errors.error_is_a(*invalid_value, *unknown_option),
          "sibling ArgParser errors do not match");
 
@@ -809,6 +966,97 @@ void test_runtime_error_registry() {
          "existing native errors inherit Exception");
 }
 
+void test_runtime_module_error_descriptors() {
+  RuntimeModuleRegistry modules;
+  RuntimeDispatchRegistry dispatch;
+  RuntimeTypeRegistry types;
+  RuntimeErrorRegistry errors(RuntimeErrorRegistry::Seed::Empty);
+
+  const std::optional<std::uint16_t> exception =
+      errors.register_error("Exception");
+  expect(exception.has_value(), "empty error registry accepts core root error");
+  expect(!errors.error_id("PoolTimeoutError").has_value(),
+         "empty error registry starts without net.http errors");
+
+  amber::runtime::register_builtin_runtime_modules(modules, dispatch, types,
+                                                   &errors);
+
+  const auto http_error = errors.error_id("HttpError");
+  const auto request_error = errors.error_id("RequestError");
+  const auto unsupported_scheme = errors.error_id("UnsupportedSchemeError");
+  const auto timeout = errors.error_id("HttpTimeoutError");
+  const auto pool_timeout = errors.error_id("PoolTimeoutError");
+  expect(http_error.has_value() && request_error.has_value() &&
+             unsupported_scheme.has_value() && timeout.has_value() &&
+             pool_timeout.has_value(),
+         "net.http descriptor registers its runtime error family");
+  expect(errors.error_is_a(*pool_timeout, *timeout) &&
+             errors.error_is_a(*pool_timeout, *http_error) &&
+             errors.error_is_a(*pool_timeout, *exception),
+         "PoolTimeoutError inherits through descriptor-registered parents");
+  expect(errors.error_is_a(*unsupported_scheme, *request_error) &&
+             errors.error_is_a(*unsupported_scheme, *http_error),
+         "request errors inherit through descriptor-registered parents");
+  expect(std::string(errors.error_name(*pool_timeout)) == "PoolTimeoutError",
+         "descriptor-registered error name round-trips");
+
+  const auto json_error = errors.error_id("JsonError");
+  const auto json_parse = errors.error_id("JsonParseError");
+  const auto codec_error = errors.error_id("CodecError");
+  const auto codec_decode = errors.error_id("CodecDecodeError");
+  const auto entropy = errors.error_id("EntropyError");
+  const auto uuid_parse = errors.error_id("UuidParseError");
+  const auto time_parse = errors.error_id("TimeParseError");
+  const auto url_parse = errors.error_id("UrlParseError");
+  const auto url_build = errors.error_id("UrlBuildError");
+  expect(json_error.has_value() && json_parse.has_value() &&
+             codec_error.has_value() && codec_decode.has_value() &&
+             entropy.has_value() && uuid_parse.has_value() &&
+             time_parse.has_value() && url_parse.has_value() &&
+             url_build.has_value(),
+         "stdlib descriptors register non-http module error families");
+  expect(errors.error_is_a(*json_parse, *json_error) &&
+             errors.error_is_a(*codec_decode, *codec_error) &&
+             errors.error_is_a(*entropy, *exception) &&
+             errors.error_is_a(*uuid_parse, *exception) &&
+             errors.error_is_a(*time_parse, *exception) &&
+             errors.error_is_a(*url_parse, *exception) &&
+             errors.error_is_a(*url_build, *exception),
+         "non-http descriptor error inheritance is registered");
+
+  const auto parse_error = errors.error_id("ArgParser.ParseError");
+  const auto invalid_value = errors.error_id("ArgParser.InvalidValue");
+  const auto help = errors.error_id("ArgParser.HelpRequested");
+  expect(parse_error.has_value() && invalid_value.has_value() &&
+             help.has_value(),
+         "ArgParser descriptor registers structured errors");
+  expect(errors.error_is_a(*invalid_value, *parse_error) &&
+             !errors.error_is_a(*help, *parse_error),
+         "ArgParser descriptor preserves parse/help inheritance split");
+  expect(errors.error_default_exit_code(*parse_error).has_value() &&
+             *errors.error_default_exit_code(*parse_error) == 2,
+         "ArgParser descriptor registers default exit code");
+  expect((errors.error_effective_field_mask(*invalid_value) &
+          amber::runtime::kRuntimeErrorFieldOption) != 0U,
+         "ArgParser descriptor registers structured fields");
+
+  const auto task_failed = errors.error_id("TaskFailedError");
+  const auto atomic_compat = errors.error_id("AtomicCompatibilityError");
+  const auto flow_gather = errors.error_id("FlowGatherError");
+  const auto moved = errors.error_id("MovedValueError");
+  const auto refused = errors.error_id("ConnectionRefusedError");
+  expect(task_failed.has_value() && atomic_compat.has_value() &&
+             flow_gather.has_value() && moved.has_value() &&
+             refused.has_value(),
+         "task/net descriptors register runtime error families");
+  expect(errors.error_is_a(*task_failed, *exception) &&
+             errors.error_is_a(*atomic_compat, *exception) &&
+             errors.error_is_a(*flow_gather, *exception) &&
+             errors.error_is_a(*moved, *exception) &&
+             errors.error_is_a(*refused, *exception),
+         "task/net descriptor errors inherit Exception");
+}
+
 } // namespace
 
 int main() {
@@ -820,11 +1068,13 @@ int main() {
   test_handler_table(registry);
   test_dispatch_registry_imports_native_handlers(registry);
   test_builtin_runtime_module_descriptors();
+  test_task_channel_descriptor_instance_lifecycle();
   test_type_call_registry();
   test_math_compute(registry);
   test_math_not_handled(registry);
   test_math_faults(registry);
   test_runtime_error_registry();
+  test_runtime_module_error_descriptors();
 
   std::cout << "stdlib registry tests passed\n";
   return 0;

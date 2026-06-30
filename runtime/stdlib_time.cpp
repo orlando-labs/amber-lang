@@ -956,7 +956,8 @@ RuntimeNativeModuleDescriptor time_module_descriptor() {
           {{RuntimeNativeTypeKind::Time, &time_dispatch},
            {RuntimeNativeTypeKind::TimePeriod, &time_dispatch}},
           {},
-          {}};
+          {},
+          {{"TimeError", "Exception"}, {"TimeParseError", "TimeError"}}};
 }
 
 void register_time(NativeRegistry &registry) {
@@ -965,11 +966,15 @@ void register_time(NativeRegistry &registry) {
 
 void register_time_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
-                                  RuntimeTypeRegistry &types) {
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor = time_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime

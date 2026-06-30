@@ -1,7 +1,9 @@
 #include "runtime/concurrency.h"
 #include "runtime/stdlib_registry.h"
 
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -43,6 +45,43 @@ bool capacity_from_args(NativeStdlibCall &call, std::size_t *out) {
     *out = static_cast<std::size_t>(capacity->as_integer());
   }
   return true;
+}
+
+bool duration_from_value(NativeStdlibCall &call, const Value &value,
+                         std::chrono::milliseconds *out) {
+  if (value.is_integer()) {
+    *out = std::chrono::milliseconds(value.as_integer());
+    return true;
+  }
+  if (value.is_float()) {
+    *out = std::chrono::milliseconds(
+        static_cast<std::int64_t>(value.as_float() * 1000.0));
+    return true;
+  }
+  call.fault("TypeError",
+             "duration must be Integer milliseconds or Float seconds");
+  return false;
+}
+
+std::optional<std::chrono::milliseconds>
+timeout_from_keywords(NativeStdlibCall &call) {
+  const std::optional<Value> timeout = call.keyword("timeout");
+  if (!timeout.has_value()) {
+    return std::chrono::milliseconds::max();
+  }
+  std::chrono::milliseconds value;
+  if (!duration_from_value(call, *timeout, &value)) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+bool set_fault_from_channel_result(NativeStdlibCall &call,
+                                   const RuntimeChannelResult &result) {
+  call.fault(result.error_name.empty() ? "ChannelError" : result.error_name,
+             result.message.empty() ? "channel operation failed"
+                                    : result.message);
+  return false;
 }
 
 std::optional<RuntimeFlowPartitionPolicy>
@@ -181,7 +220,90 @@ SendStatus construct_threaded_collection(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+SendStatus channel_instance_send(NativeStdlibCall &call) {
+  if (!call.receiver.is_channel()) {
+    return SendStatus::NotHandled;
+  }
+  const std::shared_ptr<RuntimeChannel> channel = call.receiver.as_channel();
+  if (channel == nullptr) {
+    return call.fault("TypeError", "channel is null");
+  }
+  if (call.selector == "close") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "Channel.close does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::boolean(channel->close());
+    return SendStatus::Matched;
+  }
+  if (call.selector == "closed?") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "Channel.closed? does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::boolean(channel->closed());
+    return SendStatus::Matched;
+  }
+  if (call.selector == "send") {
+    if (!call.require_arity(1) ||
+        !call.reject_unknown_keywords({"timeout"}) ||
+        !call.require_no_block()) {
+      return SendStatus::Faulted;
+    }
+    const std::optional<std::chrono::milliseconds> timeout =
+        timeout_from_keywords(call);
+    if (!timeout.has_value()) {
+      return SendStatus::Faulted;
+    }
+    if (call.block_suspension_in_property_arm("Channel.send")) {
+      return SendStatus::Faulted;
+    }
+    const RuntimeChannelResult sent = channel->send(call.args[0], *timeout);
+    if (!sent.ok) {
+      set_fault_from_channel_result(call, sent);
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::boolean(sent.sent);
+    return SendStatus::Matched;
+  }
+  if (call.selector == "recv") {
+    if (!call.require_arity(0) ||
+        !call.reject_unknown_keywords({"timeout"}) ||
+        !call.require_no_block()) {
+      return SendStatus::Faulted;
+    }
+    const std::optional<std::chrono::milliseconds> timeout =
+        timeout_from_keywords(call);
+    if (!timeout.has_value()) {
+      return SendStatus::Faulted;
+    }
+    if (call.block_suspension_in_property_arm("Channel.recv")) {
+      return SendStatus::Faulted;
+    }
+    const RuntimeChannelResult received = channel->recv(*timeout);
+    if (!received.ok) {
+      set_fault_from_channel_result(call, received);
+      return SendStatus::Faulted;
+    }
+    *call.out = received.value;
+    return SendStatus::Matched;
+  }
+  return SendStatus::NotHandled;
+}
+
 SendStatus task_type_send(NativeStdlibCall &call) {
+  if (call.receiver.is_channel()) {
+    return channel_instance_send(call);
+  }
+  if (!call.receiver.is_native_type()) {
+    return call.task_runtime_send();
+  }
   if (call.selector != "new") {
     return SendStatus::NotHandled;
   }
@@ -218,24 +340,45 @@ RuntimeNativeModuleDescriptor task_module_descriptor() {
            {"task.flow.ThreadedCollection",
             RuntimeNativeTypeKind::ThreadedCollection}},
           {{RuntimeNativeTypeKind::Channel, task_type_send},
+           {RuntimeNativeTypeKind::TaskModule, task_type_send},
            {RuntimeNativeTypeKind::Mutex, task_type_send},
            {RuntimeNativeTypeKind::Atomic, task_type_send},
            {RuntimeNativeTypeKind::Barrier, task_type_send},
            {RuntimeNativeTypeKind::Flow, task_type_send},
            {RuntimeNativeTypeKind::ThreadedCollection, task_type_send}},
           {},
-          {}};
+          {},
+          {{"TaskError", "Exception"},
+           {"TaskNotDoneError", "TaskError"},
+           {"TaskFailedError", "TaskError"},
+           {"TimeoutError", "Exception"},
+           {"CancelledError", "Exception"},
+           {"ChannelClosedError", "Exception"},
+           {"DeadlockError", "Exception"},
+           {"OwnershipError", "Exception"},
+           {"AtomicError", "Exception"},
+           {"AtomicCompatibilityError", "AtomicError"},
+           {"FlowError", "Exception"},
+           {"FlowCancelledError", "FlowError"},
+           {"FlowPartitionError", "FlowError"},
+           {"FlowGatherError", "FlowError"},
+           {"MoveError", "Exception"},
+           {"MovedValueError", "MoveError"}}};
 }
 
 } // namespace
 
 void register_task_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
-                                  RuntimeTypeRegistry &types) {
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor = task_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime

@@ -123,6 +123,14 @@ errors:
     parent: Exception
   - name: UuidParseError
     parent: UuidError
+  - name: UrlError
+    parent: Exception
+  - name: UrlParseError
+    parent: UrlError
+  - name: UrlDecodeError
+    parent: UrlError
+  - name: UrlBuildError
+    parent: UrlError
   - name: Exception
   - name: ArgParser.ParseError
     parent: Exception

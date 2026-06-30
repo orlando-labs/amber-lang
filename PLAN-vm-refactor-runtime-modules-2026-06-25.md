@@ -822,6 +822,10 @@ registration or when the branch is already behind a registry interface.
 
 ### Phase 3: Move first-party modules behind descriptors
 
+Status: complete for first-party path, constructor/type-call, and selector
+dispatch migration as of 2026-06-29. Module-owned error registration remains
+the Phase 4 scope.
+
 Migrate modules in slices, each with tests:
 
 - modules already using `NativeRegistry`: Math, Json, codecs, Digest,
@@ -1852,7 +1856,93 @@ Slice record, 2026-06-29:
   (`net_socket_handoff_to_task` twice and `net_tcp_loopback`) failing on
   `listen: Operation not permitted`.
 
+Slice record, 2026-06-29:
+
+- Promoted `sync.Channel` instance lifecycle selectors into the task descriptor:
+  `close` and `closed?`.
+- Reused the existing `Channel` descriptor handler for both `Channel.new` and
+  channel instance lifecycle dispatch, with the VM now consulting
+  `RuntimeDispatchRegistry` before falling through to the remaining channel
+  `send`/`recv` arms.
+- Left `Channel.send` and `Channel.recv` in VM for later Phase 3 slices because
+  they still carry timeout parsing, cooperative blocking guards, and channel
+  result-to-fault translation.
+- Added registry-level coverage asserting descriptor-routed `Channel.closed?`
+  and idempotent `Channel.close` behavior without needing loopback/network
+  tests.
+- Verified compile smoke: standalone `runtime/stdlib_task.cpp`, standalone
+  `runtime/vm.cpp`, standalone `tests/stdlib_registry_tests.cpp`, and
+  `git diff --check`.
+- Verified with forced focused build targets: `make -B
+  build/stdlib_registry_tests build/vm_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests` and
+  `build/vm_tests`.
+- Sandboxed `build/stdlib_task_tests` failed at its first loopback TCP source
+  case (`cooperative socket read`) with the source program failing to execute;
+  elevated rerun was unavailable because the automatic reviewer reported the
+  usage limit.
+- Sandboxed `make conformance` reached `137 passed, 3 failed, 0 skipped for
+  M11`; all three failures were the known loopback corpus cases
+  (`net_socket_handoff_to_task` twice and `net_tcp_loopback`) failing on
+  `listen: Operation not permitted`.
+
+Slice record, 2026-06-29:
+
+- Promoted the remaining first-party runtime value selectors behind descriptor
+  dispatch. `sync.Channel.send` and `sync.Channel.recv` now live in the task
+  descriptor handler beside the earlier channel constructor/lifecycle selectors.
+- Routed remaining task/sync selectors for task handles, mutexes, atomics,
+  barriers, flows, and threaded collections through the task descriptor; the
+  VM's legacy bodies are now reachable only through a guarded `StdlibHost`
+  callback from descriptor dispatch.
+- Routed remaining IO/filesystem/network/net.http runtime-value selectors
+  through descriptor-owned IO value handlers. Pipe endpoint, `fs.File`, TCP,
+  UDP, and net.http bodies that still own policy checks, cooperative waiting,
+  provider routing, or request/response mechanics are preserved behind a
+  guarded `StdlibHost` callback rather than direct top-level VM fallback.
+- Added narrow host facades for property-arm suspension checks and guarded
+  task/IO runtime SEND callbacks so descriptor handlers can reuse existing
+  behavior without depending on VM internals.
+- Registered descriptor IO value handlers for the remaining net.http runtime
+  values: clients, request/response bodies, redirects, requests, responses,
+  request handles, headers, servers, server requests, and server responses.
+- Updated `amberc`'s native-runtime archive source list so native builds link
+  the split runtime support graph and descriptor module translation units.
+  This fixed the full-suite native link failure exposed by the Phase 3 split.
+- Extended registry coverage to assert descriptor-owned handlers for the
+  remaining IO/fs/net/net.http/task runtime values and descriptor-routed
+  `Channel.send`/`Channel.recv`.
+- Verified compile/check gates: `git diff --check`, `make -B
+  build/stdlib_registry_tests build/vm_tests build/amber_ext_tests`, and
+  `make -B build/io_tests build/vm_net_http_tests build/stdlib_task_tests`.
+- Verified focused binaries: `build/stdlib_registry_tests`, `build/vm_tests`,
+  `build/amber_ext_tests`, elevated `build/io_tests`, elevated
+  `build/vm_net_http_tests` (`566 checks`), and elevated
+  `build/stdlib_task_tests`.
+- Verified conformance gate: elevated `make conformance`
+  (`140 passed, 0 failed, 0 skipped for M11`).
+- Verified full and backend gates after the native-runtime source-list fix:
+  elevated `make test` (`ambertest: 139 passed, 0 failed`) and
+  `make backend-equivalence` (`80 passed, 0 failed`).
+
+Audit record, 2026-06-30:
+
+- Rechecked the Phase 3 end state in `runtime/vm.cpp` after the final selector
+  migration because the VM diff still has several insertion-heavy hunks.
+- The retained first-party module bodies are guarded `StdlibHost` callback
+  paths (`io_value_descriptor_bypass_` / `task_runtime_descriptor_bypass_`) or
+  registry handoff code; they are no longer direct top-level VM selector
+  fallback.
+- No unguarded path lookup, constructor allowlist, or selector-dispatch island
+  for the migrated first-party modules was found outside the registry
+  interface. The extra VM lines come from guarded callback plumbing and
+  registry-backed error metadata, not unfinished Phase 3 dispatch.
+
 ### Phase 4: Move errors behind descriptors
+
+Status: first-party module error descriptors landed on 2026-06-30. The
+native-package-defined error test landed in the first Phase 5 slice once
+package manifests and `NativeExtRegistry` exposed package error descriptors.
 
 - Add error descriptors to core module registration.
 - Register net.http errors from the net.http module descriptor, including
@@ -1865,7 +1955,47 @@ Slice record, 2026-06-29:
 - Add a native package test where a thunk raises a package-defined error and
   Amber catches it by exact class and by parent class.
 
+Slice record, 2026-06-30:
+
+- Made `RuntimeErrorRegistry` descriptor-extensible while preserving the
+  generated bootstrap table as the default seed; descriptor-only tests can now
+  start from an empty registry and register module errors explicitly.
+- Extended `RuntimeNativeModuleDescriptor` with error descriptors and wired
+  builtin runtime module registration to pass the world/direct-VM error
+  registry through first-party modules.
+- Registered first-party module-owned error families from descriptors:
+  `net.http`, core `net`, task/sync/flow/move, Json, codecs, SecureRandom,
+  ArgParser, Uuid, Time, and Url. This includes `PoolTimeoutError` and the
+  newly bootstrapped `UrlError` / `UrlParseError` / `UrlDecodeError` /
+  `UrlBuildError` family.
+- Moved native error instance default message, default exit code, and structured
+  field-mask lookup from direct generated helpers to the active
+  `RuntimeErrorRegistry`.
+- Kept `spec/registries/runtime_errors.def` as the generated frontend/bootstrap
+  mirror during the transition; Url errors were added to both the YAML registry
+  and X-macro mirror so prelude lookup and binder knowledge stay aligned.
+- Added registry coverage that proves module descriptors populate an empty
+  error registry, plus VM coverage that `UrlParseError` can be raised and
+  caught via parent `UrlError`.
+- Verified final focused gates after the generated mirror update:
+  `git diff --check`, `make -B build/stdlib_registry_tests build/vm_tests
+  build/stdlib_url_tests`, and binaries `build/stdlib_registry_tests`,
+  `build/vm_tests`, `build/stdlib_url_tests`.
+- Verified broader gates during this slice before the final generated mirror
+  write: elevated `make test` (`ambertest: 139 passed, 0 failed`), elevated
+  `make conformance` (`140 passed, 0 failed, 0 skipped for M11`), elevated
+  `build/io_tests`, elevated `build/vm_net_http_tests` (`566 checks`),
+  elevated `build/stdlib_task_tests`, and `make backend-equivalence`
+  (`80 passed, 0 failed`). A final elevated `make test` rerun after the mirror
+  write was blocked by the automatic approval usage limit; the final
+  non-elevated backend-equivalence rerun passed (`80 passed, 0 failed`).
+
 ### Phase 5: Unify third-party native packages
+
+Status: package-owned native error descriptors landed on 2026-06-30. The wider
+constructor/method/type descriptor unification remains the next Phase 5 scope;
+this slice makes native package errors first-class in the world-scoped runtime
+error registry.
 
 - Extend generated native package registration so it contributes a module
   descriptor, not only `NativeExtRegistry` thunks and `NativeTagRegistry` types.
@@ -1876,6 +2006,38 @@ Slice record, 2026-06-29:
 - Preserve current native package semantics: pure Amber fallback in bytecode,
   native thunk in native builds, native-only leaves fail closed without native
   support, and foreign-handle lifetime rules remain deterministic.
+
+Slice record, 2026-06-30:
+
+- Added `PackageNativeError` metadata for native extension manifests, including
+  TOML `[[native.errors]]`, build JSON `errors`, manifest JSON output, and
+  canonical manifest digest input.
+- Extended generated native-extension startup registration to register package
+  error descriptors in `NativeExtRegistry` alongside thunks and foreign-handle
+  tags. Missing parents default to `NativeError`.
+- Taught `RuntimeWorld` and direct VM fallback construction to import
+  `NativeExtRegistry` error descriptors into the active `RuntimeErrorRegistry`
+  before code execution, so `amber_fault(ctx, "Package.Error", ...)` resolves
+  into structured, typed-rescuable errors.
+- Updated the `native_ext_demo` fixture with `Demo.NativeError` and
+  `Demo.NativeLeafError`; the native thunk raises `Demo.NativeLeafError`, and
+  Amber catches it by exact class and parent class while preserving the existing
+  native (`42`) and bytecode fallback (`210`) outputs.
+- Verified focused gates: `git diff --check`, `make -B build/build_tests
+  build/package_tests build/amber_ext_tests build/vm_tests build/amberc`, and
+  binaries `build/build_tests`, `build/package_tests`, `build/amber_ext_tests`,
+  `build/vm_tests`, `build/native_tests`.
+- Verified native package behavior directly:
+  `build/amberc build tests/fixtures/native_ext_demo/amber.build.json --target
+  native --out-dir build/native_ext_demo_phase5/out --cache-dir
+  build/native_ext_demo_phase5/cache`, executable output `42`, and bytecode
+  fallback output `210`.
+- Verified broad gates: elevated `make test` (`ambertest: 139 passed, 0
+  failed`), elevated `make conformance` (`140 passed, 0 failed, 0 skipped for
+  M11`), and `make backend-equivalence` (`80 passed, 0 failed`). The first
+  backend-equivalence attempts hit the harness's fixed 60s per-command timeout
+  while compiling `argparser_first_class_errors`; running that compile directly
+  completed successfully, and the warm rerun of the full gate passed.
 
 ### Phase 6: Remove legacy coupling
 

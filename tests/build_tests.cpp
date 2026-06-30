@@ -87,7 +87,9 @@ void test_native_extensions_parse_and_gate() {
       "\"symbols\":[{\"logical\":\"blake3.hash\","
       "\"symbol\":\"amber_blake3_hash\"}],"
       "\"types\":[{\"amber\":\"crypto.blake3.Hasher\",\"tag\":\"blake3.Hasher\","
-      "\"ownership\":\"owned\",\"destructor\":\"blake3.hasher_free\"}]"
+      "\"ownership\":\"owned\",\"destructor\":\"blake3.hasher_free\"}],"
+      "\"errors\":[{\"name\":\"crypto.blake3.HashError\","
+      "\"parent\":\"NativeError\",\"default_message\":\"hash failed\"}]"
       "}]}";
   const amber::build::BuildManifestResult parsed =
       amber::build::parse_build_manifest_json(source, "amber.build.json");
@@ -108,6 +110,10 @@ void test_native_extensions_parse_and_gate() {
              extension.types[0].tag == "blake3.Hasher" &&
              extension.types[0].ownership == "owned",
          "native extension type tag/ownership");
+  expect(extension.errors.size() == 1 &&
+             extension.errors[0].name == "crypto.blake3.HashError" &&
+             extension.errors[0].parent == "NativeError",
+         "native extension error descriptor");
 
   // Without ffi.v1 the same manifest is rejected.
   const std::string ungated =

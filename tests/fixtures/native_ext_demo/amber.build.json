@@ -17,7 +17,12 @@
       "sources": ["native/demo.c"],
       "capabilities": ["ffi"],
       "symbols": [
-        {"logical": "demo.doubled", "symbol": "amber_demo_doubled"}
+        {"logical": "demo.doubled", "symbol": "amber_demo_doubled"},
+        {"logical": "demo.fail_leaf", "symbol": "amber_demo_fail_leaf"}
+      ],
+      "errors": [
+        {"name": "Demo.NativeError", "parent": "NativeError"},
+        {"name": "Demo.NativeLeafError", "parent": "Demo.NativeError"}
       ]
     }
   ]

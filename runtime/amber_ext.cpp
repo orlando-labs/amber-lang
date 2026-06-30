@@ -336,6 +336,19 @@ void NativeExtRegistry::register_thunk(const std::string &logical, void *fn) {
 void NativeExtRegistry::register_type(NativeTypeDescriptor descriptor) {
   tags_.register_type(std::move(descriptor));
 }
+void NativeExtRegistry::register_error(NativeExtErrorDescriptor descriptor) {
+  errors_.push_back(std::move(descriptor));
+}
+void NativeExtRegistry::register_errors(RuntimeErrorRegistry &errors) const {
+  for (const NativeExtErrorDescriptor &descriptor : errors_) {
+    errors.register_error(descriptor.name,
+                          descriptor.parent.empty() ? "NativeError"
+                                                    : descriptor.parent,
+                          descriptor.default_message,
+                          descriptor.default_exit_code,
+                          descriptor.field_mask);
+  }
+}
 void *NativeExtRegistry::lookup(const std::string &logical) const {
   const auto found = thunks_.find(logical);
   return found == thunks_.end() ? nullptr : found->second;

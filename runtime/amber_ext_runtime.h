@@ -14,11 +14,20 @@
 #include "runtime/amber_ext.h"
 #include "runtime/stdlib_registry.h" // StdlibHost, NativeTagRegistry, Value
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace amber::runtime {
+
+struct NativeExtErrorDescriptor {
+  std::string name;
+  std::string parent;
+  std::string default_message;
+  std::int64_t default_exit_code = -1;
+  std::uint32_t field_mask = 0;
+};
 
 // The native binary's logical-name -> thunk table plus the foreign-handle tag
 // registry. Populated once at process startup by generated registration calls
@@ -35,6 +44,9 @@ class NativeExtRegistry {
 public:
   void register_thunk(const std::string &logical, void *fn);
   void register_type(NativeTypeDescriptor descriptor);
+  void register_error(NativeExtErrorDescriptor descriptor);
+
+  void register_errors(RuntimeErrorRegistry &errors) const;
 
   // The thunk pointer registered for `logical`, or nullptr when none is.
   void *lookup(const std::string &logical) const;
@@ -52,6 +64,7 @@ public:
 private:
   std::unordered_map<std::string, void *> thunks_;
   NativeTagRegistry tags_;
+  std::vector<NativeExtErrorDescriptor> errors_;
 };
 
 // Outcome of bridging a native-extension call through the C ABI. On `!ok` a

@@ -13,3 +13,13 @@ AmberStatus amber_demo_doubled(AmberCtx *cx, const AmberValue *args,
   *out = amber_make_int(cx, n * 2);
   return AMBER_OK;
 }
+
+AmberStatus amber_demo_fail_leaf(AmberCtx *cx, const AmberValue *args,
+                                 size_t argc, AmberValue *out) {
+  (void)args;
+  (void)out;
+  if (argc != 0) {
+    return amber_fault(cx, "TypeError", "fail_leaf expects no arguments");
+  }
+  return amber_fault(cx, "Demo.NativeLeafError", "native leaf failed");
+}

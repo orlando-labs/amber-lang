@@ -223,7 +223,12 @@ void test_native_extension_manifest() {
       "amber = \"crypto.blake3.Hasher\"\n"
       "tag = \"blake3.Hasher\"\n"
       "ownership = \"owned\"\n"
-      "destructor = \"blake3.hasher_free\"\n";
+      "destructor = \"blake3.hasher_free\"\n"
+      "\n"
+      "[[native.errors]]\n"
+      "name = \"crypto.blake3.HashError\"\n"
+      "parent = \"NativeError\"\n"
+      "default_message = \"hash failed\"\n";
 
   amber::pkg::PackageManifestResult parsed =
       amber::pkg::parse_manifest_toml(source, "amber.toml");
@@ -247,11 +252,18 @@ void test_native_extension_manifest() {
              ext.types[0].ownership == "owned" &&
              ext.types[0].destructor == "blake3.hasher_free",
          "native type fields");
+  expect(ext.errors.size() == 1 &&
+             ext.errors[0].name == "crypto.blake3.HashError" &&
+             ext.errors[0].parent == "NativeError" &&
+             ext.errors[0].default_message == "hash failed",
+         "native error fields");
 
   const std::string json = amber::pkg::manifest_to_json(parsed.manifest);
   expect(json.find("\"native_extensions\"") != std::string::npos &&
              json.find("amber_blake3_hash") != std::string::npos &&
-             json.find("\"tag\":\"blake3.Hasher\"") != std::string::npos,
+             json.find("\"tag\":\"blake3.Hasher\"") != std::string::npos &&
+             json.find("\"name\":\"crypto.blake3.HashError\"") !=
+                 std::string::npos,
          "manifest json includes native sections");
 
   // Native content folds deterministically into the package digest.

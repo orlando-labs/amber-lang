@@ -173,7 +173,7 @@ SendStatus fs_file_instance_send(NativeStdlibCall &call) {
   }
   if (call.selector != "path" && call.selector != "mode" &&
       call.selector != "closed?" && call.selector != "close!") {
-    return SendStatus::NotHandled;
+    return call.io_value_runtime_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {
@@ -194,7 +194,7 @@ SendStatus fs_file_instance_send(NativeStdlibCall &call) {
       }
     }
     if (memory_file != nullptr) {
-      return SendStatus::NotHandled;
+      return call.io_value_runtime_send();
     }
     RuntimeIoStatus result = file->close();
     if (!set_fault_from_io_status(call, result)) {
@@ -586,7 +586,8 @@ RuntimeNativeModuleDescriptor fs_module_descriptor() {
       {{"fs.Path", RuntimeNativeTypeKind::FsPath, fs_path_instance_send},
        {"fs.File", RuntimeNativeTypeKind::FsFile, fs_file_instance_send},
        {"fs.Metadata", RuntimeNativeTypeKind::Fs, fs_metadata_instance_send}},
-      {{RuntimeNativeTypeKind::FsPath, "new"}}};
+      {{RuntimeNativeTypeKind::FsPath, "new"}},
+      {}};
 }
 
 } // namespace

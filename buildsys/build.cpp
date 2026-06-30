@@ -456,10 +456,28 @@ bool read_native_extensions(
         extension.types.push_back(std::move(type));
       }
     }
+    if (const JsonValue *errors = member(item, "errors")) {
+      for (const JsonValue &entry : errors->array_value) {
+        amber::pkg::PackageNativeError error;
+        read_string_member(entry, "name", &error.name);
+        read_string_member(entry, "parent", &error.parent);
+        read_string_member(entry, "default_message", &error.default_message);
+        read_string_member(entry, "default_exit_code",
+                           &error.default_exit_code);
+        extension.errors.push_back(std::move(error));
+      }
+    }
     if (extension.name.empty()) {
       diagnostics->push_back(diagnostic(
           "BuildManifestError", "native extension entries require a name",
           path));
+    }
+    for (const amber::pkg::PackageNativeError &error : extension.errors) {
+      if (error.name.empty()) {
+        diagnostics->push_back(diagnostic(
+            "BuildManifestError", "native extension errors require a name",
+            path));
+      }
     }
     out->push_back(std::move(extension));
   }

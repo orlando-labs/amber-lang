@@ -975,7 +975,11 @@ RuntimeNativeModuleDescriptor url_module_descriptor() {
   return {{{"Url", RuntimeNativeTypeKind::Url}},
           {{RuntimeNativeTypeKind::Url, &url_dispatch}},
           {},
-          {}};
+          {},
+          {{"UrlError", "Exception"},
+           {"UrlParseError", "UrlError"},
+           {"UrlDecodeError", "UrlError"},
+           {"UrlBuildError", "UrlError"}}};
 }
 
 void register_url(NativeRegistry &registry) {
@@ -984,11 +988,15 @@ void register_url(NativeRegistry &registry) {
 
 void register_url_runtime_module(RuntimeModuleRegistry &modules,
                                  RuntimeDispatchRegistry &dispatch,
-                                 RuntimeTypeRegistry &types) {
+                                 RuntimeTypeRegistry &types,
+                                 RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor = url_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime

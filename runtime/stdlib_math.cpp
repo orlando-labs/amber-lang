@@ -173,6 +173,7 @@ RuntimeNativeModuleDescriptor math_module_descriptor() {
   return {{{"Math", RuntimeNativeTypeKind::Math}},
           {{RuntimeNativeTypeKind::Math, &math_dispatch}},
           {},
+          {},
           {}};
 }
 

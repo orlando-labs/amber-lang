@@ -1573,7 +1573,10 @@ RuntimeNativeModuleDescriptor json_module_descriptor() {
   return {{{"Json", RuntimeNativeTypeKind::Json}},
           {{RuntimeNativeTypeKind::Json, &json_dispatch}},
           {},
-          {}};
+          {},
+          {{"JsonError", "Exception"},
+           {"JsonParseError", "JsonError"},
+           {"JsonGenerateError", "JsonError"}}};
 }
 
 } // namespace
@@ -1584,11 +1587,15 @@ void register_json(NativeRegistry &registry) {
 
 void register_json_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
-                                  RuntimeTypeRegistry &types) {
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor = json_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime

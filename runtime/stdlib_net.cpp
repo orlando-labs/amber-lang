@@ -166,7 +166,7 @@ SendStatus tcp_stream_instance_send(NativeStdlibCall &call) {
     return resource_lifecycle_send(call, *stream);
   }
   if (call.selector != "local_endpoint" && call.selector != "remote_endpoint") {
-    return SendStatus::NotHandled;
+    return call.io_value_runtime_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {
@@ -188,7 +188,7 @@ SendStatus tcp_listener_instance_send(NativeStdlibCall &call) {
     return resource_lifecycle_send(call, *listener);
   }
   if (call.selector != "local_endpoint") {
-    return SendStatus::NotHandled;
+    return call.io_value_runtime_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {
@@ -208,7 +208,7 @@ SendStatus udp_socket_instance_send(NativeStdlibCall &call) {
     return resource_lifecycle_send(call, *socket);
   }
   if (call.selector != "local_endpoint") {
-    return SendStatus::NotHandled;
+    return call.io_value_runtime_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {
@@ -447,18 +447,26 @@ RuntimeNativeModuleDescriptor net_module_descriptor() {
             tcp_listener_instance_send},
            {"net.UdpSocket", RuntimeNativeTypeKind::NetUdp,
             udp_socket_instance_send}},
-          {{RuntimeNativeTypeKind::NetEndpoint, "new"}}};
+          {{RuntimeNativeTypeKind::NetEndpoint, "new"}},
+          {{"ConnectionError", "Exception"},
+           {"ConnectionRefusedError", "ConnectionError"},
+           {"ConnectionResetError", "ConnectionError"},
+           {"DnsError", "Exception"}}};
 }
 
 } // namespace
 
 void register_net_runtime_module(RuntimeModuleRegistry &modules,
                                  RuntimeDispatchRegistry &dispatch,
-                                 RuntimeTypeRegistry &types) {
+                                 RuntimeTypeRegistry &types,
+                                 RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor = net_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime

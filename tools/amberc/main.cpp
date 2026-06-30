@@ -5795,10 +5795,32 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
       for (const char c : text) {
         if (c == '\\' || c == '"') {
           escaped.push_back('\\');
+          escaped.push_back(c);
+        } else if (c == '\n') {
+          escaped += "\\n";
+        } else if (c == '\r') {
+          escaped += "\\r";
+        } else if (c == '\t') {
+          escaped += "\\t";
+        } else {
+          escaped.push_back(c);
         }
-        escaped.push_back(c);
       }
       return escaped;
+    };
+    const auto exit_code_literal = [](const std::string &text) {
+      if (text.empty()) {
+        return std::string();
+      }
+      std::size_t parsed = 0;
+      try {
+        const std::int64_t value = std::stoll(text, &parsed, 10);
+        if (parsed == text.size()) {
+          return std::to_string(value);
+        }
+      } catch (const std::exception &) {
+      }
+      return std::string();
     };
     std::vector<std::string> declared_symbols;
     const auto declare_once = [&](const std::string &symbol) {
@@ -5855,6 +5877,26 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
                  "RuntimeForeignHandle::Ownership::Borrowed;\n";
         }
         out << "    registry.register_type(descriptor);\n";
+        out << "  }\n";
+      }
+      for (const amber::pkg::PackageNativeError &error : extension.errors) {
+        out << "  {\n";
+        out << "    amber::runtime::NativeExtErrorDescriptor descriptor;\n";
+        out << "    descriptor.name = \"" << cpp_string(error.name) << "\";\n";
+        out << "    descriptor.parent = \""
+            << cpp_string(error.parent.empty() ? "NativeError" : error.parent)
+            << "\";\n";
+        if (!error.default_message.empty()) {
+          out << "    descriptor.default_message = \""
+              << cpp_string(error.default_message) << "\";\n";
+        }
+        const std::string default_exit_code =
+            exit_code_literal(error.default_exit_code);
+        if (!default_exit_code.empty()) {
+          out << "    descriptor.default_exit_code = " << default_exit_code
+              << ";\n";
+        }
+        out << "    registry.register_error(descriptor);\n";
         out << "  }\n";
       }
     }
@@ -5962,9 +6004,20 @@ native_runtime_sources(const std::filesystem::path &root) {
       "profile/data.cpp",
       "profile/wasm_accel.cpp",
       "profile/modern.cpp",
+      "buildsys/build.cpp",
+      "optimizer/native.cpp",
       "package/package.cpp",
       "runtime/context.cpp",
       "runtime/text.cpp",
+      "runtime/watch.cpp",
+      "runtime/value.cpp",
+      "runtime/value_display.cpp",
+      "runtime/errors.cpp",
+      "runtime/numeric.cpp",
+      "runtime/objects.cpp",
+      "runtime/heap.cpp",
+      "runtime/concurrency.cpp",
+      "runtime/world.cpp",
       "runtime/io.cpp",
       "runtime/reactor.cpp",
       "runtime/digest.cpp",
@@ -5973,6 +6026,11 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/net_http_transport.cpp",
       "runtime/vm.cpp",
       "runtime/stdlib_registry.cpp",
+      "runtime/stdlib_io.cpp",
+      "runtime/stdlib_fs.cpp",
+      "runtime/stdlib_net.cpp",
+      "runtime/stdlib_net_http.cpp",
+      "runtime/stdlib_task.cpp",
       "runtime/stdlib_math.cpp",
       "runtime/stdlib_json.cpp",
       "runtime/stdlib_codecs.cpp",
@@ -5983,6 +6041,8 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/stdlib_time.cpp",
       "runtime/stdlib_url.cpp",
       "runtime/amber_ext.cpp",
+      "runtime/module_loader.cpp",
+      "runtime/native_bridge.cpp",
   };
   std::vector<std::string> out;
   out.reserve(relative.size());

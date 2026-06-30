@@ -1,4 +1,5 @@
 #include "runtime/world.h"
+#include "runtime/amber_ext_runtime.h"
 #include "runtime/context.h"
 #include "runtime/stdlib_registry.h"
 #include "runtime/vm_internal.h"
@@ -232,7 +233,8 @@ struct RuntimeWorld::Impl {
     register_legacy_native_type_paths(module_registry);
     register_legacy_native_type_calls(type_registry);
     register_builtin_runtime_modules(module_registry, dispatch_registry,
-                                     type_registry);
+                                     type_registry, &error_registry);
+    NativeExtRegistry::global().register_errors(error_registry);
     capabilities = capability::resolve_capabilities(module->capabilities,
                                                     options.capability_grants);
     effects = effect::validate_effect_summaries(

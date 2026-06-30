@@ -94,17 +94,148 @@ void RuntimeDispatchRegistry::import_native_handlers(
 }
 
 std::optional<std::uint16_t>
+RuntimeErrorRegistry::register_error(std::string name, std::string parent,
+                                     std::string default_message,
+                                     std::int64_t default_exit_code,
+                                     std::uint32_t field_mask) {
+  if (name.empty()) {
+    return std::nullopt;
+  }
+  const auto existing = error_ids_.find(name);
+  if (existing != error_ids_.end()) {
+    const ErrorRecord &record = errors_[existing->second];
+    if (record.parent != parent ||
+        record.default_message != default_message ||
+        record.default_exit_code != default_exit_code ||
+        record.field_mask != field_mask) {
+      return std::nullopt;
+    }
+    return existing->second;
+  }
+  return append_error({std::move(name), std::move(parent),
+                       std::move(default_message), default_exit_code,
+                       field_mask},
+                      true);
+}
+
+RuntimeErrorRegistry::RuntimeErrorRegistry(Seed seed) {
+  if (seed == Seed::Empty) {
+    return;
+  }
+#define AMBER_RUNTIME_ERROR(name, parent, default_message, default_exit_code,  \
+                            field_mask)                                        \
+  append_error({name, parent, default_message, default_exit_code, field_mask},  \
+               error_ids_.find(name) == error_ids_.end());
+#include "spec/registries/runtime_errors.def"
+#undef AMBER_RUNTIME_ERROR
+}
+
+std::uint16_t RuntimeErrorRegistry::append_error(ErrorRecord record,
+                                                 bool update_name_index) {
+  const std::uint16_t id = static_cast<std::uint16_t>(errors_.size());
+  if (update_name_index) {
+    error_ids_.emplace(record.name, id);
+  }
+  errors_.push_back(std::move(record));
+  return id;
+}
+
+std::optional<std::uint16_t>
 RuntimeErrorRegistry::error_id(const std::string &name) const {
-  return runtime_error_id(name);
+  const auto it = error_ids_.find(name);
+  if (it == error_ids_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
 }
 
 const char *RuntimeErrorRegistry::error_name(std::uint16_t error_id) const {
-  return runtime_error_name(error_id);
+  if (error_id >= errors_.size()) {
+    return "Error";
+  }
+  return errors_[error_id].name.c_str();
 }
 
 bool RuntimeErrorRegistry::error_is_a(std::uint16_t error_id,
                                       std::uint16_t ancestor_error_id) const {
-  return runtime_error_is_a(error_id, ancestor_error_id);
+  for (std::uint16_t depth = 0; error_id < errors_.size() &&
+                                depth < errors_.size(); ++depth) {
+    if (error_id == ancestor_error_id) {
+      return true;
+    }
+    const std::string &parent = errors_[error_id].parent;
+    if (parent.empty()) {
+      return false;
+    }
+    const std::optional<std::uint16_t> parent_id = this->error_id(parent);
+    if (!parent_id.has_value()) {
+      return false;
+    }
+    error_id = *parent_id;
+  }
+  return false;
+}
+
+std::uint32_t
+RuntimeErrorRegistry::error_effective_field_mask(std::uint16_t error_id) const {
+  std::uint32_t mask = 0;
+  for (std::uint16_t depth = 0; error_id < errors_.size() &&
+                                depth < errors_.size(); ++depth) {
+    const ErrorRecord &record = errors_[error_id];
+    mask |= record.field_mask;
+    if (record.parent.empty()) {
+      break;
+    }
+    const std::optional<std::uint16_t> parent_id =
+        this->error_id(record.parent);
+    if (!parent_id.has_value()) {
+      break;
+    }
+    error_id = *parent_id;
+  }
+  return mask;
+}
+
+std::optional<std::int64_t>
+RuntimeErrorRegistry::error_default_exit_code(std::uint16_t error_id) const {
+  for (std::uint16_t depth = 0; error_id < errors_.size() &&
+                                depth < errors_.size(); ++depth) {
+    const ErrorRecord &record = errors_[error_id];
+    if (record.default_exit_code >= 0) {
+      return record.default_exit_code;
+    }
+    if (record.parent.empty()) {
+      break;
+    }
+    const std::optional<std::uint16_t> parent_id =
+        this->error_id(record.parent);
+    if (!parent_id.has_value()) {
+      break;
+    }
+    error_id = *parent_id;
+  }
+  return std::nullopt;
+}
+
+const char *
+RuntimeErrorRegistry::error_default_message(std::uint16_t error_id) const {
+  for (std::uint16_t depth = 0; error_id < errors_.size() &&
+                                depth < errors_.size(); ++depth) {
+    const ErrorRecord &record = errors_[error_id];
+    if (!record.default_message.empty()) {
+      return record.default_message.c_str();
+    }
+    if (record.parent.empty()) {
+      break;
+    }
+    const std::optional<std::uint16_t> parent_id =
+        this->error_id(record.parent);
+    if (!parent_id.has_value()) {
+      break;
+    }
+    error_id = *parent_id;
+  }
+  return "";
 }
 
 void NativeRegistry::register_handler(RuntimeNativeTypeKind kind,
@@ -194,6 +325,16 @@ void register_runtime_type_descriptor(
   }
 }
 
+void register_runtime_error_descriptor(
+    RuntimeErrorRegistry &errors,
+    const RuntimeNativeModuleDescriptor &descriptor) {
+  for (const RuntimeNativeModuleErrorDescriptor &error : descriptor.errors) {
+    (void)errors.register_error(error.name, error.parent,
+                                error.default_message,
+                                error.default_exit_code, error.field_mask);
+  }
+}
+
 // The single list of builtin libraries. New libraries add one line here and
 // ship as `runtime/stdlib_<name>.{cpp}` — no further edit to `vm.cpp`.
 void register_builtin_stdlib(NativeRegistry &registry) {
@@ -210,21 +351,22 @@ void register_builtin_stdlib(NativeRegistry &registry) {
 
 void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
                                       RuntimeDispatchRegistry &dispatch,
-                                      RuntimeTypeRegistry &types) {
+                                      RuntimeTypeRegistry &types,
+                                      RuntimeErrorRegistry *errors) {
   register_io_runtime_module(modules, dispatch, types);
   register_fs_runtime_module(modules, dispatch, types);
-  register_net_runtime_module(modules, dispatch, types);
-  register_net_http_runtime_module(modules, dispatch, types);
-  register_task_runtime_module(modules, dispatch, types);
+  register_net_runtime_module(modules, dispatch, types, errors);
+  register_net_http_runtime_module(modules, dispatch, types, errors);
+  register_task_runtime_module(modules, dispatch, types, errors);
   register_math_runtime_module(modules, dispatch, types);
-  register_json_runtime_module(modules, dispatch, types);
-  register_codecs_runtime_module(modules, dispatch, types);
+  register_json_runtime_module(modules, dispatch, types, errors);
+  register_codecs_runtime_module(modules, dispatch, types, errors);
   register_digest_runtime_module(modules, dispatch, types);
-  register_secure_random_runtime_module(modules, dispatch, types);
-  register_argparser_runtime_module(modules, dispatch, types);
-  register_uuid_runtime_module(modules, dispatch, types);
-  register_time_runtime_module(modules, dispatch, types);
-  register_url_runtime_module(modules, dispatch, types);
+  register_secure_random_runtime_module(modules, dispatch, types, errors);
+  register_argparser_runtime_module(modules, dispatch, types, errors);
+  register_uuid_runtime_module(modules, dispatch, types, errors);
+  register_time_runtime_module(modules, dispatch, types, errors);
+  register_url_runtime_module(modules, dispatch, types, errors);
 }
 
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {

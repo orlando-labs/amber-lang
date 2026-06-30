@@ -434,6 +434,19 @@ std::string canonical_manifest_text(const PackageManifest &manifest) {
       out << prefix << ".type." << j
           << ".destructor=" << line_escape(native.types[j].destructor) << "\n";
     }
+    out << prefix << ".error.count=" << native.errors.size() << "\n";
+    for (std::size_t j = 0; j < native.errors.size(); ++j) {
+      out << prefix << ".error." << j
+          << ".name=" << line_escape(native.errors[j].name) << "\n";
+      out << prefix << ".error." << j
+          << ".parent=" << line_escape(native.errors[j].parent) << "\n";
+      out << prefix << ".error." << j
+          << ".default_message="
+          << line_escape(native.errors[j].default_message) << "\n";
+      out << prefix << ".error." << j
+          << ".default_exit_code="
+          << line_escape(native.errors[j].default_exit_code) << "\n";
+    }
   }
   return out.str();
 }
@@ -662,7 +675,8 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
     Capabilities,
     Native,
     NativeSymbols,
-    NativeTypes
+    NativeTypes,
+    NativeErrors
   };
 
   PackageManifestResult result;
@@ -670,6 +684,7 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
   PackageModule *current_module = nullptr;
   PackageNativeExtension *current_native = nullptr;
   PackageNativeType *current_native_type = nullptr;
+  PackageNativeError *current_native_error = nullptr;
 
   std::istringstream input(source);
   std::string raw_line;
@@ -685,6 +700,7 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
       current_module = nullptr;
       current_native = nullptr;
       current_native_type = nullptr;
+      current_native_error = nullptr;
       continue;
     }
     if (line == "[dependencies]") {
@@ -692,6 +708,7 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
       current_module = nullptr;
       current_native = nullptr;
       current_native_type = nullptr;
+      current_native_error = nullptr;
       continue;
     }
     if (line == "[capabilities]") {
@@ -699,6 +716,7 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
       current_module = nullptr;
       current_native = nullptr;
       current_native_type = nullptr;
+      current_native_error = nullptr;
       continue;
     }
     if (line == "[[modules]]" || line == "[[module]]") {
@@ -706,6 +724,7 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
       current_module = &result.manifest.modules.back();
       current_native = nullptr;
       current_native_type = nullptr;
+      current_native_error = nullptr;
       section = Section::Modules;
       continue;
     }
@@ -713,6 +732,7 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
       result.manifest.native_extensions.push_back({});
       current_native = &result.manifest.native_extensions.back();
       current_native_type = nullptr;
+      current_native_error = nullptr;
       current_module = nullptr;
       section = Section::Native;
       continue;
@@ -720,6 +740,7 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
     if (line == "[native.symbols]") {
       current_module = nullptr;
       current_native_type = nullptr;
+      current_native_error = nullptr;
       if (current_native == nullptr) {
         result.diagnostics.push_back(diagnostic(
             "PackageManifestError",
@@ -730,6 +751,7 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
     }
     if (line == "[[native.types]]") {
       current_module = nullptr;
+      current_native_error = nullptr;
       if (current_native == nullptr) {
         result.diagnostics.push_back(diagnostic(
             "PackageManifestError",
@@ -740,6 +762,21 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
         current_native_type = &current_native->types.back();
       }
       section = Section::NativeTypes;
+      continue;
+    }
+    if (line == "[[native.errors]]") {
+      current_module = nullptr;
+      current_native_type = nullptr;
+      if (current_native == nullptr) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "[[native.errors]] must follow a [[native]] section", path));
+        current_native_error = nullptr;
+      } else {
+        current_native->errors.push_back({});
+        current_native_error = &current_native->errors.back();
+      }
+      section = Section::NativeErrors;
       continue;
     }
     if (!line.empty() && line.front() == '[') {
@@ -925,6 +962,26 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
             path));
       }
       break;
+    case Section::NativeErrors:
+      if (current_native_error == nullptr) {
+        break;
+      }
+      if (key == "name") {
+        current_native_error->name = value;
+      } else if (key == "parent") {
+        current_native_error->parent = value;
+      } else if (key == "default_message") {
+        current_native_error->default_message = value;
+      } else if (key == "default_exit_code") {
+        current_native_error->default_exit_code = value;
+      } else {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "unsupported [[native.errors]] key at line " +
+                std::to_string(line_no) + ": " + key,
+            path));
+      }
+      break;
     case Section::None:
       result.diagnostics.push_back(diagnostic(
           "PackageManifestError",
@@ -1032,6 +1089,13 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
             "borrowed [[native.types]] must not declare a destructor", path));
       }
     }
+    for (const PackageNativeError &error : native.errors) {
+      if (error.name.empty()) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageManifestError",
+            "[[native.errors]] entries require a name", path));
+      }
+    }
   }
 
   result.manifest.modules = sorted_modules(result.manifest.modules);
@@ -1136,6 +1200,18 @@ std::string manifest_to_json(const PackageManifest &manifest) {
           << "\",\"ownership\":\"" << json_escape(native.types[j].ownership)
           << "\",\"destructor\":\"" << json_escape(native.types[j].destructor)
           << "\"}";
+    }
+    out << "],\"errors\":[";
+    for (std::size_t j = 0; j < native.errors.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(native.errors[j].name)
+          << "\",\"parent\":\"" << json_escape(native.errors[j].parent)
+          << "\",\"default_message\":\""
+          << json_escape(native.errors[j].default_message)
+          << "\",\"default_exit_code\":\""
+          << json_escape(native.errors[j].default_exit_code) << "\"}";
     }
     out << "]}";
   }

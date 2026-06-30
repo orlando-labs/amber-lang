@@ -204,7 +204,8 @@ RuntimeNativeModuleDescriptor uuid_module_descriptor() {
            {"UUID", RuntimeNativeTypeKind::Uuid}},
           {{RuntimeNativeTypeKind::Uuid, &uuid_dispatch}},
           {},
-          {}};
+          {},
+          {{"UuidError", "Exception"}, {"UuidParseError", "UuidError"}}};
 }
 
 void register_uuid(NativeRegistry &registry) {
@@ -213,11 +214,15 @@ void register_uuid(NativeRegistry &registry) {
 
 void register_uuid_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
-                                  RuntimeTypeRegistry &types) {
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor = uuid_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime

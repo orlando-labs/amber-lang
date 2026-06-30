@@ -1103,7 +1103,26 @@ RuntimeNativeModuleDescriptor argparser_module_descriptor() {
   return {{{"ArgParser", RuntimeNativeTypeKind::ArgParser}},
           {{RuntimeNativeTypeKind::ArgParser, &parser_dispatch}},
           {},
-          {{RuntimeNativeTypeKind::ArgParser, "new"}}};
+          {{RuntimeNativeTypeKind::ArgParser, "new"}},
+          {{"ArgParser.ParseError",
+            "Exception",
+            "",
+            2,
+            kRuntimeErrorFieldOption | kRuntimeErrorFieldValue |
+                kRuntimeErrorFieldExitCode | kRuntimeErrorFieldUsage |
+                kRuntimeErrorFieldHelp},
+           {"ArgParser.UnknownOption", "ArgParser.ParseError"},
+           {"ArgParser.MissingValue", "ArgParser.ParseError"},
+           {"ArgParser.MissingRequired", "ArgParser.ParseError"},
+           {"ArgParser.UnexpectedArgument", "ArgParser.ParseError"},
+           {"ArgParser.InvalidValue", "ArgParser.ParseError"},
+           {"ArgParser.InvalidChoice", "ArgParser.ParseError"},
+           {"ArgParser.HelpRequested",
+            "Exception",
+            "help requested",
+            0,
+            kRuntimeErrorFieldExitCode | kRuntimeErrorFieldUsage |
+                kRuntimeErrorFieldHelp}}};
 }
 
 } // namespace
@@ -1114,12 +1133,16 @@ void register_argparser(NativeRegistry &registry) {
 
 void register_argparser_runtime_module(RuntimeModuleRegistry &modules,
                                        RuntimeDispatchRegistry &dispatch,
-                                       RuntimeTypeRegistry &types) {
+                                       RuntimeTypeRegistry &types,
+                                       RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor =
       argparser_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime

@@ -910,9 +910,11 @@ public:
         dispatch_registry_ == &owned_dispatch_registry_) {
       register_builtin_runtime_modules(owned_module_registry_,
                                        owned_dispatch_registry_,
-                                       owned_type_registry_);
+                                       owned_type_registry_,
+                                       &owned_error_registry_);
     }
     if (error_registry_ == nullptr) {
+      NativeExtRegistry::global().register_errors(owned_error_registry_);
       error_registry_ = &owned_error_registry_;
     }
     resolve_native_bindings();
@@ -1199,6 +1201,11 @@ public:
     return call_block_to_stdlib_result(*static_cast<const Frame *>(frame),
                                        block, args);
   }
+  bool stdlib_block_suspension_in_property_arm(
+      const void *frame, const std::string &context) override {
+    return block_suspension_in_property_arm(
+        *static_cast<const Frame *>(frame), context.c_str());
+  }
   void stdlib_throw_json_stop(const void *frame,
                               std::optional<Value> value) override {
     throw_value(*static_cast<const Frame *>(frame), json_stop_tag_value(),
@@ -1327,6 +1334,23 @@ public:
     return stdlib_net_tcp_close(*static_cast<const Frame *>(frame), resource,
                                 report_fault);
   }
+  SendStatus stdlib_io_value_runtime_send(
+      const void *frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    struct BypassGuard {
+      bool &slot;
+      bool previous;
+      explicit BypassGuard(bool &value) : slot(value), previous(value) {
+        slot = true;
+      }
+      ~BypassGuard() { slot = previous; }
+    } guard(io_value_descriptor_bypass_);
+    return try_apply_native_stdlib_send(*static_cast<const Frame *>(frame),
+                                        receiver, selector, args, block,
+                                        kw_args, out);
+  }
   SendStatus stdlib_net_http_construct_client(
       const void *frame, const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
@@ -1400,6 +1424,24 @@ public:
     return apply_http_server_response_type_send(
         *static_cast<const Frame *>(frame), selector, args, block, kw_args,
         out);
+  }
+  SendStatus stdlib_task_runtime_send(
+      const void *frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) override {
+    struct BypassGuard {
+      bool &slot;
+      bool previous;
+      explicit BypassGuard(bool &value) : slot(value), previous(value) {
+        slot = true;
+      }
+      ~BypassGuard() { slot = previous; }
+    } guard(task_runtime_descriptor_bypass_);
+    const SendStatus status = try_apply_native_stdlib_send(
+        *static_cast<const Frame *>(frame), receiver, selector, args, block,
+        kw_args, out);
+    return status;
   }
   bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
                                   std::string *out) override {
@@ -10195,9 +10237,9 @@ private:
   make_native_error_instance(std::uint16_t error_id) {
     auto instance = std::make_shared<ErrorInstanceValue>();
     instance->error_id = error_id;
-    instance->message = runtime_error_default_message(error_id);
+    instance->message = error_registry().error_default_message(error_id);
     const std::uint32_t field_mask =
-        runtime_error_effective_field_mask(error_id);
+        error_registry().error_effective_field_mask(error_id);
     const auto add_null_field = [&](std::uint32_t bit, const char *name) {
       if ((field_mask & bit) != 0U) {
         instance->fields.push_back({name, Value::null()});
@@ -10207,7 +10249,7 @@ private:
     add_null_field(kRuntimeErrorFieldValue, "value");
     if ((field_mask & kRuntimeErrorFieldExitCode) != 0U) {
       const std::optional<std::int64_t> exit_code =
-          runtime_error_default_exit_code(error_id);
+          error_registry().error_default_exit_code(error_id);
       instance->fields.push_back({"exit_code", exit_code.has_value()
                                                    ? Value::integer(*exit_code)
                                                    : Value::null()});
@@ -10242,7 +10284,7 @@ private:
     }
 
     const std::uint32_t field_mask =
-        runtime_error_effective_field_mask(error_id);
+        error_registry().error_effective_field_mask(error_id);
     bool message_keyword_seen = false;
     for (const auto &[name_id, value] : kw_args) {
       if (name_id >= module_.symbols.size()) {
@@ -17005,17 +17047,22 @@ private:
         return SendStatus::Matched;
       }
 
-      if (const std::optional<RuntimeIoValueHandlerDescriptor> handler =
-              dispatch_registry().io_value_handler(io_value->type_name())) {
-        if (handler->handler != nullptr) {
-          NativeStdlibCall call{*this,         &frame,   receiver,
-                                handler->kind, selector, args,
-                                block,         kw_args,  out};
-          const SendStatus status = (*handler->handler)(call);
-          if (status != SendStatus::NotHandled) {
-            return status;
+      if (!io_value_descriptor_bypass_) {
+        if (const std::optional<RuntimeIoValueHandlerDescriptor> handler =
+                dispatch_registry().io_value_handler(io_value->type_name())) {
+          if (handler->handler != nullptr) {
+            NativeStdlibCall call{*this,         &frame,   receiver,
+                                  handler->kind, selector, args,
+                                  block,         kw_args,  out};
+            const SendStatus status = (*handler->handler)(call);
+            if (status != SendStatus::NotHandled) {
+              return status;
+            }
           }
         }
+      }
+      if (!io_value_descriptor_bypass_) {
+        return SendStatus::NotHandled;
       }
 
       if (const auto client =
@@ -18142,7 +18189,43 @@ private:
       }
     }
 
-    if (receiver.is_task_module()) {
+    if (!task_runtime_descriptor_bypass_) {
+      std::optional<RuntimeNativeTypeKind> task_runtime_kind;
+      if (receiver.is_task_module()) {
+        task_runtime_kind = RuntimeNativeTypeKind::TaskModule;
+      } else if (receiver.is_task_handle()) {
+        task_runtime_kind = RuntimeNativeTypeKind::TaskModule;
+      } else if (receiver.is_mutex()) {
+        task_runtime_kind = RuntimeNativeTypeKind::Mutex;
+      } else if (receiver.is_atomic()) {
+        task_runtime_kind = RuntimeNativeTypeKind::Atomic;
+      } else if (receiver.is_barrier()) {
+        task_runtime_kind = RuntimeNativeTypeKind::Barrier;
+      } else if (receiver.is_flow_module()) {
+        task_runtime_kind = RuntimeNativeTypeKind::Flow;
+      } else if (receiver.is_threaded_collection()) {
+        task_runtime_kind = RuntimeNativeTypeKind::ThreadedCollection;
+      } else if ((receiver.is_list() || receiver.is_tuple() ||
+                  receiver.is_set()) &&
+                 (selector == "threaded" || selector == "parallel")) {
+        task_runtime_kind = RuntimeNativeTypeKind::ThreadedCollection;
+      }
+      if (task_runtime_kind.has_value()) {
+        if (const std::optional<NativeStdlibHandler> handler =
+                dispatch_registry().native_handler(*task_runtime_kind)) {
+          NativeStdlibCall call{
+              *this,    &frame, receiver, *task_runtime_kind,
+              selector, args,   block,    kw_args,
+              out};
+          const SendStatus status = (*handler)(call);
+          if (status != SendStatus::NotHandled) {
+            return status;
+          }
+        }
+      }
+    }
+
+    if (task_runtime_descriptor_bypass_ && receiver.is_task_module()) {
       const std::shared_ptr<RuntimeTaskModule> task = receiver.as_task_module();
       if (task == nullptr) {
         set_fault(frame, "TypeError", "task module is null");
@@ -18376,7 +18459,7 @@ private:
       }
     }
 
-    if (receiver.is_task_handle()) {
+    if (task_runtime_descriptor_bypass_ && receiver.is_task_handle()) {
       const std::shared_ptr<RuntimeTaskHandle> handle =
           receiver.as_task_handle();
       if (handle == nullptr) {
@@ -18465,78 +18548,21 @@ private:
     }
 
     if (receiver.is_channel()) {
-      const std::shared_ptr<RuntimeChannel> channel = receiver.as_channel();
-      if (channel == nullptr) {
-        set_fault(frame, "TypeError", "channel is null");
-        return SendStatus::Faulted;
-      }
-      if (selector == "send") {
-        if (!require_arity(1) ||
-            !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
-            !require_no_block()) {
-          return SendStatus::Faulted;
+      if (const std::optional<NativeStdlibHandler> handler =
+              dispatch_registry().native_handler(
+                  RuntimeNativeTypeKind::Channel)) {
+        NativeStdlibCall call{
+            *this,    &frame, receiver, RuntimeNativeTypeKind::Channel,
+            selector, args,   block,    kw_args,
+            out};
+        const SendStatus status = (*handler)(call);
+        if (status != SendStatus::NotHandled) {
+          return status;
         }
-        std::chrono::milliseconds timeout;
-        if (!timeout_from_keywords(frame, kw_args, &timeout)) {
-          return SendStatus::Faulted;
-        }
-        if (block_suspension_in_property_arm(frame, "Channel.send")) {
-          return SendStatus::Faulted;
-        }
-        const RuntimeChannelResult sent = channel->send(args[0], timeout);
-        if (!sent.ok) {
-          set_fault_from_channel_result(frame, sent);
-          return SendStatus::Faulted;
-        }
-        *out = Value::boolean(sent.sent);
-        return SendStatus::Matched;
-      }
-      if (selector == "recv") {
-        if (!require_arity(0) ||
-            !reject_unknown_keywords(frame, kw_args, {"timeout"}) ||
-            !require_no_block()) {
-          return SendStatus::Faulted;
-        }
-        std::chrono::milliseconds timeout;
-        if (!timeout_from_keywords(frame, kw_args, &timeout)) {
-          return SendStatus::Faulted;
-        }
-        if (block_suspension_in_property_arm(frame, "Channel.recv")) {
-          return SendStatus::Faulted;
-        }
-        const RuntimeChannelResult received = channel->recv(timeout);
-        if (!received.ok) {
-          set_fault_from_channel_result(frame, received);
-          return SendStatus::Faulted;
-        }
-        *out = received.value;
-        return SendStatus::Matched;
-      }
-      if (selector == "close") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "Channel.close does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        *out = Value::boolean(channel->close());
-        return SendStatus::Matched;
-      }
-      if (selector == "closed?") {
-        if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
-          if (!kw_args.empty()) {
-            set_fault(frame, "TypeError",
-                      "Channel.closed? does not accept keywords");
-          }
-          return SendStatus::Faulted;
-        }
-        *out = Value::boolean(channel->closed());
-        return SendStatus::Matched;
       }
     }
 
-    if (receiver.is_mutex()) {
+    if (task_runtime_descriptor_bypass_ && receiver.is_mutex()) {
       const std::shared_ptr<RuntimeMutex> mutex = receiver.as_mutex();
       if (mutex == nullptr) {
         set_fault(frame, "TypeError", "mutex is null");
@@ -18623,7 +18649,7 @@ private:
       }
     }
 
-    if (receiver.is_atomic()) {
+    if (task_runtime_descriptor_bypass_ && receiver.is_atomic()) {
       const std::shared_ptr<RuntimeAtomic> atomic = receiver.as_atomic();
       if (atomic == nullptr) {
         set_fault(frame, "TypeError", "atomic is null");
@@ -18707,7 +18733,7 @@ private:
       }
     }
 
-    if (receiver.is_barrier()) {
+    if (task_runtime_descriptor_bypass_ && receiver.is_barrier()) {
       const std::shared_ptr<RuntimeBarrier> barrier = receiver.as_barrier();
       if (barrier == nullptr) {
         set_fault(frame, "TypeError", "barrier is null");
@@ -18733,7 +18759,7 @@ private:
       }
     }
 
-    if (receiver.is_flow_module()) {
+    if (task_runtime_descriptor_bypass_ && receiver.is_flow_module()) {
       const std::shared_ptr<RuntimeFlowModule> flow = receiver.as_flow_module();
       if (flow == nullptr) {
         set_fault(frame, "TypeError", "flow module is null");
@@ -18840,7 +18866,7 @@ private:
       }
     }
 
-    if (receiver.is_threaded_collection()) {
+    if (task_runtime_descriptor_bypass_ && receiver.is_threaded_collection()) {
       const std::shared_ptr<RuntimeThreadedCollection> threaded =
           receiver.as_threaded_collection();
       if (threaded == nullptr) {
@@ -18949,7 +18975,8 @@ private:
       }
     }
 
-    if ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
+    if (task_runtime_descriptor_bypass_ &&
+        (receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
         (selector == "threaded" || selector == "parallel")) {
       if (!block.is_null()) {
         set_fault(frame, "TypeError", selector + " does not accept block");
@@ -20192,7 +20219,7 @@ private:
         return SendStatus::Matched;
       }
       if (runtime_error_field_bit(selector) != 0U &&
-          (runtime_error_effective_field_mask(instance->error_id) &
+          (error_registry().error_effective_field_mask(instance->error_id) &
            runtime_error_field_bit(selector)) != 0U) {
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
@@ -26073,6 +26100,13 @@ private:
   // point to stop the task driver's step loop and describe the wake source.
   bool parkable_ = false;
   std::optional<ParkRequest> park_request_;
+  // Transitional Phase 3 reroute: task/sync descriptor handlers call back into
+  // the legacy VM bodies through StdlibHost, so the recursive SEND must not
+  // re-enter the descriptor before reaching those bodies.
+  bool task_runtime_descriptor_bypass_ = false;
+  // Same Phase 3 reroute for IO-backed stdlib values whose effectful bodies
+  // still live in VM helpers while descriptor handlers own selector entry.
+  bool io_value_descriptor_bypass_ = false;
   // Set when this Vm executes inside a property arm of an outer Vm (nested
   // executions inherit the non-suspendable dynamic extent).
   std::optional<std::string> inherited_no_suspend_label_;

@@ -8443,6 +8443,17 @@ void test_native_error_inherited_rescue_execution() {
              sibling.value.as_integer() == 7,
          "native sibling error class should not catch");
 
+  amber::runtime::ExecutionResult url =
+      execute_emitted_init("try:\n"
+                           "  raise UrlParseError(\"bad url\")\n"
+                           "rescue UrlError |e|:\n"
+                           "  if UrlError === e and UrlParseError === e:\n"
+                           "    7\n"
+                           "  else:\n"
+                           "    0\n");
+  expect(url.ok() && url.value.is_integer() && url.value.as_integer() == 7,
+         "URL parent error class should catch registered subclass");
+
   amber::runtime::ExecutionResult root =
       execute_emitted_init("try:\n"
                            "  raise TypeError(\"bad type\")\n"

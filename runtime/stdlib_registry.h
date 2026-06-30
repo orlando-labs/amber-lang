@@ -170,6 +170,12 @@ public:
                                               const Value &block,
                                               std::vector<Value> args) = 0;
 
+  // Guard against operations that can suspend while evaluating property arms.
+  // The VM owns the frame/property-arm state; stdlib handlers only name the
+  // operation they are about to perform.
+  virtual bool stdlib_block_suspension_in_property_arm(
+      const void *frame, const std::string &context) = 0;
+
   // Raise the host-owned non-local stop used by Json stream/path APIs.
   virtual void stdlib_throw_json_stop(const void *frame,
                                       std::optional<Value> value) = 0;
@@ -243,6 +249,11 @@ public:
                                      Value *out) = 0;
   virtual bool stdlib_net_tcp_close(const void *frame, const Value &resource,
                                     bool report_fault) = 0;
+  virtual SendStatus stdlib_io_value_runtime_send(
+      const void *frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
   virtual SendStatus stdlib_net_http_construct_client(
       const void *frame, const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
@@ -282,6 +293,11 @@ public:
       Value *out) = 0;
   virtual SendStatus stdlib_net_http_server_response_type_send(
       const void *frame, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) = 0;
+  virtual SendStatus stdlib_task_runtime_send(
+      const void *frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
       Value *out) = 0;
@@ -456,6 +472,10 @@ struct NativeStdlibCall {
     return host.stdlib_call_block(frame, target, std::move(block_args));
   }
 
+  bool block_suspension_in_property_arm(const std::string &context) const {
+    return host.stdlib_block_suspension_in_property_arm(frame, context);
+  }
+
   void throw_json_stop(std::optional<Value> value = std::nullopt) const {
     host.stdlib_throw_json_stop(frame, std::move(value));
   }
@@ -616,6 +636,16 @@ struct NativeStdlibCall {
                                                           block, kw_args, out);
   }
 
+  SendStatus task_runtime_send() const {
+    return host.stdlib_task_runtime_send(frame, receiver, selector, args, block,
+                                         kw_args, out);
+  }
+
+  SendStatus io_value_runtime_send() const {
+    return host.stdlib_io_value_runtime_send(frame, receiver, selector, args,
+                                             block, kw_args, out);
+  }
+
   bool secure_random_bytes(std::size_t count, std::string *out) const {
     return host.stdlib_secure_random_bytes(frame, count, out);
   }
@@ -752,10 +782,38 @@ private:
 
 class RuntimeErrorRegistry {
 public:
+  enum class Seed { GeneratedBootstrap, Empty };
+
+  explicit RuntimeErrorRegistry(Seed seed = Seed::GeneratedBootstrap);
+
+  std::optional<std::uint16_t>
+  register_error(std::string name, std::string parent = {},
+                 std::string default_message = {},
+                 std::int64_t default_exit_code = -1,
+                 std::uint32_t field_mask = 0);
+
   std::optional<std::uint16_t> error_id(const std::string &name) const;
   const char *error_name(std::uint16_t error_id) const;
   bool error_is_a(std::uint16_t error_id,
                   std::uint16_t ancestor_error_id) const;
+  std::uint32_t error_effective_field_mask(std::uint16_t error_id) const;
+  std::optional<std::int64_t>
+  error_default_exit_code(std::uint16_t error_id) const;
+  const char *error_default_message(std::uint16_t error_id) const;
+
+private:
+  struct ErrorRecord {
+    std::string name;
+    std::string parent;
+    std::string default_message;
+    std::int64_t default_exit_code = -1;
+    std::uint32_t field_mask = 0;
+  };
+
+  std::uint16_t append_error(ErrorRecord record, bool update_name_index);
+
+  std::vector<ErrorRecord> errors_;
+  std::unordered_map<std::string, std::uint16_t> error_ids_;
 };
 
 struct RuntimeNativeModulePathDescriptor {
@@ -779,11 +837,20 @@ struct RuntimeNativeModuleTypeCallDescriptor {
   const char *selector = "";
 };
 
+struct RuntimeNativeModuleErrorDescriptor {
+  const char *name = "";
+  const char *parent = "";
+  const char *default_message = "";
+  std::int64_t default_exit_code = -1;
+  std::uint32_t field_mask = 0;
+};
+
 struct RuntimeNativeModuleDescriptor {
   std::vector<RuntimeNativeModulePathDescriptor> paths;
   std::vector<RuntimeNativeModuleHandlerDescriptor> handlers;
   std::vector<RuntimeNativeModuleIoHandlerDescriptor> io_handlers;
   std::vector<RuntimeNativeModuleTypeCallDescriptor> type_calls;
+  std::vector<RuntimeNativeModuleErrorDescriptor> errors;
 };
 
 // Compatibility facade populated once during VM construction (no static
@@ -827,7 +894,8 @@ private:
 void register_builtin_stdlib(NativeRegistry &registry);
 void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
                                       RuntimeDispatchRegistry &dispatch,
-                                      RuntimeTypeRegistry &types);
+                                      RuntimeTypeRegistry &types,
+                                      RuntimeErrorRegistry *errors = nullptr);
 void register_native_module_descriptor(
     NativeRegistry &registry, const RuntimeNativeModuleDescriptor &descriptor);
 void register_runtime_module_descriptor(
@@ -838,6 +906,9 @@ void register_runtime_dispatch_descriptor(
     const RuntimeNativeModuleDescriptor &descriptor);
 void register_runtime_type_descriptor(
     RuntimeTypeRegistry &types,
+    const RuntimeNativeModuleDescriptor &descriptor);
+void register_runtime_error_descriptor(
+    RuntimeErrorRegistry &errors,
     const RuntimeNativeModuleDescriptor &descriptor);
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry);
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry);
@@ -853,13 +924,16 @@ void register_fs_runtime_module(RuntimeModuleRegistry &modules,
                                 RuntimeTypeRegistry &types);
 void register_net_runtime_module(RuntimeModuleRegistry &modules,
                                  RuntimeDispatchRegistry &dispatch,
-                                 RuntimeTypeRegistry &types);
+                                 RuntimeTypeRegistry &types,
+                                 RuntimeErrorRegistry *errors = nullptr);
 void register_net_http_runtime_module(RuntimeModuleRegistry &modules,
                                       RuntimeDispatchRegistry &dispatch,
-                                      RuntimeTypeRegistry &types);
+                                      RuntimeTypeRegistry &types,
+                                      RuntimeErrorRegistry *errors = nullptr);
 void register_task_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
-                                  RuntimeTypeRegistry &types);
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors = nullptr);
 void register_math(NativeRegistry &registry);
 void register_math_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
@@ -867,11 +941,13 @@ void register_math_runtime_module(RuntimeModuleRegistry &modules,
 void register_json(NativeRegistry &registry);
 void register_json_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
-                                  RuntimeTypeRegistry &types);
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors = nullptr);
 void register_codecs(NativeRegistry &registry);
 void register_codecs_runtime_module(RuntimeModuleRegistry &modules,
                                     RuntimeDispatchRegistry &dispatch,
-                                    RuntimeTypeRegistry &types);
+                                    RuntimeTypeRegistry &types,
+                                    RuntimeErrorRegistry *errors = nullptr);
 void register_digest(NativeRegistry &registry);
 void register_digest_runtime_module(RuntimeModuleRegistry &modules,
                                     RuntimeDispatchRegistry &dispatch,
@@ -879,22 +955,28 @@ void register_digest_runtime_module(RuntimeModuleRegistry &modules,
 void register_secure_random(NativeRegistry &registry);
 void register_secure_random_runtime_module(RuntimeModuleRegistry &modules,
                                            RuntimeDispatchRegistry &dispatch,
-                                           RuntimeTypeRegistry &types);
+                                           RuntimeTypeRegistry &types,
+                                           RuntimeErrorRegistry *errors =
+                                               nullptr);
 void register_argparser(NativeRegistry &registry);
 void register_argparser_runtime_module(RuntimeModuleRegistry &modules,
                                        RuntimeDispatchRegistry &dispatch,
-                                       RuntimeTypeRegistry &types);
+                                       RuntimeTypeRegistry &types,
+                                       RuntimeErrorRegistry *errors = nullptr);
 void register_uuid(NativeRegistry &registry);
 void register_uuid_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
-                                  RuntimeTypeRegistry &types);
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors = nullptr);
 void register_time(NativeRegistry &registry);
 void register_time_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,
-                                  RuntimeTypeRegistry &types);
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors = nullptr);
 void register_url(NativeRegistry &registry);
 void register_url_runtime_module(RuntimeModuleRegistry &modules,
                                  RuntimeDispatchRegistry &dispatch,
-                                 RuntimeTypeRegistry &types);
+                                 RuntimeTypeRegistry &types,
+                                 RuntimeErrorRegistry *errors = nullptr);
 
 } // namespace amber::runtime

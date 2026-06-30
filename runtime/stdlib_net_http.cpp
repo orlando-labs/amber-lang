@@ -146,6 +146,10 @@ SendStatus net_http_server_response_type_send(NativeStdlibCall &call) {
   return call.net_http_server_response_type_send();
 }
 
+SendStatus net_http_instance_send(NativeStdlibCall &call) {
+  return call.io_value_runtime_send();
+}
+
 RuntimeNativeModuleDescriptor net_http_module_descriptor() {
   return {
       {{"net.http", RuntimeNativeTypeKind::NetHttp},
@@ -178,7 +182,29 @@ RuntimeNativeModuleDescriptor net_http_module_descriptor() {
         net_http_server_request_type_send},
        {RuntimeNativeTypeKind::NetHttpServerResponse,
         net_http_server_response_type_send}},
-      {},
+      {{"net.http.Client", RuntimeNativeTypeKind::NetHttpClient,
+        net_http_instance_send},
+       {"net.http.RequestBody", RuntimeNativeTypeKind::NetHttpRequestBody,
+        net_http_instance_send},
+       {"net.http.ResponseBody", RuntimeNativeTypeKind::NetHttpRequestBody,
+        net_http_instance_send},
+       {"net.http.RedirectRecord", RuntimeNativeTypeKind::NetHttp,
+        net_http_instance_send},
+       {"net.http.Request", RuntimeNativeTypeKind::NetHttpRequest,
+        net_http_instance_send},
+       {"net.http.Response", RuntimeNativeTypeKind::NetHttp,
+        net_http_instance_send},
+       {"net.http.RequestHandle", RuntimeNativeTypeKind::NetHttp,
+        net_http_instance_send},
+       {"net.http.Headers", RuntimeNativeTypeKind::NetHttpHeaders,
+        net_http_instance_send},
+       {"net.http.Server", RuntimeNativeTypeKind::NetHttpServer,
+        net_http_instance_send},
+       {"net.http.ServerRequest", RuntimeNativeTypeKind::NetHttpServerRequest,
+        net_http_instance_send},
+       {"net.http.ServerResponse",
+        RuntimeNativeTypeKind::NetHttpServerResponse,
+        net_http_instance_send}},
       {{RuntimeNativeTypeKind::NetHttpClient, "new"},
        {RuntimeNativeTypeKind::NetHttpRequest, "new"},
        {RuntimeNativeTypeKind::NetHttpRequestBody, "new"},
@@ -187,18 +213,48 @@ RuntimeNativeModuleDescriptor net_http_module_descriptor() {
        {RuntimeNativeTypeKind::NetHttpServerResponse, "new"},
        {RuntimeNativeTypeKind::NetHttpJsonGetJson, "__call__"},
        {RuntimeNativeTypeKind::NetHttpJsonPostJson, "__call__"},
-       {RuntimeNativeTypeKind::NetHttpFormBody, "__call__"}}};
+       {RuntimeNativeTypeKind::NetHttpFormBody, "__call__"}},
+      {{"HttpError", "Exception"},
+       {"RequestError", "HttpError"},
+       {"InvalidUrlError", "RequestError"},
+       {"InvalidMethodError", "RequestError"},
+       {"InvalidHeaderError", "RequestError"},
+       {"UnsupportedSchemeError", "RequestError"},
+       {"RequestStateError", "RequestError"},
+       {"ProtocolError", "HttpError"},
+       {"HeaderLimitError", "ProtocolError"},
+       {"StatusLineLimitError", "ProtocolError"},
+       {"ChunkError", "ProtocolError"},
+       {"UnexpectedEofError", "ProtocolError"},
+       {"BodyError", "HttpError"},
+       {"BodyConsumedError", "BodyError"},
+       {"BodyLengthError", "BodyError"},
+       {"BodyLimitError", "BodyError"},
+       {"RedirectError", "HttpError"},
+       {"TooManyRedirectsError", "RedirectError"},
+       {"NonReplayableRedirectError", "RedirectError"},
+       {"HttpTimeoutError", "HttpError"},
+       {"PoolTimeoutError", "HttpTimeoutError"},
+       {"OpenTimeoutError", "HttpTimeoutError"},
+       {"ReadTimeoutError", "HttpTimeoutError"},
+       {"WriteTimeoutError", "HttpTimeoutError"},
+       {"BodyTimeoutError", "HttpTimeoutError"},
+       {"TotalTimeoutError", "HttpTimeoutError"}}};
 }
 
 } // namespace
 
 void register_net_http_runtime_module(RuntimeModuleRegistry &modules,
                                       RuntimeDispatchRegistry &dispatch,
-                                      RuntimeTypeRegistry &types) {
+                                      RuntimeTypeRegistry &types,
+                                      RuntimeErrorRegistry *errors) {
   const RuntimeNativeModuleDescriptor descriptor = net_http_module_descriptor();
   register_runtime_module_descriptor(modules, descriptor);
   register_runtime_dispatch_descriptor(dispatch, descriptor);
   register_runtime_type_descriptor(types, descriptor);
+  if (errors != nullptr) {
+    register_runtime_error_descriptor(*errors, descriptor);
+  }
 }
 
 } // namespace amber::runtime
