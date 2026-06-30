@@ -3000,6 +3000,26 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
       break;
     }
   }
+  // A `*name` / `**name` rest parameter collects surplus positional/keyword
+  // arguments into a Tuple/Map in the VM frame prologue; the direct native C++
+  // lane has no equivalent packing, so any module that defines one runs
+  // entirely under the VM.
+  if (first_reason.empty()) {
+    for (const amber::bytecode::BcMethod &method : module.methods) {
+      bool has_rest = false;
+      for (const amber::bytecode::MethodParamEntry &param : method.params) {
+        if ((param.flags & (amber::bytecode::kMethodParamFlagRest |
+                            amber::bytecode::kMethodParamFlagKwRest)) != 0U) {
+          has_rest = true;
+          break;
+        }
+      }
+      if (has_rest) {
+        first_reason = "rest/keyword-rest parameter requires VM fallback";
+        break;
+      }
+    }
+  }
   if (first_reason.empty()) {
     for (const amber::bytecode::BcCode &code : module.code_objects) {
       std::string reason;

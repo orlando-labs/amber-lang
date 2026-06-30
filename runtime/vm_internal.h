@@ -32,6 +32,10 @@ struct PreparedSeqState {
   std::vector<Value> items;
   std::size_t rest_start = 0;
   bool source_was_tuple = false;
+  // Upper bound (exclusive) of the rest slice, lowered by each from-end
+  // `PGetIndex` so a mid-position rest (`[a, *b, c]`) captures only the middle.
+  // SIZE_MAX means "to the end" (tail rest, the common case).
+  std::size_t rest_end = SIZE_MAX;
 };
 
 struct PreparedMapState {
@@ -311,6 +315,14 @@ struct RuntimeState {
   RuntimeHeap heap;
   std::vector<ClassRuntimeState> classes;
   bool owners_initialized = false;
+  // Rest parameters: maps a method body's entry code id to the register index
+  // of its `*name` rest parameter, so the closure-call frame setup can pack
+  // surplus positional arguments into a Tuple. Built once in
+  // initialize_for_module; `has_any_rest_params` keeps the common (no-rest)
+  // call path to a single bool check.
+  bool has_any_rest_params = false;
+  std::unordered_map<std::uint32_t, std::uint32_t> rest_param_index_by_code;
+  std::unordered_map<std::uint32_t, std::uint32_t> kw_rest_param_index_by_code;
   bool world_frozen = false;
   std::uint64_t world_epoch = 1;
   std::uint64_t watch_epoch = 0;
@@ -431,6 +443,18 @@ struct RuntimeState {
     }
     if (owners_initialized) {
       return;
+    }
+    for (const bytecode::BcMethod &method : module.methods) {
+      for (std::uint32_t i = 0; i < method.params.size(); ++i) {
+        const std::uint32_t flags = method.params[i].flags;
+        if ((flags & bytecode::kMethodParamFlagRest) != 0U) {
+          rest_param_index_by_code[method.entry_code_id] = i;
+          has_any_rest_params = true;
+        } else if ((flags & bytecode::kMethodParamFlagKwRest) != 0U) {
+          kw_rest_param_index_by_code[method.entry_code_id] = i;
+          has_any_rest_params = true;
+        }
+      }
     }
     for (std::uint32_t index = 0; index < module.classes.size(); ++index) {
       ClassRuntimeState &runtime = classes[index];

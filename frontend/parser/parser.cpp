@@ -1967,6 +1967,15 @@ std::unique_ptr<ast::Expr> Parser::parse_param() {
   } else if (match(lexer::TokenKind::AtAt)) {
     auto_assign_kind = "@@";
   }
+  // A `*name` rest parameter collects surplus positional arguments into an
+  // immutable Tuple. It cannot combine with `&` (block) or `@`/`@@`
+  // (auto-assign), and takes neither a keyword `:` nor a default `=`.
+  const bool is_rest =
+      !is_block && auto_assign_kind == "none" && match(lexer::TokenKind::Star);
+  // A `**name` keyword-rest parameter collects unmatched keyword arguments
+  // into a Map. Same exclusivity rules as `*name`.
+  const bool is_kw_rest = !is_block && !is_rest && auto_assign_kind == "none" &&
+                          match(lexer::TokenKind::StarStar);
   // §4.2: a block parameter is always a single name, never a pattern.
   if (is_block && !check(lexer::TokenKind::Identifier)) {
     error_code(current(), "AMB_BLOCK_PARAM_PATTERN",
@@ -1974,7 +1983,10 @@ std::unique_ptr<ast::Expr> Parser::parse_param() {
   }
   const lexer::Token name =
       consume(lexer::TokenKind::Identifier, "expected parameter name");
-  std::string kind = is_block ? "block" : "positional";
+  std::string kind = is_block      ? "block"
+                     : is_rest      ? "rest"
+                     : is_kw_rest   ? "kw_rest"
+                                    : "positional";
   std::string type_expr;
   std::unique_ptr<ast::Expr> default_expr;
 
@@ -1985,12 +1997,13 @@ std::unique_ptr<ast::Expr> Parser::parse_param() {
   // Block parameters take neither a keyword `:` nor a default `=` in v1
   // (default deferred per RFC §10.1); leaving them unconsumed lets the
   // signature's `)` expectation flag a malformed `&blk: …` / `&blk = …`.
-  if (!is_block && match(lexer::TokenKind::Colon)) {
+  if (!is_block && !is_rest && !is_kw_rest && match(lexer::TokenKind::Colon)) {
     kind = "keyword";
     if (!check(lexer::TokenKind::Comma) && !check(lexer::TokenKind::RParen)) {
       default_expr = parse_expression(1, StopMode::Normal);
     }
-  } else if (!is_block && match(lexer::TokenKind::Equal)) {
+  } else if (!is_block && !is_rest && !is_kw_rest &&
+             match(lexer::TokenKind::Equal)) {
     default_expr = parse_expression(1, StopMode::Normal);
   }
 
@@ -2332,6 +2345,30 @@ bool Parser::is_simple_many_def_header() const {
   for (std::size_t i = current_ + 1; i < close_index; ++i) {
     if (tokens_[i].kind == lexer::TokenKind::Ampersand) {
       return false;
+    }
+  }
+  // A top-level `*name` / `**name` rest sigil is likewise a signature construct
+  // (it collects surplus positional/keyword arguments into a Tuple/Map), not a
+  // destructuring pattern, so its presence forces normal signature parsing.
+  // Tracked at bracket depth 0 only, so a nested rest-binding pattern such as
+  // `def f((a, *rest)):` still reaches the many-def pattern path.
+  {
+    int rest_depth = 0;
+    for (std::size_t i = current_ + 1; i < close_index; ++i) {
+      const lexer::TokenKind kind = tokens_[i].kind;
+      if (kind == lexer::TokenKind::LParen ||
+          kind == lexer::TokenKind::LBracket ||
+          kind == lexer::TokenKind::LBrace) {
+        ++rest_depth;
+      } else if (kind == lexer::TokenKind::RParen ||
+                 kind == lexer::TokenKind::RBracket ||
+                 kind == lexer::TokenKind::RBrace) {
+        --rest_depth;
+      } else if (rest_depth == 0 &&
+                 (kind == lexer::TokenKind::Star ||
+                  kind == lexer::TokenKind::StarStar)) {
+        return false;
+      }
     }
   }
   if (close_index + 1 < tokens_.size() &&
@@ -2808,18 +2845,45 @@ std::unique_ptr<ast::Expr> Parser::try_parse_pattern_assignment() {
     return nullptr;
   }
 
-  const std::vector<lexer::Token> left_tokens =
-      expression_slice_tokens(tokens_, current_, equal_index);
-  Parser left_parser(left_tokens);
-  ParseResult left_parse = left_parser.parse_expression_unit();
-  if (left_parse.ok() && left_parse.expr != nullptr &&
-      (is_assignable(*left_parse.expr) ||
-       is_optional_bracket_access(*left_parse.expr))) {
-    return nullptr;
+  // A top-level (depth-0) comma in the left-hand side marks a bare destructuring
+  // target list (`a, b = …` / `a, *b = …`). Treat it as a parenthesized tuple
+  // pattern so the surrounding parens are optional sugar, lowering `a, *b = e`
+  // to `(a, *b) = e`.
+  bool lhs_has_top_comma = false;
+  for (std::size_t i = current_, depth = 0; i < equal_index; ++i) {
+    const lexer::TokenKind k = tokens_[i].kind;
+    if (k == lexer::TokenKind::LParen || k == lexer::TokenKind::LBracket ||
+        k == lexer::TokenKind::LBrace) {
+      ++depth;
+    } else if (k == lexer::TokenKind::RParen ||
+               k == lexer::TokenKind::RBracket ||
+               k == lexer::TokenKind::RBrace) {
+      if (depth > 0) {
+        --depth;
+      }
+    } else if (k == lexer::TokenKind::Comma && depth == 0) {
+      lhs_has_top_comma = true;
+      break;
+    }
   }
 
-  const std::string pattern_text =
+  if (!lhs_has_top_comma) {
+    const std::vector<lexer::Token> left_tokens =
+        expression_slice_tokens(tokens_, current_, equal_index);
+    Parser left_parser(left_tokens);
+    ParseResult left_parse = left_parser.parse_expression_unit();
+    if (left_parse.ok() && left_parse.expr != nullptr &&
+        (is_assignable(*left_parse.expr) ||
+         is_optional_bracket_access(*left_parse.expr))) {
+      return nullptr;
+    }
+  }
+
+  std::string pattern_text =
       pattern_text_from_tokens(tokens_, current_, equal_index);
+  if (lhs_has_top_comma) {
+    pattern_text = "(" + pattern_text + ")";
+  }
   current_ = equal_index + 1;
   std::unique_ptr<ast::Expr> right = parse_expression(1, StopMode::Normal);
   const lexer::Span left_span =

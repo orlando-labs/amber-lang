@@ -1269,6 +1269,10 @@ private:
             entry.flags |= kMethodParamFlagKeyword;
           } else if (string_field(*param, "kind") == "block") {
             entry.flags |= kMethodParamFlagBlock;
+          } else if (string_field(*param, "kind") == "rest") {
+            entry.flags |= kMethodParamFlagRest;
+          } else if (string_field(*param, "kind") == "kw_rest") {
+            entry.flags |= kMethodParamFlagKwRest;
           }
           if (!bool_field(*param, "has_default")) {
             method.params.push_back(entry);
@@ -2963,11 +2967,13 @@ void CodeEmitter::compile_pattern_node(const ast::Expr &node,
           continue;
         }
         const std::uint32_t item_reg = alloc_temp();
+        std::uint32_t item_index = parse_u32_string(string_field(*item, "index"));
+        if (bool_field(*item, "from_end")) {
+          item_index |= kPatternSeqFromEndBit;
+        }
         emit_instruction(
             Opcode::PGetIndex,
-            {{item_reg, false},
-             {seq_reg, false},
-             {parse_u32_string(string_field(*item, "index")), false}},
+            {{item_reg, false}, {seq_reg, false}, {item_index, false}},
             item->span);
         compile_pattern_node(*pattern, item_reg, fail_patches);
       }

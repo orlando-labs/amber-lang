@@ -301,6 +301,19 @@ inline constexpr std::uint32_t kMethodParamFlagHasDefault = 0x2U;
 // RFC block-parameters: a `&name` parameter bound from the frame's block
 // channel rather than a positional/keyword argument.
 inline constexpr std::uint32_t kMethodParamFlagBlock = 0x4U;
+// Rest parameters: a `*name` parameter that collects all surplus positional
+// arguments into an immutable Tuple snapshot. At most one per signature.
+inline constexpr std::uint32_t kMethodParamFlagRest = 0x8U;
+// Keyword-rest parameters: a `**name` parameter that collects every keyword
+// argument not bound to a declared keyword parameter into a frozen, name-
+// indifferent Map. At most one per signature.
+inline constexpr std::uint32_t kMethodParamFlagKwRest = 0x10U;
+
+// Sequence-pattern `PGetIndex`: when this bit is set on the index operand, the
+// element is addressed from the END of the sequence (offset 0 = last element),
+// which is how the fixed patterns AFTER a mid-position rest (`[a, *b, c]`) are
+// bound. The low bits hold the from-end offset.
+inline constexpr std::uint32_t kPatternSeqFromEndBit = 0x80000000U;
 
 struct MethodParamEntry {
   std::uint32_t external_name_sym_id = 0;

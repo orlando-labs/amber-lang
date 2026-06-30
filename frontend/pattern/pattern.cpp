@@ -570,24 +570,26 @@ private:
 
     std::vector<std::unique_ptr<Node>> items;
     std::string rest_mode = "none";
-    bool rest_tail_valid = true;
     bool rest_seen = false;
+    bool multiple_rest = false;
+    std::size_t rest_index = 0;
     bool saw_comma = false;
     if (!match(close_kind)) {
       while (true) {
         const std::size_t before = index_;
         std::string current_rest_mode = parse_sequence_rest_mode();
         if (!current_rest_mode.empty()) {
+          // A second rest in one sequence is illegal; a single rest may sit
+          // anywhere — fixed patterns after it bind from the end.
           if (rest_seen) {
-            rest_tail_valid = false;
+            multiple_rest = true;
+          } else {
+            rest_index = items.size();
           }
           rest_seen = true;
           rest_mode = current_rest_mode;
         } else {
           index_ = before;
-          if (rest_seen) {
-            rest_tail_valid = false;
-          }
           std::unique_ptr<Node> value = parse_pattern();
           if (value == nullptr) {
             return nullptr;
@@ -615,7 +617,8 @@ private:
     }
     auto node = make_node(kind, span_);
     node->string_field("rest_mode", rest_mode);
-    node->bool_field("rest_tail_valid", rest_tail_valid);
+    node->bool_field("rest_tail_valid", !multiple_rest);
+    node->string_field("rest_index", std::to_string(rest_index));
     node->list_field("items", std::move(items));
     return node;
   }
@@ -1115,13 +1118,27 @@ std::unique_ptr<Node> compile_match_program_node(const ast::Expr &pattern) {
     if (!rest_binding.empty()) {
       node->string_field("rest_binding", rest_binding);
     }
+    const std::string rest_index_str = string_value(pattern, "rest_index");
+    const std::size_t rest_index =
+        rest_index_str.empty()
+            ? 0U
+            : static_cast<std::size_t>(std::stoul(rest_index_str));
+    const bool has_rest = rest_mode != "none";
+    const std::size_t total = list == nullptr ? 0U : list->values.size();
     std::vector<std::unique_ptr<Node>> items;
     if (list != nullptr) {
-      for (std::size_t index = 0; index < list->values.size(); ++index) {
-        auto item = make_node("PSeqItem", list->values[index]->span);
-        item->string_field("index", std::to_string(index));
-        item->node_field("pattern",
-                         compile_match_program_node(*list->values[index]));
+      for (std::size_t p = 0; p < list->values.size(); ++p) {
+        auto item = make_node("PSeqItem", list->values[p]->span);
+        if (has_rest && p >= rest_index) {
+          // Fixed pattern after the rest (`[a, *b, c]`): bind from the end so
+          // the rest captures the variable-length middle.
+          item->string_field("index", std::to_string(total - 1U - p));
+          item->bool_field("from_end", true);
+        } else {
+          item->string_field("index", std::to_string(p));
+          item->bool_field("from_end", false);
+        }
+        item->node_field("pattern", compile_match_program_node(*list->values[p]));
         items.push_back(std::move(item));
       }
     }

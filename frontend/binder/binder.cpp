@@ -1555,6 +1555,20 @@ CallBindResult bind_call_shape(const Signature &signature,
       // call's block channel, not a positional/keyword argument, and is
       // optional, so it never consumes a positional slot nor is "missing".
       slot.source_kind = "block";
+    } else if (param.kind == "rest") {
+      // A `*name` rest parameter absorbs every remaining positional argument
+      // (zero or more) into a Tuple at runtime; statically it is always
+      // satisfied, so it never reports "missing" and consumes the surplus so
+      // no "too many positional arguments" diagnostic fires.
+      slot.source_kind = "rest";
+      while (positional_cursor < positional_indices.size()) {
+        ++positional_cursor;
+      }
+    } else if (param.kind == "kw_rest") {
+      // A `**name` keyword-rest parameter absorbs every keyword argument not
+      // bound to a declared keyword parameter; always satisfied, never
+      // "missing", and consumes no positional slot.
+      slot.source_kind = "kw_rest";
     } else if (positional_cursor < positional_indices.size()) {
       const int arg_index = positional_indices[positional_cursor++];
       slot.source_kind = "positional";
@@ -1572,13 +1586,24 @@ CallBindResult bind_call_shape(const Signature &signature,
             .span});
   }
 
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    const CallArgShape &arg = args[i];
-    if (!arg.keyword_name.empty() &&
-        consumed_keywords.count(arg.keyword_name) == 0 &&
-        first_keyword_indices[arg.keyword_name] == static_cast<int>(i)) {
-      result.diagnostics.push_back(lexer::Diagnostic{
-          "E2009", "error", "binder", "unknown keyword argument", arg.span});
+  bool has_kw_rest = false;
+  for (const ParamDescriptor &param : signature.params) {
+    if (param.kind == "kw_rest") {
+      has_kw_rest = true;
+      break;
+    }
+  }
+  // A `**name` keyword-rest parameter absorbs every otherwise-unmatched keyword
+  // argument, so unknown keywords are legal when one is present.
+  if (!has_kw_rest) {
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      const CallArgShape &arg = args[i];
+      if (!arg.keyword_name.empty() &&
+          consumed_keywords.count(arg.keyword_name) == 0 &&
+          first_keyword_indices[arg.keyword_name] == static_cast<int>(i)) {
+        result.diagnostics.push_back(lexer::Diagnostic{
+            "E2009", "error", "binder", "unknown keyword argument", arg.span});
+      }
     }
   }
 

@@ -4419,18 +4419,90 @@ private:
     }
   }
 
+  // Register index of a `*name` rest parameter for the given method-body code,
+  // or nullopt. Gated on a single bool so non-variadic call sites pay nothing.
+  std::optional<std::uint32_t>
+  rest_param_index_for_code(std::uint32_t code_id) const {
+    if (!state_->has_any_rest_params) {
+      return std::nullopt;
+    }
+    const auto it = state_->rest_param_index_by_code.find(code_id);
+    if (it == state_->rest_param_index_by_code.end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  }
+
+  // Register index of a `**name` keyword-rest parameter for the given
+  // method-body code, or nullopt. Same single-bool gate as the rest case.
+  std::optional<std::uint32_t>
+  kw_rest_param_index_for_code(std::uint32_t code_id) const {
+    if (!state_->has_any_rest_params) {
+      return std::nullopt;
+    }
+    const auto it = state_->kw_rest_param_index_by_code.find(code_id);
+    if (it == state_->kw_rest_param_index_by_code.end()) {
+      return std::nullopt;
+    }
+    return it->second;
+  }
+
+  // True when the method-body code declares a `*name` and/or `**name`
+  // parameter, so its calls must use the param-aware shaping path (which splits
+  // positionals around the rest and packs the Tuple/Map) rather than a raw
+  // positional register copy. Cheap: a single bool unless the module uses them.
+  bool code_has_rest_params(std::uint32_t code_id) const {
+    return rest_param_index_for_code(code_id).has_value() ||
+           kw_rest_param_index_for_code(code_id).has_value();
+  }
+
+  // Binds a `**name` keyword-rest parameter to an empty frozen Map on the
+  // positional/no-keyword frame-setup paths. The keyword-bearing path overwrites
+  // this via shape_method_call/materialize_defaults.
+  void seed_empty_kw_rest(Frame &frame, std::uint32_t code_id) {
+    const std::optional<std::uint32_t> kw_rest_index =
+        kw_rest_param_index_for_code(code_id);
+    if (!kw_rest_index.has_value() ||
+        static_cast<std::size_t>(*kw_rest_index) >= frame.regs.size()) {
+      return;
+    }
+    frame.regs[*kw_rest_index] =
+        make_symbol_map_value(std::vector<MapEntry>{}, /*frozen=*/true);
+    frame.initialized[*kw_rest_index] = 1U;
+    sync_integer_reg_from_value(frame, *kw_rest_index,
+                                frame.regs[*kw_rest_index]);
+  }
+
   void push_frame_from_args(const BcCode &code, const Value *args,
                             std::size_t arg_count,
                             const std::vector<Value> &captures, Value self,
                             Value block,
                             std::optional<std::uint32_t> caller_result_reg) {
     Frame frame = acquire_frame(code);
-    for (std::size_t i = 0; i < arg_count && i < frame.regs.size(); ++i) {
+    const std::optional<std::uint32_t> rest_index =
+        rest_param_index_for_code(code.code_id);
+    const std::size_t fixed_count =
+        rest_index.has_value() ? std::min<std::size_t>(*rest_index, arg_count)
+                               : arg_count;
+    for (std::size_t i = 0; i < fixed_count && i < frame.regs.size(); ++i) {
       frame.regs[i] = args[i];
       frame.initialized[i] = 1U;
       sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(i),
                                   frame.regs[i]);
     }
+    if (rest_index.has_value() &&
+        static_cast<std::size_t>(*rest_index) < frame.regs.size()) {
+      const std::size_t k = *rest_index;
+      std::vector<Value> rest_items;
+      if (arg_count > k) {
+        rest_items.assign(args + k, args + arg_count);
+      }
+      frame.regs[k] = make_tuple_value(std::move(rest_items));
+      frame.initialized[k] = 1U;
+      sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(k),
+                                  frame.regs[k]);
+    }
+    seed_empty_kw_rest(frame, code.code_id);
     frame.captures = captures;
     frame.self = std::move(self);
     frame.block = std::move(block);
@@ -4443,7 +4515,12 @@ private:
       const std::vector<Value> &captures, Value self, Value block,
       std::optional<std::uint32_t> caller_result_reg) {
     Frame frame = acquire_frame(code);
-    for (std::size_t i = 0; i < arg_count && i < frame.regs.size(); ++i) {
+    const std::optional<std::uint32_t> rest_index =
+        rest_param_index_for_code(code.code_id);
+    const std::size_t fixed_count =
+        rest_index.has_value() ? std::min<std::size_t>(*rest_index, arg_count)
+                               : arg_count;
+    for (std::size_t i = 0; i < fixed_count && i < frame.regs.size(); ++i) {
       frame.initialized[i] = 1U;
       if (args[i].int_valid) {
         frame.regs[i] = Value::null();
@@ -4456,6 +4533,24 @@ private:
                                     frame.regs[i]);
       }
     }
+    if (rest_index.has_value() &&
+        static_cast<std::size_t>(*rest_index) < frame.regs.size()) {
+      const std::size_t k = *rest_index;
+      std::vector<Value> rest_items;
+      if (arg_count > k) {
+        rest_items.reserve(arg_count - k);
+        for (std::size_t i = k; i < arg_count; ++i) {
+          rest_items.push_back(args[i].int_valid
+                                   ? Value::integer(args[i].int_value)
+                                   : args[i].value);
+        }
+      }
+      frame.regs[k] = make_tuple_value(std::move(rest_items));
+      frame.initialized[k] = 1U;
+      sync_integer_reg_from_value(frame, static_cast<std::uint32_t>(k),
+                                  frame.regs[k]);
+    }
+    seed_empty_kw_rest(frame, code.code_id);
     frame.captures = captures;
     frame.self = std::move(self);
     frame.block = std::move(block);
@@ -4762,6 +4857,12 @@ private:
     if (code == nullptr) {
       set_fault(frame, "VMError", "closure code id is unknown");
       return FastCallStatus::Faulted;
+    }
+
+    // Rest / keyword-rest parameters need the param-aware shaping path; decline
+    // the fast register-copy path so the call falls through to it.
+    if (code_has_rest_params(closure->code_id)) {
+      return FastCallStatus::NotHandled;
     }
 
     // Native-extension dispatch: a closure over a native-bound code object
@@ -6247,10 +6348,11 @@ private:
 
   Value materialize_sequence_rest(const PreparedSeqState &state) {
     std::vector<Value> rest;
-    if (state.rest_start < state.items.size()) {
+    const std::size_t end = std::min(state.rest_end, state.items.size());
+    if (state.rest_start < end) {
       rest.assign(state.items.begin() +
                       static_cast<std::ptrdiff_t>(state.rest_start),
-                  state.items.end());
+                  state.items.begin() + static_cast<std::ptrdiff_t>(end));
     }
     if (state.source_was_tuple) {
       return make_tuple_value(std::move(rest));
@@ -6375,7 +6477,7 @@ private:
     static const std::string kReduce = "reduce";
     static const std::string kInclude = "include?";
     static const std::string kEach = "each";
-    static const std::string kToA = "to_a";
+    static const std::string kToA = "to_array";
     static const std::string kCount = "count";
     if (selector == "collect") {
       return kMap;
@@ -9612,23 +9714,62 @@ private:
       }
     }
 
-    std::size_t positional_cursor = 0;
+    // Bind positional arguments. Positional parameters are those without a
+    // keyword/block/keyword-rest flag; at most one may be a `*name` rest. With
+    // no rest, bind left-to-right (a surplus is an error). With a rest, the
+    // fixed parameters before it bind from the front, those after it bind from
+    // the back, and the rest collects the middle into an immutable Tuple (e.g.
+    // `def f(*head, tail)` gives `head` everything but the last argument).
+    std::vector<std::size_t> positional_slots;
+    std::optional<std::size_t> rest_ordinal;
     for (std::size_t i = 0; i < out_params->size(); ++i) {
-      const bytecode::MethodParamEntry &entry = (*out_params)[i];
-      if ((entry.flags & (bytecode::kMethodParamFlagKeyword |
-                          bytecode::kMethodParamFlagBlock)) != 0U) {
-        // Block parameters are bound from the frame's block channel, not from
-        // positional arguments (RFC block-parameters §5).
+      const std::uint32_t flags = (*out_params)[i].flags;
+      if ((flags & (bytecode::kMethodParamFlagKeyword |
+                    bytecode::kMethodParamFlagBlock |
+                    bytecode::kMethodParamFlagKwRest)) != 0U) {
         continue;
       }
-      if (positional_cursor < pos_args.size()) {
-        (*out_slots)[i].present = true;
-        (*out_slots)[i].value = pos_args[positional_cursor++];
+      if ((flags & bytecode::kMethodParamFlagRest) != 0U) {
+        rest_ordinal = positional_slots.size();
       }
+      positional_slots.push_back(i);
     }
-    if (positional_cursor != pos_args.size()) {
-      set_fault(frame, "TypeError", "too many positional arguments");
-      return false;
+
+    if (!rest_ordinal.has_value()) {
+      std::size_t positional_cursor = 0;
+      for (std::size_t slot : positional_slots) {
+        if (positional_cursor < pos_args.size()) {
+          (*out_slots)[slot].present = true;
+          (*out_slots)[slot].value = pos_args[positional_cursor++];
+        }
+      }
+      if (positional_cursor != pos_args.size()) {
+        set_fault(frame, "TypeError", "too many positional arguments");
+        return false;
+      }
+    } else {
+      const std::size_t before = *rest_ordinal;
+      const std::size_t after = positional_slots.size() - before - 1;
+      if (pos_args.size() < before + after) {
+        set_fault(frame, "TypeError", "too few positional arguments");
+        return false;
+      }
+      const std::size_t rest_count = pos_args.size() - before - after;
+      for (std::size_t j = 0; j < before; ++j) {
+        (*out_slots)[positional_slots[j]].present = true;
+        (*out_slots)[positional_slots[j]].value = pos_args[j];
+      }
+      std::vector<Value> rest_items(
+          pos_args.begin() + static_cast<std::ptrdiff_t>(before),
+          pos_args.begin() + static_cast<std::ptrdiff_t>(before + rest_count));
+      (*out_slots)[positional_slots[before]].present = true;
+      (*out_slots)[positional_slots[before]].value =
+          make_tuple_value(std::move(rest_items));
+      for (std::size_t j = 0; j < after; ++j) {
+        (*out_slots)[positional_slots[before + 1 + j]].present = true;
+        (*out_slots)[positional_slots[before + 1 + j]].value =
+            pos_args[before + rest_count + j];
+      }
     }
 
     std::vector<bool> kw_consumed(kw_args.size(), false);
@@ -9647,10 +9788,33 @@ private:
       }
     }
 
-    for (std::size_t kw_index = 0; kw_index < kw_args.size(); ++kw_index) {
-      if (!kw_consumed[kw_index]) {
-        set_fault(frame, "TypeError", "unknown keyword argument");
-        return false;
+    // A `**name` keyword-rest parameter collects every keyword argument not
+    // bound to a declared keyword parameter into a frozen, name-indifferent Map
+    // (empty when none remain). Without one, a stray keyword is an error.
+    std::optional<std::size_t> kw_rest_slot;
+    for (std::size_t i = 0; i < out_params->size(); ++i) {
+      if (((*out_params)[i].flags & bytecode::kMethodParamFlagKwRest) != 0U) {
+        kw_rest_slot = i;
+        break;
+      }
+    }
+    if (kw_rest_slot.has_value()) {
+      std::vector<MapEntry> rest_entries;
+      for (std::size_t kw_index = 0; kw_index < kw_args.size(); ++kw_index) {
+        if (!kw_consumed[kw_index]) {
+          rest_entries.emplace_back(kw_args[kw_index].first,
+                                    kw_args[kw_index].second);
+        }
+      }
+      (*out_slots)[*kw_rest_slot].present = true;
+      (*out_slots)[*kw_rest_slot].value =
+          make_symbol_map_value(std::move(rest_entries), /*frozen=*/true);
+    } else {
+      for (std::size_t kw_index = 0; kw_index < kw_args.size(); ++kw_index) {
+        if (!kw_consumed[kw_index]) {
+          set_fault(frame, "TypeError", "unknown keyword argument");
+          return false;
+        }
       }
     }
 
@@ -10324,7 +10488,7 @@ private:
         set_fault(frame, "VMError", "closure code id is unknown");
         return false;
       }
-      if (!kw_args.empty()) {
+      if (!kw_args.empty() || code_has_rest_params(closure->code_id)) {
         const bytecode::BcMethod *method =
             find_method_by_entry_code(closure->code_id);
         if (method == nullptr || !method->clause_table.empty()) {
@@ -20666,7 +20830,7 @@ private:
         (receiver_is_sequence_like &&
          collection_selector_in(
              {"empty?", "[]",         "[]?",      "has_index?", "deconstruct",
-              "first",  "count",      "to_a",     "lazy",       "each",
+              "first",  "count",      "to_array",     "lazy",       "each",
               "map",    "filter_map", "flat_map", "select",     "reject",
               "find",   "group",      "any?",     "all?",       "none?",
               "reduce"})) ||
@@ -20718,7 +20882,7 @@ private:
                                                       "keys",
                                                       "values",
                                                       "entries",
-                                                      "to_a",
+                                                      "to_array",
                                                       "count",
                                                       "each",
                                                       "map",
@@ -20888,7 +21052,7 @@ private:
         return SendStatus::Faulted;
       }
 
-      if (collection_selector == "to_a" ||
+      if (collection_selector == "to_array" ||
           collection_selector == "deconstruct") {
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
@@ -21560,7 +21724,7 @@ private:
             *out = Value::integer(static_cast<std::int64_t>(items.size()));
             return SendStatus::Matched;
           }
-          if (collection_selector == "to_a") {
+          if (collection_selector == "to_array") {
             if (!require_arity(0) || !require_no_block()) {
               return SendStatus::Faulted;
             }
@@ -21713,7 +21877,7 @@ private:
           *out = Value::integer(count);
           return SendStatus::Matched;
         }
-        if (collection_selector == "to_a") {
+        if (collection_selector == "to_array") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -22133,7 +22297,7 @@ private:
           *out = make_list_value(std::move(values));
           return SendStatus::Matched;
         }
-        if (collection_selector == "entries" || collection_selector == "to_a") {
+        if (collection_selector == "entries" || collection_selector == "to_array") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -22857,7 +23021,7 @@ private:
     const bool collection_fast_selector =
         collection_selector == "[]" || collection_selector == "count" ||
         collection_selector == "first" || collection_selector == "empty?" ||
-        collection_selector == "deconstruct" || collection_selector == "to_a";
+        collection_selector == "deconstruct" || collection_selector == "to_array";
     const bool integer_selector =
         selector == "+" || selector == "-" || selector == "*" ||
         selector == "/" || selector == "%" || selector == "//" ||
@@ -23055,7 +23219,7 @@ private:
 
     std::int64_t single_integer_arg = 0;
     if (collection_selector == "empty?" || collection_selector == "count" ||
-        collection_selector == "deconstruct" || collection_selector == "to_a") {
+        collection_selector == "deconstruct" || collection_selector == "to_array") {
       if (pos_count != 0U) {
         return FastSendStatus::NotHandled;
       }
@@ -23110,7 +23274,7 @@ private:
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
-    if (collection_selector == "to_a") {
+    if (collection_selector == "to_array") {
       return write_reg_fast_plain(frame, dst, make_list_value(*items))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
@@ -23871,6 +24035,10 @@ private:
           return true;
         }
       }
+      // §5.5 computed-property aliases: the short conversion names (`.int`,
+      // `.array`, `.map`) are property-access semantics, not methods, so they
+      // are resolved here. The full `to_*` method names (`.to_int`) instead go
+      // through the general implicit nullary send below, like any other method.
       if (const std::optional<RuntimeNativeTypeKind> target =
               conversion_target_for_alias(*selector)) {
         if (!ensure_lifecycle_access(frame, receiver)) {
@@ -25269,7 +25437,8 @@ private:
           set_fault(frame, "VMError", "closure code id is unknown");
           return;
         }
-        if (!packet.kw_args.empty()) {
+        if (!packet.kw_args.empty() ||
+            code_has_rest_params(closure->code_id)) {
           const bytecode::BcMethod *method =
               find_method_by_entry_code(closure->code_id);
           if (method == nullptr || !method->clause_table.empty()) {
@@ -25818,13 +25987,29 @@ private:
         set_fault(frame, "VMError", "P_GET_INDEX expects prepared sequence");
         return;
       }
-      if (index >= state->second.items.size()) {
-        set_fault(frame, "VMError", "P_GET_INDEX is out of range");
-        return;
+      const std::size_t size = state->second.items.size();
+      std::size_t actual = 0;
+      if ((index & bytecode::kPatternSeqFromEndBit) != 0U) {
+        // Fixed pattern after a mid-position rest (`[a, *b, c]`): address from
+        // the end and lower the rest's upper bound so it stops before it.
+        const std::size_t offset =
+            static_cast<std::size_t>(index & ~bytecode::kPatternSeqFromEndBit);
+        if (offset >= size) {
+          set_fault(frame, "VMError", "P_GET_INDEX is out of range");
+          return;
+        }
+        actual = size - 1U - offset;
+        state->second.rest_end = std::min(state->second.rest_end, actual);
+      } else {
+        if (index >= size) {
+          set_fault(frame, "VMError", "P_GET_INDEX is out of range");
+          return;
+        }
+        actual = index;
+        state->second.rest_start =
+            std::max(state->second.rest_start, actual + 1U);
       }
-      state->second.rest_start = std::max(state->second.rest_start,
-                                          static_cast<std::size_t>(index) + 1U);
-      if (!write_reg(frame, dst, state->second.items[index])) {
+      if (!write_reg(frame, dst, state->second.items[actual])) {
         return;
       }
       ++frame.pc;
