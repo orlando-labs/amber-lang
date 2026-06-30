@@ -2,6 +2,35 @@
 
 namespace amber::runtime {
 
+namespace {
+
+std::string registry_string_or_empty(const bytecode::BcModule &module,
+                                     std::uint32_t id) {
+  return id < module.strings.size() ? module.strings[id] : std::string();
+}
+
+bool parse_native_binding_code_id(const std::string &key,
+                                  const std::string &prefix,
+                                  std::uint32_t *out) {
+  std::uint32_t code_id = 0;
+  bool parsed = key.size() > prefix.size();
+  for (std::size_t i = prefix.size(); i < key.size(); ++i) {
+    const char digit = key[i];
+    if (digit < '0' || digit > '9') {
+      parsed = false;
+      break;
+    }
+    code_id = code_id * 10U + static_cast<std::uint32_t>(digit - '0');
+  }
+  if (!parsed || code_id == 0U) {
+    return false;
+  }
+  *out = code_id;
+  return true;
+}
+
+} // namespace
+
 void RuntimeModuleRegistry::register_native_type_path(
     std::string path, RuntimeNativeTypeKind kind) {
   bindings_[std::move(path)] = RuntimeBindingRef::native_type_binding(kind);
@@ -100,6 +129,67 @@ void *RuntimeDispatchRegistry::native_package_thunk(
     const std::string &logical) const {
   const auto it = native_package_thunks_.find(logical);
   return it == native_package_thunks_.end() ? nullptr : it->second;
+}
+
+void RuntimeDispatchRegistry::register_native_package_code_binding(
+    std::uint32_t code_id, bool method, std::string logical) {
+  native_package_code_bindings_[code_id] = {method, std::move(logical)};
+}
+
+const RuntimeNativePackageCodeBindingDescriptor *
+RuntimeDispatchRegistry::native_package_code_binding(
+    std::uint32_t code_id) const {
+  const auto it = native_package_code_bindings_.find(code_id);
+  return it == native_package_code_bindings_.end() ? nullptr : &it->second;
+}
+
+void RuntimeDispatchRegistry::register_native_package_method_binding(
+    std::string tag, std::string selector, std::string logical) {
+  std::string key = std::move(tag);
+  key.push_back('\t');
+  key += selector;
+  native_package_method_bindings_[std::move(key)] = std::move(logical);
+}
+
+const std::string *RuntimeDispatchRegistry::native_package_method_binding(
+    const std::string &tag, const std::string &selector) const {
+  const auto it = native_package_method_bindings_.find(tag + "\t" + selector);
+  return it == native_package_method_bindings_.end() ? nullptr : &it->second;
+}
+
+void RuntimeDispatchRegistry::import_native_package_bindings(
+    const bytecode::BcModule &module) {
+  static const std::string kBindPrefix = "amber.native.bind:";
+  static const std::string kMethodPrefix = "amber.native.method:";
+  for (const bytecode::AttrEntry &attr : module.attrs) {
+    const std::string key = registry_string_or_empty(module, attr.key_str_id);
+    if (key.compare(0, kBindPrefix.size(), kBindPrefix) == 0) {
+      std::uint32_t code_id = 0;
+      if (!parse_native_binding_code_id(key, kBindPrefix, &code_id)) {
+        continue;
+      }
+      const std::string value =
+          registry_string_or_empty(module, attr.value_str_id);
+      if (value.size() < 2U || value[1] != ':') {
+        continue;
+      }
+      register_native_package_code_binding(code_id, value[0] == 'M',
+                                           value.substr(2));
+      continue;
+    }
+    if (key.compare(0, kMethodPrefix.size(), kMethodPrefix) == 0) {
+      const std::string logical =
+          registry_string_or_empty(module, attr.value_str_id);
+      const std::string method_key = key.substr(kMethodPrefix.size());
+      const std::size_t separator = method_key.find('\t');
+      if (separator == std::string::npos) {
+        continue;
+      }
+      register_native_package_method_binding(method_key.substr(0, separator),
+                                             method_key.substr(separator + 1U),
+                                             logical);
+    }
+  }
 }
 
 void RuntimeDispatchRegistry::import_native_handlers(

@@ -733,6 +733,11 @@ struct RuntimeIoValueHandlerDescriptor {
   NativeStdlibHandler handler = nullptr;
 };
 
+struct RuntimeNativePackageCodeBindingDescriptor {
+  bool method = false;
+  std::string logical;
+};
+
 class RuntimeTypeRegistry {
 public:
   void register_native_type_call(RuntimeNativeTypeKind kind,
@@ -775,6 +780,20 @@ public:
   void register_native_package_thunk(std::string logical, void *fn);
   void *native_package_thunk(const std::string &logical) const;
 
+  void register_native_package_code_binding(std::uint32_t code_id, bool method,
+                                            std::string logical);
+  const RuntimeNativePackageCodeBindingDescriptor *
+  native_package_code_binding(std::uint32_t code_id) const;
+
+  void register_native_package_method_binding(std::string tag,
+                                              std::string selector,
+                                              std::string logical);
+  const std::string *
+  native_package_method_binding(const std::string &tag,
+                                const std::string &selector) const;
+
+  void import_native_package_bindings(const bytecode::BcModule &module);
+
   void import_native_handlers(const NativeRegistry &registry);
 
 private:
@@ -788,6 +807,10 @@ private:
   std::unordered_map<std::string, RuntimeIoValueHandlerDescriptor>
       io_value_handlers_;
   std::unordered_map<std::string, void *> native_package_thunks_;
+  std::unordered_map<std::uint32_t, RuntimeNativePackageCodeBindingDescriptor>
+      native_package_code_bindings_;
+  std::unordered_map<std::string, std::string>
+      native_package_method_bindings_;
 };
 
 class RuntimeErrorRegistry {

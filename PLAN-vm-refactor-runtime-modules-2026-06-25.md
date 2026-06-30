@@ -2085,6 +2085,33 @@ Slice record, 2026-06-30:
   `24`, and native-class bytecode fallback still failing closed with
   `NativeRequiredError`.
 
+Slice record, 2026-06-30:
+
+- Moved module-native binding metadata out of VM-local maps and into
+  `RuntimeDispatchRegistry`. The registry now imports `amber.native.bind:*`
+  code-object attrs and `amber.native.method:*` foreign-handle method attrs from
+  the active bytecode module.
+- Taught `RuntimeWorld` and direct VM fallback construction to import native
+  package binding attrs into the active dispatch registry before execution.
+- Switched native class constructor dispatch, native def/method dispatch, fast
+  closure-call checks, and foreign-handle method lookup to query
+  `RuntimeDispatchRegistry` for package binding metadata. This removes the
+  VM-owned `native_bindings_` and `native_method_bindings_` maps.
+- Added registry coverage proving attr import for free bindings, method
+  bindings, handle method bindings, malformed attrs, and missing entries.
+- Verified focused gates: `git diff --check`, `make -B
+  build/stdlib_registry_tests build/vm_tests build/amberc`, binaries
+  `build/stdlib_registry_tests` and `build/vm_tests`, native def fixture build
+  `build/amberc build tests/fixtures/native_ext_demo/amber.build.json --target
+  native --out-dir build/native_ext_demo_phase5_bindings/out --cache-dir
+  build/native_ext_demo_phase5_bindings/cache`, native output `42`, bytecode
+  fallback output `210`, native-class fixture build
+  `build/amberc build tests/fixtures/native_class_demo/amber.build.json
+  --target native --out-dir build/native_class_demo_phase5_bindings/out
+  --cache-dir build/native_class_demo_phase5_bindings/cache`, native output
+  `24`, and native-class bytecode fallback still failing closed with
+  `NativeRequiredError`.
+
 ### Phase 6: Remove legacy coupling
 
 - Retire module-specific `RuntimeNativeTypeKind` enum values once all callers use

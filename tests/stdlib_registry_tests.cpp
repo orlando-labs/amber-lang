@@ -26,6 +26,7 @@ using amber::runtime::RuntimeErrorRegistry;
 using amber::runtime::RuntimeIoValueHandlerDescriptor;
 using amber::runtime::RuntimeModuleRegistry;
 using amber::runtime::RuntimeNativeFunctionKind;
+using amber::runtime::RuntimeNativePackageCodeBindingDescriptor;
 using amber::runtime::RuntimeNativeTypeKind;
 using amber::runtime::RuntimeTypeCallDescriptor;
 using amber::runtime::RuntimeTypeRegistry;
@@ -850,6 +851,61 @@ void test_type_call_registry() {
          "Math is not directly callable as a constructor");
 }
 
+void test_dispatch_registry_imports_native_package_bindings() {
+  amber::bytecode::BcModule module;
+  module.strings = {
+      "amber.native.bind:7",
+      "F:pkg.free",
+      "amber.native.bind:9",
+      "M:pkg.method",
+      "amber.native.method:pkg.Handle\tbump!",
+      "pkg.bump",
+      "amber.native.bind:bad",
+      "F:ignored",
+      "amber.native.bind:0",
+      "F:nope",
+      "amber.native.method:malformed",
+      "pkg.bad",
+  };
+  module.attrs = {
+      {0, 1},
+      {2, 3},
+      {4, 5},
+      {6, 7},
+      {8, 9},
+      {10, 11},
+      {999, 1},
+      {0, 999},
+  };
+
+  RuntimeDispatchRegistry dispatch;
+  dispatch.import_native_package_bindings(module);
+
+  const RuntimeNativePackageCodeBindingDescriptor *free_binding =
+      dispatch.native_package_code_binding(7);
+  expect(free_binding != nullptr && !free_binding->method &&
+             free_binding->logical == "pkg.free",
+         "native package free code binding imports from module attrs");
+
+  const RuntimeNativePackageCodeBindingDescriptor *method_binding =
+      dispatch.native_package_code_binding(9);
+  expect(method_binding != nullptr && method_binding->method &&
+             method_binding->logical == "pkg.method",
+         "native package method code binding imports from module attrs");
+
+  const std::string *handle_method =
+      dispatch.native_package_method_binding("pkg.Handle", "bump!");
+  expect(handle_method != nullptr && *handle_method == "pkg.bump",
+         "native package handle method binding imports from module attrs");
+
+  expect(dispatch.native_package_code_binding(0) == nullptr &&
+             dispatch.native_package_code_binding(42) == nullptr &&
+             dispatch.native_package_method_binding("pkg.Handle", "missing") ==
+                 nullptr,
+         "native package binding importer preserves malformed and missing "
+         "entries as misses");
+}
+
 void test_math_compute(const NativeRegistry &registry) {
   MockHost host;
   Value out = Value::null();
@@ -1070,6 +1126,7 @@ int main() {
   test_builtin_runtime_module_descriptors();
   test_task_channel_descriptor_instance_lifecycle();
   test_type_call_registry();
+  test_dispatch_registry_imports_native_package_bindings();
   test_math_compute(registry);
   test_math_not_handled(registry);
   test_math_faults(registry);

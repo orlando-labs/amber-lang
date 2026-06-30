@@ -914,6 +914,7 @@ public:
                                        &owned_error_registry_);
     }
     if (dispatch_registry_ == &owned_dispatch_registry_) {
+      owned_dispatch_registry_.import_native_package_bindings(module_);
       NativeExtRegistry::global().register_thunks(owned_dispatch_registry_);
     }
     if (type_registry_ == &owned_type_registry_) {
@@ -923,7 +924,6 @@ public:
       NativeExtRegistry::global().register_errors(owned_error_registry_);
       error_registry_ = &owned_error_registry_;
     }
-    resolve_native_bindings();
   }
 
   // --- StdlibHost: the native stdlib facade, forwarding to VM helpers. The
@@ -4772,7 +4772,8 @@ private:
     // Native-extension dispatch: a closure over a native-bound code object
     // (e.g. a top-level `native def` invoked as `hash(data)`) routes to its
     // registered C thunk before any fast/direct body evaluation (5c-ii).
-    if (native_binding_for_code(closure->code_id) != nullptr) {
+    if (dispatch_registry().native_package_code_binding(closure->code_id) !=
+        nullptr) {
       std::vector<Value> pos_args;
       pos_args.reserve(pos_count);
       for (std::uint32_t i = 0; i < pos_count; ++i) {
@@ -9836,50 +9837,16 @@ private:
     return out;
   }
 
-  // Lower the `amber.native.bind:<code_id>` module attrs into a fast lookup
-  // table (native-packages 5c-ii). Runs once at construction.
-  void resolve_native_bindings() {
-    static const std::string kBindPrefix = "amber.native.bind:";
-    static const std::string kMethodPrefix = "amber.native.method:";
-    for (const bytecode::AttrEntry &attr : module_.attrs) {
-      const std::string key = string_or_empty(attr.key_str_id);
-      if (key.compare(0, kBindPrefix.size(), kBindPrefix) == 0) {
-        std::uint32_t code_id = 0;
-        bool parsed = key.size() > kBindPrefix.size();
-        for (std::size_t i = kBindPrefix.size(); i < key.size(); ++i) {
-          const char digit = key[i];
-          if (digit < '0' || digit > '9') {
-            parsed = false;
-            break;
-          }
-          code_id = code_id * 10U + static_cast<std::uint32_t>(digit - '0');
-        }
-        const std::string value = string_or_empty(attr.value_str_id);
-        if (!parsed || code_id == 0U || value.size() < 2U || value[1] != ':') {
-          continue;
-        }
-        native_bindings_[code_id] = {value[0] == 'M', value.substr(2)};
-      } else if (key.compare(0, kMethodPrefix.size(), kMethodPrefix) == 0) {
-        // Re-key from `amber.native.method:<tag>\t<selector>` to the runtime's
-        // "<tag>\t<selector>" lookup key.
-        native_method_bindings_[key.substr(kMethodPrefix.size())] =
-            string_or_empty(attr.value_str_id);
-      }
-    }
-  }
-
   // The thunk registered for a foreign-handle send (tag + selector), or
   // nullptr.
   void *native_method_thunk(const std::string &tag,
                             const std::string &selector) const {
-    if (native_method_bindings_.empty()) {
+    const std::string *logical =
+        dispatch_registry().native_package_method_binding(tag, selector);
+    if (logical == nullptr) {
       return nullptr;
     }
-    const auto found = native_method_bindings_.find(tag + "\t" + selector);
-    if (found == native_method_bindings_.end()) {
-      return nullptr;
-    }
-    return dispatch_registry().native_package_thunk(found->second);
+    return dispatch_registry().native_package_thunk(*logical);
   }
 
   // Construction of a `native class`: when the resolved `init` is native-bound
@@ -9891,12 +9858,12 @@ private:
                                    const std::vector<Value> &pos_args,
                                    std::uint32_t dst, bool *ok) {
     *ok = true;
-    const std::pair<bool, std::string> *binding =
-        native_binding_for_code(init.entry_code_id);
+    const RuntimeNativePackageCodeBindingDescriptor *binding =
+        dispatch_registry().native_package_code_binding(init.entry_code_id);
     if (binding == nullptr) {
       return false;
     }
-    void *fn = dispatch_registry().native_package_thunk(binding->second);
+    void *fn = dispatch_registry().native_package_thunk(binding->logical);
     if (fn == nullptr) {
       return false; // bytecode build: a native-only ctor falls through and the
                     // synthesized NativeRequiredError body runs.
@@ -9915,15 +9882,6 @@ private:
     }
     ++frame.pc;
     return true;
-  }
-
-  const std::pair<bool, std::string> *
-  native_binding_for_code(std::uint32_t code_id) const {
-    if (native_bindings_.empty()) {
-      return nullptr;
-    }
-    const auto found = native_bindings_.find(code_id);
-    return found == native_bindings_.end() ? nullptr : &found->second;
   }
 
   const bytecode::BcMethod *
@@ -9961,17 +9919,17 @@ private:
                                           const Value &self, Value *out,
                                           bool *faulted) {
     *faulted = false;
-    const std::pair<bool, std::string> *binding =
-        native_binding_for_code(code_id);
+    const RuntimeNativePackageCodeBindingDescriptor *binding =
+        dispatch_registry().native_package_code_binding(code_id);
     if (binding == nullptr) {
       return false;
     }
-    void *fn = dispatch_registry().native_package_thunk(binding->second);
+    void *fn = dispatch_registry().native_package_thunk(binding->logical);
     if (fn == nullptr) {
       return false; // bytecode build: fall back to the Amber body.
     }
     NativeExtCallOutcome outcome =
-        binding->first
+        binding->method
             ? amber_ext_invoke_method(*this, &caller,
                                       type_registry().native_package_tags(),
                                       reinterpret_cast<AmberMethodFn>(fn), self,
@@ -25329,7 +25287,8 @@ private:
           return;
         }
         // Native-extension dispatch for a native-bound closure (5c-ii).
-        if (native_binding_for_code(closure->code_id) != nullptr) {
+        if (dispatch_registry().native_package_code_binding(closure->code_id) !=
+            nullptr) {
           Value native_out = Value::null();
           bool native_faulted = false;
           if (try_dispatch_native_extension_code(
@@ -26164,16 +26123,6 @@ private:
   // World-owned error registry, or `owned_error_registry_` for direct VM entry
   // points.
   const RuntimeErrorRegistry *error_registry_ = nullptr;
-  // Native-extension dispatch (native-packages 5c-ii): entry code object ->
-  // {is_method, logical-symbol}, lowered from `amber.native.bind:<code_id>`
-  // module attrs. A registered thunk for the logical name (native build) runs
-  // instead of the Amber body; with no thunk (bytecode build) the body runs.
-  std::unordered_map<std::uint32_t, std::pair<bool, std::string>>
-      native_bindings_;
-  // Foreign-handle method dispatch (native-packages 5c-ii): "<tag>\t<selector>"
-  // -> logical symbol, lowered from `amber.native.method:` attrs. A send on a
-  // foreign handle resolves the thunk by the handle's tag + selector.
-  std::unordered_map<std::string, std::string> native_method_bindings_;
 };
 
 } // namespace
