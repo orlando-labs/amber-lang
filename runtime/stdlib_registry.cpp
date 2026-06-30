@@ -562,8 +562,4 @@ void register_legacy_native_type_paths(RuntimeModuleRegistry &registry) {
   registry.register_native_type_path("Object", RuntimeNativeTypeKind::Object);
 }
 
-void register_legacy_native_type_calls(RuntimeTypeRegistry &registry) {
-  (void)registry;
-}
-
 } // namespace amber::runtime

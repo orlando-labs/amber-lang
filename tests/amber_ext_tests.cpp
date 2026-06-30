@@ -302,7 +302,7 @@ struct RecordingHost : StdlibHost {
                             bool /*report_fault*/) override {
     return false;
   }
-  SendStatus stdlib_io_value_runtime_send(
+  SendStatus stdlib_vm_io_value_intrinsic_send(
       const void * /*frame*/, const Value & /*receiver*/,
       const std::string & /*selector*/, const std::vector<Value> & /*args*/,
       const Value & /*block*/,
@@ -380,7 +380,7 @@ struct RecordingHost : StdlibHost {
       Value * /*out*/) override {
     return SendStatus::NotHandled;
   }
-  SendStatus stdlib_task_runtime_send(
+  SendStatus stdlib_vm_task_intrinsic_send(
       const void * /*frame*/, const Value & /*receiver*/,
       const std::string & /*selector*/, const std::vector<Value> & /*args*/,
       const Value & /*block*/,

@@ -147,7 +147,7 @@ SendStatus net_http_server_response_type_send(NativeStdlibCall &call) {
 }
 
 SendStatus net_http_instance_send(NativeStdlibCall &call) {
-  return call.io_value_runtime_send();
+  return call.vm_io_value_intrinsic_send();
 }
 
 RuntimeNativeModuleDescriptor net_http_module_descriptor() {

@@ -29,7 +29,7 @@
 namespace amber::runtime {
 
 // Outcome of a SEND attempt. `NotHandled` means "not mine, keep looking" and is
-// what lets a registered handler coexist with the legacy inline chain: an
+// what lets a registered handler coexist with VM-owned intrinsic behavior: an
 // unknown selector for a migrated kind returns `NotHandled` and falls through.
 enum class SendStatus { Matched, NotHandled, Faulted };
 
@@ -249,7 +249,7 @@ public:
                                      Value *out) = 0;
   virtual bool stdlib_net_tcp_close(const void *frame, const Value &resource,
                                     bool report_fault) = 0;
-  virtual SendStatus stdlib_io_value_runtime_send(
+  virtual SendStatus stdlib_vm_io_value_intrinsic_send(
       const void *frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
@@ -296,7 +296,7 @@ public:
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
       Value *out) = 0;
-  virtual SendStatus stdlib_task_runtime_send(
+  virtual SendStatus stdlib_vm_task_intrinsic_send(
       const void *frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
@@ -636,14 +636,14 @@ struct NativeStdlibCall {
                                                           block, kw_args, out);
   }
 
-  SendStatus task_runtime_send() const {
-    return host.stdlib_task_runtime_send(frame, receiver, selector, args, block,
-                                         kw_args, out);
+  SendStatus vm_task_intrinsic_send() const {
+    return host.stdlib_vm_task_intrinsic_send(frame, receiver, selector, args,
+                                              block, kw_args, out);
   }
 
-  SendStatus io_value_runtime_send() const {
-    return host.stdlib_io_value_runtime_send(frame, receiver, selector, args,
-                                             block, kw_args, out);
+  SendStatus vm_io_value_intrinsic_send() const {
+    return host.stdlib_vm_io_value_intrinsic_send(frame, receiver, selector,
+                                                  args, block, kw_args, out);
   }
 
   bool secure_random_bytes(std::size_t count, std::string *out) const {
@@ -923,8 +923,8 @@ public:
                         NativeStdlibHandler handler);
   void register_path(std::string path, RuntimeNativeTypeKind kind);
 
-  // The handler that owns `kind`, or nullptr when the kind is still on the
-  // legacy inline chain.
+  // The handler that owns `kind`, or nullptr for VM intrinsic native types
+  // such as Kernel/Amber/conversions.
   NativeStdlibHandler handler_for(RuntimeNativeTypeKind kind) const;
 
   // The kind a source path (`"Math"`, `"io.ByteBuffer"`, ...) resolves to, or
@@ -979,7 +979,6 @@ RuntimeNativePackageDescriptor
 runtime_native_package_descriptor_from_module(const bytecode::BcModule &module);
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry);
 void register_legacy_native_type_paths(RuntimeModuleRegistry &registry);
-void register_legacy_native_type_calls(RuntimeTypeRegistry &registry);
 
 // Per-library registration entry points (defined in
 // `runtime/stdlib_<name>.cpp`).

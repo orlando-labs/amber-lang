@@ -478,7 +478,7 @@ SendStatus io_pipe_endpoint_instance_send(NativeStdlibCall &call) {
   }
   if (call.selector != "pipe" && call.selector != "closed?" &&
       call.selector != "close!") {
-    return call.io_value_runtime_send();
+    return call.vm_io_value_intrinsic_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {

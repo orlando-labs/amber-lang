@@ -276,7 +276,7 @@ struct MockHost : StdlibHost {
                             bool /*report_fault*/) override {
     return false;
   }
-  SendStatus stdlib_io_value_runtime_send(
+  SendStatus stdlib_vm_io_value_intrinsic_send(
       const void * /*frame*/, const Value & /*receiver*/,
       const std::string & /*selector*/, const std::vector<Value> & /*args*/,
       const Value & /*block*/,
@@ -354,7 +354,7 @@ struct MockHost : StdlibHost {
       Value * /*out*/) override {
     return SendStatus::NotHandled;
   }
-  SendStatus stdlib_task_runtime_send(
+  SendStatus stdlib_vm_task_intrinsic_send(
       const void * /*frame*/, const Value & /*receiver*/,
       const std::string & /*selector*/, const std::vector<Value> & /*args*/,
       const Value & /*block*/,
@@ -828,26 +828,25 @@ void test_task_channel_descriptor_instance_lifecycle() {
 
 void test_type_call_registry() {
   RuntimeTypeRegistry registry;
-  amber::runtime::register_legacy_native_type_calls(registry);
 
   const std::optional<RuntimeTypeCallDescriptor> argparser =
       registry.native_type_call(RuntimeNativeTypeKind::ArgParser);
   expect(!argparser.has_value(),
-         "ArgParser type call moved out of the legacy registry");
+         "empty type registry has no implicit ArgParser constructor");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::IoPipe).has_value(),
-         "IoPipe type call moved out of the legacy registry");
+         "empty type registry has no implicit IoPipe constructor");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::FsPath).has_value(),
-         "FsPath type call moved out of the legacy registry");
+         "empty type registry has no implicit FsPath constructor");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::NetEndpoint)
               .has_value(),
-         "NetEndpoint type call moved out of the legacy registry");
+         "empty type registry has no implicit NetEndpoint constructor");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::NetHttpClient)
               .has_value(),
-         "NetHttpClient type call moved out of the legacy registry");
+         "empty type registry has no implicit net.http.Client constructor");
 
   expect(!registry.native_type_call(RuntimeNativeTypeKind::Math).has_value(),
          "Math is not directly callable as a constructor");

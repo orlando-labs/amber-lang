@@ -1929,10 +1929,10 @@ Audit record, 2026-06-30:
 
 - Rechecked the Phase 3 end state in `runtime/vm.cpp` after the final selector
   migration because the VM diff still has several insertion-heavy hunks.
-- The retained first-party module bodies are guarded `StdlibHost` callback
-  paths (`io_value_descriptor_bypass_` / `task_runtime_descriptor_bypass_`) or
-  registry handoff code; they are no longer direct top-level VM selector
-  fallback.
+- The retained first-party module bodies were guarded `StdlibHost` callback
+  paths or registry handoff code; they were no longer direct top-level VM
+  selector fallback. Phase 6 later replaced those mutable guards with explicit
+  VM-intrinsic host hooks.
 - No unguarded path lookup, constructor allowlist, or selector-dispatch island
   for the migrated first-party modules was found outside the registry
   interface. The extra VM lines come from guarded callback plumbing and
@@ -1999,7 +1999,7 @@ method binding metadata, generated native startup contributes thunks,
 foreign-handle ownership descriptors, and package-owned errors, and
 `RuntimeWorld` registers the merged descriptor once. `NativeExtRegistry`
 remains only as the process-global startup staging point needed before a
-runtime world exists; remaining VM reduction belongs to Phase 6.
+runtime world exists; the remaining VM reduction is completed in Phase 6 below.
 
 - Extend generated native package registration so it contributes a module
   descriptor, not only `NativeExtRegistry` thunks and `NativeTagRegistry` types.
@@ -2192,12 +2192,49 @@ Slice record, 2026-06-30:
 
 ### Phase 6: Remove legacy coupling
 
+Status: finalized on 2026-06-30. The VM no longer carries hidden mutable
+descriptor-bypass flags or the empty legacy native constructor registration
+hook. Normal SEND uses registry dispatch first and falls through only to
+VM-owned intrinsic behavior; stdlib handlers that still need VM-resident
+effectful bodies call explicit `StdlibHost` intrinsic hooks. Module-specific
+`RuntimeNativeTypeKind` values remain only as the current descriptor/value keys
+until runtime type references can replace them everywhere.
+
 - Retire module-specific `RuntimeNativeTypeKind` enum values once all callers use
   runtime type references.
 - Delete the VM hardcoded module path map and constructor allowlist.
 - Reduce `try_apply_native_stdlib_send` to registry dispatch plus true VM
   intrinsic behavior.
 - Keep `vm.cpp` focused on interpreter control flow and VM-owned primitives.
+
+Slice record, 2026-06-30:
+
+- Removed the transitional `io_value_descriptor_bypass_` and
+  `task_runtime_descriptor_bypass_` state from `Vm`.
+- Replaced recursive guarded reroutes with explicit `NativeStdlibSendMode`
+  values and renamed the `StdlibHost` callbacks to
+  `stdlib_vm_io_value_intrinsic_send(...)` and
+  `stdlib_vm_task_intrinsic_send(...)`.
+- Deleted the empty `register_legacy_native_type_calls(...)` compatibility
+  hook and stopped `RuntimeWorld` / direct VM construction from calling a
+  phantom constructor allowlist.
+- Updated registry tests to assert an empty type registry has no implicit
+  constructor allowlist while descriptor-owned type calls remain covered by the
+  builtin runtime module descriptor test.
+
+Verification, 2026-06-30:
+
+- Built `build/stdlib_registry_tests`, `build/amber_ext_tests`,
+  `build/vm_tests`, `build/amberc`, `build/stdlib_task_tests`,
+  `build/io_tests`, `build/net_http_tests`, and `build/net_http_tcp_tests`.
+- Passed `build/stdlib_registry_tests`, `build/amber_ext_tests`,
+  `build/vm_tests`, and `build/net_http_tests`.
+- `build/io_tests`, `build/stdlib_task_tests`, and
+  `build/net_http_tcp_tests` were blocked by sandboxed loopback/listen
+  permissions in this environment.
+- `make backend-equivalence` reached a harness timeout on the first native
+  compile; the timed standalone compile completed successfully in 71.52s and
+  the generated VM/native executables both printed `42`.
 
 ## 5. Public Interface Changes
 

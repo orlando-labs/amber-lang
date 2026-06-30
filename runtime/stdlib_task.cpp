@@ -302,7 +302,7 @@ SendStatus task_type_send(NativeStdlibCall &call) {
     return channel_instance_send(call);
   }
   if (!call.receiver.is_native_type()) {
-    return call.task_runtime_send();
+    return call.vm_task_intrinsic_send();
   }
   if (call.selector != "new") {
     return SendStatus::NotHandled;

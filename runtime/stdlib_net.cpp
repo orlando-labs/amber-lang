@@ -166,7 +166,7 @@ SendStatus tcp_stream_instance_send(NativeStdlibCall &call) {
     return resource_lifecycle_send(call, *stream);
   }
   if (call.selector != "local_endpoint" && call.selector != "remote_endpoint") {
-    return call.io_value_runtime_send();
+    return call.vm_io_value_intrinsic_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {
@@ -188,7 +188,7 @@ SendStatus tcp_listener_instance_send(NativeStdlibCall &call) {
     return resource_lifecycle_send(call, *listener);
   }
   if (call.selector != "local_endpoint") {
-    return call.io_value_runtime_send();
+    return call.vm_io_value_intrinsic_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {
@@ -208,7 +208,7 @@ SendStatus udp_socket_instance_send(NativeStdlibCall &call) {
     return resource_lifecycle_send(call, *socket);
   }
   if (call.selector != "local_endpoint") {
-    return call.io_value_runtime_send();
+    return call.vm_io_value_intrinsic_send();
   }
   if (!call.require_arity(0) || !call.kw_args.empty() ||
       !call.require_no_block()) {

@@ -900,7 +900,6 @@ public:
       module_registry_ = &owned_module_registry_;
     }
     if (type_registry_ == nullptr) {
-      register_legacy_native_type_calls(owned_type_registry_);
       type_registry_ = &owned_type_registry_;
     }
     if (dispatch_registry_ == nullptr) {
@@ -1351,22 +1350,15 @@ public:
     return stdlib_net_tcp_close(*static_cast<const Frame *>(frame), resource,
                                 report_fault);
   }
-  SendStatus stdlib_io_value_runtime_send(
+  SendStatus stdlib_vm_io_value_intrinsic_send(
       const void *frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
       Value *out) override {
-    struct BypassGuard {
-      bool &slot;
-      bool previous;
-      explicit BypassGuard(bool &value) : slot(value), previous(value) {
-        slot = true;
-      }
-      ~BypassGuard() { slot = previous; }
-    } guard(io_value_descriptor_bypass_);
+    const auto mode = NativeStdlibSendMode::IoValueIntrinsic;
     return try_apply_native_stdlib_send(*static_cast<const Frame *>(frame),
                                         receiver, selector, args, block,
-                                        kw_args, out);
+                                        kw_args, out, mode);
   }
   SendStatus stdlib_net_http_construct_client(
       const void *frame, const std::vector<Value> &args, const Value &block,
@@ -1442,22 +1434,14 @@ public:
         *static_cast<const Frame *>(frame), selector, args, block, kw_args,
         out);
   }
-  SendStatus stdlib_task_runtime_send(
+  SendStatus stdlib_vm_task_intrinsic_send(
       const void *frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
       Value *out) override {
-    struct BypassGuard {
-      bool &slot;
-      bool previous;
-      explicit BypassGuard(bool &value) : slot(value), previous(value) {
-        slot = true;
-      }
-      ~BypassGuard() { slot = previous; }
-    } guard(task_runtime_descriptor_bypass_);
     const SendStatus status = try_apply_native_stdlib_send(
         *static_cast<const Frame *>(frame), receiver, selector, args, block,
-        kw_args, out);
+        kw_args, out, NativeStdlibSendMode::TaskRuntimeIntrinsic);
     return status;
   }
   bool stdlib_secure_random_bytes(const void *frame, std::size_t count,
@@ -16739,10 +16723,17 @@ private:
     return SendStatus::Faulted;
   }
 
+  enum class NativeStdlibSendMode {
+    Normal,
+    IoValueIntrinsic,
+    TaskRuntimeIntrinsic,
+  };
+
   SendStatus try_apply_native_stdlib_send(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
-      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out,
+      NativeStdlibSendMode mode = NativeStdlibSendMode::Normal) {
     auto require_arity = [&](std::size_t expected) -> bool {
       if (args.size() != expected) {
         set_fault(frame, "TypeError", "wrong native stdlib SEND arity");
@@ -16823,9 +16814,9 @@ private:
         return SendStatus::Matched;
       }
       // Layer 0 stdlib substrate: registered library handlers run before the
-      // legacy inline chain below. A handler that returns NotHandled (e.g. an
-      // unknown selector for a migrated kind) falls through to the unchanged
-      // path, so any kind not yet on the registry behaves exactly as before.
+      // VM-owned intrinsic cases below. A handler that returns NotHandled
+      // leaves non-module behavior such as type matching and conversions to
+      // the VM.
       if (const std::optional<NativeStdlibHandler> handler =
               dispatch_registry().native_handler(kind)) {
         NativeStdlibCall call{*this, &frame, receiver, kind, selector,
@@ -17024,7 +17015,7 @@ private:
         return SendStatus::Matched;
       }
 
-      if (!io_value_descriptor_bypass_) {
+      if (mode != NativeStdlibSendMode::IoValueIntrinsic) {
         if (const std::optional<RuntimeIoValueHandlerDescriptor> handler =
                 dispatch_registry().io_value_handler(io_value->type_name())) {
           if (handler->handler != nullptr) {
@@ -17038,7 +17029,7 @@ private:
           }
         }
       }
-      if (!io_value_descriptor_bypass_) {
+      if (mode != NativeStdlibSendMode::IoValueIntrinsic) {
         return SendStatus::NotHandled;
       }
 
@@ -18166,7 +18157,7 @@ private:
       }
     }
 
-    if (!task_runtime_descriptor_bypass_) {
+    if (mode != NativeStdlibSendMode::TaskRuntimeIntrinsic) {
       std::optional<RuntimeNativeTypeKind> task_runtime_kind;
       if (receiver.is_task_module()) {
         task_runtime_kind = RuntimeNativeTypeKind::TaskModule;
@@ -18202,7 +18193,8 @@ private:
       }
     }
 
-    if (task_runtime_descriptor_bypass_ && receiver.is_task_module()) {
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
+        receiver.is_task_module()) {
       const std::shared_ptr<RuntimeTaskModule> task = receiver.as_task_module();
       if (task == nullptr) {
         set_fault(frame, "TypeError", "task module is null");
@@ -18436,7 +18428,8 @@ private:
       }
     }
 
-    if (task_runtime_descriptor_bypass_ && receiver.is_task_handle()) {
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
+        receiver.is_task_handle()) {
       const std::shared_ptr<RuntimeTaskHandle> handle =
           receiver.as_task_handle();
       if (handle == nullptr) {
@@ -18539,7 +18532,8 @@ private:
       }
     }
 
-    if (task_runtime_descriptor_bypass_ && receiver.is_mutex()) {
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
+        receiver.is_mutex()) {
       const std::shared_ptr<RuntimeMutex> mutex = receiver.as_mutex();
       if (mutex == nullptr) {
         set_fault(frame, "TypeError", "mutex is null");
@@ -18626,7 +18620,8 @@ private:
       }
     }
 
-    if (task_runtime_descriptor_bypass_ && receiver.is_atomic()) {
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
+        receiver.is_atomic()) {
       const std::shared_ptr<RuntimeAtomic> atomic = receiver.as_atomic();
       if (atomic == nullptr) {
         set_fault(frame, "TypeError", "atomic is null");
@@ -18710,7 +18705,8 @@ private:
       }
     }
 
-    if (task_runtime_descriptor_bypass_ && receiver.is_barrier()) {
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
+        receiver.is_barrier()) {
       const std::shared_ptr<RuntimeBarrier> barrier = receiver.as_barrier();
       if (barrier == nullptr) {
         set_fault(frame, "TypeError", "barrier is null");
@@ -18736,7 +18732,8 @@ private:
       }
     }
 
-    if (task_runtime_descriptor_bypass_ && receiver.is_flow_module()) {
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
+        receiver.is_flow_module()) {
       const std::shared_ptr<RuntimeFlowModule> flow = receiver.as_flow_module();
       if (flow == nullptr) {
         set_fault(frame, "TypeError", "flow module is null");
@@ -18843,7 +18840,8 @@ private:
       }
     }
 
-    if (task_runtime_descriptor_bypass_ && receiver.is_threaded_collection()) {
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
+        receiver.is_threaded_collection()) {
       const std::shared_ptr<RuntimeThreadedCollection> threaded =
           receiver.as_threaded_collection();
       if (threaded == nullptr) {
@@ -18952,7 +18950,7 @@ private:
       }
     }
 
-    if (task_runtime_descriptor_bypass_ &&
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
         (receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
         (selector == "threaded" || selector == "parallel")) {
       if (!block.is_null()) {
@@ -26078,13 +26076,6 @@ private:
   // point to stop the task driver's step loop and describe the wake source.
   bool parkable_ = false;
   std::optional<ParkRequest> park_request_;
-  // Transitional Phase 3 reroute: task/sync descriptor handlers call back into
-  // the legacy VM bodies through StdlibHost, so the recursive SEND must not
-  // re-enter the descriptor before reaching those bodies.
-  bool task_runtime_descriptor_bypass_ = false;
-  // Same Phase 3 reroute for IO-backed stdlib values whose effectful bodies
-  // still live in VM helpers while descriptor handlers own selector entry.
-  bool io_value_descriptor_bypass_ = false;
   // Set when this Vm executes inside a property arm of an outer Vm (nested
   // executions inherit the non-suspendable dynamic extent).
   std::optional<std::string> inherited_no_suspend_label_;
