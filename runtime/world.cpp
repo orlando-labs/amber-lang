@@ -235,9 +235,8 @@ struct RuntimeWorld::Impl {
     register_builtin_runtime_modules(module_registry, dispatch_registry,
                                      type_registry, &error_registry);
     dispatch_registry.import_native_package_bindings(*module);
-    NativeExtRegistry::global().register_thunks(dispatch_registry);
-    NativeExtRegistry::global().register_types(type_registry);
-    NativeExtRegistry::global().register_errors(error_registry);
+    NativeExtRegistry::global().register_runtime_contributions(
+        dispatch_registry, type_registry, error_registry);
     capabilities = capability::resolve_capabilities(module->capabilities,
                                                     options.capability_grants);
     effects = effect::validate_effect_summaries(

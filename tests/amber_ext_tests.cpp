@@ -22,9 +22,11 @@
 
 using amber::runtime::NativeTagRegistry;
 using amber::runtime::NativeTypeDescriptor;
+using amber::runtime::NativeExtErrorDescriptor;
 using amber::runtime::NativeExtRegistry;
 using amber::runtime::RuntimeBytes;
 using amber::runtime::RuntimeDispatchRegistry;
+using amber::runtime::RuntimeErrorRegistry;
 using amber::runtime::RuntimeForeignHandle;
 using amber::runtime::RuntimeTypeRegistry;
 using amber::runtime::SendStatus;
@@ -599,6 +601,52 @@ void test_native_extension_thunk_import() {
          "imported native extension thunk map preserves misses");
 }
 
+void test_native_extension_runtime_contributions() {
+  using Ownership = RuntimeForeignHandle::Ownership;
+
+  NativeExtRegistry extension_registry;
+  int marker = 0;
+  extension_registry.register_thunk("pkg.fn", &marker);
+
+  NativeTypeDescriptor owned;
+  owned.tag = "pkg.Handle";
+  owned.ownership = Ownership::Owned;
+  owned.owned_destructor = &owned_destructor;
+  extension_registry.register_type(owned);
+
+  NativeExtErrorDescriptor error;
+  error.name = "Pkg.NativeLeafError";
+  error.default_message = "package failed";
+  error.default_exit_code = 23;
+  extension_registry.register_error(error);
+
+  RuntimeDispatchRegistry dispatch;
+  RuntimeTypeRegistry types;
+  RuntimeErrorRegistry errors;
+  extension_registry.register_runtime_contributions(dispatch, types, errors);
+
+  expect(dispatch.native_package_thunk("pkg.fn") == &marker,
+         "native extension contributor imports thunks");
+
+  const NativeTypeDescriptor *lookup =
+      types.native_package_tags().lookup("pkg.Handle");
+  expect(lookup != nullptr && lookup->ownership == Ownership::Owned &&
+             lookup->owned_destructor == &owned_destructor,
+         "native extension contributor imports types");
+
+  const auto native_error = errors.error_id("NativeError");
+  const auto package_error = errors.error_id("Pkg.NativeLeafError");
+  expect(native_error.has_value() && package_error.has_value() &&
+             errors.error_is_a(*package_error, *native_error),
+         "native extension contributor imports default-parent errors");
+  expect(errors.error_default_exit_code(*package_error).has_value() &&
+             *errors.error_default_exit_code(*package_error) == 23,
+         "native extension contributor imports error exit codes");
+  expect(std::string(errors.error_default_message(*package_error)) ==
+             "package failed",
+         "native extension contributor imports error messages");
+}
+
 } // namespace
 
 int main() {
@@ -609,6 +657,7 @@ int main() {
   test_amber_ext_fault_and_version();
   test_native_extension_type_import();
   test_native_extension_thunk_import();
+  test_native_extension_runtime_contributions();
   std::cout << "amber_ext_tests: ok\n";
   return 0;
 }

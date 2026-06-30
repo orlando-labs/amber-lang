@@ -360,6 +360,13 @@ void NativeExtRegistry::register_errors(RuntimeErrorRegistry &errors) const {
                           descriptor.field_mask);
   }
 }
+void NativeExtRegistry::register_runtime_contributions(
+    RuntimeDispatchRegistry &dispatch, RuntimeTypeRegistry &types,
+    RuntimeErrorRegistry &errors) const {
+  register_thunks(dispatch);
+  register_types(types);
+  register_errors(errors);
+}
 NativeExtRegistry &NativeExtRegistry::global() {
   static NativeExtRegistry registry;
   return registry;

@@ -1992,10 +1992,13 @@ Slice record, 2026-06-30:
 
 ### Phase 5: Unify third-party native packages
 
-Status: package-owned native error descriptors landed on 2026-06-30. The wider
-constructor/method/type descriptor unification remains the next Phase 5 scope;
-this slice makes native package errors first-class in the world-scoped runtime
-error registry.
+Status: package-owned native errors, foreign-handle type descriptors, logical
+thunks, and module-native binding metadata now import into the same
+world-scoped registries used by first-party runtime modules. Generated native
+package startup still populates `NativeExtRegistry` first; the remaining Phase
+5 scope is collapsing that startup contributor into an explicit module
+descriptor shape for constructors, methods, ownership rules, and package
+errors.
 
 - Extend generated native package registration so it contributes a module
   descriptor, not only `NativeExtRegistry` thunks and `NativeTagRegistry` types.
@@ -2127,6 +2130,25 @@ Slice record, 2026-06-30:
   `build/amberc build tests/fixtures/native_ext_demo/amber.build.json --target
   native --out-dir build/native_ext_demo_phase5_trim/out --cache-dir
   build/native_ext_demo_phase5_trim/cache`, native output `42`, and bytecode
+  fallback output `210`.
+
+Slice record, 2026-06-30:
+
+- Added a one-shot `NativeExtRegistry::register_runtime_contributions(...)`
+  helper for full runtime-world composition, so `RuntimeWorld` imports native
+  package thunks, foreign-handle type descriptors, and package-owned errors as
+  one contributor rather than spelling each lane separately.
+- Kept the direct VM fallback on granular imports because tests and embedders
+  can inject only some registries; that path must preserve its partial
+  ownership semantics until registry wiring is fully world-owned.
+- Added amber_ext coverage proving the contributor helper imports thunk, type,
+  and default-parent error descriptors into the runtime registries.
+- Verified focused gates: `git diff --check`, `make -B build/amber_ext_tests
+  build/vm_tests build/amberc`, binaries `build/amber_ext_tests` and
+  `build/vm_tests`, native def fixture build
+  `build/amberc build tests/fixtures/native_ext_demo/amber.build.json --target
+  native --out-dir build/native_ext_demo_phase5_contrib/out --cache-dir
+  build/native_ext_demo_phase5_contrib/cache`, native output `42`, and bytecode
   fallback output `210`.
 
 ### Phase 6: Remove legacy coupling

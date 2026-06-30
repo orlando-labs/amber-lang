@@ -49,6 +49,9 @@ public:
   void register_thunks(RuntimeDispatchRegistry &dispatch) const;
   void register_types(RuntimeTypeRegistry &types) const;
   void register_errors(RuntimeErrorRegistry &errors) const;
+  void register_runtime_contributions(RuntimeDispatchRegistry &dispatch,
+                                      RuntimeTypeRegistry &types,
+                                      RuntimeErrorRegistry &errors) const;
 
   // The single process-global instance the generated binary fills and runtime
   // worlds import from.
