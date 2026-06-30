@@ -360,10 +360,6 @@ void NativeExtRegistry::register_errors(RuntimeErrorRegistry &errors) const {
                           descriptor.field_mask);
   }
 }
-void *NativeExtRegistry::lookup(const std::string &logical) const {
-  const auto found = thunks_.find(logical);
-  return found == thunks_.end() ? nullptr : found->second;
-}
 NativeExtRegistry &NativeExtRegistry::global() {
   static NativeExtRegistry registry;
   return registry;

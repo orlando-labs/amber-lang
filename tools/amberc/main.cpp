@@ -5781,13 +5781,14 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "}\n\n";
 
   // Native-extension registration table (native-packages 5c-ii). The build
-  // manifest names the logical->symbol bindings and foreign-handle types; emit
-  // a startup function that fills the process-global NativeExtRegistry the VM
-  // SEND path consults. Bytecode builds never run this, so a `native def` there
-  // falls back to its Amber body. Symbols are declared with the free-thunk
-  // prototype and reinterpret_cast at registration: C linkage matches by name,
-  // and the VM casts back to the method/destructor shape it knows from the
-  // bytecode binding.
+  // manifest names the logical->symbol bindings, foreign-handle types, and
+  // package errors; emit a startup function that fills the process-global
+  // NativeExtRegistry. RuntimeWorld imports that table into its active
+  // registries before execution. Bytecode builds never run this, so a
+  // `native def` there falls back to its Amber body. Symbols are declared with
+  // the free-thunk prototype and reinterpret_cast at registration: C linkage
+  // matches by name, and the VM casts back to the method/destructor shape it
+  // knows from the bytecode binding.
   const bool has_native_extensions = !native_extensions.empty();
   if (has_native_extensions) {
     const auto cpp_string = [](const std::string &text) {

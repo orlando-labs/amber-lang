@@ -29,11 +29,11 @@ struct NativeExtErrorDescriptor {
   std::uint32_t field_mask = 0;
 };
 
-// The native binary's logical-name -> thunk table plus the foreign-handle tag
-// registry. Populated once at process startup by generated registration calls
-// (one per `[native.symbols]` / `[[native.types]]` entry); empty in a plain
-// bytecode run, which is exactly what makes a `native def` fall back to its
-// Amber body when no thunk is registered.
+// The native binary's logical-name -> thunk table, foreign-handle tag table,
+// and package error descriptors. Populated once at process startup by
+// generated registration calls, then imported into the active RuntimeWorld
+// registries. Empty in a plain bytecode run, which is exactly what makes a
+// `native def` fall back to its Amber body when no thunk is registered.
 //
 // A thunk is stored as a raw `void *`: the registration table is generated from
 // the build manifest, which does not record whether a symbol is a free function
@@ -50,17 +50,8 @@ public:
   void register_types(RuntimeTypeRegistry &types) const;
   void register_errors(RuntimeErrorRegistry &errors) const;
 
-  // The thunk pointer registered for `logical`, or nullptr when none is.
-  void *lookup(const std::string &logical) const;
-
-  NativeTagRegistry &tags() { return tags_; }
-  const NativeTagRegistry &tags() const { return tags_; }
-
-  bool empty() const { return thunks_.empty(); }
-  std::size_t size() const { return thunks_.size(); }
-
-  // The single process-global instance the generated binary fills and the VM
-  // consults.
+  // The single process-global instance the generated binary fills and runtime
+  // worlds import from.
   static NativeExtRegistry &global();
 
 private:

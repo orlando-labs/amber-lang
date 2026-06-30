@@ -2112,6 +2112,23 @@ Slice record, 2026-06-30:
   `24`, and native-class bytecode fallback still failing closed with
   `NativeRequiredError`.
 
+Slice record, 2026-06-30:
+
+- Trimmed the direct query surface from `NativeExtRegistry`: the VM no longer
+  has accessors for global thunk lookup, global tag lookup, or table
+  size/emptiness. The process-global registry is now explicitly a startup
+  contributor that runtime worlds import from.
+- Refreshed native executable generation comments to describe the generated
+  startup table as feeding world registries rather than being consulted by VM
+  dispatch directly.
+- Verified focused gates: `git diff --check`, `make -B build/amber_ext_tests
+  build/vm_tests build/amberc`, binaries `build/amber_ext_tests` and
+  `build/vm_tests`, native def fixture build
+  `build/amberc build tests/fixtures/native_ext_demo/amber.build.json --target
+  native --out-dir build/native_ext_demo_phase5_trim/out --cache-dir
+  build/native_ext_demo_phase5_trim/cache`, native output `42`, and bytecode
+  fallback output `210`.
+
 ### Phase 6: Remove legacy coupling
 
 - Retire module-specific `RuntimeNativeTypeKind` enum values once all callers use
