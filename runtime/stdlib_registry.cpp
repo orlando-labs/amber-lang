@@ -53,6 +53,11 @@ RuntimeTypeRegistry::native_type_call(RuntimeNativeTypeKind kind) const {
   return it->second;
 }
 
+void RuntimeTypeRegistry::register_native_package_type(
+    NativeTypeDescriptor descriptor) {
+  native_package_tags_.register_type(std::move(descriptor));
+}
+
 void RuntimeDispatchRegistry::register_native_handler(
     RuntimeNativeTypeKind kind, NativeStdlibHandler handler) {
   native_handlers_[kind] = handler;

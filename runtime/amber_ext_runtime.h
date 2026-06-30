@@ -46,6 +46,7 @@ public:
   void register_type(NativeTypeDescriptor descriptor);
   void register_error(NativeExtErrorDescriptor descriptor);
 
+  void register_types(RuntimeTypeRegistry &types) const;
   void register_errors(RuntimeErrorRegistry &errors) const;
 
   // The thunk pointer registered for `logical`, or nullptr when none is.
@@ -79,12 +80,12 @@ struct NativeExtCallOutcome {
 // method) into the per-call arena, invoke the thunk, and marshal the result
 // back. The frame is type-erased to `const void *` exactly as in StdlibHost.
 NativeExtCallOutcome amber_ext_invoke_free(StdlibHost &host, const void *frame,
-                                           NativeTagRegistry &tags,
+                                           const NativeTagRegistry &tags,
                                            AmberFreeFn fn,
                                            const std::vector<Value> &args);
 NativeExtCallOutcome
 amber_ext_invoke_method(StdlibHost &host, const void *frame,
-                        NativeTagRegistry &tags, AmberMethodFn fn,
+                        const NativeTagRegistry &tags, AmberMethodFn fn,
                         const Value &self, const std::vector<Value> &args);
 
 // Direct AmberCtx surface, used by the bridge helpers above and by unit tests
@@ -92,7 +93,7 @@ amber_ext_invoke_method(StdlibHost &host, const void *frame,
 // Value into the arena and returns its opaque handle; `export` reads a handle
 // back out. Handles are valid until `amber_ext_ctx_close`.
 AmberCtx *amber_ext_ctx_open(StdlibHost &host, const void *frame,
-                             NativeTagRegistry &tags);
+                             const NativeTagRegistry &tags);
 void amber_ext_ctx_close(AmberCtx *ctx);
 AmberValue amber_ext_ctx_import(AmberCtx *ctx, Value value);
 Value amber_ext_ctx_export(AmberCtx *ctx, AmberValue handle);

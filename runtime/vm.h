@@ -54,6 +54,15 @@ public:
     const auto found = types_.find(tag);
     return found == types_.end() ? nullptr : &found->second;
   }
+  std::vector<NativeTypeDescriptor> registered_types() const {
+    std::vector<NativeTypeDescriptor> out;
+    out.reserve(types_.size());
+    for (const auto &[tag, descriptor] : types_) {
+      (void)tag;
+      out.push_back(descriptor);
+    }
+    return out;
+  }
   std::size_t size() const { return types_.size(); }
 
 private:

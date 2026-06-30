@@ -741,6 +741,11 @@ public:
   std::optional<RuntimeTypeCallDescriptor>
   native_type_call(RuntimeNativeTypeKind kind) const;
 
+  void register_native_package_type(NativeTypeDescriptor descriptor);
+  const NativeTagRegistry &native_package_tags() const {
+    return native_package_tags_;
+  }
+
 private:
   struct KindHash {
     std::size_t operator()(RuntimeNativeTypeKind kind) const {
@@ -749,6 +754,7 @@ private:
   };
   std::unordered_map<RuntimeNativeTypeKind, RuntimeTypeCallDescriptor, KindHash>
       native_calls_;
+  NativeTagRegistry native_package_tags_;
 };
 
 class RuntimeDispatchRegistry {

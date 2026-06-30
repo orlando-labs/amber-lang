@@ -2039,6 +2039,28 @@ Slice record, 2026-06-30:
   while compiling `argparser_first_class_errors`; running that compile directly
   completed successfully, and the warm rerun of the full gate passed.
 
+Slice record, 2026-06-30:
+
+- Imported native package foreign-handle type descriptors from
+  `NativeExtRegistry` into `RuntimeTypeRegistry`, so each runtime world/direct
+  VM fallback has an active type-registry view of package tags instead of
+  reading `NativeExtRegistry::global().tags()` directly.
+- Switched VM native-handle construction, method dispatch marshalling, and
+  deterministic foreign-handle teardown to pass
+  `type_registry().native_package_tags()` into the amber_ext bridge. Thunk
+  lookup still uses `NativeExtRegistry` while the next Phase 5 dispatch slice
+  decides how logical thunk bindings become descriptor-owned dispatch entries.
+- Made the amber_ext bridge accept a const `NativeTagRegistry`, matching its
+  lookup-only use, and added registry coverage proving extension type
+  descriptors import into `RuntimeTypeRegistry`.
+- Verified focused gates: `git diff --check`, `make -B build/amber_ext_tests
+  build/vm_tests build/amberc`, binaries `build/amber_ext_tests` and
+  `build/vm_tests`, native-class fixture build
+  `build/amberc build tests/fixtures/native_class_demo/amber.build.json
+  --target native --out-dir build/native_class_demo_phase5_types/out
+  --cache-dir build/native_class_demo_phase5_types/cache`, native output `24`,
+  and bytecode fallback still failing closed with `NativeRequiredError`.
+
 ### Phase 6: Remove legacy coupling
 
 - Retire module-specific `RuntimeNativeTypeKind` enum values once all callers use

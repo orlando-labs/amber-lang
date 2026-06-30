@@ -50,7 +50,7 @@ bool value_is_bytes(const Value &value) {
 struct AmberCtx {
   amber::runtime::StdlibHost *host = nullptr;
   const void *frame = nullptr;
-  amber::runtime::NativeTagRegistry *tags = nullptr;
+  const amber::runtime::NativeTagRegistry *tags = nullptr;
   // The per-call value arena. `AmberValue` is a 1-based index encoded as a
   // pointer, so reallocation here never invalidates a handle.
   std::vector<Value> arena;
@@ -339,6 +339,11 @@ void NativeExtRegistry::register_type(NativeTypeDescriptor descriptor) {
 void NativeExtRegistry::register_error(NativeExtErrorDescriptor descriptor) {
   errors_.push_back(std::move(descriptor));
 }
+void NativeExtRegistry::register_types(RuntimeTypeRegistry &types) const {
+  for (NativeTypeDescriptor descriptor : tags_.registered_types()) {
+    types.register_native_package_type(std::move(descriptor));
+  }
+}
 void NativeExtRegistry::register_errors(RuntimeErrorRegistry &errors) const {
   for (const NativeExtErrorDescriptor &descriptor : errors_) {
     errors.register_error(descriptor.name,
@@ -361,7 +366,7 @@ NativeExtRegistry &NativeExtRegistry::global() {
 // ---- bridge helpers (the VM SEND path) ---------------------------------
 
 NativeExtCallOutcome amber_ext_invoke_free(StdlibHost &host, const void *frame,
-                                           NativeTagRegistry &tags,
+                                           const NativeTagRegistry &tags,
                                            AmberFreeFn fn,
                                            const std::vector<Value> &args) {
   AmberCtx ctx;
@@ -385,7 +390,7 @@ NativeExtCallOutcome amber_ext_invoke_free(StdlibHost &host, const void *frame,
 
 NativeExtCallOutcome
 amber_ext_invoke_method(StdlibHost &host, const void *frame,
-                        NativeTagRegistry &tags, AmberMethodFn fn,
+                        const NativeTagRegistry &tags, AmberMethodFn fn,
                         const Value &self, const std::vector<Value> &args) {
   AmberCtx ctx;
   ctx.host = &host;
@@ -411,7 +416,7 @@ amber_ext_invoke_method(StdlibHost &host, const void *frame,
 // ---- direct ctx surface (bridge helpers + unit tests) ------------------
 
 AmberCtx *amber_ext_ctx_open(StdlibHost &host, const void *frame,
-                             NativeTagRegistry &tags) {
+                             const NativeTagRegistry &tags) {
   AmberCtx *ctx = new AmberCtx();
   ctx->host = &host;
   ctx->frame = frame;

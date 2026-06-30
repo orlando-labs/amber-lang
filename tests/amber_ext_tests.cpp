@@ -22,8 +22,10 @@
 
 using amber::runtime::NativeTagRegistry;
 using amber::runtime::NativeTypeDescriptor;
+using amber::runtime::NativeExtRegistry;
 using amber::runtime::RuntimeBytes;
 using amber::runtime::RuntimeForeignHandle;
+using amber::runtime::RuntimeTypeRegistry;
 using amber::runtime::SendStatus;
 using amber::runtime::StdlibHost;
 using amber::runtime::Value;
@@ -560,6 +562,28 @@ void test_amber_ext_fault_and_version() {
   amber::runtime::amber_ext_ctx_close(cx);
 }
 
+void test_native_extension_type_import() {
+  using Ownership = RuntimeForeignHandle::Ownership;
+
+  NativeExtRegistry extension_registry;
+  NativeTypeDescriptor owned;
+  owned.tag = "pkg.Handle";
+  owned.ownership = Ownership::Owned;
+  owned.owned_destructor = &owned_destructor;
+  extension_registry.register_type(owned);
+
+  RuntimeTypeRegistry types;
+  extension_registry.register_types(types);
+
+  const NativeTypeDescriptor *lookup =
+      types.native_package_tags().lookup("pkg.Handle");
+  expect(lookup != nullptr && lookup->ownership == Ownership::Owned &&
+             lookup->owned_destructor == &owned_destructor,
+         "native extension types import into RuntimeTypeRegistry");
+  expect(types.native_package_tags().lookup("missing.Handle") == nullptr,
+         "imported runtime type tags preserve unknown-tag misses");
+}
+
 } // namespace
 
 int main() {
@@ -568,6 +592,7 @@ int main() {
   test_amber_ext_handle_lifecycle();
   test_amber_ext_make_handle_unknown_tag();
   test_amber_ext_fault_and_version();
+  test_native_extension_type_import();
   std::cout << "amber_ext_tests: ok\n";
   return 0;
 }

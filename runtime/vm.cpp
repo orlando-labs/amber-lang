@@ -913,6 +913,9 @@ public:
                                        owned_type_registry_,
                                        &owned_error_registry_);
     }
+    if (type_registry_ == &owned_type_registry_) {
+      NativeExtRegistry::global().register_types(owned_type_registry_);
+    }
     if (error_registry_ == nullptr) {
       NativeExtRegistry::global().register_errors(owned_error_registry_);
       error_registry_ = &owned_error_registry_;
@@ -1876,7 +1879,8 @@ private:
       return true; // already torn down: a no-op, matching heap idempotence.
     }
     AmberCtx *ctx =
-        amber_ext_ctx_open(*this, &frame, NativeExtRegistry::global().tags());
+        amber_ext_ctx_open(*this, &frame,
+                           type_registry().native_package_tags());
     *changed = handle->destroy(ctx);
     amber_ext_ctx_close(ctx);
     return !fault_.has_value();
@@ -9896,7 +9900,8 @@ private:
                     // synthesized NativeRequiredError body runs.
     }
     NativeExtCallOutcome outcome =
-        amber_ext_invoke_free(*this, &frame, registry.tags(),
+        amber_ext_invoke_free(*this, &frame,
+                              type_registry().native_package_tags(),
                               reinterpret_cast<AmberFreeFn>(fn), pos_args);
     if (!outcome.ok || fault_.has_value()) {
       *ok = false;
@@ -9966,10 +9971,12 @@ private:
     }
     NativeExtCallOutcome outcome =
         binding->first
-            ? amber_ext_invoke_method(*this, &caller, registry.tags(),
+            ? amber_ext_invoke_method(*this, &caller,
+                                      type_registry().native_package_tags(),
                                       reinterpret_cast<AmberMethodFn>(fn), self,
                                       pos_args)
-            : amber_ext_invoke_free(*this, &caller, registry.tags(),
+            : amber_ext_invoke_free(*this, &caller,
+                                    type_registry().native_package_tags(),
                                     reinterpret_cast<AmberFreeFn>(fn),
                                     pos_args);
     if (!outcome.ok || fault_.has_value()) {
@@ -23725,7 +23732,7 @@ private:
           return false;
         }
         const NativeExtCallOutcome outcome = amber_ext_invoke_method(
-            *this, &frame, NativeExtRegistry::global().tags(),
+            *this, &frame, type_registry().native_package_tags(),
             reinterpret_cast<AmberMethodFn>(fn), receiver, args);
         if (!outcome.ok || fault_.has_value()) {
           return false;
