@@ -3072,30 +3072,35 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
       break;
     }
   }
-  // A `*name` / `**name` rest parameter collects surplus positional/keyword
-  // arguments into a Tuple/Map in the VM frame prologue; the direct native C++
-  // lane has no equivalent packing, so any module that defines one runs
-  // entirely under the VM.
-  if (first_reason.empty()) {
-    for (const amber::bytecode::BcMethod &method : module.methods) {
-      bool has_rest = false;
-      for (const amber::bytecode::MethodParamEntry &param : method.params) {
-        if ((param.flags & (amber::bytecode::kMethodParamFlagRest |
-                            amber::bytecode::kMethodParamFlagKwRest)) != 0U) {
-          has_rest = true;
-          break;
-        }
-      }
-      if (has_rest) {
-        first_reason = "rest/keyword-rest parameter requires VM fallback";
+  // A `*name` / `**name` rest parameter packs surplus positional arguments into
+  // an immutable Tuple and unmatched keywords into a frozen Map in the VM frame
+  // prologue; the direct native C++ calling convention has no equivalent
+  // packing. Rather than dropping the whole module to the VM, keep only the
+  // rest/keyword-rest method BODIES on the per-function VM bridge -- a native
+  // caller invokes them through amber_vm_fallback_call -> execute(code_id, args),
+  // which shapes the Tuple/Map exactly like a normal call -- and let the rest of
+  // the module compile native. A rest body that is not bridge-eligible (its body
+  // is effectful) still forces the whole-module fallback via first_reason below.
+  std::set<std::uint32_t> rest_body_code_ids;
+  for (const amber::bytecode::BcMethod &method : module.methods) {
+    for (const amber::bytecode::MethodParamEntry &param : method.params) {
+      if ((param.flags & (amber::bytecode::kMethodParamFlagRest |
+                          amber::bytecode::kMethodParamFlagKwRest)) != 0U) {
+        rest_body_code_ids.insert(method.entry_code_id);
         break;
       }
     }
   }
   if (first_reason.empty()) {
     for (const amber::bytecode::BcCode &code : module.code_objects) {
+      const bool is_rest_body =
+          rest_body_code_ids.find(code.code_id) != rest_body_code_ids.end();
       std::string reason;
-      if (native_cpp_code_supported(module, code, &reason)) {
+      // A rest body must never be native-compiled: the native calling
+      // convention would copy positionals straight into registers without
+      // packing the Tuple/Map. Skip the native-supported check and route it to
+      // the bridge (or, if effectful, to the whole-module fallback).
+      if (!is_rest_body && native_cpp_code_supported(module, code, &reason)) {
         plan.native_code_ids.insert(code.code_id);
         continue;
       }
@@ -3105,7 +3110,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
         continue;
       }
       if (first_reason.empty()) {
-        first_reason = "c" + std::to_string(code.code_id) + ": " + reason;
+        first_reason =
+            "c" + std::to_string(code.code_id) + ": " +
+            (is_rest_body ? "rest/keyword-rest body not bridge-eligible: " +
+                                vm_callable_reason
+                          : reason);
       }
     }
   }

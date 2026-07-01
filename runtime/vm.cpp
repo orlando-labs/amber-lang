@@ -1497,8 +1497,27 @@ public:
       state_->heap.drain_remote_frees();
       return with_runtime_names({Value::null(), fault_});
     }
-    push_frame(*entry, args, std::move(entry_captures), std::move(self),
-               std::move(block), std::nullopt);
+    // A rest-parameter body reached directly with positional arguments -- the
+    // native lane's per-function VM bridge calls execute(code_id, args) this
+    // way -- needs the full call-shaping (before/rest/after split, Tuple pack,
+    // frozen keyword-rest Map) that the SEND/closure path applies. push_frame's
+    // raw positional copy only packs a trailing rest, so route single-clause
+    // rest bodies through push_rest_entry_frame; everything else (including the
+    // no-rest common case) keeps push_frame.
+    const bytecode::BcMethod *rest_method =
+        code_has_rest_params(code_id) ? find_method_by_entry_code(code_id)
+                                      : nullptr;
+    if (rest_method != nullptr && rest_method->clause_table.empty()) {
+      if (!push_rest_entry_frame(*entry, *rest_method, args,
+                                 std::move(entry_captures), std::move(self),
+                                 std::move(block))) {
+        state_->heap.drain_remote_frees();
+        return with_runtime_names({Value::null(), fault_});
+      }
+    } else {
+      push_frame(*entry, args, std::move(entry_captures), std::move(self),
+                 std::move(block), std::nullopt);
+    }
     // Native-extension entry: when the native lane's per-function VM bridge
     // calls execute() for a native-bound code object, route it straight to the
     // registered thunk instead of running the Amber fallback body (5c-ii).
@@ -4590,6 +4609,39 @@ private:
                   std::optional<std::uint32_t> caller_result_reg) {
     push_frame_from_args(code, args.data(), args.size(), captures,
                          std::move(self), std::move(block), caller_result_reg);
+  }
+
+  // Pushes the entry frame for a rest-parameter method body invoked with only
+  // positional arguments -- the shape the native lane's per-function VM bridge
+  // uses (amber_vm_fallback_call -> execute(code_id, args)). The raw
+  // push_frame positional copy packs a trailing rest but leaves the after-rest
+  // parameters of a mid-position rest (`def f(*head, tail)`) unbound, so bind
+  // through the same call-shaping used on the SEND/closure path instead: the
+  // before/rest/after positional split, the immutable Tuple pack, and the
+  // frozen keyword-rest Map. Returns false with fault_ set on a binding fault
+  // (e.g. too few positional arguments), which the bridge turns into a sound
+  // whole-program restart. Clause-based methods keep the raw push_frame path.
+  bool push_rest_entry_frame(const BcCode &entry,
+                             const bytecode::BcMethod &method,
+                             const std::vector<Value> &args,
+                             std::vector<Value> captures, Value self,
+                             Value block) {
+    Frame frame = acquire_frame(entry);
+    frame.captures = std::move(captures);
+    frame.self = std::move(self);
+    frame.block = std::move(block);
+    std::vector<bytecode::MethodParamEntry> params;
+    std::vector<BoundMethodArg> slots;
+    const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
+    if (!shape_method_call(frame, method, args, no_kw_args, &params, &slots)) {
+      return false;
+    }
+    if (!materialize_defaults(frame, method, params, slots) ||
+        !apply_auto_assigns(frame, method, entry)) {
+      return false;
+    }
+    frames_.push_back(std::move(frame));
+    return true;
   }
 
   Frame acquire_frame(const BcCode &code) {
