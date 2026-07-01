@@ -507,6 +507,16 @@ test: build
 	grep -q '^42$$' $(BUILD_DIR)/native-ext-demo-native.out
 	$(BUILD_DIR)/amberc tests/fixtures/native_ext_demo/src/main.am > $(BUILD_DIR)/native-ext-demo-bytecode.out
 	grep -q '^210$$' $(BUILD_DIR)/native-ext-demo-bytecode.out
+	rm -rf $(BUILD_DIR)/native_graph_pure
+	$(BUILD_DIR)/amberc build tests/fixtures/native_graph_pure/amber.build.json --target native --out-dir $(BUILD_DIR)/native_graph_pure/out --cache-dir $(BUILD_DIR)/native_graph_pure/cache > $(BUILD_DIR)/native-graph-pure-build.json
+	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "ok" and result["native_graph_module_count"] == 2 and result["native_graph_vm_fallback_code_count"] == 0, result' $(BUILD_DIR)/native-graph-pure-build.json
+	$(BUILD_DIR)/native_graph_pure/out/nat.graph.main > $(BUILD_DIR)/native-graph-pure.out
+	grep -q '^42$$' $(BUILD_DIR)/native-graph-pure.out
+	rm -rf $(BUILD_DIR)/native_ext_dep
+	$(BUILD_DIR)/amberc build tests/fixtures/native_ext_dep/amber.build.json --target native --out-dir $(BUILD_DIR)/native_ext_dep/out --cache-dir $(BUILD_DIR)/native_ext_dep/cache > $(BUILD_DIR)/native-ext-dep-build.json
+	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "ok" and result["native_graph_module_count"] == 2 and result["native_graph_vm_fallback_code_count"] == 1 and result["native_extensions"] and result["native_extensions"][0]["native_source_sha256"].startswith("sha256:"), result' $(BUILD_DIR)/native-ext-dep-build.json
+	$(BUILD_DIR)/native_ext_dep/out/nat.dep.main > $(BUILD_DIR)/native-ext-dep-native.out
+	grep -q '^42$$' $(BUILD_DIR)/native-ext-dep-native.out
 	rm -rf $(BUILD_DIR)/native_class_demo
 	$(BUILD_DIR)/amberc build tests/fixtures/native_class_demo/amber.build.json --target native --out-dir $(BUILD_DIR)/native_class_demo/out --cache-dir $(BUILD_DIR)/native_class_demo/cache > $(BUILD_DIR)/native-class-demo-build.json
 	grep -q '"status": "ok"' $(BUILD_DIR)/native-class-demo-build.json

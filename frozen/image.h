@@ -45,6 +45,7 @@ struct FrozenImageArtifact {
   pkg::PackageArtifact package;
   std::uint64_t world_epoch = 1;
   std::vector<FrozenImageNativeModule> native_modules;
+  std::vector<pkg::PackageNativeExtensionMetadata> native_extensions;
   std::vector<FrozenImageAnalysisEntry> analysis;
 };
 

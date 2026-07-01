@@ -117,7 +117,26 @@ amber::pkg::PackageManifest fixture_manifest() {
                                       "\n"
                                       "[[modules]]\n"
                                       "name = \"frozen.core\"\n"
-                                      "path = \"src/core.am\"\n";
+                                      "path = \"src/core.am\"\n"
+                                      "\n"
+                                      "[[native]]\n"
+                                      "name = \"frozen_ext\"\n"
+                                      "language = \"c\"\n"
+                                      "sources = [\"native/ext.c\"]\n"
+                                      "headers = [\"native/ext.h\"]\n"
+                                      "\n"
+                                      "[native.symbols]\n"
+                                      "\"frozen.native\" = \"amber_frozen_native\"\n"
+                                      "\n"
+                                      "[[native.types]]\n"
+                                      "amber = \"frozen.NativeBox\"\n"
+                                      "tag = \"frozen.NativeBox\"\n"
+                                      "ownership = \"borrowed\"\n"
+                                      "\n"
+                                      "[[native.errors]]\n"
+                                      "name = \"frozen.NativeError\"\n"
+                                      "parent = \"NativeError\"\n"
+                                      "default_message = \"native failed\"\n";
   amber::pkg::PackageManifestResult parsed =
       amber::pkg::parse_manifest_toml(manifest_source, "amber.toml");
   expect(parsed.ok(), "fixture manifest should parse");
@@ -149,6 +168,11 @@ ImageFixture build_fixture(bool reverse_inputs = false) {
   amber::pkg::PackageBuildOptions options;
   options.key_id = "ci";
   options.signing_key = "secret";
+  options.target_triple = "test-triple";
+  options.native_blobs = {
+      {"frozen_ext", "source", "native/ext.c", {}, {0x63, 0x31}},
+      {"frozen_ext", "header", "native/ext.h", {}, {0x68, 0x31}},
+  };
   amber::pkg::PackageBuildResult package =
       amber::pkg::build_package_artifact(fixture_manifest(), blobs, options);
   expect(package.ok, "package artifact should build");
@@ -317,6 +341,38 @@ void test_frozen_image_verify_rejects_missing_native_readiness_guard() {
          "verify diagnostics should explain readiness guard failure");
 }
 
+void test_frozen_image_verify_rejects_native_extension_mismatches() {
+  const ImageFixture fixture = build_fixture(false);
+  const auto rejects = [](const std::string &serialized,
+                          const std::string &message) {
+    const amber::frozen::FrozenImageVerifyResult verified =
+        amber::frozen::verify_frozen_image_artifact(serialized, "secret");
+    expect(!verified.ok, message);
+  };
+
+  rejects(replace_first(fixture.image.serialized,
+                        "native_extension.0.amber_ext_abi_version=1",
+                        "native_extension.0.amber_ext_abi_version=2"),
+          "frozen image verify should reject changed amber_ext ABI version");
+  rejects(replace_first(fixture.image.serialized,
+                        "native_extension.0.native_source_sha256=sha256:",
+                        "native_extension.0.native_source_sha256=sha256:0"),
+          "frozen image verify should reject changed native source digest");
+  rejects(replace_first(fixture.image.serialized,
+                        "native_extension.0.exported_symbol_sha256=sha256:",
+                        "native_extension.0.exported_symbol_sha256=sha256:0"),
+          "frozen image verify should reject changed exported-symbol digest");
+  rejects(replace_first(fixture.image.serialized,
+                        "native_extension.0.type.0.ownership=borrowed",
+                        "native_extension.0.type.0.ownership=owned"),
+          "frozen image verify should reject changed ownership metadata");
+  rejects(replace_first(fixture.image.serialized,
+                        "native_extension.0.error.0.default_message=native "
+                        "failed",
+                        "native_extension.0.error.0.default_message=changed"),
+          "frozen image verify should reject changed native error metadata");
+}
+
 } // namespace
 
 int main() {
@@ -324,5 +380,6 @@ int main() {
   test_frozen_image_load_freezes_world_and_executes_bound_native();
   test_frozen_image_verify_rejects_non_frozen_native_summary();
   test_frozen_image_verify_rejects_missing_native_readiness_guard();
+  test_frozen_image_verify_rejects_native_extension_mismatches();
   return 0;
 }

@@ -85,6 +85,11 @@ struct BuildSummary {
   std::string native_launcher_source;
   std::string native_cxx;
   bool native_bytecode_trampoline = false;
+  std::uint64_t native_graph_module_count = 0;
+  std::uint64_t native_graph_code_count = 0;
+  std::uint64_t native_graph_native_code_count = 0;
+  std::uint64_t native_graph_vm_fallback_code_count = 0;
+  std::vector<amber::pkg::PackageNativeExtensionMetadata> native_extensions;
   BuildProfileSet profiles;
   std::vector<BuildArtifactRecord> artifacts;
   std::vector<BuildDiagnostic> diagnostics;

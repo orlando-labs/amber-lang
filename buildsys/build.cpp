@@ -726,6 +726,59 @@ std::string summary_to_json(const BuildSummary &summary) {
   out << "  \"native_cxx\": \"" << json_escape(summary.native_cxx) << "\",\n";
   out << "  \"native_bytecode_fallback\": "
       << (summary.native_bytecode_trampoline ? "true" : "false") << ",\n";
+  out << "  \"native_graph_module_count\": "
+      << summary.native_graph_module_count << ",\n";
+  out << "  \"native_graph_code_count\": " << summary.native_graph_code_count
+      << ",\n";
+  out << "  \"native_graph_native_code_count\": "
+      << summary.native_graph_native_code_count << ",\n";
+  out << "  \"native_graph_vm_fallback_code_count\": "
+      << summary.native_graph_vm_fallback_code_count << ",\n";
+  out << "  \"native_extensions\": [";
+  for (std::size_t i = 0; i < summary.native_extensions.size(); ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    const amber::pkg::PackageNativeExtensionMetadata &metadata =
+        summary.native_extensions[i];
+    out << "\n    {\"name\":\"" << json_escape(metadata.name)
+        << "\",\"amber_ext_abi_version\":"
+        << metadata.amber_ext_abi_version << ",\"target_triple\":\""
+        << json_escape(metadata.target_triple)
+        << "\",\"native_source_sha256\":\""
+        << json_escape(metadata.native_source_digest)
+        << "\",\"exported_symbol_sha256\":\""
+        << json_escape(metadata.exported_symbol_digest)
+        << "\",\"types\":[";
+    for (std::size_t j = 0; j < metadata.types.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"amber\":\"" << json_escape(metadata.types[j].amber)
+          << "\",\"tag\":\"" << json_escape(metadata.types[j].tag)
+          << "\",\"ownership\":\""
+          << json_escape(metadata.types[j].ownership)
+          << "\",\"destructor\":\""
+          << json_escape(metadata.types[j].destructor) << "\"}";
+    }
+    out << "],\"errors\":[";
+    for (std::size_t j = 0; j < metadata.errors.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(metadata.errors[j].name)
+          << "\",\"parent\":\"" << json_escape(metadata.errors[j].parent)
+          << "\",\"default_message\":\""
+          << json_escape(metadata.errors[j].default_message)
+          << "\",\"default_exit_code\":\""
+          << json_escape(metadata.errors[j].default_exit_code) << "\"}";
+    }
+    out << "]}";
+  }
+  if (!summary.native_extensions.empty()) {
+    out << "\n  ";
+  }
+  out << "],\n";
   emit_profile_set(out, summary.profiles, "  ");
   out << ",\n";
   out << "  \"artifacts\": [";

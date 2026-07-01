@@ -1608,6 +1608,27 @@ private:
     return module_.strings[string_id];
   }
 
+  std::optional<std::string>
+  merged_init_module_name(std::uint32_t code_id) const {
+    const std::string key = "amber.merged.init:" + std::to_string(code_id);
+    for (const bytecode::AttrEntry &attr : module_.attrs) {
+      if (string_or_empty(attr.key_str_id) == key) {
+        return string_or_empty(attr.value_str_id);
+      }
+    }
+    return std::nullopt;
+  }
+
+  bool is_merged_init_wrapper(std::uint32_t code_id) const {
+    const std::string key = "amber.merged.wrapper:" + std::to_string(code_id);
+    for (const bytecode::AttrEntry &attr : module_.attrs) {
+      if (string_or_empty(attr.key_str_id) == key) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   std::string local_name_for_slot(const BcCode &code,
                                   std::uint32_t slot) const {
     for (const SlotLayoutEntry &entry : code.local_layout) {
@@ -1634,7 +1655,11 @@ private:
     if (code.kind != CodeKind::Module) {
       return;
     }
-    state_->module_bindings.clear();
+    const std::optional<std::string> merged_module =
+        merged_init_module_name(code.code_id);
+    if (!merged_module.has_value() && !is_merged_init_wrapper(code.code_id)) {
+      state_->module_bindings.clear();
+    }
     for (const SlotLayoutEntry &entry : code.local_layout) {
       if (entry.slot >= regs.size() || entry.slot >= initialized.size() ||
           initialized[entry.slot] == 0U) {
@@ -1644,7 +1669,9 @@ private:
       if (name.empty()) {
         continue;
       }
-      state_->module_bindings[name] = regs[entry.slot];
+      const std::string storage_name =
+          merged_module.has_value() ? (*merged_module + ":" + name) : name;
+      state_->module_bindings[storage_name] = regs[entry.slot];
     }
     state_->module_init_completed = true;
   }
@@ -24146,6 +24173,27 @@ private:
       class_index = receiver.as_class_object().class_index;
       dispatch_flags = kMethodFlagClass;
     } else {
+      // Bare member access on a builtin receiver: per spec ("dot is a message;
+      // identifier is a value", §bare-nullary member access), attempt a general
+      // implicit zero-argument send before failing, so any syntactically-nullary
+      // builtin method works bare (`42.to_int`, `xs.first`), matching
+      // user-defined types and the parenthesised call path. `&receiver.name`
+      // still takes a reference rather than sending.
+      if (property_access) {
+        Value bare_result = Value::null();
+        const SendStatus bare_status = try_apply_scalar_send(
+            frame, receiver, *selector, args, block, kw_args, &bare_result);
+        if (bare_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (bare_status == SendStatus::Matched) {
+          if (!write_reg(frame, dst, std::move(bare_result))) {
+            return false;
+          }
+          ++frame.pc;
+          return true;
+        }
+      }
       std::string message = "selector `" + *selector +
                             "` is not implemented in current runtime baseline";
       // RFC §11: when a bare collection method is used where the bang or the

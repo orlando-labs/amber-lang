@@ -271,13 +271,46 @@ void test_native_extension_manifest() {
   blob.name = "crypto.blake3";
   blob.path = "src/blake3.am";
   blob.bytes = {0x01, 0x02, 0x03};
+  amber::pkg::PackageBuildOptions native_options;
+  native_options.target_triple = "test-triple";
+  native_options.native_blobs = {
+      {"blake3", "source", "native/blake3.c", {}, {0x63, 0x31}},
+      {"blake3", "source", "native/amber_blake3.c", {}, {0x63, 0x32}},
+  };
+  const amber::pkg::PackageBuildResult missing_blobs =
+      amber::pkg::build_package_artifact(parsed.manifest, {blob});
+  expect(!missing_blobs.ok, "declared native sources require package blobs");
   const amber::pkg::PackageBuildResult first =
-      amber::pkg::build_package_artifact(parsed.manifest, {blob});
+      amber::pkg::build_package_artifact(parsed.manifest, {blob},
+                                         native_options);
   const amber::pkg::PackageBuildResult second =
-      amber::pkg::build_package_artifact(parsed.manifest, {blob});
+      amber::pkg::build_package_artifact(parsed.manifest, {blob},
+                                         native_options);
   expect(first.ok && second.ok, "native package builds");
   expect(first.artifact.manifest_digest == second.artifact.manifest_digest,
          "native manifest digest is deterministic");
+  expect(first.artifact.native_blobs.size() == 2,
+         "native source blobs are stored in the package");
+  expect(first.artifact.native_extensions.size() == 1 &&
+             first.artifact.native_extensions[0].target_triple ==
+                 "test-triple",
+         "native extension metadata records target triple");
+  const amber::pkg::PackageVerifyResult verified =
+      amber::pkg::verify_package_artifact(first.serialized);
+  expect(verified.ok, "native package verifies");
+  const std::string inspect = amber::pkg::artifact_to_json(first.artifact);
+  expect(inspect.find("\"native_blobs\"") != std::string::npos &&
+             inspect.find("\"native_source_sha256\"") != std::string::npos,
+         "package json exposes native blobs and source digest");
+  std::string tampered = first.serialized;
+  const std::size_t native_bytes = tampered.find("bytes=6331");
+  expect(native_bytes != std::string::npos,
+         "serialized package should contain native source bytes");
+  tampered.replace(native_bytes + std::string("bytes=").size(), 4, "6330");
+  const amber::pkg::PackageVerifyResult tampered_verify =
+      amber::pkg::verify_package_artifact(tampered);
+  expect(!tampered_verify.ok,
+         "native blob digest mismatch should be rejected");
 
   const std::string base =
       "[package]\nname = \"p\"\nversion = \"0.1.0\"\nroot = \"p\"\n"

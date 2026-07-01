@@ -345,6 +345,101 @@ sorted_module_blobs(std::vector<PackageModuleBlob> modules) {
   return modules;
 }
 
+std::vector<PackageNativeBlob>
+sorted_native_blobs(std::vector<PackageNativeBlob> blobs) {
+  std::sort(blobs.begin(), blobs.end(),
+            [](const PackageNativeBlob &left,
+               const PackageNativeBlob &right) {
+              if (left.extension_name != right.extension_name) {
+                return left.extension_name < right.extension_name;
+              }
+              if (left.kind != right.kind) {
+                return left.kind < right.kind;
+              }
+              return left.path < right.path;
+            });
+  return blobs;
+}
+
+std::vector<PackageNativeSymbol>
+sorted_native_symbols(std::vector<PackageNativeSymbol> symbols) {
+  std::sort(symbols.begin(), symbols.end(),
+            [](const PackageNativeSymbol &left,
+               const PackageNativeSymbol &right) {
+              if (left.logical != right.logical) {
+                return left.logical < right.logical;
+              }
+              return left.symbol < right.symbol;
+            });
+  return symbols;
+}
+
+std::vector<PackageNativeType>
+sorted_native_types(std::vector<PackageNativeType> types) {
+  std::sort(types.begin(), types.end(),
+            [](const PackageNativeType &left, const PackageNativeType &right) {
+              if (left.amber != right.amber) {
+                return left.amber < right.amber;
+              }
+              return left.tag < right.tag;
+            });
+  return types;
+}
+
+std::vector<PackageNativeError>
+sorted_native_errors(std::vector<PackageNativeError> errors) {
+  std::sort(errors.begin(), errors.end(),
+            [](const PackageNativeError &left,
+               const PackageNativeError &right) {
+              return left.name < right.name;
+            });
+  return errors;
+}
+
+std::vector<PackageNativeExtensionMetadata> sorted_native_metadata(
+    std::vector<PackageNativeExtensionMetadata> metadata) {
+  std::sort(metadata.begin(), metadata.end(),
+            [](const PackageNativeExtensionMetadata &left,
+               const PackageNativeExtensionMetadata &right) {
+              return left.name < right.name;
+            });
+  return metadata;
+}
+
+std::string native_source_digest_text(const PackageNativeExtension &extension,
+                                      std::vector<PackageNativeBlob> blobs) {
+  blobs = sorted_native_blobs(std::move(blobs));
+  std::ostringstream out;
+  out << "name=" << line_escape(extension.name) << "\n";
+  out << "blob.count=" << blobs.size() << "\n";
+  for (std::size_t i = 0; i < blobs.size(); ++i) {
+    const PackageNativeBlob &blob = blobs[i];
+    out << "blob." << i << ".kind=" << line_escape(blob.kind) << "\n";
+    out << "blob." << i << ".path=" << line_escape(blob.path) << "\n";
+    const std::string digest =
+        blob.digest.empty() ? "sha256:" + sha256_hex_bytes(blob.bytes)
+                            : blob.digest;
+    out << "blob." << i << ".sha256=" << line_escape(digest) << "\n";
+  }
+  return out.str();
+}
+
+std::string exported_symbol_digest_text(
+    const PackageNativeExtension &extension) {
+  std::ostringstream out;
+  const std::vector<PackageNativeSymbol> symbols =
+      sorted_native_symbols(extension.symbols);
+  out << "name=" << line_escape(extension.name) << "\n";
+  out << "symbol.count=" << symbols.size() << "\n";
+  for (std::size_t i = 0; i < symbols.size(); ++i) {
+    out << "symbol." << i
+        << ".logical=" << line_escape(symbols[i].logical) << "\n";
+    out << "symbol." << i << ".symbol=" << line_escape(symbols[i].symbol)
+        << "\n";
+  }
+  return out.str();
+}
+
 std::vector<capability::CapabilityRequest>
 sorted_capabilities(std::vector<capability::CapabilityRequest> capabilities) {
   std::sort(capabilities.begin(), capabilities.end(),
@@ -503,6 +598,63 @@ std::string serialize_unsigned_package(const PackageArtifact &artifact) {
     out << "capability." << i << ".flags=" << capabilities[i].flags << "\n";
   }
 
+  out << "native.count=" << artifact.manifest.native_extensions.size()
+      << "\n";
+  for (std::size_t i = 0; i < artifact.manifest.native_extensions.size();
+       ++i) {
+    const PackageNativeExtension &native =
+        artifact.manifest.native_extensions[i];
+    const std::string prefix = "native." + std::to_string(i);
+    out << prefix << ".name=" << line_escape(native.name) << "\n";
+    out << prefix << ".language=" << line_escape(native.language) << "\n";
+    const auto emit_array = [&](const char *field,
+                                const std::vector<std::string> &values) {
+      out << prefix << "." << field << ".count=" << values.size() << "\n";
+      for (std::size_t j = 0; j < values.size(); ++j) {
+        out << prefix << "." << field << "." << j << "="
+            << line_escape(values[j]) << "\n";
+      }
+    };
+    emit_array("sources", native.sources);
+    emit_array("headers", native.headers);
+    emit_array("include_dirs", native.include_dirs);
+    emit_array("defines", native.defines);
+    emit_array("cxxflags", native.cxxflags);
+    emit_array("link_libraries", native.link_libraries);
+    emit_array("capabilities", native.capabilities);
+    out << prefix << ".symbol.count=" << native.symbols.size() << "\n";
+    for (std::size_t j = 0; j < native.symbols.size(); ++j) {
+      out << prefix << ".symbol." << j
+          << ".logical=" << line_escape(native.symbols[j].logical) << "\n";
+      out << prefix << ".symbol." << j
+          << ".symbol=" << line_escape(native.symbols[j].symbol) << "\n";
+    }
+    out << prefix << ".type.count=" << native.types.size() << "\n";
+    for (std::size_t j = 0; j < native.types.size(); ++j) {
+      out << prefix << ".type." << j
+          << ".amber=" << line_escape(native.types[j].amber) << "\n";
+      out << prefix << ".type." << j
+          << ".tag=" << line_escape(native.types[j].tag) << "\n";
+      out << prefix << ".type." << j
+          << ".ownership=" << line_escape(native.types[j].ownership) << "\n";
+      out << prefix << ".type." << j
+          << ".destructor=" << line_escape(native.types[j].destructor) << "\n";
+    }
+    out << prefix << ".error.count=" << native.errors.size() << "\n";
+    for (std::size_t j = 0; j < native.errors.size(); ++j) {
+      out << prefix << ".error." << j
+          << ".name=" << line_escape(native.errors[j].name) << "\n";
+      out << prefix << ".error." << j
+          << ".parent=" << line_escape(native.errors[j].parent) << "\n";
+      out << prefix << ".error." << j
+          << ".default_message="
+          << line_escape(native.errors[j].default_message) << "\n";
+      out << prefix << ".error." << j
+          << ".default_exit_code="
+          << line_escape(native.errors[j].default_exit_code) << "\n";
+    }
+  }
+
   const std::vector<PackageModuleBlob> modules =
       sorted_module_blobs(artifact.modules);
   out << "module.count=" << modules.size() << "\n";
@@ -516,6 +668,64 @@ std::string serialize_unsigned_package(const PackageArtifact &artifact) {
     out << "module." << i << ".sha256=" << digest << "\n";
     out << "module." << i << ".bytes=" << bytes_to_hex(modules[i].bytes)
         << "\n";
+  }
+
+  const std::vector<PackageNativeBlob> native_blobs =
+      sorted_native_blobs(artifact.native_blobs);
+  out << "native_blob.count=" << native_blobs.size() << "\n";
+  for (std::size_t i = 0; i < native_blobs.size(); ++i) {
+    const PackageNativeBlob &blob = native_blobs[i];
+    const std::string prefix = "native_blob." + std::to_string(i) + ".";
+    const std::string digest =
+        blob.digest.empty() ? "sha256:" + sha256_hex_bytes(blob.bytes)
+                            : blob.digest;
+    out << prefix << "extension=" << line_escape(blob.extension_name) << "\n";
+    out << prefix << "kind=" << line_escape(blob.kind) << "\n";
+    out << prefix << "path=" << line_escape(blob.path) << "\n";
+    out << prefix << "sha256=" << line_escape(digest) << "\n";
+    out << prefix << "bytes=" << bytes_to_hex(blob.bytes) << "\n";
+  }
+
+  const std::vector<PackageNativeExtensionMetadata> native_metadata =
+      sorted_native_metadata(artifact.native_extensions);
+  out << "native_metadata.count=" << native_metadata.size() << "\n";
+  for (std::size_t i = 0; i < native_metadata.size(); ++i) {
+    const PackageNativeExtensionMetadata &metadata = native_metadata[i];
+    const std::string prefix = "native_metadata." + std::to_string(i) + ".";
+    out << prefix << "name=" << line_escape(metadata.name) << "\n";
+    out << prefix << "amber_ext_abi_version="
+        << metadata.amber_ext_abi_version << "\n";
+    out << prefix << "target_triple=" << line_escape(metadata.target_triple)
+        << "\n";
+    out << prefix << "native_source_sha256="
+        << line_escape(metadata.native_source_digest) << "\n";
+    out << prefix << "exported_symbol_sha256="
+        << line_escape(metadata.exported_symbol_digest) << "\n";
+    out << prefix << "type.count=" << metadata.types.size() << "\n";
+    for (std::size_t j = 0; j < metadata.types.size(); ++j) {
+      out << prefix << "type." << j
+          << ".amber=" << line_escape(metadata.types[j].amber) << "\n";
+      out << prefix << "type." << j
+          << ".tag=" << line_escape(metadata.types[j].tag) << "\n";
+      out << prefix << "type." << j
+          << ".ownership=" << line_escape(metadata.types[j].ownership) << "\n";
+      out << prefix << "type." << j
+          << ".destructor=" << line_escape(metadata.types[j].destructor)
+          << "\n";
+    }
+    out << prefix << "error.count=" << metadata.errors.size() << "\n";
+    for (std::size_t j = 0; j < metadata.errors.size(); ++j) {
+      out << prefix << "error." << j
+          << ".name=" << line_escape(metadata.errors[j].name) << "\n";
+      out << prefix << "error." << j
+          << ".parent=" << line_escape(metadata.errors[j].parent) << "\n";
+      out << prefix << "error." << j
+          << ".default_message="
+          << line_escape(metadata.errors[j].default_message) << "\n";
+      out << prefix << "error." << j
+          << ".default_exit_code="
+          << line_escape(metadata.errors[j].default_exit_code) << "\n";
+    }
   }
   return out.str();
 }
@@ -1251,6 +1461,33 @@ std::string render_lockfile(const PackageManifest &manifest) {
   return out.str();
 }
 
+std::vector<PackageNativeExtensionMetadata>
+native_extension_metadata(const std::vector<PackageNativeExtension> &extensions,
+                          const std::vector<PackageNativeBlob> &blobs,
+                          const std::string &target_triple) {
+  std::vector<PackageNativeExtensionMetadata> out;
+  for (const PackageNativeExtension &extension : extensions) {
+    std::vector<PackageNativeBlob> extension_blobs;
+    for (const PackageNativeBlob &blob : blobs) {
+      if (blob.extension_name == extension.name) {
+        extension_blobs.push_back(blob);
+      }
+    }
+    PackageNativeExtensionMetadata metadata;
+    metadata.name = extension.name;
+    metadata.amber_ext_abi_version = 1;
+    metadata.target_triple = target_triple.empty() ? "source" : target_triple;
+    metadata.native_source_digest =
+        sha256_prefixed(native_source_digest_text(extension, extension_blobs));
+    metadata.exported_symbol_digest =
+        sha256_prefixed(exported_symbol_digest_text(extension));
+    metadata.types = sorted_native_types(extension.types);
+    metadata.errors = sorted_native_errors(extension.errors);
+    out.push_back(std::move(metadata));
+  }
+  return sorted_native_metadata(std::move(out));
+}
+
 PackageBuildResult
 build_package_artifact(const PackageManifest &manifest,
                        const std::vector<PackageModuleBlob> &modules,
@@ -1289,6 +1526,55 @@ build_package_artifact(const PackageManifest &manifest,
           "PackageBuildError", "invalid capability request: " + request.name));
     }
   }
+  std::set<std::string> declared_native_blobs;
+  const auto native_blob_key = [](const std::string &extension,
+                                  const std::string &kind,
+                                  const std::string &path) {
+    return extension + "\n" + kind + "\n" + path;
+  };
+  for (const PackageNativeExtension &extension : manifest.native_extensions) {
+    for (const std::string &source : extension.sources) {
+      declared_native_blobs.insert(
+          native_blob_key(extension.name, "source", source));
+    }
+    for (const std::string &header : extension.headers) {
+      declared_native_blobs.insert(
+          native_blob_key(extension.name, "header", header));
+    }
+  }
+  std::map<std::string, PackageNativeBlob> native_blobs_by_key;
+  for (const PackageNativeBlob &blob : options.native_blobs) {
+    if (blob.extension_name.empty() || blob.path.empty() ||
+        (blob.kind != "source" && blob.kind != "header") ||
+        blob.bytes.empty()) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageBuildError",
+          "native blobs require extension, source/header kind, path, and "
+          "non-empty bytes"));
+      continue;
+    }
+    const std::string key =
+        native_blob_key(blob.extension_name, blob.kind, blob.path);
+    if (declared_native_blobs.find(key) == declared_native_blobs.end()) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageBuildError",
+          "native blob is not declared by the manifest: " + blob.path));
+      continue;
+    }
+    if (!native_blobs_by_key.emplace(key, blob).second) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageBuildError", "duplicate native blob: " + blob.path));
+    }
+  }
+  for (const std::string &key : declared_native_blobs) {
+    if (native_blobs_by_key.find(key) == native_blobs_by_key.end()) {
+      const std::size_t last = key.rfind('\n');
+      const std::string path =
+          last == std::string::npos ? key : key.substr(last + 1U);
+      result.diagnostics.push_back(diagnostic(
+          "PackageBuildError", "missing native source/header blob: " + path));
+    }
+  }
   if (!result.diagnostics.empty()) {
     return result;
   }
@@ -1316,6 +1602,16 @@ build_package_artifact(const PackageManifest &manifest,
     result.artifact.modules.push_back(std::move(blob));
   }
   result.artifact.modules = sorted_module_blobs(result.artifact.modules);
+  for (const auto &entry : native_blobs_by_key) {
+    PackageNativeBlob blob = entry.second;
+    blob.digest = "sha256:" + sha256_hex_bytes(blob.bytes);
+    result.artifact.native_blobs.push_back(std::move(blob));
+  }
+  result.artifact.native_blobs =
+      sorted_native_blobs(result.artifact.native_blobs);
+  result.artifact.native_extensions = native_extension_metadata(
+      result.artifact.manifest.native_extensions,
+      result.artifact.native_blobs, options.target_triple);
 
   const std::string unsigned_payload =
       serialize_unsigned_package(result.artifact);
@@ -1405,6 +1701,20 @@ PackageParseResult parse_package_artifact(const std::string &serialized,
   if (values.find("capability.count") != values.end()) {
     capability_count = parse_count(values, "capability.count", &count_ok);
   }
+  std::uint64_t native_count = 0;
+  if (values.find("native.count") != values.end()) {
+    native_count = parse_count(values, "native.count", &count_ok);
+  }
+  std::uint64_t native_blob_count = 0;
+  if (values.find("native_blob.count") != values.end()) {
+    native_blob_count =
+        parse_count(values, "native_blob.count", &count_ok);
+  }
+  std::uint64_t native_metadata_count = 0;
+  if (values.find("native_metadata.count") != values.end()) {
+    native_metadata_count =
+        parse_count(values, "native_metadata.count", &count_ok);
+  }
   if (!count_ok) {
     result.diagnostics.push_back(
         diagnostic("PackageParseError",
@@ -1449,6 +1759,106 @@ PackageParseResult parse_package_artifact(const std::string &serialized,
     result.artifact.manifest.capabilities.push_back(std::move(request));
   }
 
+  const auto read_string_array = [&](const std::string &prefix,
+                                     const std::string &field,
+                                     std::vector<std::string> *out) -> bool {
+    bool array_count_ok = true;
+    const std::uint64_t count =
+        parse_count(values, prefix + field + ".count", &array_count_ok);
+    if (!array_count_ok) {
+      return false;
+    }
+    for (std::uint64_t i = 0; i < count; ++i) {
+      std::string value;
+      if (!get_escaped_value(values,
+                             prefix + field + "." + std::to_string(i),
+                             &value)) {
+        return false;
+      }
+      out->push_back(std::move(value));
+    }
+    return true;
+  };
+
+  for (std::uint64_t i = 0; i < native_count; ++i) {
+    PackageNativeExtension extension;
+    const std::string prefix = "native." + std::to_string(i) + ".";
+    if (!get_escaped_value(values, prefix + "name", &extension.name) ||
+        !get_escaped_value(values, prefix + "language", &extension.language) ||
+        !read_string_array(prefix, "sources", &extension.sources) ||
+        !read_string_array(prefix, "headers", &extension.headers) ||
+        !read_string_array(prefix, "include_dirs", &extension.include_dirs) ||
+        !read_string_array(prefix, "defines", &extension.defines) ||
+        !read_string_array(prefix, "cxxflags", &extension.cxxflags) ||
+        !read_string_array(prefix, "link_libraries",
+                           &extension.link_libraries) ||
+        !read_string_array(prefix, "capabilities", &extension.capabilities)) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageParseError",
+          "package artifact native extension is incomplete", path));
+      return result;
+    }
+    bool symbol_count_ok = true;
+    const std::uint64_t symbol_count =
+        parse_count(values, prefix + "symbol.count", &symbol_count_ok);
+    bool type_count_ok = true;
+    const std::uint64_t type_count =
+        parse_count(values, prefix + "type.count", &type_count_ok);
+    bool error_count_ok = true;
+    const std::uint64_t error_count =
+        parse_count(values, prefix + "error.count", &error_count_ok);
+    if (!symbol_count_ok || !type_count_ok || !error_count_ok) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageParseError",
+          "package artifact native extension counts are invalid", path));
+      return result;
+    }
+    for (std::uint64_t j = 0; j < symbol_count; ++j) {
+      PackageNativeSymbol symbol;
+      const std::string entry =
+          prefix + "symbol." + std::to_string(j) + ".";
+      if (!get_escaped_value(values, entry + "logical", &symbol.logical) ||
+          !get_escaped_value(values, entry + "symbol", &symbol.symbol)) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageParseError",
+            "package artifact native symbol is incomplete", path));
+        return result;
+      }
+      extension.symbols.push_back(std::move(symbol));
+    }
+    for (std::uint64_t j = 0; j < type_count; ++j) {
+      PackageNativeType type;
+      const std::string entry = prefix + "type." + std::to_string(j) + ".";
+      if (!get_escaped_value(values, entry + "amber", &type.amber) ||
+          !get_escaped_value(values, entry + "tag", &type.tag) ||
+          !get_escaped_value(values, entry + "ownership", &type.ownership) ||
+          !get_escaped_value(values, entry + "destructor", &type.destructor)) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageParseError",
+            "package artifact native type is incomplete", path));
+        return result;
+      }
+      extension.types.push_back(std::move(type));
+    }
+    for (std::uint64_t j = 0; j < error_count; ++j) {
+      PackageNativeError error;
+      const std::string entry = prefix + "error." + std::to_string(j) + ".";
+      if (!get_escaped_value(values, entry + "name", &error.name) ||
+          !get_escaped_value(values, entry + "parent", &error.parent) ||
+          !get_escaped_value(values, entry + "default_message",
+                             &error.default_message) ||
+          !get_escaped_value(values, entry + "default_exit_code",
+                             &error.default_exit_code)) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageParseError",
+            "package artifact native error is incomplete", path));
+        return result;
+      }
+      extension.errors.push_back(std::move(error));
+    }
+    result.artifact.manifest.native_extensions.push_back(std::move(extension));
+  }
+
   for (std::uint64_t i = 0; i < module_count; ++i) {
     PackageModuleBlob module;
     const std::string prefix = "module." + std::to_string(i) + ".";
@@ -1471,6 +1881,94 @@ PackageParseResult parse_package_artifact(const std::string &serialized,
     result.artifact.modules.push_back(std::move(module));
   }
 
+  for (std::uint64_t i = 0; i < native_blob_count; ++i) {
+    PackageNativeBlob blob;
+    const std::string prefix = "native_blob." + std::to_string(i) + ".";
+    if (!get_escaped_value(values, prefix + "extension",
+                           &blob.extension_name) ||
+        !get_escaped_value(values, prefix + "kind", &blob.kind) ||
+        !get_escaped_value(values, prefix + "path", &blob.path) ||
+        !get_escaped_value(values, prefix + "sha256", &blob.digest)) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageParseError", "package artifact native blob is incomplete",
+          path));
+      return result;
+    }
+    const auto bytes_it = values.find(prefix + "bytes");
+    if (bytes_it == values.end() || !hex_to_bytes(bytes_it->second,
+                                                  &blob.bytes)) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageParseError",
+          "package artifact native blob bytes are invalid", path));
+      return result;
+    }
+    result.artifact.native_blobs.push_back(std::move(blob));
+  }
+
+  for (std::uint64_t i = 0; i < native_metadata_count; ++i) {
+    PackageNativeExtensionMetadata metadata;
+    const std::string prefix =
+        "native_metadata." + std::to_string(i) + ".";
+    if (!get_escaped_value(values, prefix + "name", &metadata.name) ||
+        !get_escaped_value(values, prefix + "target_triple",
+                           &metadata.target_triple) ||
+        !get_escaped_value(values, prefix + "native_source_sha256",
+                           &metadata.native_source_digest) ||
+        !get_escaped_value(values, prefix + "exported_symbol_sha256",
+                           &metadata.exported_symbol_digest)) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageParseError",
+          "package artifact native metadata is incomplete", path));
+      return result;
+    }
+    bool abi_ok = true;
+    metadata.amber_ext_abi_version = static_cast<std::uint32_t>(
+        parse_count(values, prefix + "amber_ext_abi_version", &abi_ok));
+    bool type_count_ok = true;
+    const std::uint64_t type_count =
+        parse_count(values, prefix + "type.count", &type_count_ok);
+    bool error_count_ok = true;
+    const std::uint64_t error_count =
+        parse_count(values, prefix + "error.count", &error_count_ok);
+    if (!abi_ok || !type_count_ok || !error_count_ok) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageParseError",
+          "package artifact native metadata counts are invalid", path));
+      return result;
+    }
+    for (std::uint64_t j = 0; j < type_count; ++j) {
+      PackageNativeType type;
+      const std::string entry = prefix + "type." + std::to_string(j) + ".";
+      if (!get_escaped_value(values, entry + "amber", &type.amber) ||
+          !get_escaped_value(values, entry + "tag", &type.tag) ||
+          !get_escaped_value(values, entry + "ownership", &type.ownership) ||
+          !get_escaped_value(values, entry + "destructor", &type.destructor)) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageParseError",
+            "package artifact native metadata type is incomplete", path));
+        return result;
+      }
+      metadata.types.push_back(std::move(type));
+    }
+    for (std::uint64_t j = 0; j < error_count; ++j) {
+      PackageNativeError error;
+      const std::string entry = prefix + "error." + std::to_string(j) + ".";
+      if (!get_escaped_value(values, entry + "name", &error.name) ||
+          !get_escaped_value(values, entry + "parent", &error.parent) ||
+          !get_escaped_value(values, entry + "default_message",
+                             &error.default_message) ||
+          !get_escaped_value(values, entry + "default_exit_code",
+                             &error.default_exit_code)) {
+        result.diagnostics.push_back(diagnostic(
+            "PackageParseError",
+            "package artifact native metadata error is incomplete", path));
+        return result;
+      }
+      metadata.errors.push_back(std::move(error));
+    }
+    result.artifact.native_extensions.push_back(std::move(metadata));
+  }
+
   get_escaped_value(values, "signature.algorithm",
                     &result.artifact.signature.algorithm);
   get_escaped_value(values, "signature.key_id",
@@ -1485,6 +1983,10 @@ PackageParseResult parse_package_artifact(const std::string &serialized,
   result.artifact.manifest.capabilities =
       sorted_capabilities(result.artifact.manifest.capabilities);
   result.artifact.modules = sorted_module_blobs(result.artifact.modules);
+  result.artifact.native_blobs =
+      sorted_native_blobs(result.artifact.native_blobs);
+  result.artifact.native_extensions =
+      sorted_native_metadata(result.artifact.native_extensions);
   return result;
 }
 
@@ -1535,6 +2037,166 @@ PackageVerifyResult verify_package_artifact(const std::string &serialized,
       result.diagnostics.push_back(
           diagnostic("PackageVerifyError",
                      "module digest does not match: " + module.name, path));
+    }
+  }
+  const auto native_blob_key = [](const std::string &extension,
+                                  const std::string &kind,
+                                  const std::string &blob_path) {
+    return extension + "\n" + kind + "\n" + blob_path;
+  };
+  std::set<std::string> declared_native_blobs;
+  for (const PackageNativeExtension &extension :
+       artifact.manifest.native_extensions) {
+    for (const std::string &source : extension.sources) {
+      declared_native_blobs.insert(
+          native_blob_key(extension.name, "source", source));
+    }
+    for (const std::string &header : extension.headers) {
+      declared_native_blobs.insert(
+          native_blob_key(extension.name, "header", header));
+    }
+  }
+  std::set<std::string> seen_native_blobs;
+  for (const PackageNativeBlob &blob : artifact.native_blobs) {
+    const std::string key =
+        native_blob_key(blob.extension_name, blob.kind, blob.path);
+    if (!seen_native_blobs.insert(key).second) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError", "duplicate native blob: " + blob.path, path));
+    }
+    if (declared_native_blobs.find(key) == declared_native_blobs.end()) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "native blob is not declared by the manifest: " + blob.path, path));
+    }
+    if (blob.kind != "source" && blob.kind != "header") {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError", "native blob kind is invalid: " + blob.path,
+          path));
+    }
+    if (blob.bytes.empty()) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError", "native blob is empty: " + blob.path, path));
+    }
+    const std::string expected_digest =
+        "sha256:" + sha256_hex_bytes(blob.bytes);
+    if (blob.digest != expected_digest) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "native blob digest does not match: " + blob.path, path));
+    }
+  }
+  for (const std::string &key : declared_native_blobs) {
+    if (seen_native_blobs.find(key) == seen_native_blobs.end()) {
+      const std::size_t last = key.rfind('\n');
+      const std::string blob_path =
+          last == std::string::npos ? key : key.substr(last + 1U);
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "package is missing native source/header blob: " + blob_path,
+          path));
+    }
+  }
+
+  std::set<std::string> seen_native_metadata;
+  for (const PackageNativeExtensionMetadata &metadata :
+       artifact.native_extensions) {
+    if (!seen_native_metadata.insert(metadata.name).second) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "duplicate native extension metadata: " + metadata.name, path));
+    }
+    const PackageNativeExtension *extension = nullptr;
+    for (const PackageNativeExtension &candidate :
+         artifact.manifest.native_extensions) {
+      if (candidate.name == metadata.name) {
+        extension = &candidate;
+        break;
+      }
+    }
+    if (extension == nullptr) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "native extension metadata has no matching manifest entry: " +
+              metadata.name,
+          path));
+      continue;
+    }
+    if (metadata.amber_ext_abi_version != 1U) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "native extension ABI version does not match amber_ext: " +
+              metadata.name,
+          path));
+    }
+    std::vector<PackageNativeBlob> extension_blobs;
+    for (const PackageNativeBlob &blob : artifact.native_blobs) {
+      if (blob.extension_name == metadata.name) {
+        extension_blobs.push_back(blob);
+      }
+    }
+    const PackageNativeExtensionMetadata expected =
+        native_extension_metadata({*extension}, extension_blobs,
+                                  metadata.target_triple)
+            .front();
+    if (metadata.native_source_digest != expected.native_source_digest) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "native source digest does not match: " + metadata.name, path));
+    }
+    if (metadata.exported_symbol_digest != expected.exported_symbol_digest) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "native exported-symbol digest does not match: " + metadata.name,
+          path));
+    }
+    if (metadata.types.size() != expected.types.size()) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "native ownership metadata does not match: " + metadata.name, path));
+    } else {
+      for (std::size_t i = 0; i < metadata.types.size(); ++i) {
+        const PackageNativeType &left = metadata.types[i];
+        const PackageNativeType &right = expected.types[i];
+        if (left.amber != right.amber || left.tag != right.tag ||
+            left.ownership != right.ownership ||
+            left.destructor != right.destructor) {
+          result.diagnostics.push_back(diagnostic(
+              "PackageVerifyError",
+              "native ownership metadata does not match: " + metadata.name,
+              path));
+          break;
+        }
+      }
+    }
+    if (metadata.errors.size() != expected.errors.size()) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "native error metadata does not match: " + metadata.name, path));
+    } else {
+      for (std::size_t i = 0; i < metadata.errors.size(); ++i) {
+        const PackageNativeError &left = metadata.errors[i];
+        const PackageNativeError &right = expected.errors[i];
+        if (left.name != right.name || left.parent != right.parent ||
+            left.default_message != right.default_message ||
+            left.default_exit_code != right.default_exit_code) {
+          result.diagnostics.push_back(diagnostic(
+              "PackageVerifyError",
+              "native error metadata does not match: " + metadata.name,
+              path));
+          break;
+        }
+      }
+    }
+  }
+  for (const PackageNativeExtension &extension :
+       artifact.manifest.native_extensions) {
+    if (seen_native_metadata.find(extension.name) ==
+        seen_native_metadata.end()) {
+      result.diagnostics.push_back(diagnostic(
+          "PackageVerifyError",
+          "package is missing native extension metadata: " + extension.name,
+          path));
     }
   }
 
@@ -1630,6 +2292,66 @@ std::string artifact_to_json(const PackageArtifact &artifact) {
         << "\",\"target\":\"" << json_escape(capabilities[i].target)
         << "\",\"reason\":\"" << json_escape(capabilities[i].reason)
         << "\",\"flags\":" << capabilities[i].flags << "}";
+  }
+  out << "\n  ],\n";
+  out << "  \"native_blobs\": [";
+  const std::vector<PackageNativeBlob> native_blobs =
+      sorted_native_blobs(artifact.native_blobs);
+  for (std::size_t i = 0; i < native_blobs.size(); ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    const PackageNativeBlob &blob = native_blobs[i];
+    const std::string digest =
+        blob.digest.empty() ? "sha256:" + sha256_hex_bytes(blob.bytes)
+                            : blob.digest;
+    out << "\n    {\"extension\":\"" << json_escape(blob.extension_name)
+        << "\",\"kind\":\"" << json_escape(blob.kind) << "\",\"path\":\""
+        << json_escape(blob.path) << "\",\"sha256\":\""
+        << json_escape(digest) << "\",\"size\":" << blob.bytes.size() << "}";
+  }
+  out << "\n  ],\n";
+  out << "  \"native_extensions\": [";
+  const std::vector<PackageNativeExtensionMetadata> native_metadata =
+      sorted_native_metadata(artifact.native_extensions);
+  for (std::size_t i = 0; i < native_metadata.size(); ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    const PackageNativeExtensionMetadata &metadata = native_metadata[i];
+    out << "\n    {\"name\":\"" << json_escape(metadata.name)
+        << "\",\"amber_ext_abi_version\":"
+        << metadata.amber_ext_abi_version << ",\"target_triple\":\""
+        << json_escape(metadata.target_triple)
+        << "\",\"native_source_sha256\":\""
+        << json_escape(metadata.native_source_digest)
+        << "\",\"exported_symbol_sha256\":\""
+        << json_escape(metadata.exported_symbol_digest)
+        << "\",\"types\":[";
+    for (std::size_t j = 0; j < metadata.types.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"amber\":\"" << json_escape(metadata.types[j].amber)
+          << "\",\"tag\":\"" << json_escape(metadata.types[j].tag)
+          << "\",\"ownership\":\""
+          << json_escape(metadata.types[j].ownership)
+          << "\",\"destructor\":\""
+          << json_escape(metadata.types[j].destructor) << "\"}";
+    }
+    out << "],\"errors\":[";
+    for (std::size_t j = 0; j < metadata.errors.size(); ++j) {
+      if (j != 0U) {
+        out << ",";
+      }
+      out << "{\"name\":\"" << json_escape(metadata.errors[j].name)
+          << "\",\"parent\":\"" << json_escape(metadata.errors[j].parent)
+          << "\",\"default_message\":\""
+          << json_escape(metadata.errors[j].default_message)
+          << "\",\"default_exit_code\":\""
+          << json_escape(metadata.errors[j].default_exit_code) << "\"}";
+    }
+    out << "]}";
   }
   out << "\n  ],\n";
   out << "  \"signature\": {\"present\":"

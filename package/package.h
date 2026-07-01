@@ -94,6 +94,24 @@ struct PackageModuleBlob {
   std::vector<std::uint8_t> bytes;
 };
 
+struct PackageNativeBlob {
+  std::string extension_name;
+  std::string kind; // "source" or "header"
+  std::string path;
+  std::string digest;
+  std::vector<std::uint8_t> bytes;
+};
+
+struct PackageNativeExtensionMetadata {
+  std::string name;
+  std::uint32_t amber_ext_abi_version = 1;
+  std::string target_triple;
+  std::string native_source_digest;
+  std::string exported_symbol_digest;
+  std::vector<PackageNativeType> types;
+  std::vector<PackageNativeError> errors;
+};
+
 struct PackageSignature {
   std::string algorithm;
   std::string key_id;
@@ -106,12 +124,16 @@ struct PackageArtifact {
   std::string lockfile;
   std::string lock_digest;
   std::vector<PackageModuleBlob> modules;
+  std::vector<PackageNativeBlob> native_blobs;
+  std::vector<PackageNativeExtensionMetadata> native_extensions;
   PackageSignature signature;
 };
 
 struct PackageBuildOptions {
   std::string key_id;
   std::string signing_key;
+  std::string target_triple;
+  std::vector<PackageNativeBlob> native_blobs;
 };
 
 struct PackageBuildResult {
@@ -154,6 +176,10 @@ PackageManifestResult parse_manifest_toml(const std::string &source,
 
 std::string manifest_to_json(const PackageManifest &manifest);
 std::string render_lockfile(const PackageManifest &manifest);
+std::vector<PackageNativeExtensionMetadata>
+native_extension_metadata(const std::vector<PackageNativeExtension> &extensions,
+                          const std::vector<PackageNativeBlob> &blobs,
+                          const std::string &target_triple = {});
 
 PackageBuildResult
 build_package_artifact(const PackageManifest &manifest,

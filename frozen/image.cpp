@@ -242,6 +242,30 @@ sorted_native_modules(std::vector<FrozenImageNativeModule> modules) {
   return modules;
 }
 
+std::vector<pkg::PackageNativeExtensionMetadata> sorted_native_extensions(
+    std::vector<pkg::PackageNativeExtensionMetadata> extensions) {
+  std::sort(extensions.begin(), extensions.end(),
+            [](const pkg::PackageNativeExtensionMetadata &left,
+               const pkg::PackageNativeExtensionMetadata &right) {
+              return left.name < right.name;
+            });
+  return extensions;
+}
+
+bool same_native_type(const pkg::PackageNativeType &left,
+                      const pkg::PackageNativeType &right) {
+  return left.amber == right.amber && left.tag == right.tag &&
+         left.ownership == right.ownership &&
+         left.destructor == right.destructor;
+}
+
+bool same_native_error(const pkg::PackageNativeError &left,
+                       const pkg::PackageNativeError &right) {
+  return left.name == right.name && left.parent == right.parent &&
+         left.default_message == right.default_message &&
+         left.default_exit_code == right.default_exit_code;
+}
+
 const pkg::PackageModuleBlob *
 package_blob_by_name(const pkg::PackageArtifact &artifact,
                      const std::string &module_name) {
@@ -443,6 +467,8 @@ FrozenImageBuildResult build_frozen_image_artifact(
 
   result.artifact.native_modules =
       sorted_native_modules(result.artifact.native_modules);
+  result.artifact.native_extensions =
+      sorted_native_extensions(package_artifact.native_extensions);
   if (!result.diagnostics.empty()) {
     return result;
   }
@@ -477,6 +503,50 @@ serialize_frozen_image_artifact(const FrozenImageArtifact &artifact) {
         << "\n";
     out << prefix << "native.bytes="
         << bytes_to_hex(string_to_bytes(module.metadata_json)) << "\n";
+  }
+
+  const std::vector<pkg::PackageNativeExtensionMetadata> extensions =
+      sorted_native_extensions(artifact.native_extensions);
+  out << "native_extension.count=" << extensions.size() << "\n";
+  for (std::size_t i = 0; i < extensions.size(); ++i) {
+    const pkg::PackageNativeExtensionMetadata &extension = extensions[i];
+    const std::string prefix =
+        "native_extension." + std::to_string(i) + ".";
+    out << prefix << "name=" << line_escape(extension.name) << "\n";
+    out << prefix << "amber_ext_abi_version="
+        << extension.amber_ext_abi_version << "\n";
+    out << prefix << "target_triple="
+        << line_escape(extension.target_triple) << "\n";
+    out << prefix << "native_source_sha256="
+        << line_escape(extension.native_source_digest) << "\n";
+    out << prefix << "exported_symbol_sha256="
+        << line_escape(extension.exported_symbol_digest) << "\n";
+    out << prefix << "type.count=" << extension.types.size() << "\n";
+    for (std::size_t j = 0; j < extension.types.size(); ++j) {
+      out << prefix << "type." << j
+          << ".amber=" << line_escape(extension.types[j].amber) << "\n";
+      out << prefix << "type." << j
+          << ".tag=" << line_escape(extension.types[j].tag) << "\n";
+      out << prefix << "type." << j
+          << ".ownership=" << line_escape(extension.types[j].ownership)
+          << "\n";
+      out << prefix << "type." << j
+          << ".destructor=" << line_escape(extension.types[j].destructor)
+          << "\n";
+    }
+    out << prefix << "error.count=" << extension.errors.size() << "\n";
+    for (std::size_t j = 0; j < extension.errors.size(); ++j) {
+      out << prefix << "error." << j
+          << ".name=" << line_escape(extension.errors[j].name) << "\n";
+      out << prefix << "error." << j
+          << ".parent=" << line_escape(extension.errors[j].parent) << "\n";
+      out << prefix << "error." << j
+          << ".default_message="
+          << line_escape(extension.errors[j].default_message) << "\n";
+      out << prefix << "error." << j
+          << ".default_exit_code="
+          << line_escape(extension.errors[j].default_exit_code) << "\n";
+    }
   }
 
   out << "analysis.count=" << artifact.analysis.size() << "\n";
@@ -613,6 +683,83 @@ parse_frozen_image_artifact(const std::string &serialized,
     result.artifact.native_modules.push_back(std::move(module));
   }
 
+  std::uint64_t native_extension_count = 0;
+  if (parse_count(values, "native_extension.count",
+                  &native_extension_count)) {
+    for (std::uint64_t i = 0; i < native_extension_count; ++i) {
+      pkg::PackageNativeExtensionMetadata extension;
+      const std::string prefix =
+          "native_extension." + std::to_string(i) + ".";
+      if (!get_escaped_value(values, prefix + "name", &extension.name) ||
+          !get_escaped_value(values, prefix + "target_triple",
+                             &extension.target_triple) ||
+          !get_escaped_value(values, prefix + "native_source_sha256",
+                             &extension.native_source_digest) ||
+          !get_escaped_value(values, prefix + "exported_symbol_sha256",
+                             &extension.exported_symbol_digest) ||
+          !parse_u32(values[prefix + "amber_ext_abi_version"],
+                     &extension.amber_ext_abi_version)) {
+        result.diagnostics.push_back(diagnostic(
+            "FrozenImageParseError",
+            "frozen image native extension is incomplete"));
+        continue;
+      }
+      std::uint64_t type_count = 0;
+      if (!parse_count(values, prefix + "type.count", &type_count)) {
+        result.diagnostics.push_back(diagnostic(
+            "FrozenImageParseError",
+            "frozen image native extension type count is invalid",
+            extension.name));
+        continue;
+      }
+      for (std::uint64_t j = 0; j < type_count; ++j) {
+        pkg::PackageNativeType type;
+        const std::string entry =
+            prefix + "type." + std::to_string(j) + ".";
+        if (!get_escaped_value(values, entry + "amber", &type.amber) ||
+            !get_escaped_value(values, entry + "tag", &type.tag) ||
+            !get_escaped_value(values, entry + "ownership",
+                               &type.ownership) ||
+            !get_escaped_value(values, entry + "destructor",
+                               &type.destructor)) {
+          result.diagnostics.push_back(diagnostic(
+              "FrozenImageParseError",
+              "frozen image native extension type is incomplete",
+              extension.name));
+          continue;
+        }
+        extension.types.push_back(std::move(type));
+      }
+      std::uint64_t error_count = 0;
+      if (!parse_count(values, prefix + "error.count", &error_count)) {
+        result.diagnostics.push_back(diagnostic(
+            "FrozenImageParseError",
+            "frozen image native extension error count is invalid",
+            extension.name));
+        continue;
+      }
+      for (std::uint64_t j = 0; j < error_count; ++j) {
+        pkg::PackageNativeError error;
+        const std::string entry =
+            prefix + "error." + std::to_string(j) + ".";
+        if (!get_escaped_value(values, entry + "name", &error.name) ||
+            !get_escaped_value(values, entry + "parent", &error.parent) ||
+            !get_escaped_value(values, entry + "default_message",
+                               &error.default_message) ||
+            !get_escaped_value(values, entry + "default_exit_code",
+                               &error.default_exit_code)) {
+          result.diagnostics.push_back(diagnostic(
+              "FrozenImageParseError",
+              "frozen image native extension error is incomplete",
+              extension.name));
+          continue;
+        }
+        extension.errors.push_back(std::move(error));
+      }
+      result.artifact.native_extensions.push_back(std::move(extension));
+    }
+  }
+
   std::uint64_t analysis_count = 0;
   if (parse_count(values, "analysis.count", &analysis_count)) {
     for (std::uint64_t i = 0; i < analysis_count; ++i) {
@@ -631,6 +778,8 @@ parse_frozen_image_artifact(const std::string &serialized,
     }
   }
 
+  result.artifact.native_extensions =
+      sorted_native_extensions(result.artifact.native_extensions);
   return result;
 }
 
@@ -752,6 +901,102 @@ verify_frozen_image_artifact(const std::string &serialized,
     }
   }
 
+  std::set<std::string> image_extension_names;
+  for (const pkg::PackageNativeExtensionMetadata &extension :
+       artifact.native_extensions) {
+    if (!image_extension_names.insert(extension.name).second) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "duplicate native extension in frozen image: " + extension.name,
+          extension.name));
+    }
+    const pkg::PackageNativeExtensionMetadata *package_extension = nullptr;
+    for (const pkg::PackageNativeExtensionMetadata &candidate :
+         artifact.package.native_extensions) {
+      if (candidate.name == extension.name) {
+        package_extension = &candidate;
+        break;
+      }
+    }
+    if (package_extension == nullptr) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "native extension has no matching package metadata",
+          extension.name));
+      continue;
+    }
+    if (extension.amber_ext_abi_version != 1U ||
+        extension.amber_ext_abi_version !=
+            package_extension->amber_ext_abi_version) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "native extension ABI version does not match",
+          extension.name));
+    }
+    if (extension.target_triple != package_extension->target_triple) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "native extension target triple does not match",
+          extension.name));
+    }
+    if (extension.native_source_digest !=
+        package_extension->native_source_digest) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "native extension source digest does not match", extension.name));
+    }
+    if (extension.exported_symbol_digest !=
+        package_extension->exported_symbol_digest) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "native extension exported-symbol digest does not match",
+          extension.name));
+    }
+    if (extension.types.size() != package_extension->types.size()) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "native extension ownership metadata does not match",
+          extension.name));
+    } else {
+      for (std::size_t i = 0; i < extension.types.size(); ++i) {
+        if (!same_native_type(extension.types[i],
+                              package_extension->types[i])) {
+          result.diagnostics.push_back(diagnostic(
+              "FrozenImageVerifyError",
+              "native extension ownership metadata does not match",
+              extension.name));
+          break;
+        }
+      }
+    }
+    if (extension.errors.size() != package_extension->errors.size()) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "native extension error metadata does not match", extension.name));
+    } else {
+      for (std::size_t i = 0; i < extension.errors.size(); ++i) {
+        if (!same_native_error(extension.errors[i],
+                               package_extension->errors[i])) {
+          result.diagnostics.push_back(diagnostic(
+              "FrozenImageVerifyError",
+              "native extension error metadata does not match",
+              extension.name));
+          break;
+        }
+      }
+    }
+  }
+  for (const pkg::PackageNativeExtensionMetadata &extension :
+       artifact.package.native_extensions) {
+    if (image_extension_names.find(extension.name) ==
+        image_extension_names.end()) {
+      result.diagnostics.push_back(diagnostic(
+          "FrozenImageVerifyError",
+          "frozen image is missing native extension metadata",
+          extension.name));
+    }
+  }
+
   result.freeze_analysis_valid = result.diagnostics.empty();
   result.loadable = result.package_valid && result.freeze_analysis_valid;
   result.ok = result.loadable;
@@ -787,6 +1032,24 @@ std::string artifact_to_json(const FrozenImageArtifact &artifact) {
         << (module.requires_frozen_world ? "true" : "false")
         << ",\"code_objects\":" << module.code_object_count << ",\"sha256\":\""
         << json_escape(module.metadata_digest) << "\"}";
+  }
+  out << "\n  ],\n";
+  out << "  \"native_extensions\": [";
+  const std::vector<pkg::PackageNativeExtensionMetadata> extensions =
+      sorted_native_extensions(artifact.native_extensions);
+  for (std::size_t i = 0; i < extensions.size(); ++i) {
+    if (i != 0U) {
+      out << ",";
+    }
+    const pkg::PackageNativeExtensionMetadata &extension = extensions[i];
+    out << "\n    {\"name\":\"" << json_escape(extension.name)
+        << "\",\"amber_ext_abi_version\":"
+        << extension.amber_ext_abi_version << ",\"target_triple\":\""
+        << json_escape(extension.target_triple)
+        << "\",\"native_source_sha256\":\""
+        << json_escape(extension.native_source_digest)
+        << "\",\"exported_symbol_sha256\":\""
+        << json_escape(extension.exported_symbol_digest) << "\"}";
   }
   out << "\n  ],\n";
   out << "  \"analysis\": [";

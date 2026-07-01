@@ -1,0 +1,14 @@
+{
+  "schema": "amber.build.v1",
+  "name": "native.graph.pure",
+  "root": "nat.graph.main",
+  "profiles": {
+    "required": ["core.v1"],
+    "optional": ["typed.v1"],
+    "forbidden": ["ffi.v1"]
+  },
+  "modules": [
+    {"name": "nat.graph.main", "path": "src/main.am"},
+    {"name": "nat.graph.util", "path": "src/util.am"}
+  ]
+}

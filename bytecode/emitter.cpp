@@ -648,8 +648,82 @@ public:
     build_items(root);
     build_exports(root);
     build_init(root);
+    emit_import_alias_attrs(root);
     emit_native_binding_attrs();
     return {std::move(module_), std::move(diagnostics_)};
+  }
+
+  std::optional<std::uint32_t>
+  module_init_local_slot(const std::string &local_name) const {
+    if (!module_.init.has_entry_code_id) {
+      return std::nullopt;
+    }
+    for (const BcCode &code : module_.code_objects) {
+      if (code.code_id != module_.init.entry_code_id) {
+        continue;
+      }
+      for (const SlotLayoutEntry &entry : code.local_layout) {
+        if (entry.name_str_id < module_.strings.size() &&
+            module_.strings[entry.name_str_id] == local_name) {
+          return entry.slot;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  // Native whole-graph builds need to seed package import aliases before each
+  // original module init creates closures that capture them. The runtime loader
+  // owns this out-of-band today, so mirror the source imports into attrs without
+  // changing ordinary bytecode semantics.
+  void emit_import_alias_attrs(const ast::Expr &root) {
+    const ast::ListField *imports = list_field(root, "imports");
+    if (imports == nullptr) {
+      return;
+    }
+    const std::string module_name = string_field(root, "module_name");
+    for (const std::unique_ptr<ast::Expr> &item : imports->values) {
+      const std::string import_kind = item->kind;
+      const std::string dependency = string_field(*item, "module_id");
+      if (dependency.empty()) {
+        continue;
+      }
+      if (import_kind == "HImportModule") {
+        const std::string local_name = string_field(*item, "local_name");
+        const std::optional<std::uint32_t> slot =
+            module_init_local_slot(local_name);
+        if (!slot.has_value()) {
+          continue;
+        }
+        const std::string key =
+            "amber.import.alias:" + module_name + "\t" + local_name;
+        const std::string value =
+            "M\t" + dependency + "\t" + std::to_string(*slot);
+        module_.attrs.push_back({intern_string(key), intern_string(value)});
+        continue;
+      }
+      if (import_kind != "HImportNames") {
+        continue;
+      }
+      const ast::ListField *names = list_field(*item, "names");
+      if (names == nullptr) {
+        continue;
+      }
+      for (const std::unique_ptr<ast::Expr> &name : names->values) {
+        const std::string local_name = string_field(*name, "local_name");
+        const std::string source_name = string_field(*name, "source_name");
+        const std::optional<std::uint32_t> slot =
+            module_init_local_slot(local_name);
+        if (!slot.has_value() || source_name.empty()) {
+          continue;
+        }
+        const std::string key =
+            "amber.import.alias:" + module_name + "\t" + local_name;
+        const std::string value = "F\t" + dependency + "\t" + source_name +
+                                  "\t" + std::to_string(*slot);
+        module_.attrs.push_back({intern_string(key), intern_string(value)});
+      }
+    }
   }
 
   // Mirror each native binding into a module attr the VM reads at startup to
@@ -1478,6 +1552,14 @@ BcCode CodeEmitter::emit() {
             break;
           }
         }
+      }
+    }
+  }
+  if (procedure_ != nullptr && procedure_->kind == "module_init") {
+    for (const hir::ProcedureLocal &local : procedure_->locals) {
+      if (local.binding_kind == "import_alias") {
+        emit_instruction(Opcode::LoadNull, {{parse_slot(local.slot, 'l'), false}},
+                         local.span);
       }
     }
   }
