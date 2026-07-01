@@ -311,7 +311,7 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   BcModule module;
   for (const std::string &symbol :
        {"each", "map", "filter_map", "flat_map", "select", "reject",
-        "reduce", "find", "any?", "all?", "none?", "first", "count", "to_a",
+        "reduce", "find", "any?", "all?", "none?", "first", "count", "to_array",
         "to_array", "lazy", "group", "+", ">",
         "contains?", "include?", "===", "empty?", "[]", "Range", "low",
         "high", "collect", "collect_concat", "filter", "find_all", "detect",
@@ -356,7 +356,7 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   module.code_objects.push_back(
       make_send_code(13, symbol_id_or_die(module, "count"), false));
   module.code_objects.push_back(
-      make_send_code(14, symbol_id_or_die(module, "to_a"), false));
+      make_send_code(14, symbol_id_or_die(module, "to_array"), false));
   module.code_objects.push_back(
       make_send_code(16, symbol_id_or_die(module, "group"), true));
   module.code_objects.push_back(
@@ -424,7 +424,7 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   lazy_map_to_a.instructions.push_back(
       send_instr(3, 2, symbol_id_or_die(module, "map"), {}, 1));
   lazy_map_to_a.instructions.push_back(
-      send_instr(4, 3, symbol_id_or_die(module, "to_a")));
+      send_instr(4, 3, symbol_id_or_die(module, "to_array")));
   lazy_map_to_a.instructions.push_back({Opcode::Return, {{4, false}}});
   module.code_objects.push_back(lazy_map_to_a);
 
@@ -479,7 +479,7 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   lazy_map_select_to_a.instructions.push_back(
       send_instr(5, 4, symbol_id_or_die(module, "select"), {}, 2));
   lazy_map_select_to_a.instructions.push_back(
-      send_instr(5, 5, symbol_id_or_die(module, "to_a")));
+      send_instr(5, 5, symbol_id_or_die(module, "to_array")));
   lazy_map_select_to_a.instructions.push_back(
       {Opcode::Return, {{5, false}}});
   module.code_objects.push_back(lazy_map_select_to_a);
@@ -493,7 +493,7 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   lazy_flat_map_to_a.instructions.push_back(
       send_instr(3, 2, symbol_id_or_die(module, "flat_map"), {}, 1));
   lazy_flat_map_to_a.instructions.push_back(
-      send_instr(4, 3, symbol_id_or_die(module, "to_a")));
+      send_instr(4, 3, symbol_id_or_die(module, "to_array")));
   lazy_flat_map_to_a.instructions.push_back({Opcode::Return, {{4, false}}});
   module.code_objects.push_back(lazy_flat_map_to_a);
 
@@ -506,7 +506,7 @@ amber::bytecode::BcModule make_sequence_protocol_module() {
   lazy_filter_map_to_a.instructions.push_back(
       send_instr(3, 2, symbol_id_or_die(module, "filter_map"), {}, 1));
   lazy_filter_map_to_a.instructions.push_back(
-      send_instr(4, 3, symbol_id_or_die(module, "to_a")));
+      send_instr(4, 3, symbol_id_or_die(module, "to_array")));
   lazy_filter_map_to_a.instructions.push_back({Opcode::Return, {{4, false}}});
   module.code_objects.push_back(lazy_filter_map_to_a);
 
@@ -1464,7 +1464,7 @@ amber::bytecode::BcModule make_map_protocol_module() {
 
   BcModule module;
   for (const std::string &symbol :
-       {"keys", "values", "entries", "to_a", "each", "map", "select", "reject",
+       {"keys", "values", "entries", "to_array", "each", "map", "select", "reject",
         "filter_map", "transform", "transform_values", "[]", "contains?",
         "include?", "+", ">", "==", "count", "length", "size", "key?",
         "has_key?", "member?", "value?", "has_value?", "collect", "filter",
@@ -1485,7 +1485,7 @@ amber::bytecode::BcModule make_map_protocol_module() {
   module.code_objects.push_back(
       make_send_code(3, symbol_id_or_die(module, "entries"), false));
   module.code_objects.push_back(
-      make_send_code(4, symbol_id_or_die(module, "to_a"), false));
+      make_send_code(4, symbol_id_or_die(module, "to_array"), false));
   module.code_objects.push_back(
       make_send_code(5, symbol_id_or_die(module, "each"), true));
   module.code_objects.push_back(

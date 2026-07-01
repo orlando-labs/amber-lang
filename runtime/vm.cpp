@@ -9010,6 +9010,41 @@ private:
         }
         return conversion_ok(make_list_value(set->items));
       }
+      if (value.is_map()) {
+        // A Map materializes into an Array of `(key, value)` tuples, matching
+        // the collection `entries`/`to_array` behaviour.
+        const IntrusivePtr<MapValue> map = value.as_map();
+        if (map == nullptr) {
+          return conversion_error("TypeError", "map value is null");
+        }
+        std::vector<Value> entries;
+        entries.reserve(map->entries.size());
+        for (const MapEntry &entry : map->entries) {
+          entries.push_back(make_tuple_value({entry.key, entry.value}));
+        }
+        return conversion_ok(make_list_value(std::move(entries)));
+      }
+      if (value_is_lazy_seq_instance(value)) {
+        // A finite/realizable lazy sequence materializes into an Array (spec
+        // §5.4); an unbounded source faults via require_lazy_seq_finite_source.
+        const std::optional<LazySeqState> state =
+            extract_lazy_seq_state(frame, value);
+        if (!state.has_value()) {
+          if (fault_.has_value()) {
+            return conversion_error(fault_->error_name, fault_->message);
+          }
+          return conversion_error("TypeError", "cannot cast value to Array");
+        }
+        const std::optional<std::vector<Value>> items =
+            materialize_lazy_seq_items(frame, *state, value, std::nullopt);
+        if (!items.has_value()) {
+          if (fault_.has_value()) {
+            return conversion_error(fault_->error_name, fault_->message);
+          }
+          return conversion_error("TypeError", "cannot cast value to Array");
+        }
+        return conversion_ok(make_list_value(*items));
+      }
       return conversion_error("TypeError", "cannot cast value to Array");
     }
     case RuntimeNativeTypeKind::Tuple: {

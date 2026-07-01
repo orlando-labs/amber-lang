@@ -4232,7 +4232,7 @@ void test_runtime_sequence_collections_contract() {
 
   BcModule module;
   module.symbols = {"lazy",     "map",   "select", "reduce", "+",     ">",
-                    "flat_map", "group", "count",  "find",   "first", "to_a",
+                    "flat_map", "group", "count",  "find",   "first", "to_array",
                     "any?",     "all?",  "none?",  "low",    "high"};
 
   Constant one;
@@ -4315,7 +4315,7 @@ void test_runtime_sequence_collections_contract() {
   shape_probe.instructions.push_back(
       send_instr(4, 0, symbol_id_or_die(module, "first"), {2}));
   shape_probe.instructions.push_back(
-      send_instr(5, 0, symbol_id_or_die(module, "to_a")));
+      send_instr(5, 0, symbol_id_or_die(module, "to_array")));
   shape_probe.instructions.push_back(
       send_instr(6, 0, symbol_id_or_die(module, "any?")));
   shape_probe.instructions.push_back(
@@ -4433,7 +4433,7 @@ void test_runtime_sequence_collections_contract() {
              shape_parts->items[0].as_integer() == 0,
          "first should return first item");
   expect_integer_list(shape_parts->items[1], {0}, "first(count)");
-  expect_integer_list(shape_parts->items[2], {0, 1, 2}, "to_a");
+  expect_integer_list(shape_parts->items[2], {0, 1, 2}, "to_array");
   expect(shape_parts->items[3].is_bool() && shape_parts->items[3].as_bool(),
          "any? should see truthy items");
   expect(shape_parts->items[4].is_bool() && shape_parts->items[4].as_bool(),

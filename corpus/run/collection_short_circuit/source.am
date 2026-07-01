@@ -9,6 +9,6 @@ def probe():
   dropped = xs.drop(4)
   idx = xs.find_index |x|: x == 8
   dw = [1, 2, 3, 1].drop_while |x|: x < 3
-  lazy_take = (1..).lazy().take(3).to_a()
+  lazy_take = (1..).lazy().take(3).to_array()
   lazy_idx = (1..).lazy().find_index |x|: x == 4
   "#{taken}:#{dropped}:#{idx}:#{dw}:#{lazy_take}:#{lazy_idx}"
