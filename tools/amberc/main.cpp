@@ -35,6 +35,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unistd.h>
 #include <vector>
@@ -1197,11 +1198,18 @@ bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
   return (selector == "[]" && pos_count == 1U) ||
          (selector == "[]=" && pos_count == 2U) ||
+         (selector == "each" && pos_count == 0U) ||
          ((selector == "count" || selector == "length" || selector == "size" ||
            selector == "first") &&
           pos_count == 0U) ||
-         ((selector == "contains?" || selector == "includes?") &&
+         ((selector == "contains?" || selector == "includes?" ||
+           selector == "include?" || selector == "starts_with?" ||
+           selector == "ends_with?" || selector == "split") &&
           pos_count == 1U) ||
+         (selector == "replace" && pos_count == 2U) ||
+         ((selector == "upcase" || selector == "downcase" ||
+           selector == "trim" || selector == "strip") &&
+          pos_count == 0U) ||
          (selector == "concat" && pos_count == 1U) ||
          (selector == "to_str" && pos_count == 0U);
 }
@@ -1456,6 +1464,9 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       }
       const std::size_t block_index = kw_index + 1U + kw_count * 2U;
       const bool no_block = operand_is_no_block(instruction, block_index);
+      const bool collection_block_send =
+          selector == "each" && pos_count == 0U && kw_count == 0U &&
+          !no_block;
       bool json_send = false;
       if ((selector == "to_json" && pos_count == 0U && kw_count == 0U &&
            no_block) ||
@@ -1601,7 +1612,7 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       }
       if (!json_send && !codec_send && !digest_send && !range_send &&
           !random_send && !time_send && !uuid_send && !url_send &&
-          (kw_count != 0U || !no_block)) {
+          (kw_count != 0U || (!no_block && !collection_block_send))) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
       }
@@ -2431,19 +2442,51 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_index(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
       } else if (selector == "[]=") {
-        write_reg_stmt(dst, "native_list_set(" + read_reg_expr(recv) + ", " +
+        write_reg_stmt(dst, "native_index_set(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ", " +
                                 read_reg_expr(arg2) + ")");
+      } else if (selector == "each") {
+        if (block_reg < 0) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          write_reg_stmt(dst, "native_each(" + read_reg_expr(recv) + ", " +
+                                  read_reg_expr(static_cast<std::uint32_t>(
+                                      block_reg)) +
+                                  ")");
+        }
       } else if (selector == "count") {
         write_reg_stmt(dst, "native_count(" + read_reg_expr(recv) + ")");
       } else if (selector == "length" || selector == "size") {
-        write_reg_stmt(dst,
-                       "native_string_length(" + read_reg_expr(recv) + ")");
+        write_reg_stmt(dst, "native_length(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
         write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ")");
-      } else if (selector == "contains?" || selector == "includes?") {
-        write_reg_stmt(dst, "native_string_contains(" + read_reg_expr(recv) +
+      } else if (selector == "contains?" || selector == "includes?" ||
+                 selector == "include?") {
+        write_reg_stmt(dst, "native_contains(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "starts_with?") {
+        write_reg_stmt(dst, "native_string_starts_with(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
+      } else if (selector == "ends_with?") {
+        write_reg_stmt(dst, "native_string_ends_with(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "split") {
+        write_reg_stmt(dst, "native_string_split(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "replace") {
+        write_reg_stmt(dst, "native_string_replace(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", " +
+                                read_reg_expr(arg2) + ")");
+      } else if (selector == "upcase") {
+        write_reg_stmt(dst,
+                       "native_string_case(" + read_reg_expr(recv) + ", true)");
+      } else if (selector == "downcase") {
+        write_reg_stmt(dst, "native_string_case(" + read_reg_expr(recv) +
+                                ", false)");
+      } else if (selector == "trim" || selector == "strip") {
+        write_reg_stmt(dst,
+                       "native_string_trim(" + read_reg_expr(recv) + ")");
       } else if (selector == "concat") {
         write_reg_stmt(dst, "native_string_concat(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
@@ -3483,6 +3526,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeMap *>(value.heap_value);\n";
   out << "}\n";
+  out << "static NativeMap &as_mutable_map(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Map || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeMap *>(value.heap_value);\n";
+  out << "}\n";
   out << "static const NativeBytes &as_bytes(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Bytes || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
@@ -3538,6 +3586,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "static NativeValue native_count(const NativeValue &value) {\n";
   out << "  if (value.tag == NativeValue::Tag::List) return "
          "native_list_count(value);\n";
+  out << "  if (value.tag == NativeValue::Tag::Map) return "
+         "NativeValue::integer(static_cast<std::int64_t>("
+         "as_map(value).entries.size()));\n";
   out << "  if (value.tag == NativeValue::Tag::Bytes) return "
          "NativeValue::integer(static_cast<std::int64_t>("
          "as_bytes(value).bytes.size()));\n";
@@ -3695,6 +3746,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return NativeValue::integer(native_string_codepoint_count("
          "native_string_text(value)));\n";
   out << "}\n\n";
+  out << "static NativeValue native_length(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::String) return "
+         "native_string_length(value);\n";
+  out << "  return native_count(value);\n";
+  out << "}\n\n";
   out << "static NativeValue native_string_contains(const NativeValue &value, "
          "const NativeValue &needle) {\n";
   out << "  if (value.tag != NativeValue::Tag::String || "
@@ -3702,11 +3758,177 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return NativeValue::boolean(native_string_text(value).find("
          "native_string_text(needle)) != std::string::npos);\n";
   out << "}\n\n";
+  out << "static std::size_t native_utf8_next_cp(const std::string &text, "
+         "std::size_t i) {\n";
+  out << "  std::size_t j = i + 1U;\n";
+  out << "  while (j < text.size() && "
+         "(static_cast<unsigned char>(text[j]) & 0xC0U) == 0x80U) ++j;\n";
+  out << "  return j;\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_case(const NativeValue &value, "
+         "bool up) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String) throw "
+         "NativeBailout();\n";
+  out << "  std::string text = native_string_text(value);\n";
+  out << "  for (char &c : text) {\n";
+  out << "    const unsigned char uc = static_cast<unsigned char>(c);\n";
+  out << "    if (up && uc >= 'a' && uc <= 'z') c = "
+         "static_cast<char>(uc - 32U);\n";
+  out << "    else if (!up && uc >= 'A' && uc <= 'Z') c = "
+         "static_cast<char>(uc + 32U);\n";
+  out << "  }\n";
+  out << "  return NativeValue::string_ref(native_intern_string(text));\n";
+  out << "}\n\n";
+  out << "static bool native_ascii_space(unsigned char c) {\n";
+  out << "  return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || "
+         "c == '\\f' || c == '\\v';\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_trim(const NativeValue &value) "
+         "{\n";
+  out << "  if (value.tag != NativeValue::Tag::String) throw "
+         "NativeBailout();\n";
+  out << "  const std::string &text = native_string_text(value);\n";
+  out << "  std::size_t first = 0;\n";
+  out << "  std::size_t last = text.size();\n";
+  out << "  while (first < last && native_ascii_space("
+         "static_cast<unsigned char>(text[first]))) ++first;\n";
+  out << "  while (last > first && native_ascii_space("
+         "static_cast<unsigned char>(text[last - 1U]))) --last;\n";
+  out << "  return NativeValue::string_ref(native_intern_string("
+         "text.substr(first, last - first)));\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_starts_with(const NativeValue "
+         "&value, const NativeValue &prefix) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String || "
+         "prefix.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  const std::string &text = native_string_text(value);\n";
+  out << "  const std::string &needle = native_string_text(prefix);\n";
+  out << "  return NativeValue::boolean(text.size() >= needle.size() && "
+         "text.compare(0, needle.size(), needle) == 0);\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_ends_with(const NativeValue "
+         "&value, const NativeValue &suffix) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String || "
+         "suffix.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  const std::string &text = native_string_text(value);\n";
+  out << "  const std::string &needle = native_string_text(suffix);\n";
+  out << "  return NativeValue::boolean(text.size() >= needle.size() && "
+         "text.compare(text.size() - needle.size(), needle.size(), needle) "
+         "== 0);\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_split(const NativeValue &value, "
+         "const NativeValue &separator) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String || "
+         "separator.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  const std::string &text = native_string_text(value);\n";
+  out << "  const std::string &sep = native_string_text(separator);\n";
+  out << "  std::vector<NativeValue> parts;\n";
+  out << "  if (sep.empty()) {\n";
+  out << "    for (std::size_t i = 0; i < text.size();) {\n";
+  out << "      const std::size_t j = native_utf8_next_cp(text, i);\n";
+  out << "      parts.push_back(NativeValue::string_ref(native_intern_string("
+         "text.substr(i, j - i))));\n";
+  out << "      i = j;\n";
+  out << "    }\n";
+  out << "  } else {\n";
+  out << "    std::size_t start = 0;\n";
+  out << "    while (true) {\n";
+  out << "      const std::size_t pos = text.find(sep, start);\n";
+  out << "      if (pos == std::string::npos) {\n";
+  out << "        parts.push_back(NativeValue::string_ref("
+         "native_intern_string(text.substr(start))));\n";
+  out << "        break;\n";
+  out << "      }\n";
+  out << "      parts.push_back(NativeValue::string_ref(native_intern_string("
+         "text.substr(start, pos - start))));\n";
+  out << "      start = pos + sep.size();\n";
+  out << "    }\n";
+  out << "  }\n";
+  out << "  return NativeValue::list(std::move(parts));\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_replace(const NativeValue &value, "
+         "const NativeValue &from_value, const NativeValue &to_value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String || "
+         "from_value.tag != NativeValue::Tag::String || "
+         "to_value.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  const std::string &text = native_string_text(value);\n";
+  out << "  const std::string &from = native_string_text(from_value);\n";
+  out << "  const std::string &to = native_string_text(to_value);\n";
+  out << "  if (from.empty()) return value;\n";
+  out << "  std::string replaced;\n";
+  out << "  std::size_t start = 0;\n";
+  out << "  while (true) {\n";
+  out << "    const std::size_t pos = text.find(from, start);\n";
+  out << "    if (pos == std::string::npos) { replaced += text.substr(start); "
+         "break; }\n";
+  out << "    replaced += text.substr(start, pos - start);\n";
+  out << "    replaced += to;\n";
+  out << "    start = pos + from.size();\n";
+  out << "  }\n";
+  out << "  return NativeValue::string_ref(native_intern_string(replaced));\n";
+  out << "}\n\n";
   out << R"AMBERCPP(static NativeValue amber_native_call_closure(const NativeValue &value, std::initializer_list<NativeValue> args);
 
 static const std::string &native_key_text(const NativeValue &value) {
   if (value.tag == NativeValue::Tag::String) return native_string_text(value);
   if (value.tag == NativeValue::Tag::Symbol) return native_symbol_text(value.scalar_value);
+  throw NativeBailout();
+}
+
+static NativeValue native_map_set(const NativeValue &value,
+                                  const NativeValue &key,
+                                  const NativeValue &next_value) {
+  if (value.tag != NativeValue::Tag::Map) throw NativeBailout();
+  native_map_store(as_mutable_map(value).entries, native_key_text(key), next_value);
+  return next_value;
+}
+
+static NativeValue native_index_set(const NativeValue &value,
+                                    const NativeValue &key,
+                                    const NativeValue &next_value) {
+  if (value.tag == NativeValue::Tag::List) {
+    return native_list_set(value, key, next_value);
+  }
+  if (value.tag == NativeValue::Tag::Map) {
+    return native_map_set(value, key, next_value);
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_contains(const NativeValue &value,
+                                   const NativeValue &needle) {
+  if (value.tag == NativeValue::Tag::String) {
+    return native_string_contains(value, needle);
+  }
+  if (value.tag == NativeValue::Tag::Map) {
+    const std::string &name = native_key_text(needle);
+    for (const auto &entry : as_map(value).entries) {
+      if (entry.first == name) return NativeValue::boolean(true);
+    }
+    return NativeValue::boolean(false);
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_each(const NativeValue &value,
+                               const NativeValue &block_value) {
+  if (value.tag == NativeValue::Tag::Map) {
+    const auto entries = as_map(value).entries;
+    for (const auto &entry : entries) {
+      (void)amber_native_call_closure(
+          block_value,
+          {NativeValue::string_ref(native_intern_string(entry.first)),
+           entry.second});
+    }
+    return value;
+  }
+  if (value.tag == NativeValue::Tag::List) {
+    const auto items = as_list(value).items;
+    for (const NativeValue &item : items) {
+      (void)amber_native_call_closure(block_value, {item});
+    }
+    return value;
+  }
   throw NativeBailout();
 }
 
@@ -6162,7 +6384,7 @@ native_runtime_sources(const std::filesystem::path &root) {
 const std::vector<std::string> &native_runtime_compile_flags() {
   static const std::vector<std::string> flags = {
       "-std=c++17",
-      "-O3",
+      "-O2",
       "-DNDEBUG",
 #ifdef AMBER_VALUE_REPR_TAGGED
       // Propagate the host amberc's Value representation (PLAN Phase 4
@@ -6243,6 +6465,24 @@ native_runtime_cache_key(const std::string &cxx,
   return amber::lexer::sha256_hex(material.str());
 }
 
+std::size_t native_runtime_archive_jobs(std::size_t source_count) {
+  if (source_count <= 1U) {
+    return source_count;
+  }
+  if (const char *env = std::getenv("AMBER_NATIVE_RT_JOBS")) {
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(env, &end, 10);
+    if (end != env && parsed > 0UL) {
+      return std::min<std::size_t>(source_count,
+                                   static_cast<std::size_t>(parsed));
+    }
+  }
+  const unsigned int hardware = std::thread::hardware_concurrency();
+  const std::size_t jobs =
+      hardware == 0U ? 1U : static_cast<std::size_t>(hardware);
+  return std::min<std::size_t>(source_count, std::min<std::size_t>(jobs, 8U));
+}
+
 std::filesystem::path
 ensure_native_runtime_archive(const std::string &cxx,
                               const std::filesystem::path &runtime_root,
@@ -6260,11 +6500,15 @@ ensure_native_runtime_archive(const std::string &cxx,
   std::filesystem::create_directories(temp_dir);
 
   std::vector<std::string> objects;
+  objects.reserve(runtime_sources.size());
+  std::vector<std::string> compile_commands;
+  compile_commands.reserve(runtime_sources.size());
+  const std::vector<std::string> &flags = native_runtime_compile_flags();
+  const std::size_t jobs = native_runtime_archive_jobs(runtime_sources.size());
   for (std::size_t i = 0; i < runtime_sources.size(); ++i) {
     const std::filesystem::path object =
         temp_dir / ("rt" + std::to_string(i) + ".o");
     std::vector<std::string> command = {cxx};
-    const std::vector<std::string> &flags = native_runtime_compile_flags();
     command.insert(command.end(), flags.begin(), flags.end());
     command.push_back("-I");
     command.push_back(runtime_root.string());
@@ -6272,13 +6516,28 @@ ensure_native_runtime_archive(const std::string &cxx,
     command.push_back(runtime_sources[i]);
     command.push_back("-o");
     command.push_back(object.string());
-    const std::string rendered = shell_command(command);
-    if (std::system(rendered.c_str()) != 0) {
+    compile_commands.push_back(shell_command(command));
+    objects.push_back(object.string());
+  }
+  for (std::size_t start = 0; start < compile_commands.size(); start += jobs) {
+    const std::size_t end =
+        std::min<std::size_t>(compile_commands.size(), start + jobs);
+    std::ostringstream batch;
+    batch << "status=0\n";
+    for (std::size_t i = start; i < end; ++i) {
+      batch << "(" << compile_commands[i] << ") &\n";
+      batch << "p" << i << "=$!\n";
+    }
+    for (std::size_t i = start; i < end; ++i) {
+      batch << "wait \"$p" << i << "\" || status=1\n";
+    }
+    batch << "exit \"$status\"\n";
+    const std::string rendered_batch = batch.str();
+    if (std::system(rendered_batch.c_str()) != 0) {
       std::filesystem::remove_all(temp_dir);
       throw std::runtime_error("native runtime archive compile failed: " +
-                               rendered);
+                               compile_commands[start]);
     }
-    objects.push_back(object.string());
   }
 
   const std::filesystem::path temp_archive = temp_dir / "libamber_rt.a";
