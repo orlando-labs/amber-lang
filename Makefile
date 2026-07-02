@@ -546,6 +546,13 @@ test: build
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_structured_modules_core/main.am > $(BUILD_DIR)/native-structured-modules-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-structured-modules-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-structured-modules-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_capability_modules_core/main.am --entry main-only --grant random.secure --require-full-native -o $(BUILD_DIR)/native-capability-modules-core > $(BUILD_DIR)/native-capability-modules-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-capability-modules-core-build.json
+	$(BUILD_DIR)/native-capability-modules-core > $(BUILD_DIR)/native-capability-modules-core.out
+	grep -q '^10$$' $(BUILD_DIR)/native-capability-modules-core.out
+	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_capability_modules_core/main.am > $(BUILD_DIR)/native-capability-modules-core.dump
+	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-capability-modules-core.dump
+	grep -q 'mode=direct-native' $(BUILD_DIR)/native-capability-modules-core.dump
 	$(BUILD_DIR)/amberc build bench/polyglot/amber/src/calls_collections.am --entry init -o $(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native-build.json
 	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/calls-collections-native-build.json
 	$(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native.out
@@ -554,11 +561,12 @@ test: build
 	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/sha-digest-native-build.json
 	$(BUILD_DIR)/sha-digest-native > $(BUILD_DIR)/sha-digest-native.out
 	grep -q '^5616000$$' $(BUILD_DIR)/sha-digest-native.out
-	$(BUILD_DIR)/amberc build tests/fixtures/secure_random_native/main.am --entry main-only --grant random.secure -o $(BUILD_DIR)/secure-random-native > $(BUILD_DIR)/secure-random-native-build.json
-	grep -q '"native_entry": true' $(BUILD_DIR)/secure-random-native-build.json
+	$(BUILD_DIR)/amberc build tests/fixtures/secure_random_native/main.am --entry main-only --grant random.secure --require-full-native -o $(BUILD_DIR)/secure-random-native > $(BUILD_DIR)/secure-random-native-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/secure-random-native-build.json
 	$(BUILD_DIR)/secure-random-native > $(BUILD_DIR)/secure-random-native.out
 	grep -q '^42$$' $(BUILD_DIR)/secure-random-native.out
-	$(BUILD_DIR)/amberc build tests/fixtures/secure_random_native/int.am --entry main-only --grant random.secure -o $(BUILD_DIR)/secure-random-native-int > $(BUILD_DIR)/secure-random-native-int-build.json
+	$(BUILD_DIR)/amberc build tests/fixtures/secure_random_native/int.am --entry main-only --grant random.secure --require-full-native -o $(BUILD_DIR)/secure-random-native-int > $(BUILD_DIR)/secure-random-native-int-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/secure-random-native-int-build.json
 	$(BUILD_DIR)/secure-random-native-int > $(BUILD_DIR)/secure-random-native-int.out
 	grep -q '^42$$' $(BUILD_DIR)/secure-random-native-int.out
 	$(BUILD_DIR)/amberc build tests/fixtures/uuid_native/main.am --entry main-only --grant random.secure -o $(BUILD_DIR)/uuid-native > $(BUILD_DIR)/uuid-native-build.json

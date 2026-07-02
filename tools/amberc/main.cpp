@@ -1734,6 +1734,18 @@ bool native_cpp_math_selector(const std::string &selector,
                   selector == "from_unix_ns") &&
                  pos_count == 1U && kw_count == 0U && no_block) {
         time_send = true;
+      } else if (selector == "from_unix" && pos_count == 1U &&
+                 kw_count <= 1U && no_block) {
+        if (kw_count == 1U) {
+          std::uint32_t kw_symbol_id = 0;
+          if (!operand_u32_value(instruction, kw_index + 1U, &kw_symbol_id) ||
+              kw_symbol_id >= module.symbols.size() ||
+              module.symbols[kw_symbol_id] != "nanosecond") {
+            *reason = "unsupported Time.from_unix keyword shape";
+            return false;
+          }
+        }
+        time_send = true;
       } else if (selector == "utc" && pos_count == 3U && kw_count <= 4U &&
                  no_block) {
         std::set<std::string> seen_keywords;
@@ -3175,6 +3187,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                      ", " + (has_second ? "true" : "false") + ", " +
                      nanosecond_expr + ", " +
                      (has_nanosecond ? "true" : "false") + ")");
+      } else if (selector == "from_unix") {
+        write_reg_stmt(dst, "native_time_from_unix(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", " +
+                                (kw_count == 1U ? read_reg_expr(kw_value_reg)
+                                                : "NativeValue::nullv()") +
+                                ", " + (kw_count == 1U ? "true" : "false") +
+                                ")");
       } else if (selector == "from_unix_ms") {
         write_reg_stmt(dst, "native_time_from_unix_ms(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
@@ -6962,6 +6981,23 @@ static int native_compare_i128(__int128 lhs, __int128 rhs) {
   if (lhs < rhs) return -1;
   if (lhs > rhs) return 1;
   return 0;
+}
+
+static NativeValue native_time_from_unix(const NativeValue &module,
+                                         const NativeValue &seconds_value,
+                                         const NativeValue &nanosecond_value,
+                                         bool has_nanosecond) {
+  if (module.tag != NativeValue::Tag::TimeModule) throw NativeBailout();
+  const std::int64_t seconds = as_int(seconds_value);
+  std::int64_t nanosecond = 0;
+  if (has_nanosecond) {
+    nanosecond = as_int(nanosecond_value);
+  }
+  if (nanosecond < 0 || nanosecond >= kNativeNanosPerSecond) {
+    throw NativeBailout();
+  }
+  return NativeValue::time(
+      NativeTime{seconds, static_cast<std::uint32_t>(nanosecond)});
 }
 
 static NativeValue native_time_from_unix_ms(const NativeValue &module,

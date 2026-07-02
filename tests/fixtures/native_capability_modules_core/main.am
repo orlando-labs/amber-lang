@@ -1,0 +1,38 @@
+package native.capability_modules_core
+
+export main
+
+def main() -> Int !{random, time, mut}:
+  score = 0
+
+  if SecureRandom.bytes(0).count() == 0:
+    score = score + 1
+  if SecureRandom.hex(0) == "" and SecureRandom.base64url(3, padding: true).length() == 4:
+    score = score + 1
+  if SecureRandom.int(42..42) == 42:
+    score = score + 1
+  uuid = SecureRandom.uuid
+  if Uuid === uuid and uuid.version == 4:
+    score = score + 1
+
+  parsed = Time.parse("2026-06-17T03:04:05.123456789+03:00")
+  if parsed.iso8601 == "2026-06-17T00:04:05.123456789Z":
+    score = score + 1
+
+  epoch = Time.from_unix(1700000000, nanosecond: 123456789)
+  if epoch.unix_seconds == 1700000000 and epoch.nanosecond == 123456789:
+    score = score + 1
+  if Time.from_unix_ms(1700000000123).unix_milliseconds == 1700000000123:
+    score = score + 1
+  if Time.from_unix_ns(1000000001).unix_nanoseconds == 1000000001:
+    score = score + 1
+
+  base = Time.utc(2024, 2, 29, hour: 1, minute: 2, second: 3, nanosecond: 4)
+  shifted = base + 1.day + 2.hours + 3.minutes + 4.seconds + 5.milliseconds
+  delta = shifted - base
+  if shifted.month == 3 and shifted.day == 1 and shifted.hour == 3:
+    score = score + 1
+  if delta.total_nanoseconds == 93784005000000 and shifted > base:
+    score = score + 1
+
+  score
