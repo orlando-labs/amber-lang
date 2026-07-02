@@ -1225,12 +1225,16 @@ bool native_cpp_collection_selector(const std::string &selector,
          ((selector == "each" || selector == "map" ||
            selector == "select" || selector == "reject" ||
            selector == "find" || selector == "any?" ||
-           selector == "all?" || selector == "none?") &&
+           selector == "all?" || selector == "none?" ||
+           selector == "transform_keys" ||
+           selector == "transform_values") &&
           pos_count == 0U) ||
          (selector == "reduce" && (pos_count == 0U || pos_count == 1U)) ||
          ((selector == "count" || selector == "length" || selector == "size" ||
            selector == "empty?" || selector == "bytesize" ||
            selector == "deconstruct" || selector == "to_array" ||
+           selector == "keys" || selector == "values" ||
+           selector == "entries" ||
            selector == "reversed" || selector == "sorted" ||
            selector == "min" || selector == "max" ||
            selector == "minmax" || selector == "init" ||
@@ -1244,10 +1248,17 @@ bool native_cpp_collection_selector(const std::string &selector,
          ((selector == "take" || selector == "drop") && pos_count == 1U) ||
          ((selector == "contains?" || selector == "includes?" ||
            selector == "include?" || selector == "member?" ||
+           selector == "has_key?" || selector == "key?" ||
+           selector == "value?" || selector == "has_value?" ||
            selector == "starts_with?" || selector == "ends_with?" ||
            selector == "split") &&
           pos_count == 1U) ||
          (selector == "slice" && (pos_count == 1U || pos_count == 2U)) ||
+         (selector == "with" && pos_count == 2U) ||
+         ((selector == "without" && pos_count == 1U) ||
+          (selector == "except" && pos_count >= 1U)) ||
+         (selector == "merge" && pos_count == 1U) ||
+         (selector == "compact" && pos_count == 0U) ||
          (selector == "replace" && pos_count == 2U) ||
          ((selector == "upcase" || selector == "downcase" ||
            selector == "trim" || selector == "strip" ||
@@ -1388,6 +1399,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
     case Opcode::MakeList:
     case Opcode::MakeTuple:
     case Opcode::MakeMap:
+    case Opcode::MakeMapDyn:
+    case Opcode::MakeMapSpread:
     case Opcode::LookupConst:
     case Opcode::LoadUpval:
     case Opcode::StoreUpval:
@@ -1514,6 +1527,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       const bool collection_block_send =
           ((selector == "each" || selector == "map" ||
             selector == "select" || selector == "reject" ||
+            selector == "transform_keys" ||
+            selector == "transform_values" ||
             selector == "find" || selector == "any?" ||
             selector == "all?" || selector == "none?") &&
            pos_count == 0U && kw_count == 0U && !no_block) ||
@@ -1748,6 +1763,10 @@ bool native_vm_callable_pure_selector(const std::string &selector) {
       "includes?",
       "contains?",
       "member?",
+      "has_key?",
+      "key?",
+      "value?",
+      "has_value?",
       "keys",
       "values",
       "entries",
@@ -2221,9 +2240,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t count = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &count);
+      const bool strict =
+          (count & amber::bytecode::kMapStrictCountFlag) != 0U;
       count &= amber::bytecode::kMapCountMask;
       out << "  {\n";
-      out << "    std::vector<std::pair<std::string, NativeValue>> entries;\n";
+      out << "    std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
       out << "    entries.reserve(" << count << ");\n";
       std::size_t operand_index = 2U;
       for (std::uint32_t index = 0; index < count; ++index) {
@@ -2231,17 +2252,102 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         std::uint32_t value_reg = 0;
         operand_u32_value(instruction, operand_index++, &symbol_id);
         operand_u32_value(instruction, operand_index++, &value_reg);
-        out << "    native_map_store(entries, native_hex_to_string(\""
-            << string_to_hex_text(module.symbols[symbol_id]) << "\"), "
-            << read_reg_expr(value_reg) << ");\n";
+        out << "    native_map_store(entries, NativeValue::symbol_ref("
+            << symbol_id << "), " << read_reg_expr(value_reg) << ", "
+            << (strict ? "true" : "false") << ");\n";
       }
       out << "    ";
       if (uses_local_capture_cells) {
         out << "write_reg(frame, " << dst
-            << ", NativeValue::map(std::move(entries)));\n";
+            << ", NativeValue::map_entries(std::move(entries), "
+            << (strict ? "true" : "false") << "));\n";
       } else {
         out << "frame.regs[" << dst
-            << "] = NativeValue::map(std::move(entries));\n";
+            << "] = NativeValue::map_entries(std::move(entries), "
+            << (strict ? "true" : "false") << ");\n";
+      }
+      out << "  }\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::MakeMapDyn: {
+      std::uint32_t dst = 0;
+      std::uint32_t count = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &count);
+      const bool strict =
+          (count & amber::bytecode::kMapStrictCountFlag) != 0U;
+      count &= amber::bytecode::kMapCountMask;
+      out << "  {\n";
+      out << "    std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
+      out << "    entries.reserve(" << count << ");\n";
+      std::size_t operand_index = 2U;
+      for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t key_reg = 0;
+        std::uint32_t value_reg = 0;
+        operand_u32_value(instruction, operand_index++, &key_reg);
+        operand_u32_value(instruction, operand_index++, &value_reg);
+        out << "    native_map_store(entries, " << read_reg_expr(key_reg)
+            << ", " << read_reg_expr(value_reg) << ", "
+            << (strict ? "true" : "false") << ");\n";
+      }
+      out << "    ";
+      if (uses_local_capture_cells) {
+        out << "write_reg(frame, " << dst
+            << ", NativeValue::map_entries(std::move(entries), "
+            << (strict ? "true" : "false") << "));\n";
+      } else {
+        out << "frame.regs[" << dst
+            << "] = NativeValue::map_entries(std::move(entries), "
+            << (strict ? "true" : "false") << ");\n";
+      }
+      out << "  }\n";
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
+    case Opcode::MakeMapSpread: {
+      std::uint32_t dst = 0;
+      std::uint32_t count = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &count);
+      const bool strict =
+          (count & amber::bytecode::kMapStrictCountFlag) != 0U;
+      count &= amber::bytecode::kMapCountMask;
+      out << "  {\n";
+      out << "    std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
+      std::size_t operand_index = 2U;
+      for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t kind = 0;
+        std::uint32_t key_or_symbol = 0;
+        std::uint32_t value_reg = 0;
+        operand_u32_value(instruction, operand_index++, &kind);
+        operand_u32_value(instruction, operand_index++, &key_or_symbol);
+        operand_u32_value(instruction, operand_index++, &value_reg);
+        if (kind == amber::bytecode::kMapSpreadEntrySymbol) {
+          out << "    native_map_store(entries, NativeValue::symbol_ref("
+              << key_or_symbol << "), " << read_reg_expr(value_reg) << ", "
+              << (strict ? "true" : "false") << ");\n";
+        } else if (kind == amber::bytecode::kMapSpreadEntryDynamic) {
+          out << "    native_map_store(entries, " << read_reg_expr(key_or_symbol)
+              << ", " << read_reg_expr(value_reg) << ", "
+              << (strict ? "true" : "false") << ");\n";
+        } else if (kind == amber::bytecode::kMapSpreadEntrySpread) {
+          out << "    native_map_append_entries(entries, "
+              << read_reg_expr(value_reg) << ", "
+              << (strict ? "true" : "false") << ");\n";
+        } else {
+          out << "    throw NativeBailout();\n";
+        }
+      }
+      out << "    ";
+      if (uses_local_capture_cells) {
+        out << "write_reg(frame, " << dst
+            << ", NativeValue::map_entries(std::move(entries), "
+            << (strict ? "true" : "false") << "));\n";
+      } else {
+        out << "frame.regs[" << dst
+            << "] = NativeValue::map_entries(std::move(entries), "
+            << (strict ? "true" : "false") << ");\n";
       }
       out << "  }\n";
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
@@ -2571,7 +2677,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                   ")");
         }
       } else if (selector == "map" || selector == "select" ||
-                 selector == "reject" || selector == "find") {
+                 selector == "reject" || selector == "find" ||
+                 selector == "transform_keys" ||
+                 selector == "transform_values") {
         if (block_reg < 0) {
           out << "  throw NativeBailout();\n";
         } else {
@@ -2627,11 +2735,22 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_deconstruct(" + read_reg_expr(recv) + ")");
       } else if (selector == "to_array") {
         write_reg_stmt(dst, "native_to_array(" + read_reg_expr(recv) + ")");
+      } else if (selector == "keys") {
+        write_reg_stmt(dst, "native_map_keys(" + read_reg_expr(recv) + ")");
+      } else if (selector == "values") {
+        write_reg_stmt(dst, "native_map_values(" + read_reg_expr(recv) + ")");
+      } else if (selector == "entries") {
+        write_reg_stmt(dst,
+                       "native_map_entries_array(" + read_reg_expr(recv) + ")");
       } else if (selector == "bytes" && pos_count == 0U) {
         write_reg_stmt(dst, "native_bytes_new(" + read_reg_expr(recv) + ")");
       } else if (selector == "contains?" || selector == "includes?" ||
-                 selector == "include?" || selector == "member?") {
+                 selector == "include?" || selector == "member?" ||
+                 selector == "has_key?" || selector == "key?") {
         write_reg_stmt(dst, "native_contains(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "value?" || selector == "has_value?") {
+        write_reg_stmt(dst, "native_map_has_value(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "starts_with?") {
         write_reg_stmt(dst, "native_string_starts_with(" +
@@ -2658,6 +2777,18 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_sequence_appended(" +
                                 read_reg_expr(recv) + ", " +
                                 pos_args_expr(0U) + ")");
+      } else if (selector == "with") {
+        write_reg_stmt(dst, "native_map_with(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", " +
+                                read_reg_expr(arg2) + ")");
+      } else if (selector == "without" || selector == "except") {
+        write_reg_stmt(dst, "native_map_except(" + read_reg_expr(recv) +
+                                ", " + pos_args_expr(0U) + ")");
+      } else if (selector == "merge") {
+        write_reg_stmt(dst, "native_map_merge(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "compact") {
+        write_reg_stmt(dst, "native_map_compact(" + read_reg_expr(recv) + ")");
       } else if (selector == "inserted") {
         write_reg_stmt(dst, "native_sequence_inserted(" +
                                 read_reg_expr(recv) + ", " +
@@ -3653,6 +3784,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue tuple(std::vector<NativeValue> items);\n";
   out << "  static NativeValue map(std::vector<std::pair<std::string, "
          "NativeValue>> entries);\n";
+  out << "  static NativeValue map_entries("
+         "std::vector<std::pair<NativeValue, NativeValue>> entries, "
+         "bool strict = false);\n";
   out << "  static NativeValue range(NativeRange value);\n";
   out << "  static NativeValue uuid(amber::runtime::RuntimeUuidValue value);\n";
   out << "  static NativeValue time(amber::runtime::RuntimeTimeValue value);\n";
@@ -3663,8 +3797,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeBytes { std::string bytes; };\n";
   out << "struct NativeList { std::vector<NativeValue> items; };\n";
   out << "struct NativeTuple { std::vector<NativeValue> items; };\n";
-  out << "struct NativeMap { std::vector<std::pair<std::string, "
-         "NativeValue>> entries; };\n";
+  out << "struct NativeMap { "
+         "std::vector<std::pair<NativeValue, NativeValue>> entries; "
+         "bool strict = false; };\n";
   out << "struct NativeRange {\n";
   out << "  std::int64_t start = 0;\n";
   out << "  std::int64_t finish = 0;\n";
@@ -3708,12 +3843,25 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  tuple->items = std::move(items); out.heap_value = tuple.get();\n";
   out << "  native_arena.tuples.push_back(std::move(tuple)); return out;\n";
   out << "}\n";
-  out << "NativeValue NativeValue::map(std::vector<std::pair<std::string, "
-         "NativeValue>> entries) {\n";
+  out << "NativeValue NativeValue::map_entries("
+         "std::vector<std::pair<NativeValue, NativeValue>> entries, "
+         "bool strict) {\n";
   out << "  NativeValue out; out.tag = Tag::Map;\n";
   out << "  auto map = std::make_unique<NativeMap>();\n";
-  out << "  map->entries = std::move(entries); out.heap_value = map.get();\n";
+  out << "  map->entries = std::move(entries); map->strict = strict; "
+         "out.heap_value = map.get();\n";
   out << "  native_arena.maps.push_back(std::move(map)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::map(std::vector<std::pair<std::string, "
+         "NativeValue>> entries) {\n";
+  out << "  std::vector<std::pair<NativeValue, NativeValue>> converted;\n";
+  out << "  converted.reserve(entries.size());\n";
+  out << "  for (auto &entry : entries) {\n";
+  out << "    converted.emplace_back("
+         "NativeValue::string_ref(native_intern_string(entry.first)), "
+         "std::move(entry.second));\n";
+  out << "  }\n";
+  out << "  return NativeValue::map_entries(std::move(converted), false);\n";
   out << "}\n";
   out << "NativeValue NativeValue::range(NativeRange value) {\n";
   out << "  NativeValue out; out.tag = Tag::Range;\n";
@@ -4397,6 +4545,212 @@ static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs) {
   }
 }
 
+static bool native_map_key_is_nameable(const NativeValue &value) {
+  return value.tag == NativeValue::Tag::String ||
+         value.tag == NativeValue::Tag::Symbol;
+}
+
+static const std::string &native_name_key_text(const NativeValue &value) {
+  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (value.tag == NativeValue::Tag::Symbol) {
+    return native_symbol_text(value.scalar_value);
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_normalize_map_key(const NativeValue &key) {
+  if (key.tag == NativeValue::Tag::Float && std::isnan(key.float_value)) {
+    throw NativeBailout();
+  }
+  if (key.tag == NativeValue::Tag::Map ||
+      key.tag == NativeValue::Tag::Closure) {
+    throw NativeBailout();
+  }
+  if (key.tag == NativeValue::Tag::List) {
+    std::vector<NativeValue> normalized;
+    normalized.reserve(as_list(key).items.size());
+    for (const NativeValue &item : as_list(key).items) {
+      normalized.push_back(native_normalize_map_key(item));
+    }
+    return NativeValue::tuple(std::move(normalized));
+  }
+  if (key.tag == NativeValue::Tag::Tuple) {
+    std::vector<NativeValue> normalized;
+    normalized.reserve(as_tuple(key).items.size());
+    for (const NativeValue &item : as_tuple(key).items) {
+      normalized.push_back(native_normalize_map_key(item));
+    }
+    return NativeValue::tuple(std::move(normalized));
+  }
+  return key;
+}
+
+static bool native_map_keys_equivalent(const NativeValue &stored,
+                                       const NativeValue &lookup,
+                                       bool strict) {
+  if (!strict && native_map_key_is_nameable(stored) &&
+      native_map_key_is_nameable(lookup)) {
+    return native_name_key_text(stored) == native_name_key_text(lookup);
+  }
+  return native_value_equal(stored, lookup);
+}
+
+static const std::pair<NativeValue, NativeValue> *
+native_map_find_entry(const NativeValue &map_value, const NativeValue &key) {
+  const NativeMap &map = as_map(map_value);
+  const NativeValue normalized = native_normalize_map_key(key);
+  for (const auto &entry : map.entries) {
+    if (native_map_keys_equivalent(entry.first, normalized, map.strict)) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+static NativeValue native_map_lookup(const NativeValue &map_value,
+                                     const NativeValue &key,
+                                     bool optional) {
+  const auto *entry = native_map_find_entry(map_value, key);
+  if (entry == nullptr) {
+    if (optional) return NativeValue::nullv();
+    throw NativeBailout();
+  }
+  return entry->second;
+}
+
+static NativeValue native_map_contains_key(const NativeValue &map_value,
+                                           const NativeValue &key) {
+  return NativeValue::boolean(native_map_find_entry(map_value, key) != nullptr);
+}
+
+static void native_map_store(
+    std::vector<std::pair<NativeValue, NativeValue>> &entries,
+    NativeValue key, NativeValue value, bool strict) {
+  NativeValue normalized = native_normalize_map_key(key);
+  for (auto &entry : entries) {
+    if (native_map_keys_equivalent(entry.first, normalized, strict)) {
+      entry.second = std::move(value);
+      return;
+    }
+  }
+  entries.emplace_back(std::move(normalized), std::move(value));
+}
+
+static void native_map_append_entries(
+    std::vector<std::pair<NativeValue, NativeValue>> &entries,
+    const NativeValue &source, bool strict) {
+  const NativeMap &map = as_map(source);
+  for (const auto &entry : map.entries) {
+    native_map_store(entries, entry.first, entry.second, strict);
+  }
+}
+
+static NativeValue native_map_keys(const NativeValue &map_value) {
+  const auto &entries = as_map(map_value).entries;
+  std::vector<NativeValue> keys;
+  keys.reserve(entries.size());
+  for (const auto &entry : entries) keys.push_back(entry.first);
+  return NativeValue::list(std::move(keys));
+}
+
+static NativeValue native_map_values(const NativeValue &map_value) {
+  const auto &entries = as_map(map_value).entries;
+  std::vector<NativeValue> values;
+  values.reserve(entries.size());
+  for (const auto &entry : entries) values.push_back(entry.second);
+  return NativeValue::list(std::move(values));
+}
+
+static NativeValue native_map_has_value(const NativeValue &map_value,
+                                        const NativeValue &needle) {
+  const auto &entries = as_map(map_value).entries;
+  for (const auto &entry : entries) {
+    if (native_value_equal(entry.second, needle)) {
+      return NativeValue::boolean(true);
+    }
+  }
+  return NativeValue::boolean(false);
+}
+
+static NativeValue native_map_entries_array(const NativeValue &map_value) {
+  const auto &entries = as_map(map_value).entries;
+  std::vector<NativeValue> result;
+  result.reserve(entries.size());
+  for (const auto &entry : entries) {
+    result.push_back(NativeValue::tuple({entry.first, entry.second}));
+  }
+  return NativeValue::list(std::move(result));
+}
+
+static NativeValue native_map_slice(const NativeValue &map_value,
+                                    const NativeValue &first_key,
+                                    const NativeValue &second_key,
+                                    bool has_second_key) {
+  const NativeMap &map = as_map(map_value);
+  std::vector<NativeValue> wanted;
+  wanted.push_back(native_normalize_map_key(first_key));
+  if (has_second_key) wanted.push_back(native_normalize_map_key(second_key));
+  std::vector<std::pair<NativeValue, NativeValue>> result;
+  for (const auto &entry : map.entries) {
+    for (const NativeValue &key : wanted) {
+      if (native_map_keys_equivalent(entry.first, key, map.strict)) {
+        result.push_back(entry);
+        break;
+      }
+    }
+  }
+  return NativeValue::map_entries(std::move(result), map.strict);
+}
+
+static NativeValue native_map_with(const NativeValue &map_value,
+                                   const NativeValue &key,
+                                   const NativeValue &value) {
+  const NativeMap &map = as_map(map_value);
+  std::vector<std::pair<NativeValue, NativeValue>> result = map.entries;
+  native_map_store(result, key, value, map.strict);
+  return NativeValue::map_entries(std::move(result), map.strict);
+}
+
+static NativeValue native_map_except(const NativeValue &map_value,
+                                     std::initializer_list<NativeValue> keys) {
+  const NativeMap &map = as_map(map_value);
+  std::vector<NativeValue> wanted;
+  wanted.reserve(keys.size());
+  for (const NativeValue &key : keys) {
+    wanted.push_back(native_normalize_map_key(key));
+  }
+  std::vector<std::pair<NativeValue, NativeValue>> result;
+  result.reserve(map.entries.size());
+  for (const auto &entry : map.entries) {
+    bool drop = false;
+    for (const NativeValue &key : wanted) {
+      if (native_map_keys_equivalent(entry.first, key, map.strict)) {
+        drop = true;
+        break;
+      }
+    }
+    if (!drop) result.push_back(entry);
+  }
+  return NativeValue::map_entries(std::move(result), map.strict);
+}
+
+static NativeValue native_map_compact(const NativeValue &map_value) {
+  const NativeMap &map = as_map(map_value);
+  std::vector<std::pair<NativeValue, NativeValue>> result;
+  result.reserve(map.entries.size());
+  for (const auto &entry : map.entries) {
+    if (entry.second.tag != NativeValue::Tag::Null) result.push_back(entry);
+  }
+  return NativeValue::map_entries(std::move(result), map.strict);
+}
+
+static NativeValue native_map_merge(const NativeValue &lhs,
+                                    const NativeValue &rhs) {
+  std::vector<std::pair<NativeValue, NativeValue>> result = as_map(lhs).entries;
+  native_map_append_entries(result, rhs, false);
+  return NativeValue::map_entries(std::move(result), false);
+}
+
 static int native_compare_for_sort(const NativeValue &lhs,
                                    const NativeValue &rhs);
 
@@ -4455,6 +4809,9 @@ static int native_compare_for_sort(const NativeValue &lhs,
 
 static NativeValue native_optional_index(const NativeValue &value,
                                          const NativeValue &index_value) {
+  if (value.tag == NativeValue::Tag::Map) {
+    return native_map_lookup(value, index_value, true);
+  }
   const std::int64_t raw_index = as_int(index_value);
   if (value.tag == NativeValue::Tag::Range && raw_index < 0) {
     return NativeValue::nullv();
@@ -4467,6 +4824,9 @@ static NativeValue native_optional_index(const NativeValue &value,
 
 static NativeValue native_has_index(const NativeValue &value,
                                     const NativeValue &index_value) {
+  if (value.tag == NativeValue::Tag::Map) {
+    return native_map_contains_key(value, index_value);
+  }
   const std::int64_t raw_index = as_int(index_value);
   if (value.tag == NativeValue::Tag::Range && raw_index < 0) {
     return NativeValue::boolean(false);
@@ -4482,6 +4842,9 @@ static NativeValue native_deconstruct(const NativeValue &value) {
 }
 
 static NativeValue native_to_array(const NativeValue &value) {
+  if (value.tag == NativeValue::Tag::Map) {
+    return native_map_entries_array(value);
+  }
   return NativeValue::list(native_sequence_items_copy(value));
 }
 
@@ -4635,16 +4998,15 @@ static bool native_truthy(const NativeValue &value) {
 }
 
 static const std::string &native_key_text(const NativeValue &value) {
-  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
-  if (value.tag == NativeValue::Tag::Symbol) return native_symbol_text(value.scalar_value);
-  throw NativeBailout();
+  return native_name_key_text(value);
 }
 
 static NativeValue native_map_set(const NativeValue &value,
                                   const NativeValue &key,
                                   const NativeValue &next_value) {
   if (value.tag != NativeValue::Tag::Map) throw NativeBailout();
-  native_map_store(as_mutable_map(value).entries, native_key_text(key), next_value);
+  native_map_store(as_mutable_map(value).entries, key, next_value,
+                   as_map(value).strict);
   return next_value;
 }
 
@@ -4673,11 +5035,7 @@ static NativeValue native_contains(const NativeValue &value,
     return NativeValue::boolean(false);
   }
   if (value.tag == NativeValue::Tag::Map) {
-    const std::string &name = native_key_text(needle);
-    for (const auto &entry : as_map(value).entries) {
-      if (entry.first == name) return NativeValue::boolean(true);
-    }
-    return NativeValue::boolean(false);
+    return native_map_contains_key(value, needle);
   }
   throw NativeBailout();
 }
@@ -4688,9 +5046,7 @@ static NativeValue native_each(const NativeValue &value,
     const auto entries = as_map(value).entries;
     for (const auto &entry : entries) {
       (void)amber_native_call_closure(
-          block_value,
-          {NativeValue::string_ref(native_intern_string(entry.first)),
-           entry.second});
+          block_value, {entry.first, entry.second});
     }
     return value;
   }
@@ -4707,6 +5063,52 @@ static NativeValue native_each(const NativeValue &value,
 static NativeValue native_sequence_higher_order(
     const NativeValue &value, const NativeValue &block_value,
     const std::string &selector) {
+  if (value.tag == NativeValue::Tag::Map) {
+    const NativeMap &map = as_map(value);
+    if (selector == "map") {
+      std::vector<NativeValue> mapped;
+      mapped.reserve(map.entries.size());
+      for (const auto &entry : map.entries) {
+        mapped.push_back(
+            amber_native_call_closure(block_value, {entry.first, entry.second}));
+      }
+      return NativeValue::list(std::move(mapped));
+    }
+    if (selector == "select" || selector == "reject") {
+      std::vector<std::pair<NativeValue, NativeValue>> filtered;
+      filtered.reserve(map.entries.size());
+      for (const auto &entry : map.entries) {
+        const bool keep = native_truthy(
+            amber_native_call_closure(block_value, {entry.first, entry.second}));
+        if ((selector == "select" && keep) ||
+            (selector == "reject" && !keep)) {
+          filtered.push_back(entry);
+        }
+      }
+      return NativeValue::map_entries(std::move(filtered), false);
+    }
+    if (selector == "transform_values") {
+      std::vector<std::pair<NativeValue, NativeValue>> transformed;
+      transformed.reserve(map.entries.size());
+      for (const auto &entry : map.entries) {
+        transformed.emplace_back(
+            entry.first,
+            amber_native_call_closure(block_value, {entry.second, entry.first}));
+      }
+      return NativeValue::map_entries(std::move(transformed), false);
+    }
+    if (selector == "transform_keys") {
+      std::vector<std::pair<NativeValue, NativeValue>> transformed;
+      transformed.reserve(map.entries.size());
+      for (const auto &entry : map.entries) {
+        NativeValue key =
+            amber_native_call_closure(block_value, {entry.first, entry.second});
+        native_map_store(transformed, key, entry.second, false);
+      }
+      return NativeValue::map_entries(std::move(transformed), false);
+    }
+    throw NativeBailout();
+  }
   const std::vector<NativeValue> items = native_sequence_items_copy(value);
   if (selector == "map") {
     std::vector<NativeValue> mapped;
@@ -4794,11 +5196,7 @@ static NativeValue native_index(const NativeValue &value, const NativeValue &key
     return NativeValue::integer(static_cast<unsigned char>(bytes[static_cast<std::size_t>(index)]));
   }
   if (value.tag == NativeValue::Tag::Map) {
-    const std::string &name = native_key_text(key);
-    for (const auto &entry : as_map(value).entries) {
-      if (entry.first == name) return entry.second;
-    }
-    throw NativeBailout();
+    return native_map_lookup(value, key, false);
   }
   throw NativeBailout();
 }
@@ -4831,26 +5229,6 @@ static NativeValue native_bytes_slice(const NativeValue &value,
                                   bytes.size() - offset);
   }
   return NativeValue::bytes(bytes.substr(offset, count));
-}
-
-static NativeValue native_map_slice(const NativeValue &value,
-                                    const NativeValue &first_key,
-                                    const NativeValue &second_key,
-                                    bool has_second_key) {
-  const auto &entries = as_map(value).entries;
-  std::vector<std::string> wanted;
-  wanted.push_back(native_key_text(first_key));
-  if (has_second_key) wanted.push_back(native_key_text(second_key));
-  std::vector<std::pair<std::string, NativeValue>> result;
-  for (const auto &entry : entries) {
-    for (const std::string &key : wanted) {
-      if (entry.first == key) {
-        result.push_back(entry);
-        break;
-      }
-    }
-  }
-  return NativeValue::map(std::move(result));
 }
 
 static NativeValue native_slice(const NativeValue &value,
@@ -5519,7 +5897,7 @@ static void append_json_value(std::string &out, const NativeValue &value,
         if (pretty) out.push_back('\n');
       }
       if (pretty) append_json_indent(out, (depth + 1) * 2);
-      append_json_escaped(out, entries[i].first);
+      append_json_escaped(out, native_key_text(entries[i].first));
       out.push_back(':');
       if (pretty) out.push_back(' ');
       append_json_value(out, entries[i].second, pretty, depth + 1);
@@ -6089,7 +6467,10 @@ static NativeValue native_url_parts_map(const amber::runtime::RuntimeUrlParts &p
 static const NativeValue *native_map_field(const NativeMap &map,
                                            const std::string &name) {
   for (auto it = map.entries.rbegin(); it != map.entries.rend(); ++it) {
-    if (it->first == name) return &it->second;
+    if (native_map_key_is_nameable(it->first) &&
+        native_key_text(it->first) == name) {
+      return &it->second;
+    }
   }
   return nullptr;
 }
@@ -6118,7 +6499,8 @@ native_url_query_pairs_from_map(const NativeValue &value) {
   const NativeMap &map = as_map(value);
   out.reserve(map.entries.size());
   for (const auto &entry : map.entries) {
-    out.push_back({entry.first, native_url_query_value_from_native(entry.second)});
+    out.push_back({native_key_text(entry.first),
+                   native_url_query_value_from_native(entry.second)});
   }
   return out;
 }
@@ -7019,9 +7401,14 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
            "amber_vm_fallback_module_strings() {\n";
     out << "  return amber_vm_fallback_state().decoded.module.strings;\n";
     out << "}\n\n";
+    out << "static const std::vector<std::string> &"
+           "amber_vm_fallback_module_symbols() {\n";
+    out << "  return amber_vm_fallback_state().decoded.module.symbols;\n";
+    out << "}\n\n";
     out << "static NativeValue amber_vm_fallback_result("
            "const amber::runtime::Value &value, "
-           "const std::vector<std::string> &vm_strings) {\n";
+           "const std::vector<std::string> &vm_strings, "
+           "const std::vector<std::string> &vm_symbols) {\n";
     out << "  if (value.is_null()) return NativeValue::nullv();\n";
     out << "  if (value.is_bool()) return "
            "NativeValue::boolean(value.as_bool());\n";
@@ -7038,6 +7425,13 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
     out << "    return NativeValue::string_ref(native_intern_string("
            "vm_strings[string_id]));\n";
     out << "  }\n";
+    out << "  if (value.is_symbol()) {\n";
+    out << "    const std::uint32_t symbol_id = "
+           "value.as_symbol().symbol_id;\n";
+    out << "    if (symbol_id >= vm_symbols.size()) throw NativeBailout();\n";
+    out << "    return NativeValue::symbol_ref(native_intern_symbol("
+           "vm_symbols[symbol_id]));\n";
+    out << "  }\n";
     out << "  if (value.is_uuid()) {\n";
     out << "    const auto uuid = value.as_uuid();\n";
     out << "    if (uuid == nullptr) throw NativeBailout();\n";
@@ -7050,7 +7444,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
     out << "    items.reserve(list->items.size());\n";
     out << "    for (const amber::runtime::Value &item : list->items) {\n";
     out << "      items.push_back(amber_vm_fallback_result(item, "
-           "vm_strings));\n";
+           "vm_strings, vm_symbols));\n";
     out << "    }\n";
     out << "    return NativeValue::list(std::move(items));\n";
     out << "  }\n";
@@ -7061,9 +7455,22 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
     out << "    items.reserve(tuple->items.size());\n";
     out << "    for (const amber::runtime::Value &item : tuple->items) {\n";
     out << "      items.push_back(amber_vm_fallback_result(item, "
-           "vm_strings));\n";
+           "vm_strings, vm_symbols));\n";
     out << "    }\n";
     out << "    return NativeValue::tuple(std::move(items));\n";
+    out << "  }\n";
+    out << "  if (value.is_map()) {\n";
+    out << "    const auto map = value.as_map();\n";
+    out << "    if (map == nullptr) throw NativeBailout();\n";
+    out << "    std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
+    out << "    entries.reserve(map->entries.size());\n";
+    out << "    for (const amber::runtime::MapEntry &entry : map->entries) {\n";
+    out << "      entries.emplace_back("
+           "amber_vm_fallback_result(entry.key, vm_strings, vm_symbols), "
+           "amber_vm_fallback_result(entry.value, vm_strings, vm_symbols));\n";
+    out << "    }\n";
+    out << "    return NativeValue::map_entries(std::move(entries), "
+           "map->strict);\n";
     out << "  }\n";
     out << "  throw NativeBailout();\n";
     out << "}\n\n";
@@ -7097,7 +7504,10 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
     out << "  return amber_vm_fallback_result(result.value, "
            "result.runtime_strings.empty() "
            "? amber_vm_fallback_module_strings() "
-           ": result.runtime_strings);\n";
+           ": result.runtime_strings, "
+           "result.runtime_symbols.empty() "
+           "? amber_vm_fallback_module_symbols() "
+           ": result.runtime_symbols);\n";
     out << "}\n\n";
   }
   out << "static std::string native_value_to_debug_string("
@@ -7172,8 +7582,16 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "    }\n";
   out << "    text << \")\"; return text.str();\n";
   out << "  }\n";
-  out << "  case NativeValue::Tag::Map: return native_string_text("
-         "native_json_generate_value(value, false));\n";
+  out << "  case NativeValue::Tag::Map: {\n";
+  out << "    const auto &entries = as_map(value).entries;\n";
+  out << "    std::ostringstream text; text << \"{\";\n";
+  out << "    for (std::size_t i = 0; i < entries.size(); ++i) {\n";
+  out << "      if (i != 0U) text << \", \";\n";
+  out << "      text << native_value_to_debug_string(entries[i].first) << "
+         "\": \" << native_value_to_debug_string(entries[i].second);\n";
+  out << "    }\n";
+  out << "    text << \"}\"; return text.str();\n";
+  out << "  }\n";
   out << "  }\n";
   out << "  throw NativeBailout();\n";
   out << "}\n";
