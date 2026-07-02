@@ -1218,17 +1218,29 @@ bool native_cpp_scalar_conversion_selector(const std::string &selector) {
 
 bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
-  return (selector == "[]" && pos_count == 1U) ||
+  return ((selector == "[]" || selector == "[]?" ||
+           selector == "has_index?") &&
+          pos_count == 1U) ||
          (selector == "[]=" && pos_count == 2U) ||
          (selector == "each" && pos_count == 0U) ||
          ((selector == "count" || selector == "length" || selector == "size" ||
-           selector == "first" || selector == "empty?" ||
-           selector == "bytesize") &&
+           selector == "empty?" || selector == "bytesize" ||
+           selector == "deconstruct" || selector == "to_array" ||
+           selector == "reversed" || selector == "sorted" ||
+           selector == "min" || selector == "max" ||
+           selector == "minmax" || selector == "init" ||
+           selector == "tail") &&
           pos_count == 0U) ||
+         (selector == "first" && (pos_count == 0U || pos_count == 1U)) ||
          (selector == "bytes" && pos_count == 0U) ||
+         (selector == "appended" && pos_count >= 1U) ||
+         (selector == "inserted" && pos_count >= 2U) ||
+         (selector == "deleted" && pos_count == 1U) ||
+         ((selector == "take" || selector == "drop") && pos_count == 1U) ||
          ((selector == "contains?" || selector == "includes?" ||
-           selector == "include?" || selector == "starts_with?" ||
-           selector == "ends_with?" || selector == "split") &&
+           selector == "include?" || selector == "member?" ||
+           selector == "starts_with?" || selector == "ends_with?" ||
+           selector == "split") &&
           pos_count == 1U) ||
          (selector == "slice" && (pos_count == 1U || pos_count == 2U)) ||
          (selector == "replace" && pos_count == 2U) ||
@@ -1369,6 +1381,7 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
     case Opcode::GetLast:
     case Opcode::SetLast:
     case Opcode::MakeList:
+    case Opcode::MakeTuple:
     case Opcode::MakeMap:
     case Opcode::LookupConst:
     case Opcode::LoadUpval:
@@ -2173,6 +2186,26 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
     }
+    case Opcode::MakeTuple: {
+      std::uint32_t dst = 0;
+      std::uint32_t first_reg = 0;
+      std::uint32_t count = 0;
+      operand_u32_value(instruction, 0, &dst);
+      operand_u32_value(instruction, 1, &first_reg);
+      operand_u32_value(instruction, 2, &count);
+      std::ostringstream expr;
+      expr << "NativeValue::tuple(std::vector<NativeValue>{";
+      for (std::uint32_t index = 0; index < count; ++index) {
+        if (index != 0U) {
+          expr << ", ";
+        }
+        expr << read_reg_expr(first_reg + index);
+      }
+      expr << "})";
+      write_reg_stmt(dst, expr.str());
+      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      break;
+    }
     case Opcode::MakeMap: {
       std::uint32_t dst = 0;
       std::uint32_t count = 0;
@@ -2420,6 +2453,20 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         block_reg = instruction.operands[block_index].value;
       }
       const std::string selector = module.symbols[symbol_id];
+      const auto pos_args_expr = [&](std::uint32_t first_index) {
+        std::ostringstream args_expr;
+        args_expr << "{";
+        for (std::uint32_t index = first_index; index < pos_count; ++index) {
+          std::uint32_t arg_reg = 0;
+          operand_u32_value(instruction, 4U + index, &arg_reg);
+          if (index != first_index) {
+            args_expr << ", ";
+          }
+          args_expr << read_reg_expr(arg_reg);
+        }
+        args_expr << "}";
+        return args_expr.str();
+      };
       if (selector == "+") {
         write_reg_stmt(dst, "numeric_add(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
@@ -2494,10 +2541,16 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "[]") {
         write_reg_stmt(dst, "native_index(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
+      } else if (selector == "[]?") {
+        write_reg_stmt(dst, "native_optional_index(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "[]=") {
         write_reg_stmt(dst, "native_index_set(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ", " +
                                 read_reg_expr(arg2) + ")");
+      } else if (selector == "has_index?") {
+        write_reg_stmt(dst, "native_has_index(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "each") {
         if (block_reg < 0) {
           out << "  throw NativeBailout();\n";
@@ -2516,11 +2569,20 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "bytesize") {
         write_reg_stmt(dst, "native_bytesize(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
-        write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ")");
+        write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) +
+                                ", " +
+                                (pos_count == 1U ? read_reg_expr(arg)
+                                                  : "NativeValue::nullv()") +
+                                ", " +
+                                (pos_count == 1U ? "true" : "false") + ")");
+      } else if (selector == "deconstruct") {
+        write_reg_stmt(dst, "native_deconstruct(" + read_reg_expr(recv) + ")");
+      } else if (selector == "to_array") {
+        write_reg_stmt(dst, "native_to_array(" + read_reg_expr(recv) + ")");
       } else if (selector == "bytes" && pos_count == 0U) {
         write_reg_stmt(dst, "native_bytes_new(" + read_reg_expr(recv) + ")");
       } else if (selector == "contains?" || selector == "includes?" ||
-                 selector == "include?") {
+                 selector == "include?" || selector == "member?") {
         write_reg_stmt(dst, "native_contains(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "starts_with?") {
@@ -2544,6 +2606,42 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                                   : "NativeValue::nullv()") +
                                 ", " +
                                 (pos_count == 2U ? "true" : "false") + ")");
+      } else if (selector == "appended") {
+        write_reg_stmt(dst, "native_sequence_appended(" +
+                                read_reg_expr(recv) + ", " +
+                                pos_args_expr(0U) + ")");
+      } else if (selector == "inserted") {
+        write_reg_stmt(dst, "native_sequence_inserted(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", " +
+                                pos_args_expr(1U) + ")");
+      } else if (selector == "deleted") {
+        write_reg_stmt(dst, "native_sequence_deleted(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
+      } else if (selector == "reversed") {
+        write_reg_stmt(dst, "native_sequence_reversed(" +
+                                read_reg_expr(recv) + ")");
+      } else if (selector == "init") {
+        write_reg_stmt(dst,
+                       "native_sequence_init(" + read_reg_expr(recv) + ")");
+      } else if (selector == "tail") {
+        write_reg_stmt(dst,
+                       "native_sequence_tail(" + read_reg_expr(recv) + ")");
+      } else if (selector == "take") {
+        write_reg_stmt(dst, "native_sequence_take(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "drop") {
+        write_reg_stmt(dst, "native_sequence_drop(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
+      } else if (selector == "sorted") {
+        write_reg_stmt(dst,
+                       "native_sequence_sorted(" + read_reg_expr(recv) + ")");
+      } else if (selector == "min" || selector == "max" ||
+                 selector == "minmax") {
+        write_reg_stmt(dst, "native_sequence_extreme(" + read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
       } else if (selector == "upcase") {
         write_reg_stmt(dst,
                        "native_string_case(" + read_reg_expr(recv) + ", true)");
@@ -2559,8 +2657,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "chars") {
         write_reg_stmt(dst, "native_string_chars(" + read_reg_expr(recv) + ")");
       } else if (selector == "concat") {
-        write_reg_stmt(dst, "native_string_concat(" + read_reg_expr(recv) +
-                                ", " + read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_concat(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "to_str") {
         write_reg_stmt(dst, "native_to_str(" + read_reg_expr(recv) + ")");
       } else if (selector == "to_int") {
@@ -3423,6 +3521,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "\"native bailout\"; }\n";
   out << "};\n\n";
   out << "struct NativeList;\n";
+  out << "struct NativeTuple;\n";
   out << "struct NativeMap;\n";
   out << "struct NativeRange;\n";
   out << "using NativeTime = amber::runtime::RuntimeTimeValue;\n";
@@ -3437,8 +3536,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Base64UrlModule, HexModule, "
          "DigestModule, UrlModule, SecureRandomModule, UuidModule, "
          "RangeModule, TimeModule, "
-         "TimePeriodModule, Bytes, List, Map, Range, Uuid, Time, TimePeriod, "
-         "Closure };\n";
+         "TimePeriodModule, Bytes, List, Tuple, Map, Range, Uuid, Time, "
+         "TimePeriod, Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
@@ -3503,6 +3602,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "out; }\n";
   out << "  static NativeValue bytes(std::string value);\n";
   out << "  static NativeValue list(std::vector<NativeValue> items);\n";
+  out << "  static NativeValue tuple(std::vector<NativeValue> items);\n";
   out << "  static NativeValue map(std::vector<std::pair<std::string, "
          "NativeValue>> entries);\n";
   out << "  static NativeValue range(NativeRange value);\n";
@@ -3514,6 +3614,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "};\n\n";
   out << "struct NativeBytes { std::string bytes; };\n";
   out << "struct NativeList { std::vector<NativeValue> items; };\n";
+  out << "struct NativeTuple { std::vector<NativeValue> items; };\n";
   out << "struct NativeMap { std::vector<std::pair<std::string, "
          "NativeValue>> entries; };\n";
   out << "struct NativeRange {\n";
@@ -3531,6 +3632,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeArena {\n";
   out << "  std::vector<std::unique_ptr<NativeBytes>> bytes;\n";
   out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
+  out << "  std::vector<std::unique_ptr<NativeTuple>> tuples;\n";
   out << "  std::vector<std::unique_ptr<NativeMap>> maps;\n";
   out << "  std::vector<std::unique_ptr<NativeRange>> ranges;\n";
   out << "  std::vector<std::unique_ptr<NativeUuid>> uuids;\n";
@@ -3551,6 +3653,12 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  auto list = std::make_unique<NativeList>();\n";
   out << "  list->items = std::move(items); out.heap_value = list.get();\n";
   out << "  native_arena.lists.push_back(std::move(list)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::tuple(std::vector<NativeValue> items) {\n";
+  out << "  NativeValue out; out.tag = Tag::Tuple;\n";
+  out << "  auto tuple = std::make_unique<NativeTuple>();\n";
+  out << "  tuple->items = std::move(items); out.heap_value = tuple.get();\n";
+  out << "  native_arena.tuples.push_back(std::move(tuple)); return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::map(std::vector<std::pair<std::string, "
          "NativeValue>> entries) {\n";
@@ -3667,6 +3775,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeList *>(value.heap_value);\n";
   out << "}\n";
+  out << "static const NativeTuple &as_tuple(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Tuple || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeTuple *>(value.heap_value);\n";
+  out << "}\n";
   out << "static const NativeMap &as_map(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Map || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
@@ -3708,30 +3821,80 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return static_cast<NativeClosure *>(value.heap_value);\n";
   out << "}\n";
+  out << "static std::optional<std::size_t> native_optional_sequence_index("
+         "std::int64_t index, std::size_t size) {\n";
+  out << "  const std::int64_t size_i64 = static_cast<std::int64_t>(size);\n";
+  out << "  const std::int64_t normalized = index < 0 ? size_i64 + index : "
+         "index;\n";
+  out << "  if (normalized < 0 || static_cast<std::uint64_t>(normalized) >= "
+         "size) return std::nullopt;\n";
+  out << "  return static_cast<std::size_t>(normalized);\n";
+  out << "}\n";
+  out << "static std::size_t native_sequence_index(std::int64_t index, "
+         "std::size_t size) {\n";
+  out << "  const std::optional<std::size_t> normalized = "
+         "native_optional_sequence_index(index, size);\n";
+  out << "  if (!normalized.has_value()) throw NativeBailout();\n";
+  out << "  return *normalized;\n";
+  out << "}\n";
+  out << "static std::vector<NativeValue> native_range_items("
+         "const NativeValue &value) {\n";
+  out << "  const NativeRange &range = as_range(value);\n";
+  out << "  if (range.step == 0) throw NativeBailout();\n";
+  out << "  const __int128 start = static_cast<__int128>(range.start);\n";
+  out << "  const __int128 finish = static_cast<__int128>(range.finish);\n";
+  out << "  const __int128 step = static_cast<__int128>(range.step);\n";
+  out << "  const __int128 last = range.inclusive_end ? finish : "
+         "(step > 0 ? finish - 1 : finish + 1);\n";
+  out << "  std::vector<NativeValue> items;\n";
+  out << "  if ((step > 0 && start > last) || (step < 0 && start < last)) "
+         "return items;\n";
+  out << "  for (__int128 current = start; step > 0 ? current <= last : "
+         "current >= last; current += step) {\n";
+  out << "    if (current < static_cast<__int128>("
+         "std::numeric_limits<std::int64_t>::min()) || current > "
+         "static_cast<__int128>(std::numeric_limits<std::int64_t>::max())) "
+         "throw NativeBailout();\n";
+  out << "    items.push_back(NativeValue::integer("
+         "static_cast<std::int64_t>(current)));\n";
+  out << "    if (items.size() == std::numeric_limits<std::size_t>::max()) "
+         "throw NativeBailout();\n";
+  out << "  }\n";
+  out << "  return items;\n";
+  out << "}\n";
+  out << "static std::vector<NativeValue> native_sequence_items_copy("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::List) return "
+         "as_list(value).items;\n";
+  out << "  if (value.tag == NativeValue::Tag::Tuple) return "
+         "as_tuple(value).items;\n";
+  out << "  if (value.tag == NativeValue::Tag::Range) return "
+         "native_range_items(value);\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n";
   out << "static NativeValue native_list_at(const NativeValue &value, "
          "const NativeValue &index_value) {\n";
-  out << "  const auto &items = as_list(value).items;\n";
-  out << "  const std::int64_t index = as_int(index_value);\n";
-  out << "  if (index < 0 || static_cast<std::size_t>(index) >= items.size()) "
+  out << "  const std::int64_t raw_index = as_int(index_value);\n";
+  out << "  if (value.tag == NativeValue::Tag::Range && raw_index < 0) "
          "throw NativeBailout();\n";
-  out << "  return items[static_cast<std::size_t>(index)];\n";
+  out << "  const std::vector<NativeValue> items = "
+         "native_sequence_items_copy(value);\n";
+  out << "  return items[native_sequence_index(raw_index, items.size())];\n";
   out << "}\n";
   out << "static NativeValue native_list_set(const NativeValue &value, "
          "const NativeValue &index_value, const NativeValue &next_value) {\n";
   out << "  auto &items = as_mutable_list(value).items;\n";
-  out << "  const std::int64_t index = as_int(index_value);\n";
-  out << "  if (index < 0 || static_cast<std::size_t>(index) >= items.size()) "
-         "throw NativeBailout();\n";
-  out << "  items[static_cast<std::size_t>(index)] = next_value;\n";
+  out << "  const std::size_t index = native_sequence_index(as_int(index_value), "
+         "items.size());\n";
+  out << "  items[index] = next_value;\n";
   out << "  return next_value;\n";
   out << "}\n";
-  out << "static NativeValue native_list_count(const NativeValue &value) {\n";
-  out << "  return NativeValue::integer("
-         "static_cast<std::int64_t>(as_list(value).items.size()));\n";
-  out << "}\n";
   out << "static NativeValue native_count(const NativeValue &value) {\n";
-  out << "  if (value.tag == NativeValue::Tag::List) return "
-         "native_list_count(value);\n";
+  out << "  if (value.tag == NativeValue::Tag::List || "
+         "value.tag == NativeValue::Tag::Tuple || "
+         "value.tag == NativeValue::Tag::Range) return "
+         "NativeValue::integer(static_cast<std::int64_t>("
+         "native_sequence_items_copy(value).size()));\n";
   out << "  if (value.tag == NativeValue::Tag::Map) return "
          "NativeValue::integer(static_cast<std::int64_t>("
          "as_map(value).entries.size()));\n";
@@ -3740,9 +3903,18 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "as_bytes(value).bytes.size()));\n";
   out << "  throw NativeBailout();\n";
   out << "}\n";
-  out << "static NativeValue native_list_first(const NativeValue &value) {\n";
-  out << "  const auto &items = as_list(value).items;\n";
-  out << "  return items.empty() ? NativeValue::nullv() : items.front();\n";
+  out << "static NativeValue native_list_first(const NativeValue &value, "
+         "const NativeValue &count_value, bool has_count) {\n";
+  out << "  const std::vector<NativeValue> items = "
+         "native_sequence_items_copy(value);\n";
+  out << "  if (!has_count) return items.empty() ? NativeValue::nullv() : "
+         "items.front();\n";
+  out << "  const std::int64_t raw_count = as_int(count_value);\n";
+  out << "  const std::size_t take = raw_count <= 0 ? 0U : "
+         "std::min<std::size_t>(static_cast<std::size_t>(raw_count), "
+         "items.size());\n";
+  out << "  return NativeValue::list(std::vector<NativeValue>("
+         "items.begin(), items.begin() + take));\n";
   out << "}\n\n";
   out << "static void native_map_store(std::vector<std::pair<std::string, "
          "NativeValue>> &entries, std::string key, NativeValue value) {\n";
@@ -3964,6 +4136,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "NativeValue::boolean(native_string_text(value).empty());\n";
   out << "  if (value.tag == NativeValue::Tag::List) return "
          "NativeValue::boolean(as_list(value).items.empty());\n";
+  out << "  if (value.tag == NativeValue::Tag::Tuple) return "
+         "NativeValue::boolean(as_tuple(value).items.empty());\n";
+  out << "  if (value.tag == NativeValue::Tag::Range) return "
+         "NativeValue::boolean(native_range_items(value).empty());\n";
   out << "  if (value.tag == NativeValue::Tag::Map) return "
          "NativeValue::boolean(as_map(value).entries.empty());\n";
   out << "  if (value.tag == NativeValue::Tag::Bytes) return "
@@ -4122,6 +4298,287 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  }\n";
   out << "  return NativeValue::string_ref(native_intern_string(replaced));\n";
   out << "}\n\n";
+  out << R"AMBERCPP(static bool native_is_sequence(const NativeValue &value) {
+  return value.tag == NativeValue::Tag::List ||
+         value.tag == NativeValue::Tag::Tuple ||
+         value.tag == NativeValue::Tag::Range;
+}
+
+static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs);
+
+static bool native_sequence_equal(const std::vector<NativeValue> &lhs,
+                                  const std::vector<NativeValue> &rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    if (!native_value_equal(lhs[i], rhs[i])) return false;
+  }
+  return true;
+}
+
+static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs) {
+  if (lhs.tag == NativeValue::Tag::Integer &&
+      rhs.tag == NativeValue::Tag::Integer) {
+    return lhs.scalar_value == rhs.scalar_value;
+  }
+  if (numeric_tag(lhs) && numeric_tag(rhs)) {
+    return as_double_numeric(lhs) == as_double_numeric(rhs);
+  }
+  if (lhs.tag != rhs.tag) return false;
+  switch (lhs.tag) {
+  case NativeValue::Tag::Null:
+    return true;
+  case NativeValue::Tag::Bool:
+  case NativeValue::Tag::String:
+  case NativeValue::Tag::Symbol:
+    return lhs.scalar_value == rhs.scalar_value;
+  case NativeValue::Tag::Bytes:
+    return as_bytes(lhs).bytes == as_bytes(rhs).bytes;
+  case NativeValue::Tag::List:
+    return native_sequence_equal(as_list(lhs).items, as_list(rhs).items);
+  case NativeValue::Tag::Tuple:
+    return native_sequence_equal(as_tuple(lhs).items, as_tuple(rhs).items);
+  case NativeValue::Tag::Range: {
+    const NativeRange &left = as_range(lhs);
+    const NativeRange &right = as_range(rhs);
+    return left.start == right.start && left.finish == right.finish &&
+           left.step == right.step &&
+           left.inclusive_end == right.inclusive_end;
+  }
+  default:
+    throw NativeBailout();
+  }
+}
+
+static int native_compare_for_sort(const NativeValue &lhs,
+                                   const NativeValue &rhs);
+
+static int native_compare_sequences_for_sort(
+    const std::vector<NativeValue> &lhs,
+    const std::vector<NativeValue> &rhs) {
+  const std::size_t shared = std::min(lhs.size(), rhs.size());
+  for (std::size_t i = 0; i < shared; ++i) {
+    const int cmp = native_compare_for_sort(lhs[i], rhs[i]);
+    if (cmp != 0) return cmp;
+  }
+  if (lhs.size() < rhs.size()) return -1;
+  if (lhs.size() > rhs.size()) return 1;
+  return 0;
+}
+
+static int native_compare_for_sort(const NativeValue &lhs,
+                                   const NativeValue &rhs) {
+  if (lhs.tag == NativeValue::Tag::Integer &&
+      rhs.tag == NativeValue::Tag::Integer) {
+    return compare_int64(lhs.scalar_value, rhs.scalar_value);
+  }
+  if (numeric_tag(lhs) && numeric_tag(rhs)) {
+    return compare_double_native(as_double_numeric(lhs), as_double_numeric(rhs));
+  }
+  if (lhs.tag == NativeValue::Tag::Bool &&
+      rhs.tag == NativeValue::Tag::Bool) {
+    const bool left = lhs.scalar_value != 0;
+    const bool right = rhs.scalar_value != 0;
+    return left == right ? 0 : (left ? 1 : -1);
+  }
+  if (lhs.tag == NativeValue::Tag::String &&
+      rhs.tag == NativeValue::Tag::String) {
+    const std::string &left = native_string_text(lhs);
+    const std::string &right = native_string_text(rhs);
+    return left < right ? -1 : (left > right ? 1 : 0);
+  }
+  if (lhs.tag == NativeValue::Tag::Symbol &&
+      rhs.tag == NativeValue::Tag::Symbol) {
+    const std::string &left = native_symbol_text(lhs.scalar_value);
+    const std::string &right = native_symbol_text(rhs.scalar_value);
+    return left < right ? -1 : (left > right ? 1 : 0);
+  }
+  if (lhs.tag == NativeValue::Tag::List &&
+      rhs.tag == NativeValue::Tag::List) {
+    return native_compare_sequences_for_sort(as_list(lhs).items,
+                                             as_list(rhs).items);
+  }
+  if (lhs.tag == NativeValue::Tag::Tuple &&
+      rhs.tag == NativeValue::Tag::Tuple) {
+    return native_compare_sequences_for_sort(as_tuple(lhs).items,
+                                             as_tuple(rhs).items);
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_optional_index(const NativeValue &value,
+                                         const NativeValue &index_value) {
+  const std::int64_t raw_index = as_int(index_value);
+  if (value.tag == NativeValue::Tag::Range && raw_index < 0) {
+    return NativeValue::nullv();
+  }
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  const std::optional<std::size_t> index =
+      native_optional_sequence_index(raw_index, items.size());
+  return index.has_value() ? items[*index] : NativeValue::nullv();
+}
+
+static NativeValue native_has_index(const NativeValue &value,
+                                    const NativeValue &index_value) {
+  const std::int64_t raw_index = as_int(index_value);
+  if (value.tag == NativeValue::Tag::Range && raw_index < 0) {
+    return NativeValue::boolean(false);
+  }
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  return NativeValue::boolean(
+      native_optional_sequence_index(raw_index, items.size()).has_value());
+}
+
+static NativeValue native_deconstruct(const NativeValue &value) {
+  if (!native_is_sequence(value)) throw NativeBailout();
+  return value;
+}
+
+static NativeValue native_to_array(const NativeValue &value) {
+  return NativeValue::list(native_sequence_items_copy(value));
+}
+
+static NativeValue native_sequence_appended(
+    const NativeValue &value, std::initializer_list<NativeValue> additions) {
+  std::vector<NativeValue> result = native_sequence_items_copy(value);
+  result.insert(result.end(), additions.begin(), additions.end());
+  return NativeValue::list(std::move(result));
+}
+
+static NativeValue native_sequence_inserted(
+    const NativeValue &value, const NativeValue &index_value,
+    std::initializer_list<NativeValue> additions) {
+  std::vector<NativeValue> result = native_sequence_items_copy(value);
+  const std::int64_t raw = as_int(index_value);
+  const std::int64_t size_i64 = static_cast<std::int64_t>(result.size());
+  const std::int64_t normalized = raw < 0 ? size_i64 + raw + 1 : raw;
+  if (normalized < 0 || normalized > size_i64) throw NativeBailout();
+  result.insert(result.begin() + normalized, additions.begin(),
+                additions.end());
+  return NativeValue::list(std::move(result));
+}
+
+static NativeValue native_sequence_deleted(const NativeValue &value,
+                                           const NativeValue &needle) {
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  std::vector<NativeValue> result;
+  result.reserve(items.size());
+  for (const NativeValue &item : items) {
+    if (!native_value_equal(item, needle)) result.push_back(item);
+  }
+  return NativeValue::list(std::move(result));
+}
+
+static NativeValue native_sequence_reversed(const NativeValue &value) {
+  std::vector<NativeValue> result = native_sequence_items_copy(value);
+  std::reverse(result.begin(), result.end());
+  return NativeValue::list(std::move(result));
+}
+
+static NativeValue native_sequence_init(const NativeValue &value) {
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  if (items.empty()) return NativeValue::list({});
+  return NativeValue::list(
+      std::vector<NativeValue>(items.begin(), items.end() - 1));
+}
+
+static NativeValue native_sequence_tail(const NativeValue &value) {
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  if (items.empty()) return NativeValue::list({});
+  return NativeValue::list(
+      std::vector<NativeValue>(items.begin() + 1, items.end()));
+}
+
+static NativeValue native_sequence_take(const NativeValue &value,
+                                        const NativeValue &count_value) {
+  const std::int64_t raw_count = as_int(count_value);
+  if (raw_count < 0) throw NativeBailout();
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  const std::size_t count = std::min<std::size_t>(
+      static_cast<std::size_t>(raw_count), items.size());
+  return NativeValue::list(
+      std::vector<NativeValue>(items.begin(), items.begin() + count));
+}
+
+static NativeValue native_sequence_drop(const NativeValue &value,
+                                        const NativeValue &count_value) {
+  const std::int64_t raw_count = as_int(count_value);
+  if (raw_count < 0) throw NativeBailout();
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  const std::size_t count = std::min<std::size_t>(
+      static_cast<std::size_t>(raw_count), items.size());
+  return NativeValue::list(
+      std::vector<NativeValue>(items.begin() + count, items.end()));
+}
+
+static NativeValue native_sequence_concat(const NativeValue &lhs,
+                                          const NativeValue &rhs) {
+  std::vector<NativeValue> result = native_sequence_items_copy(lhs);
+  const std::vector<NativeValue> right = native_sequence_items_copy(rhs);
+  result.insert(result.end(), right.begin(), right.end());
+  return NativeValue::list(std::move(result));
+}
+
+static NativeValue native_sequence_repeat(const NativeValue &value,
+                                          const NativeValue &count_value) {
+  const std::int64_t raw_count = as_int(count_value);
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  std::vector<NativeValue> result;
+  if (raw_count <= 0) return NativeValue::list(std::move(result));
+  const std::uint64_t count = static_cast<std::uint64_t>(raw_count);
+  if (!items.empty() &&
+      count > std::numeric_limits<std::size_t>::max() / items.size()) {
+    throw NativeBailout();
+  }
+  result.reserve(items.size() * static_cast<std::size_t>(count));
+  for (std::uint64_t i = 0; i < count; ++i) {
+    result.insert(result.end(), items.begin(), items.end());
+  }
+  return NativeValue::list(std::move(result));
+}
+
+static NativeValue native_sequence_sorted(const NativeValue &value) {
+  std::vector<NativeValue> result = native_sequence_items_copy(value);
+  for (std::size_t i = 1; i < result.size(); ++i) {
+    std::size_t j = i;
+    while (j > 0 && native_compare_for_sort(result[j], result[j - 1U]) < 0) {
+      std::swap(result[j], result[j - 1U]);
+      --j;
+    }
+  }
+  return NativeValue::list(std::move(result));
+}
+
+static NativeValue native_sequence_extreme(const NativeValue &value,
+                                           const std::string &selector) {
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  if (items.empty()) return NativeValue::nullv();
+  std::size_t min_i = 0;
+  std::size_t max_i = 0;
+  for (std::size_t i = 1; i < items.size(); ++i) {
+    if (native_compare_for_sort(items[i], items[min_i]) < 0) min_i = i;
+    if (native_compare_for_sort(items[i], items[max_i]) > 0) max_i = i;
+  }
+  if (selector == "min") return items[min_i];
+  if (selector == "max") return items[max_i];
+  if (selector == "minmax") {
+    return NativeValue::list({items[min_i], items[max_i]});
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_concat(const NativeValue &lhs,
+                                 const NativeValue &rhs) {
+  if (lhs.tag == NativeValue::Tag::String &&
+      rhs.tag == NativeValue::Tag::String) {
+    return native_string_concat(lhs, rhs);
+  }
+  if (native_is_sequence(lhs)) {
+    return native_sequence_concat(lhs, rhs);
+  }
+  throw NativeBailout();
+}
+
+)AMBERCPP";
   out << R"AMBERCPP(static NativeValue amber_native_call_closure(const NativeValue &value, std::initializer_list<NativeValue> args);
 
 static const std::string &native_key_text(const NativeValue &value) {
@@ -4154,6 +4611,13 @@ static NativeValue native_contains(const NativeValue &value,
                                    const NativeValue &needle) {
   if (value.tag == NativeValue::Tag::String) {
     return native_string_contains(value, needle);
+  }
+  if (native_is_sequence(value)) {
+    const std::vector<NativeValue> items = native_sequence_items_copy(value);
+    for (const NativeValue &item : items) {
+      if (native_value_equal(item, needle)) return NativeValue::boolean(true);
+    }
+    return NativeValue::boolean(false);
   }
   if (value.tag == NativeValue::Tag::Map) {
     const std::string &name = native_key_text(needle);
@@ -4188,7 +4652,7 @@ static NativeValue native_each(const NativeValue &value,
 }
 
 static NativeValue native_index(const NativeValue &value, const NativeValue &key) {
-  if (value.tag == NativeValue::Tag::List) {
+  if (native_is_sequence(value)) {
     return native_list_at(value, key);
   }
   if (value.tag == NativeValue::Tag::Bytes) {
@@ -4878,6 +5342,25 @@ static void append_json_value(std::string &out, const NativeValue &value,
     return;
   case NativeValue::Tag::List: {
     const auto &items = as_list(value).items;
+    out.push_back('[');
+    if (pretty && !items.empty()) out.push_back('\n');
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      if (i != 0U) {
+        out.push_back(',');
+        if (pretty) out.push_back('\n');
+      }
+      if (pretty) append_json_indent(out, (depth + 1) * 2);
+      append_json_value(out, items[i], pretty, depth + 1);
+    }
+    if (pretty && !items.empty()) {
+      out.push_back('\n');
+      append_json_indent(out, depth * 2);
+    }
+    out.push_back(']');
+    return;
+  }
+  case NativeValue::Tag::Tuple: {
+    const auto &items = as_tuple(value).items;
     out.push_back('[');
     if (pretty && !items.empty()) out.push_back('\n');
     for (std::size_t i = 0; i < items.size(); ++i) {
@@ -5896,6 +6379,8 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "as_double_numeric(rhs));\n";
   out << "  if (lhs.tag == NativeValue::Tag::String) return "
          "native_string_concat(lhs, rhs);\n";
+  out << "  if (native_is_sequence(lhs)) return "
+         "native_sequence_concat(lhs, rhs);\n";
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static NativeValue numeric_sub(const NativeValue &lhs, "
@@ -5923,6 +6408,8 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
          "NativeValue::floating(as_double_numeric(lhs) * "
          "as_double_numeric(rhs));\n";
+  out << "  if (native_is_sequence(lhs)) return "
+         "native_sequence_repeat(lhs, rhs);\n";
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static NativeValue numeric_div(const NativeValue &lhs, "
@@ -6052,6 +6539,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "    return NativeValue::boolean(negate ? !equal : equal);\n";
   out << "  }\n";
   out << "  if (lhs.tag == NativeValue::Tag::List || "
+         "lhs.tag == NativeValue::Tag::Tuple || "
          "lhs.tag == NativeValue::Tag::Closure || "
          "lhs.tag == NativeValue::Tag::Map || "
          "lhs.tag == NativeValue::Tag::JsonModule || "
@@ -6070,6 +6558,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "lhs.tag == NativeValue::Tag::Time || "
          "lhs.tag == NativeValue::Tag::TimePeriod || "
          "rhs.tag == NativeValue::Tag::List || "
+         "rhs.tag == NativeValue::Tag::Tuple || "
          "rhs.tag == NativeValue::Tag::Map || "
          "rhs.tag == NativeValue::Tag::JsonModule || "
          "rhs.tag == NativeValue::Tag::BytesModule || "
@@ -6122,6 +6611,8 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "    return false;\n";
   out << "  }\n";
   out << "}\n\n";
+  out << "static std::string native_value_to_debug_string("
+         "const NativeValue &value);\n";
   out << "static NativeValue native_to_str(const NativeValue &value) {\n";
   out << "  switch (value.tag) {\n";
   out << "  case NativeValue::Tag::String: return value;\n";
@@ -6149,6 +6640,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::Bytes: return "
          "NativeValue::string_ref(native_intern_string(as_bytes(value).bytes));"
          "\n";
+  out << "  case NativeValue::Tag::List:\n";
+  out << "  case NativeValue::Tag::Tuple:\n";
+  out << "  case NativeValue::Tag::Map:\n";
+  out << "  case NativeValue::Tag::Range:\n";
+  out << "    return NativeValue::string_ref(native_intern_string("
+         "native_value_to_debug_string(value)));\n";
   out << "  case NativeValue::Tag::StrType:\n";
   out << "  case NativeValue::Tag::IntType:\n";
   out << "  case NativeValue::Tag::BigIntType:\n";
@@ -6426,6 +6923,17 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
     out << "    }\n";
     out << "    return NativeValue::list(std::move(items));\n";
     out << "  }\n";
+    out << "  if (value.is_tuple()) {\n";
+    out << "    const auto tuple = value.as_tuple();\n";
+    out << "    if (tuple == nullptr) throw NativeBailout();\n";
+    out << "    std::vector<NativeValue> items;\n";
+    out << "    items.reserve(tuple->items.size());\n";
+    out << "    for (const amber::runtime::Value &item : tuple->items) {\n";
+    out << "      items.push_back(amber_vm_fallback_result(item, "
+           "vm_strings));\n";
+    out << "    }\n";
+    out << "    return NativeValue::tuple(std::move(items));\n";
+    out << "  }\n";
     out << "  throw NativeBailout();\n";
     out << "}\n\n";
     out << "static NativeValue amber_vm_fallback_call(std::uint32_t code_id, "
@@ -6523,6 +7031,15 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "      text << native_value_to_debug_string(items[i]);\n";
   out << "    }\n";
   out << "    text << \"]\"; return text.str();\n";
+  out << "  }\n";
+  out << "  case NativeValue::Tag::Tuple: {\n";
+  out << "    const auto &items = as_tuple(value).items;\n";
+  out << "    std::ostringstream text; text << \"(\";\n";
+  out << "    for (std::size_t i = 0; i < items.size(); ++i) {\n";
+  out << "      if (i != 0U) text << \", \";\n";
+  out << "      text << native_value_to_debug_string(items[i]);\n";
+  out << "    }\n";
+  out << "    text << \")\"; return text.str();\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Map: return native_string_text("
          "native_json_generate_value(value, false));\n";

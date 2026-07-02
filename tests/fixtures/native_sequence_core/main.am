@@ -1,0 +1,55 @@
+package native.sequence_core
+
+export main
+
+def main():
+  score = 0
+  xs = [3, 1, 2]
+  if xs.count() == 3 and xs.first() == 3 and xs.first(2)[1] == 1:
+    score = score + 1
+  if xs[?2] == 2 and xs[?3] == null and xs[?-1] == 2 and xs.has_index?(3) == false:
+    score = score + 1
+  xs[1] = 5
+  if xs[1] == 5 and xs[-1] == 2:
+    score = score + 1
+  built = xs.appended(9, 8).inserted(1, 7, 6).deleted(5)
+  if built.count() == 6 and built[1] == 7 and built[2] == 6 and built[-1] == 8:
+    score = score + 1
+  if built.reversed()[0] == 8 and built.take(2)[1] == 7 and built.drop(4)[0] == 9:
+    score = score + 1
+  combo = built.take(2).concat([10])
+  if combo[2] == 10 and ([1, 2] * 2)[2] == 1:
+    score = score + 1
+  sorted = [3, 1, 2].sorted()
+  if sorted[0] == 1 and sorted[2] == 3:
+    score = score + 1
+  words = ["b", "a", "c"].sorted()
+  if words[0] == "a" and words[2] == "c":
+    score = score + 1
+  pairs = [(2, 0), (1, 9), (1, 3)].sorted()
+  if pairs[0][0] == 1 and pairs[0][1] == 3 and pairs[2][0] == 2:
+    score = score + 1
+  mm = [3, 1, 4].minmax()
+  if [3, 1, 4].min() == 1 and [3, 1, 4].max() == 4 and mm[0] == 1 and mm[1] == 4:
+    score = score + 1
+  tuple = (7, 8, 9)
+  if tuple.count() == 3 and tuple[1] == 8 and tuple.to_array()[2] == 9:
+    score = score + 1
+  if tuple.deconstruct()[0] == 7 and tuple.first(2)[1] == 8:
+    score = score + 1
+  if built.take(2).to_str() == "[3, 7]" and tuple.to_str() == "(7, 8, 9)":
+    score = score + 1
+  r = (1..5).to_array()
+  if r.count() == 5 and r[4] == 5 and (1..5).first() == 1:
+    score = score + 1
+  stepped = Range.new(1, 5, step: 2).to_array()
+  if stepped.count() == 3 and stepped[2] == 5:
+    score = score + 1
+  descending = Range.new(5, 1, step: -2).to_array()
+  if descending.count() == 3 and descending[2] == 1:
+    score = score + 1
+  if [1, 2, 3].contains?(2) and [1, 2, 3].member?(4) == false:
+    score = score + 1
+  if [].empty?() and Range.new(5, 1).empty?():
+    score = score + 1
+  score

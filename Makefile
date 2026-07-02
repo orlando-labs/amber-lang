@@ -483,6 +483,13 @@ test: build
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_str_bytes_core/main.am > $(BUILD_DIR)/native-str-bytes-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-str-bytes-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-str-bytes-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_sequence_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-sequence-core > $(BUILD_DIR)/native-sequence-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-sequence-core-build.json
+	$(BUILD_DIR)/native-sequence-core > $(BUILD_DIR)/native-sequence-core.out
+	grep -q '^18$$' $(BUILD_DIR)/native-sequence-core.out
+	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_sequence_core/main.am > $(BUILD_DIR)/native-sequence-core.dump
+	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-sequence-core.dump
+	grep -q 'mode=direct-native' $(BUILD_DIR)/native-sequence-core.dump
 	$(BUILD_DIR)/amberc build bench/polyglot/amber/src/calls_collections.am --entry init -o $(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native-build.json
 	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/calls-collections-native-build.json
 	$(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native.out
