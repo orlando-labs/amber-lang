@@ -734,6 +734,10 @@ std::string summary_to_json(const BuildSummary &summary) {
       << summary.native_graph_native_code_count << ",\n";
   out << "  \"native_graph_vm_fallback_code_count\": "
       << summary.native_graph_vm_fallback_code_count << ",\n";
+  out << "  \"native_graph_fallback_code_count\": "
+      << summary.native_graph_fallback_code_count << ",\n";
+  out << "  \"native_graph_full_coverage\": "
+      << (summary.native_graph_full_coverage ? "true" : "false") << ",\n";
   out << "  \"native_extensions\": [";
   for (std::size_t i = 0; i < summary.native_extensions.size(); ++i) {
     if (i != 0U) {

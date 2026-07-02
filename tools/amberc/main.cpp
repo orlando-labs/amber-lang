@@ -1114,10 +1114,18 @@ std::string render_executable_script(const std::string &amberc_ref,
   return out.str();
 }
 
+struct NativeCoverageRecord {
+  std::uint32_t code_id = 0;
+  std::string code_kind;
+  std::string mode;
+  std::string reason;
+};
+
 struct NativeCppBuildPlan {
   std::string source;
   std::set<std::uint32_t> native_code_ids;
   std::set<std::uint32_t> vm_callable_code_ids;
+  std::vector<NativeCoverageRecord> coverage;
   std::string fallback_reason;
   std::string backend = "cpp-bytecode-direct-v1";
   bool entry_native = false;
@@ -1132,10 +1140,13 @@ struct NativeExecutableBuildResult {
   std::string cxx;
   std::size_t native_code_count = 0;
   std::size_t vm_callable_code_count = 0;
+  std::size_t fallback_code_count = 0;
   std::size_t total_code_count = 0;
   bool entry_native = false;
+  bool full_native_coverage = false;
   bool uses_bytecode_fallback = true;
   std::string fallback_reason;
+  std::vector<NativeCoverageRecord> coverage;
 };
 
 bool operand_u32_value(const amber::bytecode::Instruction &instruction,
@@ -1194,6 +1205,17 @@ bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
          *selector == "^" || *selector == "<<" || *selector == ">>";
 }
 
+bool native_cpp_scalar_nullary_selector(const std::string &selector) {
+  return selector == "u+" || selector == "u-" || selector == "abs" ||
+         selector == "class";
+}
+
+bool native_cpp_scalar_conversion_selector(const std::string &selector) {
+  return selector == "to_str" || selector == "to_int" ||
+         selector == "to_float" || selector == "to_bool" ||
+         selector == "to_symbol";
+}
+
 bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
   return (selector == "[]" && pos_count == 1U) ||
@@ -1210,8 +1232,7 @@ bool native_cpp_collection_selector(const std::string &selector,
          ((selector == "upcase" || selector == "downcase" ||
            selector == "trim" || selector == "strip") &&
           pos_count == 0U) ||
-         (selector == "concat" && pos_count == 1U) ||
-         (selector == "to_str" && pos_count == 0U);
+         (selector == "concat" && pos_count == 1U);
 }
 
 bool native_cpp_time_unit_selector(const std::string &selector) {
@@ -1453,9 +1474,13 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         return false;
       }
       selector = module.symbols[symbol_id];
-      const bool scalar =
+      const bool scalar_binary =
           native_cpp_scalar_selector(module, symbol_id, &selector) &&
           pos_count == 1U;
+      const bool scalar =
+          scalar_binary ||
+          (native_cpp_scalar_nullary_selector(selector) && pos_count == 0U) ||
+          (native_cpp_scalar_conversion_selector(selector) && pos_count == 0U);
       const std::size_t kw_index = 4U + pos_count;
       std::uint32_t kw_count = 0;
       if (!operand_u32_value(instruction, kw_index, &kw_count)) {
@@ -2188,7 +2213,23 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         const std::uint32_t symbol_id = module.const_pool[const_id].items[0];
         if (symbol_id < module.symbols.size()) {
           const std::string &name = module.symbols[symbol_id];
-          if (name == "Json") {
+          if (name == "Str") {
+            native_module_expr = "NativeValue::str_type()";
+          } else if (name == "Int") {
+            native_module_expr = "NativeValue::int_type()";
+          } else if (name == "BigInt") {
+            native_module_expr = "NativeValue::bigint_type()";
+          } else if (name == "Float") {
+            native_module_expr = "NativeValue::float_type()";
+          } else if (name == "Bool") {
+            native_module_expr = "NativeValue::bool_type()";
+          } else if (name == "Symbol") {
+            native_module_expr = "NativeValue::symbol_type()";
+          } else if (name == "Null") {
+            native_module_expr = "NativeValue::null_type()";
+          } else if (name == "Object") {
+            native_module_expr = "NativeValue::object_type()";
+          } else if (name == "Json") {
             native_module_expr = "NativeValue::json_module()";
           } else if (name == "Bytes") {
             native_module_expr = "NativeValue::bytes_module()";
@@ -2438,6 +2479,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
+      } else if (selector == "u+") {
+        write_reg_stmt(dst, "native_unary_plus(" + read_reg_expr(recv) + ")");
+      } else if (selector == "u-") {
+        write_reg_stmt(dst, "native_unary_minus(" + read_reg_expr(recv) + ")");
+      } else if (selector == "abs") {
+        write_reg_stmt(dst, "native_abs(" + read_reg_expr(recv) + ")");
+      } else if (selector == "class") {
+        write_reg_stmt(dst, "native_value_class(" + read_reg_expr(recv) + ")");
       } else if (selector == "[]") {
         write_reg_stmt(dst, "native_index(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
@@ -2492,6 +2541,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "to_str") {
         write_reg_stmt(dst, "native_to_str(" + read_reg_expr(recv) + ")");
+      } else if (selector == "to_int") {
+        write_reg_stmt(dst, "native_to_int(" + read_reg_expr(recv) + ")");
+      } else if (selector == "to_float") {
+        write_reg_stmt(dst, "native_to_float(" + read_reg_expr(recv) + ")");
+      } else if (selector == "to_bool") {
+        write_reg_stmt(dst, "native_to_bool(" + read_reg_expr(recv) + ")");
+      } else if (selector == "to_symbol") {
+        write_reg_stmt(dst, "native_to_symbol(" + read_reg_expr(recv) + ")");
       } else if (selector == "version") {
         write_reg_stmt(dst, "native_uuid_nullary(" + read_reg_expr(recv) +
                                 ", native_hex_to_string(\"" +
@@ -3083,6 +3140,33 @@ std::string emit_module_strings_cpp(const amber::bytecode::BcModule &module) {
   out << "  }();\n";
   out << "  return *table;\n";
   out << "}\n\n";
+  out << "static std::unordered_map<std::string, std::int64_t> &"
+         "native_symbol_index() {\n";
+  out << "  static std::unordered_map<std::string, std::int64_t> *index = "
+         "[] {\n";
+  out << "    auto *out_index = new std::unordered_map<std::string, "
+         "std::int64_t>();\n";
+  out << "    const std::vector<std::string> &table = native_symbols();\n";
+  out << "    for (std::size_t i = 0; i < table.size(); ++i) {\n";
+  out << "      out_index->emplace(table[i], "
+         "static_cast<std::int64_t>(i));\n";
+  out << "    }\n";
+  out << "    return out_index;\n";
+  out << "  }();\n";
+  out << "  return *index;\n";
+  out << "}\n\n";
+  out << "static std::int64_t native_intern_symbol(const std::string &text) "
+         "{\n";
+  out << "  auto &index = native_symbol_index();\n";
+  out << "  const auto found = index.find(text);\n";
+  out << "  if (found != index.end()) return found->second;\n";
+  out << "  std::vector<std::string> &table = native_symbols();\n";
+  out << "  const std::int64_t id = "
+         "static_cast<std::int64_t>(table.size());\n";
+  out << "  table.push_back(text);\n";
+  out << "  index.emplace(text, id);\n";
+  out << "  return id;\n";
+  out << "}\n\n";
   out << "static const std::string &native_symbol_text(std::int64_t id) {\n";
   out << "  const auto &symbols = native_symbols();\n";
   out << "  if (id < 0 || static_cast<std::size_t>(id) >= symbols.size()) "
@@ -3250,6 +3334,28 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
             : "entry code is not native eligible";
   }
   plan.fallback_reason = first_reason;
+  for (const amber::bytecode::BcCode &code : module.code_objects) {
+    NativeCoverageRecord record;
+    record.code_id = code.code_id;
+    record.code_kind = amber::bytecode::code_kind_name(code.kind);
+    if (plan.native_code_ids.find(code.code_id) != plan.native_code_ids.end()) {
+      record.mode = "direct-native";
+      record.reason = "direct C++ native codegen";
+    } else if (plan.vm_callable_code_ids.find(code.code_id) !=
+               plan.vm_callable_code_ids.end()) {
+      record.mode = "vm-bridge";
+      record.reason = "per-function VM bridge";
+    } else {
+      record.mode = "fallback";
+      record.reason =
+          first_reason.empty() ? "not classified for native execution"
+                               : first_reason;
+    }
+    plan.coverage.push_back(std::move(record));
+  }
+  plan.uses_bytecode_fallback =
+      !plan.entry_native || !plan.vm_callable_code_ids.empty() ||
+      plan.native_code_ids.size() != module.code_objects.size();
 
   std::ostringstream out;
   out << "#include \"bytecode/format.h\"\n";
@@ -3304,7 +3410,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeCell;\n\n";
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
-         "JsonModule, BytesModule, Base64Module, Base64UrlModule, HexModule, "
+         "StrType, IntType, BigIntType, FloatType, BoolType, SymbolType, "
+         "NullType, ObjectType, JsonModule, BytesModule, Base64Module, "
+         "Base64UrlModule, HexModule, "
          "DigestModule, UrlModule, SecureRandomModule, UuidModule, "
          "RangeModule, TimeModule, "
          "TimePeriodModule, Bytes, List, Map, Range, Uuid, Time, TimePeriod, "
@@ -3329,6 +3437,22 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue symbol_ref(std::int64_t symbol_id) { "
          "NativeValue out; out.tag = Tag::Symbol; out.scalar_value = "
          "symbol_id; return out; }\n";
+  out << "  static NativeValue str_type() { NativeValue out; out.tag = "
+         "Tag::StrType; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue int_type() { NativeValue out; out.tag = "
+         "Tag::IntType; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue bigint_type() { NativeValue out; out.tag = "
+         "Tag::BigIntType; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue float_type() { NativeValue out; out.tag = "
+         "Tag::FloatType; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue bool_type() { NativeValue out; out.tag = "
+         "Tag::BoolType; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue symbol_type() { NativeValue out; out.tag = "
+         "Tag::SymbolType; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue null_type() { NativeValue out; out.tag = "
+         "Tag::NullType; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue object_type() { NativeValue out; out.tag = "
+         "Tag::ObjectType; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue json_module() { NativeValue out; out.tag = "
          "Tag::JsonModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue bytes_module() { NativeValue out; out.tag = "
@@ -3610,6 +3734,45 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return value.tag != NativeValue::Tag::Null && "
          "!(value.tag == NativeValue::Tag::Bool && value.scalar_value == 0);\n";
   out << "}\n\n";
+  out << "static const char *native_type_tag_name(const NativeValue &value) "
+         "{\n";
+  out << "  switch (value.tag) {\n";
+  out << "  case NativeValue::Tag::StrType: return \"Str\";\n";
+  out << "  case NativeValue::Tag::IntType: return \"Int\";\n";
+  out << "  case NativeValue::Tag::BigIntType: return \"BigInt\";\n";
+  out << "  case NativeValue::Tag::FloatType: return \"Float\";\n";
+  out << "  case NativeValue::Tag::BoolType: return \"Bool\";\n";
+  out << "  case NativeValue::Tag::SymbolType: return \"Symbol\";\n";
+  out << "  case NativeValue::Tag::NullType: return \"Null\";\n";
+  out << "  case NativeValue::Tag::ObjectType: return \"Object\";\n";
+  out << "  case NativeValue::Tag::JsonModule: return \"Json\";\n";
+  out << "  case NativeValue::Tag::BytesModule: return \"Bytes\";\n";
+  out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
+  out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
+  out << "  case NativeValue::Tag::HexModule: return \"Hex\";\n";
+  out << "  case NativeValue::Tag::DigestModule: return \"Digest\";\n";
+  out << "  case NativeValue::Tag::UrlModule: return \"Url\";\n";
+  out << "  case NativeValue::Tag::SecureRandomModule: return "
+         "\"SecureRandom\";\n";
+  out << "  case NativeValue::Tag::UuidModule: return \"Uuid\";\n";
+  out << "  case NativeValue::Tag::RangeModule: return \"Range\";\n";
+  out << "  case NativeValue::Tag::TimeModule: return \"Time\";\n";
+  out << "  case NativeValue::Tag::TimePeriodModule: return \"TimePeriod\";\n";
+  out << "  default: throw NativeBailout();\n";
+  out << "  }\n";
+  out << "}\n\n";
+  out << "static NativeValue native_value_class(const NativeValue &value) "
+         "{\n";
+  out << "  switch (value.tag) {\n";
+  out << "  case NativeValue::Tag::Null: return NativeValue::null_type();\n";
+  out << "  case NativeValue::Tag::Bool: return NativeValue::bool_type();\n";
+  out << "  case NativeValue::Tag::Integer: return NativeValue::int_type();\n";
+  out << "  case NativeValue::Tag::Float: return NativeValue::float_type();\n";
+  out << "  case NativeValue::Tag::String: return NativeValue::str_type();\n";
+  out << "  case NativeValue::Tag::Symbol: return NativeValue::symbol_type();\n";
+  out << "  default: throw NativeBailout();\n";
+  out << "  }\n";
+  out << "}\n\n";
   out << "static std::int64_t compare_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  if (lhs < rhs) return -1;\n";
@@ -3709,6 +3872,29 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "static double as_double_numeric(const NativeValue &value) {\n";
   out << "  return value.tag == NativeValue::Tag::Integer ? "
          "static_cast<double>(value.scalar_value) : value.float_value;\n";
+  out << "}\n\n";
+  out << "static NativeValue native_unary_plus(const NativeValue &value) "
+         "{\n";
+  out << "  if (numeric_tag(value)) return value;\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue native_unary_minus(const NativeValue &value) "
+         "{\n";
+  out << "  if (value.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(checked_sub_int64(0, value.scalar_value));\n";
+  out << "  if (value.tag == NativeValue::Tag::Float) return "
+         "NativeValue::floating(-value.float_value);\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue native_abs(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::Integer) {\n";
+  out << "    return value.scalar_value < 0 ? "
+         "NativeValue::integer(checked_sub_int64(0, value.scalar_value)) : "
+         "value;\n";
+  out << "  }\n";
+  out << "  if (value.tag == NativeValue::Tag::Float) return "
+         "NativeValue::floating(std::fabs(value.float_value));\n";
+  out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static std::int64_t compare_double_native(double lhs, double rhs) "
          "{\n";
@@ -4313,7 +4499,23 @@ static NativeValue native_uuid_nullary(const NativeValue &receiver,
 static NativeValue native_type_matches(const NativeValue &module,
                                        const NativeValue &value) {
   bool matched = false;
-  if (module.tag == NativeValue::Tag::UuidModule) {
+  if (module.tag == NativeValue::Tag::StrType) {
+    matched = value.tag == NativeValue::Tag::String;
+  } else if (module.tag == NativeValue::Tag::IntType) {
+    matched = value.tag == NativeValue::Tag::Integer;
+  } else if (module.tag == NativeValue::Tag::BigIntType) {
+    matched = false;
+  } else if (module.tag == NativeValue::Tag::FloatType) {
+    matched = value.tag == NativeValue::Tag::Float;
+  } else if (module.tag == NativeValue::Tag::BoolType) {
+    matched = value.tag == NativeValue::Tag::Bool;
+  } else if (module.tag == NativeValue::Tag::SymbolType) {
+    matched = value.tag == NativeValue::Tag::Symbol;
+  } else if (module.tag == NativeValue::Tag::NullType) {
+    matched = value.tag == NativeValue::Tag::Null;
+  } else if (module.tag == NativeValue::Tag::ObjectType) {
+    matched = true;
+  } else if (module.tag == NativeValue::Tag::UuidModule) {
     matched = value.tag == NativeValue::Tag::Uuid ||
               value.tag == NativeValue::Tag::UuidModule;
   } else if (module.tag == NativeValue::Tag::TimeModule) {
@@ -5773,9 +5975,36 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  else equal = lhs.scalar_value == rhs.scalar_value;\n";
   out << "  return NativeValue::boolean(negate ? !equal : equal);\n";
   out << "}\n\n";
+  out << "static bool native_parse_int_text(const std::string &text, "
+         "std::int64_t *out_value) {\n";
+  out << "  if (text.empty()) return false;\n";
+  out << "  const char *begin = text.data();\n";
+  out << "  const char *end = text.data() + text.size();\n";
+  out << "  const auto parsed = std::from_chars(begin, end, *out_value, 10);\n";
+  out << "  return parsed.ec == std::errc{} && parsed.ptr == end;\n";
+  out << "}\n\n";
+  out << "static bool native_parse_float_text(const std::string &text, "
+         "double *out_value) {\n";
+  out << "  if (text.empty()) return false;\n";
+  out << "  for (unsigned char c : text) {\n";
+  out << "    if (std::isspace(c) != 0) return false;\n";
+  out << "  }\n";
+  out << "  try {\n";
+  out << "    std::size_t consumed = 0;\n";
+  out << "    const double parsed = std::stod(text, &consumed);\n";
+  out << "    if (consumed != text.size()) return false;\n";
+  out << "    *out_value = parsed;\n";
+  out << "    return true;\n";
+  out << "  } catch (const std::exception &) {\n";
+  out << "    return false;\n";
+  out << "  }\n";
+  out << "}\n\n";
   out << "static NativeValue native_to_str(const NativeValue &value) {\n";
   out << "  switch (value.tag) {\n";
   out << "  case NativeValue::Tag::String: return value;\n";
+  out << "  case NativeValue::Tag::Symbol: return "
+         "NativeValue::string_ref(native_intern_string("
+         "native_symbol_text(value.scalar_value)));\n";
   out << "  case NativeValue::Tag::Null: return "
          "NativeValue::string_ref(native_intern_string(\"null\"));\n";
   out << "  case NativeValue::Tag::Bool: return "
@@ -5797,6 +6026,28 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::Bytes: return "
          "NativeValue::string_ref(native_intern_string(as_bytes(value).bytes));"
          "\n";
+  out << "  case NativeValue::Tag::StrType:\n";
+  out << "  case NativeValue::Tag::IntType:\n";
+  out << "  case NativeValue::Tag::BigIntType:\n";
+  out << "  case NativeValue::Tag::FloatType:\n";
+  out << "  case NativeValue::Tag::BoolType:\n";
+  out << "  case NativeValue::Tag::SymbolType:\n";
+  out << "  case NativeValue::Tag::NullType:\n";
+  out << "  case NativeValue::Tag::ObjectType:\n";
+  out << "  case NativeValue::Tag::JsonModule:\n";
+  out << "  case NativeValue::Tag::BytesModule:\n";
+  out << "  case NativeValue::Tag::Base64Module:\n";
+  out << "  case NativeValue::Tag::Base64UrlModule:\n";
+  out << "  case NativeValue::Tag::HexModule:\n";
+  out << "  case NativeValue::Tag::DigestModule:\n";
+  out << "  case NativeValue::Tag::UrlModule:\n";
+  out << "  case NativeValue::Tag::SecureRandomModule:\n";
+  out << "  case NativeValue::Tag::UuidModule:\n";
+  out << "  case NativeValue::Tag::RangeModule:\n";
+  out << "  case NativeValue::Tag::TimeModule:\n";
+  out << "  case NativeValue::Tag::TimePeriodModule:\n";
+  out << "    return NativeValue::string_ref(native_intern_string("
+         "std::string(\"<type \") + native_type_tag_name(value) + \">\"));\n";
   out << "  case NativeValue::Tag::Uuid:\n";
   out << "    return native_uuid_nullary(value, \"to_str\");\n";
   out << "  case NativeValue::Tag::Time:\n";
@@ -5804,6 +6055,60 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "    return native_time_nullary(value, \"to_str\");\n";
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
+  out << "}\n\n";
+  out << "static NativeValue native_to_int(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::Integer) return value;\n";
+  out << "  if (value.tag == NativeValue::Tag::Float) {\n";
+  out << "    if (!std::isfinite(value.float_value)) throw NativeBailout();\n";
+  out << "    const long double raw = "
+         "static_cast<long double>(value.float_value);\n";
+  out << "    if (raw < static_cast<long double>("
+         "std::numeric_limits<std::int64_t>::min()) || raw > "
+         "static_cast<long double>(std::numeric_limits<std::int64_t>::max())) "
+         "throw NativeBailout();\n";
+  out << "    const std::int64_t as_int = "
+         "static_cast<std::int64_t>(value.float_value);\n";
+  out << "    if (static_cast<double>(as_int) != value.float_value) "
+         "throw NativeBailout();\n";
+  out << "    return NativeValue::integer(as_int);\n";
+  out << "  }\n";
+  out << "  if (value.tag == NativeValue::Tag::String) {\n";
+  out << "    std::int64_t parsed = 0;\n";
+  out << "    if (!native_parse_int_text(native_string_text(value), &parsed)) "
+         "throw NativeBailout();\n";
+  out << "    return NativeValue::integer(parsed);\n";
+  out << "  }\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue native_to_float(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::Float) return value;\n";
+  out << "  if (value.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::floating(static_cast<double>(value.scalar_value));\n";
+  out << "  if (value.tag == NativeValue::Tag::String) {\n";
+  out << "    double parsed = 0.0;\n";
+  out << "    if (!native_parse_float_text(native_string_text(value), &parsed)) "
+         "throw NativeBailout();\n";
+  out << "    return NativeValue::floating(parsed);\n";
+  out << "  }\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue native_to_bool(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::Bool) return value;\n";
+  out << "  if (value.tag == NativeValue::Tag::String) {\n";
+  out << "    const std::string &text = native_string_text(value);\n";
+  out << "    if (text == \"true\") return NativeValue::boolean(true);\n";
+  out << "    if (text == \"false\") return NativeValue::boolean(false);\n";
+  out << "  }\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue native_to_symbol(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::Symbol) return value;\n";
+  out << "  if (value.tag == NativeValue::Tag::String) {\n";
+  out << "    const std::string &text = native_string_text(value);\n";
+  out << "    if (text.empty()) throw NativeBailout();\n";
+  out << "    return NativeValue::symbol_ref(native_intern_symbol(text));\n";
+  out << "  }\n";
+  out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static NativeValue numeric_cmp(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
@@ -6053,6 +6358,16 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "native_string_text(value) + \"\\\"\";\n";
   out << "  case NativeValue::Tag::Symbol: return \":\" + "
          "native_symbol_text(value.scalar_value);\n";
+  out << "  case NativeValue::Tag::StrType:\n";
+  out << "  case NativeValue::Tag::IntType:\n";
+  out << "  case NativeValue::Tag::BigIntType:\n";
+  out << "  case NativeValue::Tag::FloatType:\n";
+  out << "  case NativeValue::Tag::BoolType:\n";
+  out << "  case NativeValue::Tag::SymbolType:\n";
+  out << "  case NativeValue::Tag::NullType:\n";
+  out << "  case NativeValue::Tag::ObjectType:\n";
+  out << "    return std::string(\"<type \") + native_type_tag_name(value) + "
+         "\">\";\n";
   out << "  case NativeValue::Tag::JsonModule: return \"Json\";\n";
   out << "  case NativeValue::Tag::BytesModule: return \"Bytes\";\n";
   out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
@@ -6260,6 +6575,30 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
 
   plan.source = out.str();
   return plan;
+}
+
+std::string native_cpp_coverage_to_dump(const NativeCppBuildPlan &plan) {
+  const std::size_t total = plan.coverage.size();
+  const std::size_t direct = plan.native_code_ids.size();
+  const std::size_t bridge = plan.vm_callable_code_ids.size();
+  const std::size_t fallback = total - direct - bridge;
+  std::ostringstream out;
+  out << "\ncpp-bytecode-direct-v1 coverage\n";
+  out << "  entry=" << (plan.entry_native ? "direct-native" : "fallback")
+      << " direct=" << direct << " vm_bridge=" << bridge
+      << " fallback=" << fallback << " total=" << total << "\n";
+  if (!plan.fallback_reason.empty()) {
+    out << "  fallback_reason=" << plan.fallback_reason << "\n";
+  }
+  for (const NativeCoverageRecord &record : plan.coverage) {
+    out << "  c" << record.code_id << " kind=" << record.code_kind
+        << " mode=" << record.mode;
+    if (!record.reason.empty()) {
+      out << " reason=\"" << record.reason << "\"";
+    }
+    out << "\n";
+  }
+  return out.str();
 }
 
 std::filesystem::path detect_native_runtime_root(const std::string &argv0) {
@@ -6755,10 +7094,17 @@ NativeExecutableBuildResult build_native_executable(
   result.cxx = cxx;
   result.native_code_count = plan.native_code_ids.size();
   result.vm_callable_code_count = plan.vm_callable_code_ids.size();
+  result.fallback_code_count =
+      artifact.module.code_objects.size() - result.native_code_count -
+      result.vm_callable_code_count;
   result.total_code_count = artifact.module.code_objects.size();
   result.entry_native = plan.entry_native;
+  result.full_native_coverage =
+      plan.entry_native &&
+      result.native_code_count == artifact.module.code_objects.size();
   result.uses_bytecode_fallback = plan.uses_bytecode_fallback;
   result.fallback_reason = plan.fallback_reason;
+  result.coverage = plan.coverage;
   return result;
 }
 
@@ -6835,6 +7181,7 @@ struct SourceBuildCliOptions {
   std::string target = "native";
   std::string entry = "auto";
   std::vector<amber::capability::CapabilityRequest> capability_grants;
+  bool require_full_native = false;
 };
 
 SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
@@ -6867,6 +7214,8 @@ SourceBuildCliOptions parse_source_build_options(int argc, char **argv,
         throw std::runtime_error(diagnostic.message);
       }
       options.capability_grants.push_back(std::move(grant));
+    } else if (arg == "--require-full-native") {
+      options.require_full_native = true;
     } else {
       throw std::runtime_error("unknown source build option: " + arg);
     }
@@ -6889,6 +7238,29 @@ default_executable_path_for(const std::string &source_path,
   std::filesystem::path output = source;
   output.replace_extension("");
   return output;
+}
+
+std::string
+full_native_requirement_diagnostic(const NativeExecutableBuildResult &native) {
+  if (native.full_native_coverage) {
+    return {};
+  }
+  std::ostringstream out;
+  out << "full native coverage required, got " << native.native_code_count
+      << "/" << native.total_code_count << " direct-native code objects";
+  if (native.vm_callable_code_count != 0U) {
+    out << ", " << native.vm_callable_code_count << " VM-bridge code objects";
+  }
+  if (native.fallback_code_count != 0U) {
+    out << ", " << native.fallback_code_count << " fallback code objects";
+  }
+  if (!native.entry_native) {
+    out << "; entry is not direct-native";
+  }
+  if (!native.fallback_reason.empty()) {
+    out << ": " << native.fallback_reason;
+  }
+  return out.str();
 }
 
 std::string executable_build_result_to_json(
@@ -6916,10 +7288,16 @@ std::string executable_build_result_to_json(
   out << "  \"native_entry\": "
       << (native != nullptr && native->entry_native ? "true" : "false")
       << ",\n";
+  out << "  \"native_full_coverage\": "
+      << (native != nullptr && native->full_native_coverage ? "true"
+                                                            : "false")
+      << ",\n";
   out << "  \"native_code_count\": "
       << (native == nullptr ? 0U : native->native_code_count) << ",\n";
   out << "  \"vm_fallback_code_count\": "
       << (native == nullptr ? 0U : native->vm_callable_code_count) << ",\n";
+  out << "  \"native_fallback_code_count\": "
+      << (native == nullptr ? 0U : native->fallback_code_count) << ",\n";
   out << "  \"bytecode_code_count\": "
       << (native == nullptr ? 0U : native->total_code_count) << ",\n";
   out << "  \"bytecode_fallback\": "
@@ -6927,7 +7305,25 @@ std::string executable_build_result_to_json(
                                                               : "false")
       << ",\n";
   out << "  \"native_fallback_reason\": \""
-      << json_escape(native == nullptr ? "" : native->fallback_reason) << "\"";
+      << json_escape(native == nullptr ? "" : native->fallback_reason)
+      << "\",\n";
+  out << "  \"native_coverage\": [";
+  if (native != nullptr) {
+    for (std::size_t i = 0; i < native->coverage.size(); ++i) {
+      if (i != 0U) {
+        out << ",";
+      }
+      const NativeCoverageRecord &record = native->coverage[i];
+      out << "\n    {\"code_id\":" << record.code_id << ",\"kind\":\""
+          << json_escape(record.code_kind) << "\",\"mode\":\""
+          << json_escape(record.mode) << "\",\"reason\":\""
+          << json_escape(record.reason) << "\"}";
+    }
+  }
+  if (native != nullptr && !native->coverage.empty()) {
+    out << "\n  ";
+  }
+  out << "]";
   if (!ok) {
     out << ",\n  \"diagnostic\": \"" << json_escape(diagnostic) << "\"\n";
   } else {
@@ -6947,6 +7343,10 @@ int run_source_build_command(int argc, char **argv) {
         !options.capability_grants.empty()) {
       throw std::runtime_error(
           "source build --grant is not supported with bytecode-wrapper target");
+    }
+    if (options.target == "bytecode-wrapper" && options.require_full_native) {
+      throw std::runtime_error(
+          "--require-full-native requires --target native or native-debug");
     }
     const std::optional<EntryExecutionMode> forced_entry =
         options.entry == "auto"
@@ -6980,6 +7380,16 @@ int run_source_build_command(int argc, char **argv) {
       native_result = build_native_executable(argv[0], artifact, output_path,
                                               native_source_path);
       native_json = &native_result;
+      if (options.require_full_native) {
+        const std::string diagnostic =
+            full_native_requirement_diagnostic(native_result);
+        if (!diagnostic.empty()) {
+          std::cout << executable_build_result_to_json(
+              false, source_path, output_path.string(), artifact.module_name,
+              artifact.entry_mode, options.target, native_json, diagnostic);
+          return 1;
+        }
+      }
     }
     std::cout << executable_build_result_to_json(
         true, source_path, output_path.string(), artifact.module_name,
@@ -7123,6 +7533,7 @@ struct BuildCliOptions {
   std::string cache_dir;
   std::string target = "both";
   bool cache_enabled = true;
+  bool require_full_native = false;
 };
 
 BuildCliOptions parse_build_options(int argc, char **argv, int start_index) {
@@ -7141,9 +7552,15 @@ BuildCliOptions parse_build_options(int argc, char **argv, int start_index) {
       }
     } else if (arg == "--no-cache") {
       options.cache_enabled = false;
+    } else if (arg == "--require-full-native") {
+      options.require_full_native = true;
     } else {
       throw std::runtime_error("unknown build option: " + arg);
     }
+  }
+  if (options.require_full_native && options.target == "bytecode") {
+    throw std::runtime_error(
+        "--require-full-native requires --target native or both");
   }
   return options;
 }
@@ -8536,6 +8953,10 @@ int run_build_command(int argc, char **argv) {
       summary.native_graph_native_code_count = native_result.native_code_count;
       summary.native_graph_vm_fallback_code_count =
           native_result.vm_callable_code_count;
+      summary.native_graph_fallback_code_count =
+          native_result.fallback_code_count;
+      summary.native_graph_full_coverage =
+          native_result.full_native_coverage;
       summary.native_extensions = amber::pkg::native_extension_metadata(
           parsed.manifest.native_extensions, native_blobs,
           native_target_triple());
@@ -8546,6 +8967,17 @@ int run_build_command(int argc, char **argv) {
       root_record->native_fallback_reason = native_result.fallback_reason;
       root_record->native_byte_size =
           std::filesystem::file_size(native_output_path);
+      if (options.require_full_native) {
+        const std::string diagnostic =
+            full_native_requirement_diagnostic(native_result);
+        if (!diagnostic.empty()) {
+          summary.ok = false;
+          summary.diagnostics.push_back(
+              {"NativeCoverageError", diagnostic, manifest_path});
+          std::cout << amber::build::summary_to_json(summary);
+          return 1;
+        }
+      }
     }
     summary.ok = true;
     std::cout << amber::build::summary_to_json(summary);
@@ -9082,8 +9514,30 @@ int main(int argc, char **argv) {
               return 1;
             }
             if (command == "native-dump") {
+              RunnableModuleArtifact cpp_artifact;
+              cpp_artifact.module_name =
+                  parse_result.module_name.empty()
+                      ? synthetic_module_name_for_path(path)
+                      : parse_result.module_name;
+              cpp_artifact.entry_mode = default_entry_mode_for(
+                  !parse_result.module_name.empty(), decode_result.module);
+              cpp_artifact.bytes = bytes;
+              cpp_artifact.module = decode_result.module;
+              if (cpp_artifact.module.init.has_entry_code_id) {
+                cpp_artifact.has_entry_init_code_id = true;
+                cpp_artifact.entry_init_code_id =
+                    cpp_artifact.module.init.entry_code_id;
+              }
+              if (const amber::bytecode::BcMethod *main_method =
+                      zero_arg_method_by_name(cpp_artifact.module, "main")) {
+                cpp_artifact.has_entry_main_code_id = true;
+                cpp_artifact.entry_main_code_id = main_method->entry_code_id;
+              }
+              const NativeCppBuildPlan cpp_plan =
+                  build_native_cpp_plan(cpp_artifact, decode_result.module);
               std::cout << amber::native::module_to_dump(native_module,
-                                                         source_hash);
+                                                         source_hash)
+                        << native_cpp_coverage_to_dump(cpp_plan);
               return 0;
             }
             std::cout << amber::native::module_to_json(native_module,

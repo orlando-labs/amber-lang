@@ -88,6 +88,35 @@ can reuse the same MIR, eligibility, ABI, runtime helper, and metadata contracts
   `tests/frozen_image_tests.cpp`.
 - Polyglot performance target: `bench/polyglot`.
 
+## Native Coverage Rollout Order
+
+This order tracks the direct `cpp-bytecode-direct-v1` coverage expansion. Each
+slice must land with bytecode/native equivalence coverage and a full-native gate
+for at least one workload or focused fixture before the next slice starts.
+
+1. Guardrails: selector/type coverage matrix, `native-dump` coverage output,
+   backend-equivalence fixtures, and build-time full-native assertions.
+2. Scalar and prelude core: `Null`, `Bool`, `Int`, `BigInt`, `Float`, `Symbol`,
+   scalar equality/comparison/conversion/display, and pure `Kernel`/`Amber`
+   helpers.
+3. `Str` and bytes: full UTF-8 string API, indexing/slicing, case/trim/split/
+   replace/prefix/suffix checks, `Bytes`, and byte-level conversion helpers.
+4. Sequence core: `Array`, `Tuple`, `Range`, indexing, assignment, count/first,
+   copy-edit verbs, and simple iteration.
+5. Higher-order enumerable blocks: `each`, `map`, `select`, `reject`, `reduce`,
+   `find`, `any?`, `all?`, and the closure ABI needed by them.
+6. Keyed collections: `Map`, `StrictMap`, `StrictHashMap`, name-indifferent
+   key handling, keys/values/entries, merge/slice/transform APIs.
+7. `Set`: membership, mutation, set algebra, subset/superset/disjoint checks.
+8. `Math` and numeric profiles: libm-backed methods plus checked/wrapping/
+   saturating numeric-profile behavior.
+9. Text/value stdlib modules: `Codecs`, `Digest`, `Uuid`, and `Url`.
+10. Structured modules: `Json`, then `ArgParser`, after strings/maps/arrays and
+    block callback semantics are native-stable.
+11. Capability modules: `SecureRandom`, `Time`, then `IO` and `FS`.
+12. Effectful/concurrent modules: `Net`, `Net.HTTP`, `task`, and `task.flow`,
+    after fallback is no longer whole-program restart-sensitive.
+
 ## Phase 0: Baseline Audit And Gates
 
 Goal: establish the exact native-readiness baseline and lock the regression

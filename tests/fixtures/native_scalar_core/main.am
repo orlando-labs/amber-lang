@@ -1,0 +1,27 @@
+package native.scalar_core
+
+export main
+
+def main():
+  score = 0
+  if (-5).abs() == 5:
+    score = score + 1
+  if (0 - 9).to_str() == "-9":
+    score = score + 1
+  if "42".to_int() == 42:
+    score = score + 1
+  if "2.5".to_float() == 2.5:
+    score = score + 1
+  if "true".to_bool() == true:
+    score = score + 1
+  if "name".to_symbol() == :name:
+    score = score + 1
+  if :name.to_str() == "name":
+    score = score + 1
+  if Int === 7:
+    score = score + 1
+  if Str === "x":
+    score = score + 1
+  if Object === null:
+    score = score + 1
+  score
