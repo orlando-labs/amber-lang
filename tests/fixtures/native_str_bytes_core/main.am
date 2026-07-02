@@ -1,0 +1,35 @@
+package native.str_bytes_core
+
+export main
+
+def main():
+  score = 0
+  text = "  Héllo  "
+  trimmed = text.trim()
+  if trimmed.length() == 5:
+    score = score + 1
+  if trimmed.bytesize() == 6:
+    score = score + 1
+  if trimmed.downcase().upcase().starts_with?("H"):
+    score = score + 1
+  if "abé".reverse() == "éba":
+    score = score + 1
+  chars = "Aé!".chars()
+  if chars.count() == 3 and chars[1] == "é":
+    score = score + 1
+  parts = "a|bé|c".split("|")
+  if parts[1] == "bé" and parts.count() == 3:
+    score = score + 1
+  if "axbxc".replace("x", "-").ends_with?("-c"):
+    score = score + 1
+  bytes = "Aé".bytes()
+  if bytes.count() == 3 and bytes[-1] == 169:
+    score = score + 1
+  if bytes.slice(1, 2).hex() == "c3a9":
+    score = score + 1
+  if Bytes.new("xy").slice(-1).to_str() == "y" and bytes.empty?() == false:
+    score = score + 1
+  picked = {a: 1, b: 2, c: 3}.slice("b", "c")
+  if picked.count() == 2 and picked["c"] == 3:
+    score = score + 1
+  score

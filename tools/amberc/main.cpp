@@ -1222,15 +1222,19 @@ bool native_cpp_collection_selector(const std::string &selector,
          (selector == "[]=" && pos_count == 2U) ||
          (selector == "each" && pos_count == 0U) ||
          ((selector == "count" || selector == "length" || selector == "size" ||
-           selector == "first") &&
+           selector == "first" || selector == "empty?" ||
+           selector == "bytesize") &&
           pos_count == 0U) ||
+         (selector == "bytes" && pos_count == 0U) ||
          ((selector == "contains?" || selector == "includes?" ||
            selector == "include?" || selector == "starts_with?" ||
            selector == "ends_with?" || selector == "split") &&
           pos_count == 1U) ||
+         (selector == "slice" && (pos_count == 1U || pos_count == 2U)) ||
          (selector == "replace" && pos_count == 2U) ||
          ((selector == "upcase" || selector == "downcase" ||
-           selector == "trim" || selector == "strip") &&
+           selector == "trim" || selector == "strip" ||
+           selector == "reverse" || selector == "chars") &&
           pos_count == 0U) ||
          (selector == "concat" && pos_count == 1U);
 }
@@ -2505,10 +2509,16 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         }
       } else if (selector == "count") {
         write_reg_stmt(dst, "native_count(" + read_reg_expr(recv) + ")");
+      } else if (selector == "empty?") {
+        write_reg_stmt(dst, "native_empty(" + read_reg_expr(recv) + ")");
       } else if (selector == "length" || selector == "size") {
         write_reg_stmt(dst, "native_length(" + read_reg_expr(recv) + ")");
+      } else if (selector == "bytesize") {
+        write_reg_stmt(dst, "native_bytesize(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
         write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ")");
+      } else if (selector == "bytes" && pos_count == 0U) {
+        write_reg_stmt(dst, "native_bytes_new(" + read_reg_expr(recv) + ")");
       } else if (selector == "contains?" || selector == "includes?" ||
                  selector == "include?") {
         write_reg_stmt(dst, "native_contains(" + read_reg_expr(recv) +
@@ -2527,6 +2537,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_string_replace(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ", " +
                                 read_reg_expr(arg2) + ")");
+      } else if (selector == "slice") {
+        write_reg_stmt(dst, "native_slice(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", " +
+                                (pos_count == 2U ? read_reg_expr(arg2)
+                                                  : "NativeValue::nullv()") +
+                                ", " +
+                                (pos_count == 2U ? "true" : "false") + ")");
       } else if (selector == "upcase") {
         write_reg_stmt(dst,
                        "native_string_case(" + read_reg_expr(recv) + ", true)");
@@ -2536,6 +2553,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "trim" || selector == "strip") {
         write_reg_stmt(dst,
                        "native_string_trim(" + read_reg_expr(recv) + ")");
+      } else if (selector == "reverse") {
+        write_reg_stmt(dst,
+                       "native_string_reverse(" + read_reg_expr(recv) + ")");
+      } else if (selector == "chars") {
+        write_reg_stmt(dst, "native_string_chars(" + read_reg_expr(recv) + ")");
       } else if (selector == "concat") {
         write_reg_stmt(dst, "native_string_concat(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
@@ -3937,6 +3959,26 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "native_string_length(value);\n";
   out << "  return native_count(value);\n";
   out << "}\n\n";
+  out << "static NativeValue native_empty(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::String) return "
+         "NativeValue::boolean(native_string_text(value).empty());\n";
+  out << "  if (value.tag == NativeValue::Tag::List) return "
+         "NativeValue::boolean(as_list(value).items.empty());\n";
+  out << "  if (value.tag == NativeValue::Tag::Map) return "
+         "NativeValue::boolean(as_map(value).entries.empty());\n";
+  out << "  if (value.tag == NativeValue::Tag::Bytes) return "
+         "NativeValue::boolean(as_bytes(value).bytes.empty());\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue native_bytesize(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::String) return "
+         "NativeValue::integer(static_cast<std::int64_t>("
+         "native_string_text(value).size()));\n";
+  out << "  if (value.tag == NativeValue::Tag::Bytes) return "
+         "NativeValue::integer(static_cast<std::int64_t>("
+         "as_bytes(value).bytes.size()));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
   out << "static NativeValue native_string_contains(const NativeValue &value, "
          "const NativeValue &needle) {\n";
   out << "  if (value.tag != NativeValue::Tag::String || "
@@ -3950,6 +3992,33 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  while (j < text.size() && "
          "(static_cast<unsigned char>(text[j]) & 0xC0U) == 0x80U) ++j;\n";
   out << "  return j;\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_reverse(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  const std::string &text = native_string_text(value);\n";
+  out << "  std::vector<std::string> cps;\n";
+  out << "  for (std::size_t i = 0; i < text.size();) {\n";
+  out << "    const std::size_t j = native_utf8_next_cp(text, i);\n";
+  out << "    cps.push_back(text.substr(i, j - i));\n";
+  out << "    i = j;\n";
+  out << "  }\n";
+  out << "  std::string out_text;\n";
+  out << "  out_text.reserve(text.size());\n";
+  out << "  for (auto it = cps.rbegin(); it != cps.rend(); ++it) "
+         "out_text += *it;\n";
+  out << "  return NativeValue::string_ref(native_intern_string(out_text));\n";
+  out << "}\n\n";
+  out << "static NativeValue native_string_chars(const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  const std::string &text = native_string_text(value);\n";
+  out << "  std::vector<NativeValue> cps;\n";
+  out << "  for (std::size_t i = 0; i < text.size();) {\n";
+  out << "    const std::size_t j = native_utf8_next_cp(text, i);\n";
+  out << "    cps.push_back(NativeValue::string_ref(native_intern_string("
+         "text.substr(i, j - i))));\n";
+  out << "    i = j;\n";
+  out << "  }\n";
+  out << "  return NativeValue::list(std::move(cps));\n";
   out << "}\n\n";
   out << "static NativeValue native_string_case(const NativeValue &value, "
          "bool up) {\n";
@@ -4124,7 +4193,8 @@ static NativeValue native_index(const NativeValue &value, const NativeValue &key
   }
   if (value.tag == NativeValue::Tag::Bytes) {
     const auto &bytes = as_bytes(value).bytes;
-    const std::int64_t index = as_int(key);
+    std::int64_t index = as_int(key);
+    if (index < 0) index += static_cast<std::int64_t>(bytes.size());
     if (index < 0 || static_cast<std::size_t>(index) >= bytes.size()) throw NativeBailout();
     return NativeValue::integer(static_cast<unsigned char>(bytes[static_cast<std::size_t>(index)]));
   }
@@ -4144,6 +4214,59 @@ static NativeValue native_bytes_new(const NativeValue &value) {
   }
   if (value.tag == NativeValue::Tag::Bytes) {
     return NativeValue::bytes(as_bytes(value).bytes);
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_bytes_slice(const NativeValue &value,
+                                      const NativeValue &start_value,
+                                      const NativeValue &length_value,
+                                      bool has_length) {
+  const auto &bytes = as_bytes(value).bytes;
+  std::int64_t normalized = as_int(start_value);
+  if (normalized < 0) normalized += static_cast<std::int64_t>(bytes.size());
+  normalized = std::clamp<std::int64_t>(
+      normalized, 0, static_cast<std::int64_t>(bytes.size()));
+  const std::size_t offset = static_cast<std::size_t>(normalized);
+  std::size_t count = bytes.size() - offset;
+  if (has_length && length_value.tag != NativeValue::Tag::Null) {
+    const std::int64_t raw_length = as_int(length_value);
+    if (raw_length < 0) throw NativeBailout();
+    count = std::min<std::size_t>(static_cast<std::size_t>(raw_length),
+                                  bytes.size() - offset);
+  }
+  return NativeValue::bytes(bytes.substr(offset, count));
+}
+
+static NativeValue native_map_slice(const NativeValue &value,
+                                    const NativeValue &first_key,
+                                    const NativeValue &second_key,
+                                    bool has_second_key) {
+  const auto &entries = as_map(value).entries;
+  std::vector<std::string> wanted;
+  wanted.push_back(native_key_text(first_key));
+  if (has_second_key) wanted.push_back(native_key_text(second_key));
+  std::vector<std::pair<std::string, NativeValue>> result;
+  for (const auto &entry : entries) {
+    for (const std::string &key : wanted) {
+      if (entry.first == key) {
+        result.push_back(entry);
+        break;
+      }
+    }
+  }
+  return NativeValue::map(std::move(result));
+}
+
+static NativeValue native_slice(const NativeValue &value,
+                                const NativeValue &first,
+                                const NativeValue &second,
+                                bool has_second) {
+  if (value.tag == NativeValue::Tag::Bytes) {
+    return native_bytes_slice(value, first, second, has_second);
+  }
+  if (value.tag == NativeValue::Tag::Map) {
+    return native_map_slice(value, first, second, has_second);
   }
   throw NativeBailout();
 }
