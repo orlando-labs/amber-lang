@@ -20034,10 +20034,115 @@ private:
     return SendStatus::NotHandled;
   }
 
-  SendStatus apply_json_generate_value_method(const Frame &frame,
-                                              const Value &receiver,
-                                              Value *out) {
-    const std::vector<Value> json_args{receiver};
+  std::optional<std::vector<Value>>
+  to_json_filter_keys_from_option(const Frame &frame, const Value &option,
+                                  const std::string &keyword) {
+    std::vector<Value> raw_keys;
+    bool source_was_tuple = false;
+    const std::optional<std::vector<Value>> sequence =
+        extract_sequence_items(frame, option, &source_was_tuple);
+    if (fault_.has_value()) {
+      return std::nullopt;
+    }
+    if (sequence.has_value()) {
+      raw_keys = *sequence;
+    } else {
+      raw_keys.push_back(option);
+    }
+
+    std::vector<Value> keys;
+    keys.reserve(raw_keys.size());
+    for (const Value &raw_key : raw_keys) {
+      CollectionKeyError error;
+      std::optional<Value> key = normalize_map_key(raw_key, &error);
+      if (!key.has_value()) {
+        set_fault(frame, error.error_name,
+                  "to_json " + keyword + ": " + error.message);
+        return std::nullopt;
+      }
+      keys.push_back(*key);
+    }
+    return keys;
+  }
+
+  bool to_json_filter_matches_key(const MapEntry &entry,
+                                  const std::vector<Value> &keys, bool strict) {
+    for (const Value &key : keys) {
+      if (map_entry_key_equivalent(entry, key, map_lookup_key_id(key), strict)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  std::optional<Value> to_json_filtered_map_value(
+      const Frame &frame, const Value &receiver,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args) {
+    if (!reject_unknown_keywords(frame, kw_args, {"only", "except"})) {
+      return std::nullopt;
+    }
+    const IntrusivePtr<MapValue> map = receiver.as_map();
+    if (map == nullptr) {
+      set_fault(frame, "TypeError", "map value is null");
+      return std::nullopt;
+    }
+
+    std::optional<std::vector<Value>> only_keys;
+    if (const std::optional<Value> only = keyword_arg_value(kw_args, "only")) {
+      std::optional<std::vector<Value>> parsed =
+          to_json_filter_keys_from_option(frame, *only, "only");
+      if (!parsed.has_value()) {
+        return std::nullopt;
+      }
+      only_keys = std::move(*parsed);
+    }
+
+    std::optional<std::vector<Value>> except_keys;
+    if (const std::optional<Value> except =
+            keyword_arg_value(kw_args, "except")) {
+      std::optional<std::vector<Value>> parsed =
+          to_json_filter_keys_from_option(frame, *except, "except");
+      if (!parsed.has_value()) {
+        return std::nullopt;
+      }
+      except_keys = std::move(*parsed);
+    }
+
+    std::vector<MapEntry> filtered;
+    filtered.reserve(map->entries.size());
+    for (const MapEntry &entry : map->entries) {
+      bool keep = !only_keys.has_value() ||
+                  to_json_filter_matches_key(entry, *only_keys, map->strict);
+      if (keep && except_keys.has_value() &&
+          to_json_filter_matches_key(entry, *except_keys, map->strict)) {
+        keep = false;
+      }
+      if (keep) {
+        filtered.push_back(entry);
+      }
+    }
+    return make_symbol_map_value(std::move(filtered), false, map->strict);
+  }
+
+  SendStatus apply_json_generate_value_method(
+      const Frame &frame, const Value &receiver,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    Value json_value = receiver;
+    if (!kw_args.empty()) {
+      if (!receiver.is_map()) {
+        set_fault(frame, "TypeError",
+                  "to_json only/except keywords are only valid for Map");
+        return SendStatus::Faulted;
+      }
+      std::optional<Value> filtered =
+          to_json_filtered_map_value(frame, receiver, kw_args);
+      if (!filtered.has_value()) {
+        return SendStatus::Faulted;
+      }
+      json_value = *filtered;
+    }
+
+    const std::vector<Value> json_args{json_value};
     const std::vector<std::pair<std::uint32_t, Value>> no_keywords;
     return try_apply_native_stdlib_send(
         frame, Value::native_type(RuntimeNativeTypeKind::Json), "generate",
@@ -20067,15 +20172,11 @@ private:
         set_fault(frame, "TypeError", "to_json accepts no arguments");
         return SendStatus::Faulted;
       }
-      if (!kw_args.empty()) {
-        set_fault(frame, "TypeError", "to_json does not accept keywords");
-        return SendStatus::Faulted;
-      }
       if (!block.is_null()) {
         set_fault(frame, "TypeError", "to_json does not accept a block");
         return SendStatus::Faulted;
       }
-      return apply_json_generate_value_method(frame, receiver, out);
+      return apply_json_generate_value_method(frame, receiver, kw_args, out);
     }
 
     auto require_arity = [&](std::size_t expected) -> bool {
@@ -24413,8 +24514,10 @@ private:
           return false;
         }
         Value json_result = Value::null();
+        const std::vector<std::pair<std::uint32_t, Value>> no_keywords;
         const SendStatus json_status =
-            apply_json_generate_value_method(frame, receiver, &json_result);
+            apply_json_generate_value_method(frame, receiver, no_keywords,
+                                             &json_result);
         if (json_status == SendStatus::Faulted) {
           return false;
         }

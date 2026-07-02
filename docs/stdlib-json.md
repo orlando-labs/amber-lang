@@ -86,10 +86,18 @@ Json.pretty_generate({ok: true, items: [1, 2]}, indent: 4)
 
 {ok: true, count: 3}.to_json
 # "{\"ok\":true,\"count\":3}"
+
+{id: 1, name: "Ada", password: "secret"}.to_json(only: [:id, :name])
+# "{\"id\":1,\"name\":\"Ada\"}"
+
+{id: 1, name: "Ada", password: "secret"}.to_json(except: :password)
+# "{\"id\":1,\"name\":\"Ada\"}"
 ```
 
 `value.to_json` - это value-method форма для того же генератора, что и
-`Json.generate(value)`.
+`Json.generate(value)`. Для `Map` и `StrictMap` он также принимает keyword-опции
+`only:` и `except:`. Значение может быть одним ключом или списком ключей; если
+переданы обе опции, сначала применяется `only:`, затем `except:`.
 
 Генератор принимает JSON-представимые значения: `null`, `Bool`, `Int`, `Float`,
 `Str`, `Symbol`, `List`, `Map` и `StrictMap`. Ключи объектов должны быть `Str`
@@ -329,7 +337,7 @@ python3 bench/polyglot/run_benchmark.py --workload json --repeats 5
 | `Json.paths(value, query, init) ...` | value | fold по matches |
 | `Json.generate(value)` | `Str` | компактный JSON |
 | `Json.pretty_generate(value, indent: 2)` | `Str` | форматированный JSON |
-| `value.to_json` | `Str` | value-method форма `Json.generate` |
+| `value.to_json` | `Str` | value-method форма `Json.generate`; для Map доступно `only:` / `except:` |
 | `Json.load_from_file(path)` | value | прочитать и разобрать JSON-файл целиком |
 | `Json.load_from_file(path, jsonl: true)` | `List` | прочитать JSONL целиком |
 | `Json.save_to_file(path, value)` | `null` | записать JSON-файл |

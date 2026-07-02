@@ -144,13 +144,32 @@ void test_parse_strict_map_and_to_json() {
       "s = Json.parse(\"{\\\"name\\\":1,\\\"other\\\":2}\", map: StrictMap)\n"
       "plain = Json.parse(\"{\\\"name\\\":1}\")\n"
       "encoded = [1, \"x\"].to_json\n"
+      "payload = {id: 1, name: \"Ada\", password: \"no\", token: \"secret\"}\n"
+      "only_json = payload.to_json(only: [\"id\", :name])\n"
+      "except_json = payload.to_json(except: :password)\n"
+      "both_json = payload.to_json(only: [:id, :name, :token], "
+      "except: \"token\")\n"
+      "strict_payload = StrictMap{name: 1, \"name\": 2, keep: 3}\n"
+      "strict_json = strict_payload.to_json(only: [\"name\", :keep])\n"
       "if StrictMap === s and Map === s and "
       "s.has_key?(:name) == false and s[\"name\"] == 1 and "
-      "plain[:name] == 1 and encoded == \"[1,\\\"x\\\"]\":\n"
+      "plain[:name] == 1 and encoded == \"[1,\\\"x\\\"]\" and "
+      "only_json == \"{\\\"id\\\":1,\\\"name\\\":\\\"Ada\\\"}\" and "
+      "except_json == \"{\\\"id\\\":1,\\\"name\\\":\\\"Ada\\\","
+      "\\\"token\\\":\\\"secret\\\"}\" and "
+      "both_json == \"{\\\"id\\\":1,\\\"name\\\":\\\"Ada\\\"}\" and "
+      "strict_json == \"{\\\"name\\\":2,\\\"keep\\\":3}\":\n"
       "  42\n"
       "else:\n"
       "  0\n");
   expect_ok_integer(result, 42, "StrictMap parse and value to_json");
+}
+
+void test_to_json_keyword_restrictions() {
+  expect_fault("[1, 2].to_json(only: [:id])\n", "TypeError",
+               "to_json only/except on non-map");
+  expect_fault("{id: 1}.to_json(extra: :id)\n", "TypeError",
+               "to_json rejects unknown map keyword");
 }
 
 void test_stream_parse_stop() {
@@ -239,6 +258,7 @@ void test_provider_file_jsonl_and_stream_file() {
 
 int main() {
   test_parse_strict_map_and_to_json();
+  test_to_json_keyword_restrictions();
   test_stream_parse_stop();
   test_path_and_paths();
   test_stop_payload_rejected_by_streaming();
