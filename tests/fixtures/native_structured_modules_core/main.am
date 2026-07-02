@@ -1,0 +1,51 @@
+package native.structured_modules_core
+
+export main
+
+def main():
+  score = 0
+
+  doc = Json.parse("{\"items\":[{\"id\":1},{\"id\":2}],\"flag\":true}")
+  if doc["items"][1]["id"] == 2 and doc["flag"] == true:
+    score = score + 1
+  generated = Json.generate({name: "amber", nums: [1, 2]})
+  if generated == "{\"name\":\"amber\",\"nums\":[1,2]}":
+    score = score + 1
+  pretty = Json.pretty_generate({ok: true, nested: {count: 2}})
+  if pretty.contains?("\n  \"nested\"") and pretty.contains?("\"count\": 2"):
+    score = score + 1
+
+  parser = ArgParser.new(cmdline: ["--port", "8080", "--host=0.0.0.0", "-v", "src", "dst", "--", "--literal"])
+  parser.name("copy")
+  parser.arg("-p", "--port", name: "port", type: Int, default: 3000)
+  parser.arg("--host", type: Str, default: "127.0.0.1")
+  parser.flag("-v", "--verbose")
+  parser.pos("source")
+  parser.pos("target")
+  parser.rest("tail")
+  args = parser.parse_or_raise()
+  if args["port"] == 8080 and args["host"] == "0.0.0.0":
+    score = score + 1
+  if args["verbose"] == true and args["source"] == "src" and args["target"] == "dst":
+    score = score + 1
+  if args["tail"][0] == "--literal":
+    score = score + 1
+
+  env = {"API_TOKEN": "sekret"}
+  env_parser = ArgParser.new(cmdline: ["--include", "src", "-I", "lib", "--no-color"], env: env)
+  env_parser.arg("-I", "--include", name: "includes", multiple: true)
+  env_parser.arg("--token", env: "API_TOKEN", required: true)
+  env_parser.flag("--color", default: true, negatable: true)
+  env_args = env_parser.parse_or_raise()
+  if env_args["includes"][0] == "src" and env_args["includes"][1] == "lib":
+    score = score + 1
+  if env_args["token"] == "sekret" and env_args["color"] == false:
+    score = score + 1
+
+  override_parser = ArgParser.new(cmdline: ["--count", "1"])
+  override_parser.arg("--count", type: Int)
+  override_args = override_parser.parse_or_raise(cmdline: ["--count", "41"])
+  if override_args["count"] == 41:
+    score = score + 1
+
+  score

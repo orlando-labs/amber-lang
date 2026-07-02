@@ -511,6 +511,41 @@ test: build
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_set_core/main.am > $(BUILD_DIR)/native-set-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-set-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-set-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_math_numeric_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-math-numeric-core > $(BUILD_DIR)/native-math-numeric-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-math-numeric-core-build.json
+	$(BUILD_DIR)/native-math-numeric-core > $(BUILD_DIR)/native-math-numeric-core.out
+	grep -q '^12$$' $(BUILD_DIR)/native-math-numeric-core.out
+	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_math_numeric_core/main.am > $(BUILD_DIR)/native-math-numeric-core.dump
+	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-math-numeric-core.dump
+	grep -q 'mode=direct-native' $(BUILD_DIR)/native-math-numeric-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_numeric_saturating_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-numeric-saturating-core > $(BUILD_DIR)/native-numeric-saturating-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-numeric-saturating-core-build.json
+	$(BUILD_DIR)/native-numeric-saturating-core > $(BUILD_DIR)/native-numeric-saturating-core.out
+	grep -q '^9$$' $(BUILD_DIR)/native-numeric-saturating-core.out
+	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_numeric_saturating_core/main.am > $(BUILD_DIR)/native-numeric-saturating-core.dump
+	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-numeric-saturating-core.dump
+	grep -q 'mode=direct-native' $(BUILD_DIR)/native-numeric-saturating-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_numeric_wrapping_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-numeric-wrapping-core > $(BUILD_DIR)/native-numeric-wrapping-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-numeric-wrapping-core-build.json
+	$(BUILD_DIR)/native-numeric-wrapping-core > $(BUILD_DIR)/native-numeric-wrapping-core.out
+	grep -q '^7$$' $(BUILD_DIR)/native-numeric-wrapping-core.out
+	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_numeric_wrapping_core/main.am > $(BUILD_DIR)/native-numeric-wrapping-core.dump
+	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-numeric-wrapping-core.dump
+	grep -q 'mode=direct-native' $(BUILD_DIR)/native-numeric-wrapping-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_text_value_stdlib_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-text-value-stdlib-core > $(BUILD_DIR)/native-text-value-stdlib-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-text-value-stdlib-core-build.json
+	$(BUILD_DIR)/native-text-value-stdlib-core > $(BUILD_DIR)/native-text-value-stdlib-core.out
+	grep -q '^25$$' $(BUILD_DIR)/native-text-value-stdlib-core.out
+	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_text_value_stdlib_core/main.am > $(BUILD_DIR)/native-text-value-stdlib-core.dump
+	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-text-value-stdlib-core.dump
+	grep -q 'mode=direct-native' $(BUILD_DIR)/native-text-value-stdlib-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_structured_modules_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-structured-modules-core > $(BUILD_DIR)/native-structured-modules-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-structured-modules-core-build.json
+	$(BUILD_DIR)/native-structured-modules-core > $(BUILD_DIR)/native-structured-modules-core.out
+	grep -q '^9$$' $(BUILD_DIR)/native-structured-modules-core.out
+	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_structured_modules_core/main.am > $(BUILD_DIR)/native-structured-modules-core.dump
+	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-structured-modules-core.dump
+	grep -q 'mode=direct-native' $(BUILD_DIR)/native-structured-modules-core.dump
 	$(BUILD_DIR)/amberc build bench/polyglot/amber/src/calls_collections.am --entry init -o $(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native-build.json
 	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/calls-collections-native-build.json
 	$(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native.out

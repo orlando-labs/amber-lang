@@ -1155,6 +1155,14 @@ bool operand_u32_value(const amber::bytecode::Instruction &instruction,
     return false;
   }
   const amber::bytecode::InstructionOperand &operand =
+struct NativeCppNumericProfile {
+  std::string int_type = "Int64";
+  std::string overflow = "checked";
+  amber::runtime::NumericPolicy policy;
+  bool supported = true;
+  std::string reason;
+};
+
       instruction.operands[index];
   if (operand.value < 0 || static_cast<std::uint64_t>(operand.value) >
                                static_cast<std::uint64_t>(
@@ -1162,6 +1170,9 @@ bool operand_u32_value(const amber::bytecode::Instruction &instruction,
     return false;
   }
   *out = static_cast<std::uint32_t>(operand.value);
+  std::string numeric_int_type = "Int64";
+  std::string numeric_overflow = "checked";
+  amber::runtime::NumericPolicy numeric_policy;
   return true;
 }
 
@@ -1217,6 +1228,63 @@ bool native_cpp_scalar_conversion_selector(const std::string &selector) {
 }
 
 bool native_cpp_collection_selector(const std::string &selector,
+std::string cpp_native_i64_expr(std::int64_t value) {
+  if (value == std::numeric_limits<std::int64_t>::min()) {
+    return "std::numeric_limits<std::int64_t>::min()";
+  }
+  if (value == std::numeric_limits<std::int64_t>::max()) {
+    return "std::numeric_limits<std::int64_t>::max()";
+  }
+  return "static_cast<std::int64_t>(" + std::to_string(value) + "LL)";
+}
+
+std::string native_cpp_numeric_mode_expr(
+    amber::runtime::NumericOverflowMode mode) {
+  switch (mode) {
+  case amber::runtime::NumericOverflowMode::Wrapping:
+    return "NativeNumericOverflowMode::Wrapping";
+  case amber::runtime::NumericOverflowMode::Saturating:
+    return "NativeNumericOverflowMode::Saturating";
+  case amber::runtime::NumericOverflowMode::Checked:
+  default:
+    return "NativeNumericOverflowMode::Checked";
+  }
+}
+
+NativeCppNumericProfile
+native_cpp_numeric_profile(const amber::bytecode::BcModule &module) {
+  NativeCppNumericProfile profile;
+  for (const amber::bytecode::AttrEntry &attr : module.attrs) {
+    const auto attr_text = [&](std::uint32_t id) -> std::string {
+      return id < module.strings.size() ? module.strings[id] : std::string{};
+    };
+    const std::string key = attr_text(attr.key_str_id);
+    if (key == "amber.numeric.int") {
+      profile.int_type = attr_text(attr.value_str_id);
+    } else if (key == "amber.numeric.overflow") {
+      profile.overflow = attr_text(attr.value_str_id);
+    }
+  }
+  if (profile.int_type.empty()) {
+    profile.int_type = "Int64";
+  }
+  if (profile.overflow.empty()) {
+    profile.overflow = "checked";
+  }
+  const std::optional<amber::runtime::NumericPolicy> policy =
+      amber::runtime::numeric_policy_for(profile.int_type, profile.overflow);
+  if (!policy.has_value()) {
+    profile.supported = false;
+    profile.reason = "module numeric profile is not supported by native "
+                     "backend (int: " +
+                     profile.int_type + ", overflow: " + profile.overflow +
+                     ")";
+    return profile;
+  }
+  profile.policy = *policy;
+  return profile;
+}
+
                                     std::uint32_t pos_count) {
   return ((selector == "[]" || selector == "[]?" ||
            selector == "has_index?") &&
@@ -1233,6 +1301,7 @@ bool native_cpp_collection_selector(const std::string &selector,
          ((selector == "count" || selector == "length" || selector == "size" ||
            selector == "empty?" || selector == "bytesize" ||
            selector == "deconstruct" || selector == "to_array" ||
+         *selector == "**" ||
            selector == "keys" || selector == "values" ||
            selector == "entries" ||
            selector == "reversed" || selector == "sorted" ||
@@ -1345,6 +1414,21 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                                   instruction.opcode == Opcode::IGeK ||
                                   instruction.opcode == Opcode::IEqK ||
                                   instruction.opcode == Opcode::INeK ||
+bool native_cpp_math_selector(const std::string &selector,
+                              std::uint32_t pos_count) {
+  return ((selector == "PI" || selector == "E") && pos_count == 0U) ||
+         ((selector == "abs" || selector == "sign" || selector == "sqrt" ||
+           selector == "cbrt" || selector == "exp" || selector == "log2" ||
+           selector == "log10" || selector == "sin" || selector == "cos" ||
+           selector == "tan" || selector == "asin" || selector == "acos" ||
+           selector == "atan" || selector == "floor" || selector == "ceil" ||
+           selector == "round" || selector == "trunc") &&
+          pos_count == 1U) ||
+         ((selector == "min" || selector == "max" || selector == "pow" ||
+           selector == "hypot" || selector == "atan2") &&
+          pos_count == 2U);
+}
+
                                   instruction.opcode == Opcode::ICmpK ||
                                   instruction.opcode == Opcode::IBitAndK ||
                                   instruction.opcode == Opcode::IBitOrK ||
@@ -1547,7 +1631,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       bool json_send = false;
       if ((selector == "to_json" && pos_count == 0U && kw_count == 0U &&
            no_block) ||
-          ((selector == "parse" || selector == "pretty_generate") &&
+          ((selector == "parse" || selector == "generate" ||
+            selector == "pretty_generate") &&
            pos_count == 1U && kw_count == 0U && no_block)) {
         json_send = true;
       } else if (selector == "stream_parse_file" && pos_count == 1U &&
@@ -1683,7 +1768,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                             kw_count == 0U && no_block;
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
           !json_send && !codec_send && !digest_send && !range_send &&
-          !random_send && !time_send && !uuid_send && !url_send) {
+          !random_send && !time_send && !uuid_send && !url_send &&
+          !math_send && !argparser_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
@@ -1715,6 +1801,52 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
 //   - every send selector is from the pure compute allow-list below.
 // The call site additionally gates at runtime: arguments must be immutable
 // bridge values (null/bool/Int/Float/Uuid) and the result must convert back to
+      const bool math_send = native_cpp_math_selector(selector, pos_count) &&
+                             kw_count == 0U && no_block;
+      bool argparser_send = false;
+      const auto kw_allowed = [&](std::initializer_list<const char *> names) {
+        for (std::uint32_t kw_i = 0; kw_i < kw_count; ++kw_i) {
+          std::uint32_t kw_symbol = 0;
+          if (!operand_u32_value(instruction, kw_index + 1U + kw_i * 2U,
+                                 &kw_symbol) ||
+              kw_symbol >= module.symbols.size()) {
+            *reason = "invalid ArgParser keyword operand";
+            return false;
+          }
+          bool matched = false;
+          for (const char *name : names) {
+            if (module.symbols[kw_symbol] == name) {
+              matched = true;
+              break;
+            }
+          }
+          if (!matched) {
+            *reason = "unsupported ArgParser keyword shape";
+            return false;
+          }
+        }
+        return true;
+      };
+      if (selector == "new" && pos_count == 0U && kw_count <= 5U &&
+          no_block) {
+        argparser_send =
+            kw_allowed({"cmdline", "name", "about", "env", "add_help"});
+      } else if ((selector == "name" || selector == "about") &&
+                 pos_count == 1U && kw_count == 0U && no_block) {
+        argparser_send = true;
+      } else if ((selector == "arg" || selector == "flag") &&
+                 pos_count >= 1U && kw_count <= 8U && no_block) {
+        argparser_send = kw_allowed({"name", "type", "default", "required",
+                                     "choices", "multiple", "env",
+                                     "negatable"});
+      } else if ((selector == "pos" || selector == "rest") &&
+                 pos_count == 1U && kw_count <= 6U && no_block) {
+        argparser_send = kw_allowed({"type", "default", "required",
+                                     "choices", "multiple", "env"});
+      } else if (selector == "parse_or_raise" && pos_count == 0U &&
+                 kw_count <= 1U && no_block) {
+        argparser_send = kw_allowed({"cmdline"});
+      }
 // a native value; otherwise the program falls back to the whole-program
 // restart, which stays sound because these functions are effect-free.
 bool native_vm_callable_pure_selector(const std::string &selector) {
@@ -1723,6 +1855,7 @@ bool native_vm_callable_pure_selector(const std::string &selector) {
   // perform IO. Soundness does not actually require it to be non-mutating
   // (a bridged function can only reach scalars and values it constructed
   // itself -- never shared state -- and emits no output before it can bail),
+          !math_send && !argparser_send &&
   // but we keep the list to side-effect-free *value transforms* so it mirrors
   // the runtime's own pure/`!`-mutator split (vm.cpp RFC §7.1/§8.x) and the
   // "pure compute" framing of amber.native-backend-equivalence.v1. The
@@ -2480,6 +2613,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
+          } else if (name == "Math") {
+            native_module_expr = "NativeValue::math_module()";
     }
     case Opcode::GetLast: {
       std::uint32_t dst = 0;
@@ -2494,6 +2629,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       out << "  frame.last = " << read_reg_expr(src) << ";\n";
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
+          } else if (name == "ArgParser") {
+            native_module_expr = "NativeValue::argparser_module()";
     }
     case Opcode::LoadUpval: {
       std::uint32_t dst = 0;
@@ -2647,7 +2784,36 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         args_expr << "}";
         return args_expr.str();
       };
-      if (selector == "+") {
+      const auto kw_args_expr = [&]() {
+        std::ostringstream args_expr;
+        args_expr << "{";
+        for (std::uint32_t index = 0; index < kw_count; ++index) {
+          std::uint32_t kw_symbol = 0;
+          std::uint32_t kw_value = 0;
+          operand_u32_value(instruction, kw_index + 1U + index * 2U,
+                            &kw_symbol);
+          operand_u32_value(instruction, kw_index + 2U + index * 2U,
+                            &kw_value);
+          if (index != 0U) {
+            args_expr << ", ";
+          }
+          const std::string kw_name =
+              kw_symbol < module.symbols.size() ? module.symbols[kw_symbol]
+                                                : std::string{};
+          args_expr << "std::pair<std::string, NativeValue>{"
+                    << "native_hex_to_string(\""
+                    << string_to_hex_text(kw_name) << "\"), "
+                    << read_reg_expr(kw_value) << "}";
+        }
+        args_expr << "}";
+        return args_expr.str();
+      };
+      if (native_cpp_math_selector(selector, pos_count)) {
+        write_reg_stmt(dst, "native_math_send(" + read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"), " +
+                                pos_args_expr(0U) + ")");
+      } else if (selector == "+") {
         write_reg_stmt(dst, "numeric_add(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
       } else if (selector == "-") {
@@ -2701,7 +2867,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "<<") {
         out << "  if (as_int(" << read_reg_expr(arg) << ") < 0 || as_int("
             << read_reg_expr(arg) << ") >= 64) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(checked_shl_int64(as_int(" +
+        write_reg_stmt(dst, "NativeValue::integer(profile_shl_int64(as_int(" +
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
       } else if (selector == ">>") {
@@ -2732,6 +2898,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_has_index(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
       } else if (selector == "each") {
+      } else if (selector == "**") {
+        write_reg_stmt(dst, "numeric_pow(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
         if (block_reg < 0) {
           out << "  throw NativeBailout();\n";
         } else {
@@ -3030,9 +3199,12 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "build_query") {
         write_reg_stmt(dst, "native_url_build_query(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
-      } else if (selector == "pretty_generate") {
+      } else if (selector == "generate" || selector == "pretty_generate") {
         write_reg_stmt(dst, "native_json_generate_value(" + read_reg_expr(arg) +
-                                ", true)");
+                                ", " +
+                                (selector == "pretty_generate" ? "true"
+                                                               : "false") +
+                                ")");
       } else if (selector == "stream_parse_file") {
         if (block_reg < 0) {
           out << "  throw NativeBailout();\n";
@@ -3098,6 +3270,32 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                   (first_step || second_step ? "true" : "false") + ")");
         }
       } else if (selector == "encode") {
+      } else if (selector == "new" && pos_count == 0U) {
+        write_reg_stmt(dst, "native_argparser_new(" + read_reg_expr(recv) +
+                                ", " + kw_args_expr() + ")");
+      } else if ((selector == "name" || selector == "about") &&
+                 pos_count == 1U) {
+        write_reg_stmt(dst, "native_argparser_named(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
+      } else if (selector == "arg" || selector == "flag") {
+        write_reg_stmt(dst, "native_argparser_option(" + read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"), " +
+                                pos_args_expr(0U) + ", " + kw_args_expr() +
+                                ")");
+      } else if (selector == "pos" || selector == "rest") {
+        write_reg_stmt(dst, "native_argparser_positional(" +
+                                read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"), " +
+                                read_reg_expr(arg) + ", " + kw_args_expr() +
+                                ")");
+      } else if (selector == "parse_or_raise") {
+        write_reg_stmt(dst, "native_argparser_parse_or_raise(" +
+                                read_reg_expr(recv) + ", " + kw_args_expr() +
+                                ")");
         write_reg_stmt(dst, "native_codec_encode(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ", " +
                                 (kw_count == 1U ? read_reg_expr(kw_value_reg)
@@ -3216,7 +3414,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (instruction.opcode == Opcode::IShl) {
         out << "  if (as_int(" << read_reg_expr(rhs) << ") < 0 || as_int("
             << read_reg_expr(rhs) << ") >= 64) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(checked_shl_int64(as_int(" +
+        write_reg_stmt(dst, "NativeValue::integer(profile_shl_int64(as_int(" +
                                 read_reg_expr(lhs) + "), as_int(" +
                                 read_reg_expr(rhs) + ")))");
       } else if (instruction.opcode == Opcode::IShr) {
@@ -3328,7 +3526,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         if (rhs < 0 || rhs >= 64) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "NativeValue::integer(checked_shl_int64(as_int(" +
+          write_reg_stmt(dst, "NativeValue::integer(profile_shl_int64(as_int(" +
                                   read_reg_expr(lhs) + "), " +
                                   cpp_decimal_i64(rhs) + "))");
         }
@@ -3566,21 +3764,13 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
                           &native_extensions = {}) {
   NativeCppBuildPlan plan;
   std::string first_reason;
-  // The generated C++ implements only the default numeric profile
-  // (int: Int64, overflow: checked). Modules selecting any other profile run
-  // entirely under the VM.
-  for (const amber::bytecode::AttrEntry &attr : module.attrs) {
-    const auto attr_text = [&](std::uint32_t id) -> std::string {
-      return id < module.strings.size() ? module.strings[id] : std::string{};
-    };
-    const std::string key = attr_text(attr.key_str_id);
-    const std::string value = attr_text(attr.value_str_id);
-    if ((key == "amber.numeric.int" && value != "Int64") ||
-        (key == "amber.numeric.overflow" && value != "checked")) {
-      first_reason = "module numeric profile is not the native default (" +
-                     key + ": " + value + ")";
-      break;
-    }
+  const NativeCppNumericProfile numeric_profile =
+      native_cpp_numeric_profile(module);
+  plan.numeric_int_type = numeric_profile.int_type;
+  plan.numeric_overflow = numeric_profile.overflow;
+  plan.numeric_policy = numeric_profile.policy;
+  if (!numeric_profile.supported) {
+    first_reason = numeric_profile.reason;
   }
   // A `*name` / `**name` rest parameter packs surplus positional arguments into
   // an immutable Tuple and unmatched keywords into a frozen Map in the VM frame
@@ -3796,12 +3986,12 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
          "StrType, IntType, BigIntType, FloatType, BoolType, SymbolType, "
-         "NullType, ObjectType, JsonModule, BytesModule, Base64Module, "
-         "Base64UrlModule, HexModule, "
-         "DigestModule, UrlModule, SecureRandomModule, UuidModule, "
+         "NullType, ObjectType, MathModule, JsonModule, BytesModule, "
+         "Base64Module, Base64UrlModule, HexModule, "
+         "DigestModule, UrlModule, ArgParserModule, SecureRandomModule, UuidModule, "
          "RangeModule, TimeModule, "
-         "TimePeriodModule, Bytes, List, Tuple, Set, Map, Range, Uuid, Time, "
-         "TimePeriod, Closure };\n";
+         "TimePeriodModule, Bytes, List, Tuple, Set, Map, Range, ArgParser, "
+         "Uuid, Time, TimePeriod, Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
@@ -3817,11 +4007,26 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue floating(double value) { NativeValue out; "
          "out.tag = Tag::Float; out.float_value = value; return out; }\n";
   out << "  static NativeValue string_ref(std::int64_t string_id) { "
+  out << "enum class NativeNumericOverflowMode { Checked, Wrapping, "
+         "Saturating };\n";
+  out << "struct NativeNumericPolicy {\n";
+  out << "  NativeNumericOverflowMode mode = "
+         "NativeNumericOverflowMode::Checked;\n";
+  out << "  std::int64_t min = std::numeric_limits<std::int64_t>::min();\n";
+  out << "  std::int64_t max = std::numeric_limits<std::int64_t>::max();\n";
+  out << "  std::uint32_t bits = 64;\n";
+  out << "};\n";
+  out << "static constexpr NativeNumericPolicy kNativeNumericPolicy{"
+      << native_cpp_numeric_mode_expr(plan.numeric_policy.mode) << ", "
+      << cpp_native_i64_expr(plan.numeric_policy.min) << ", "
+      << cpp_native_i64_expr(plan.numeric_policy.max) << ", "
+      << plan.numeric_policy.bits << "U};\n\n";
          "NativeValue out; out.tag = Tag::String; out.scalar_value = "
          "string_id; return out; }\n";
   out << "  static NativeValue symbol_ref(std::int64_t symbol_id) { "
          "NativeValue out; out.tag = Tag::Symbol; out.scalar_value = "
          "symbol_id; return out; }\n";
+  out << "struct NativeArgParser;\n";
   out << "  static NativeValue str_type() { NativeValue out; out.tag = "
          "Tag::StrType; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue int_type() { NativeValue out; out.tag = "
@@ -3872,6 +4077,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "NativeValue>> entries);\n";
   out << "  static NativeValue map_entries("
          "std::vector<std::pair<NativeValue, NativeValue>> entries, "
+  out << "  static NativeValue math_module() { NativeValue out; out.tag = "
+         "Tag::MathModule; out.scalar_value = 0; return out; }\n";
          "bool strict = false);\n";
   out << "  static NativeValue range(NativeRange value);\n";
   out << "  static NativeValue uuid(amber::runtime::RuntimeUuidValue value);\n";
@@ -3886,6 +4093,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeSet { std::vector<NativeValue> items; };\n";
   out << "struct NativeMap { "
          "std::vector<std::pair<NativeValue, NativeValue>> entries; "
+  out << "  static NativeValue argparser_module() { NativeValue out; "
+         "out.tag = Tag::ArgParserModule; out.scalar_value = 0; return "
+         "out; }\n";
          "bool strict = false; };\n";
   out << "struct NativeRange {\n";
   out << "  std::int64_t start = 0;\n";
@@ -3908,6 +4118,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::vector<std::unique_ptr<NativeRange>> ranges;\n";
   out << "  std::vector<std::unique_ptr<NativeUuid>> uuids;\n";
   out << "  std::vector<std::unique_ptr<NativeTime>> times;\n";
+  out << "  static NativeValue arg_parser(NativeArgParser value);\n";
   out << "  std::vector<std::unique_ptr<NativeTimePeriod>> periods;\n";
   out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
   out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
@@ -3927,6 +4138,30 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n";
   out << "NativeValue NativeValue::tuple(std::vector<NativeValue> items) {\n";
   out << "  NativeValue out; out.tag = Tag::Tuple;\n";
+  out << "enum class NativeArgValueType { Str, Int, Float, Bool, Symbol };\n";
+  out << "struct NativeArgParser {\n";
+  out << "  enum class SpecKind { Option, Flag, Positional, Rest };\n";
+  out << "  struct Spec {\n";
+  out << "    SpecKind kind = SpecKind::Option;\n";
+  out << "    std::vector<std::string> spellings;\n";
+  out << "    std::string name;\n";
+  out << "    NativeArgValueType type = NativeArgValueType::Str;\n";
+  out << "    bool required = false;\n";
+  out << "    bool multiple = false;\n";
+  out << "    bool negatable = false;\n";
+  out << "    bool has_default = false;\n";
+  out << "    NativeValue default_value = NativeValue::nullv();\n";
+  out << "    bool has_choices = false;\n";
+  out << "    std::vector<NativeValue> choices;\n";
+  out << "    std::string env;\n";
+  out << "  };\n";
+  out << "  std::string name;\n";
+  out << "  std::string about;\n";
+  out << "  std::vector<std::string> cmdline;\n";
+  out << "  std::vector<std::pair<std::string, std::string>> env;\n";
+  out << "  bool add_help = true;\n";
+  out << "  std::vector<Spec> specs;\n";
+  out << "};\n";
   out << "  auto tuple = std::make_unique<NativeTuple>();\n";
   out << "  tuple->items = std::move(items); out.heap_value = tuple.get();\n";
   out << "  native_arena.tuples.push_back(std::move(tuple)); return out;\n";
@@ -3940,6 +4175,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "NativeValue NativeValue::map_entries("
          "std::vector<std::pair<NativeValue, NativeValue>> entries, "
          "bool strict) {\n";
+  out << "  std::vector<std::unique_ptr<NativeArgParser>> argparsers;\n";
   out << "  NativeValue out; out.tag = Tag::Map;\n";
   out << "  auto map = std::make_unique<NativeMap>();\n";
   out << "  map->entries = std::move(entries); map->strict = strict; "
@@ -3997,6 +4233,12 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  auto cell = std::make_unique<NativeCell>(); cell->value = value;\n";
   out << "  NativeCell *raw = cell.get();\n";
   out << "  native_arena.cells.push_back(std::move(cell)); return raw;\n";
+  out << "NativeValue NativeValue::arg_parser(NativeArgParser value) {\n";
+  out << "  NativeValue out; out.tag = Tag::ArgParser;\n";
+  out << "  auto parser = std::make_unique<NativeArgParser>(std::move(value));\n";
+  out << "  out.heap_value = parser.get();\n";
+  out << "  native_arena.argparsers.push_back(std::move(parser)); return out;\n";
+  out << "}\n";
   out << "}\n\n";
   out << "struct NativeFrame {\n";
   out << "  NativeValue *regs = nullptr;\n";
@@ -4134,6 +4376,18 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "std::size_t size) {\n";
   out << "  const std::optional<std::size_t> normalized = "
          "native_optional_sequence_index(index, size);\n";
+  out << "static const NativeArgParser &as_arg_parser("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::ArgParser || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeArgParser *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static NativeArgParser &as_mutable_arg_parser("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::ArgParser || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeArgParser *>(value.heap_value);\n";
+  out << "}\n";
   out << "  if (!normalized.has_value()) throw NativeBailout();\n";
   out << "  return *normalized;\n";
   out << "}\n";
@@ -4276,6 +4530,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (lhs > rhs) return 1;\n";
   out << "  return 0;\n";
   out << "}\n\n";
+  out << "  case NativeValue::Tag::MathModule: return \"Math\";\n";
   out << "static std::int64_t floor_div_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  if (rhs == 0) throw NativeBailout();\n";
@@ -4283,6 +4538,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::int64_t quotient = lhs / rhs;\n";
   out << "  const std::int64_t remainder = lhs % rhs;\n";
   out << "  if (remainder != 0 && ((remainder < 0) != (rhs < 0))) "
+  out << "  case NativeValue::Tag::ArgParserModule: return \"ArgParser\";\n";
          "--quotient;\n";
   out << "  return quotient;\n";
   out << "}\n\n";
@@ -4291,43 +4547,136 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (rhs == -1) return 0;\n";
   out << "  return lhs - floor_div_int64(lhs, rhs) * rhs;\n";
   out << "}\n\n";
-  // Checked Int64 arithmetic (amber.numeric-profile.v1 default profile).
-  // Overflow bails out to the VM, which re-runs the program and raises the
-  // language-level OverflowError; this is observably identical because the
-  // native-eligible subset performs no side effects before bailout.
-  out << "static std::int64_t checked_add_int64(std::int64_t lhs, "
+  // Fixed-width Int arithmetic under amber.numeric-profile.v1. Checked
+  // overflows bail to the VM so it raises the language-level OverflowError;
+  // wrapping and saturating profiles resolve directly in generated code.
+  out << "static std::int64_t native_numeric_wrap_to_width("
+         "std::int64_t value) {\n";
+  out << "  if (kNativeNumericPolicy.bits >= 64U) return value;\n";
+  out << "  const std::uint64_t mask = "
+         "(std::uint64_t{1} << kNativeNumericPolicy.bits) - 1U;\n";
+  out << "  std::uint64_t wrapped = static_cast<std::uint64_t>(value) & "
+         "mask;\n";
+  out << "  if (kNativeNumericPolicy.min < 0) {\n";
+  out << "    const std::uint64_t sign_bit = std::uint64_t{1} << "
+         "(kNativeNumericPolicy.bits - 1U);\n";
+  out << "    if ((wrapped & sign_bit) != 0U) wrapped |= ~mask;\n";
+  out << "  }\n";
+  out << "  return static_cast<std::int64_t>(wrapped);\n";
+  out << "}\n\n";
+  out << "static bool native_numeric_resolve(std::int64_t exact, "
+         "bool overflowed64, bool positive_overflow, std::int64_t *out) {\n";
+  out << "  if (!overflowed64 && exact >= kNativeNumericPolicy.min && "
+         "exact <= kNativeNumericPolicy.max) { *out = exact; return true; "
+         "}\n";
+  out << "  switch (kNativeNumericPolicy.mode) {\n";
+  out << "  case NativeNumericOverflowMode::Wrapping:\n";
+  out << "    *out = native_numeric_wrap_to_width(exact);\n";
+  out << "    return true;\n";
+  out << "  case NativeNumericOverflowMode::Saturating:\n";
+  out << "    *out = overflowed64 ? "
+         "(positive_overflow ? kNativeNumericPolicy.max : "
+         "kNativeNumericPolicy.min) : "
+         "(exact > kNativeNumericPolicy.max ? kNativeNumericPolicy.max : "
+         "kNativeNumericPolicy.min);\n";
+  out << "    return true;\n";
+  out << "  case NativeNumericOverflowMode::Checked:\n";
+  out << "  default:\n";
+  out << "    return false;\n";
+  out << "  }\n";
+  out << "}\n\n";
+  out << "static std::int64_t profile_add_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
-  out << "  std::int64_t result;\n";
-  out << "  if (__builtin_add_overflow(lhs, rhs, &result)) "
+  out << "  std::int64_t result = 0;\n";
+  out << "  const bool overflowed = __builtin_add_overflow(lhs, rhs, "
+         "&result);\n";
+  out << "  if (!native_numeric_resolve(result, overflowed, lhs > 0, "
+         "&result)) throw NativeBailout();\n";
+  out << "  return result;\n";
+  out << "}\n\n";
+  out << "static std::int64_t profile_sub_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  std::int64_t result = 0;\n";
+  out << "  const bool overflowed = __builtin_sub_overflow(lhs, rhs, "
+         "&result);\n";
+  out << "  if (!native_numeric_resolve(result, overflowed, lhs >= 0, "
+         "&result)) throw NativeBailout();\n";
+  out << "  return result;\n";
+  out << "}\n\n";
+  out << "static std::int64_t profile_mul_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  std::int64_t result = 0;\n";
+  out << "  const bool overflowed = __builtin_mul_overflow(lhs, rhs, "
+         "&result);\n";
+  out << "  if (!native_numeric_resolve(result, overflowed, "
+         "(lhs < 0) == (rhs < 0), &result)) throw NativeBailout();\n";
+  out << "  return result;\n";
+  out << "}\n\n";
+  out << "static std::int64_t profile_neg_int64(std::int64_t value) {\n";
+  out << "  std::int64_t result = 0;\n";
+  out << "  if (value == std::numeric_limits<std::int64_t>::min()) {\n";
+  out << "    if (!native_numeric_resolve(value, true, true, &result)) "
          "throw NativeBailout();\n";
   out << "  return result;\n";
   out << "}\n\n";
-  out << "static std::int64_t checked_sub_int64(std::int64_t lhs, "
-         "std::int64_t rhs) {\n";
-  out << "  std::int64_t result;\n";
-  out << "  if (__builtin_sub_overflow(lhs, rhs, &result)) "
-         "throw NativeBailout();\n";
-  out << "  return result;\n";
-  out << "}\n\n";
-  out << "static std::int64_t checked_mul_int64(std::int64_t lhs, "
-         "std::int64_t rhs) {\n";
-  out << "  std::int64_t result;\n";
-  out << "  if (__builtin_mul_overflow(lhs, rhs, &result)) "
-         "throw NativeBailout();\n";
-  out << "  return result;\n";
-  out << "}\n\n";
-  out << "static std::int64_t checked_div_int64(std::int64_t lhs, "
+  out << "static std::int64_t profile_div_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  if (rhs == 0) throw NativeBailout();\n";
-  out << "  if (lhs == INT64_MIN && rhs == -1) throw NativeBailout();\n";
-  out << "  return lhs / rhs;\n";
+  out << "  std::int64_t result = 0;\n";
+  out << "  if (lhs == std::numeric_limits<std::int64_t>::min() && "
+         "rhs == -1) {\n";
+  out << "    if (!native_numeric_resolve(lhs, true, true, &result)) "
+         "throw NativeBailout();\n";
+  out << "    return result;\n";
+  out << "  }\n";
+  out << "  if (!native_numeric_resolve(lhs / rhs, false, true, &result)) "
+         "throw NativeBailout();\n";
+  out << "  return result;\n";
   out << "}\n\n";
-  out << "static std::int64_t checked_shl_int64(std::int64_t lhs, "
+  out << "static std::int64_t profile_floor_div_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  if (rhs == 0) throw NativeBailout();\n";
+  out << "  std::int64_t result = 0;\n";
+  out << "  if (lhs == std::numeric_limits<std::int64_t>::min() && "
+         "rhs == -1) {\n";
+  out << "    if (!native_numeric_resolve(lhs, true, true, &result)) "
+         "throw NativeBailout();\n";
+  out << "    return result;\n";
+  out << "  }\n";
+  out << "  if (!native_numeric_resolve(floor_div_int64(lhs, rhs), false, "
+         "true, &result)) throw NativeBailout();\n";
+  out << "  return result;\n";
+  out << "}\n\n";
+  out << "static std::int64_t profile_shl_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  const std::int64_t shifted = static_cast<std::int64_t>("
          "static_cast<std::uint64_t>(lhs) << rhs);\n";
-  out << "  if ((shifted >> rhs) != lhs) throw NativeBailout();\n";
-  out << "  return shifted;\n";
+  out << "  const bool overflowed = (shifted >> rhs) != lhs;\n";
+  out << "  std::int64_t result = 0;\n";
+  out << "  if (!native_numeric_resolve(shifted, overflowed, lhs >= 0, "
+         "&result)) throw NativeBailout();\n";
+  out << "  return result;\n";
+  out << "}\n\n";
+  out << "static std::int64_t profile_pow_int64(std::int64_t lhs, "
+         "std::int64_t rhs) {\n";
+  out << "  if (rhs < 0) throw NativeBailout();\n";
+  out << "  std::int64_t result = 1;\n";
+  out << "  std::int64_t base = lhs;\n";
+  out << "  std::uint64_t exponent = static_cast<std::uint64_t>(rhs);\n";
+  out << "  bool overflowed = false;\n";
+  out << "  while (exponent > 0) {\n";
+  out << "    if ((exponent & 1U) != 0U && "
+         "__builtin_mul_overflow(result, base, &result)) overflowed = "
+         "true;\n";
+  out << "    exponent >>= 1U;\n";
+  out << "    if (exponent > 0 && __builtin_mul_overflow(base, base, "
+         "&base)) overflowed = true;\n";
+  out << "  }\n";
+  out << "  const bool positive_overflow = "
+         "!(lhs < 0 && (static_cast<std::uint64_t>(rhs) & 1U) != 0U);\n";
+  out << "  if (!native_numeric_resolve(result, overflowed, "
+         "positive_overflow, &result)) throw NativeBailout();\n";
+  out << "  return result;\n";
   out << "}\n\n";
   out << "static std::int64_t bit_xor_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
@@ -4341,6 +4690,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "static_cast<std::uint64_t>(lhs) & "
          "static_cast<std::uint64_t>(rhs));\n";
   out << "}\n\n";
+  out << "    return result;\n";
+  out << "  }\n";
+  out << "  if (!native_numeric_resolve(-value, false, value < 0, "
+         "&result)) throw NativeBailout();\n";
   out << "static std::int64_t bit_or_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  return static_cast<std::int64_t>("
@@ -4378,7 +4731,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "static NativeValue native_unary_minus(const NativeValue &value) "
          "{\n";
   out << "  if (value.tag == NativeValue::Tag::Integer) return "
-         "NativeValue::integer(checked_sub_int64(0, value.scalar_value));\n";
+         "NativeValue::integer(profile_neg_int64(value.scalar_value));\n";
   out << "  if (value.tag == NativeValue::Tag::Float) return "
          "NativeValue::floating(-value.float_value);\n";
   out << "  throw NativeBailout();\n";
@@ -4386,7 +4739,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "static NativeValue native_abs(const NativeValue &value) {\n";
   out << "  if (value.tag == NativeValue::Tag::Integer) {\n";
   out << "    return value.scalar_value < 0 ? "
-         "NativeValue::integer(checked_sub_int64(0, value.scalar_value)) : "
+         "NativeValue::integer(profile_neg_int64(value.scalar_value)) : "
          "value;\n";
   out << "  }\n";
   out << "  if (value.tag == NativeValue::Tag::Float) return "
@@ -5977,6 +6330,9 @@ static std::string native_base64_decode_text(const std::string &text,
     if (pad_count > 2U || normalized.size() % 4U != 0U) throw NativeBailout();
   } else {
     const std::size_t residue = normalized.size() % 4U;
+  } else if (module.tag == NativeValue::Tag::ArgParserModule) {
+    matched = value.tag == NativeValue::Tag::ArgParser ||
+              value.tag == NativeValue::Tag::ArgParserModule;
     if (residue == 1U) throw NativeBailout();
     if (residue != 0U) normalized.append(4U - residue, '=');
   }
@@ -7011,6 +7367,537 @@ static NativeValue native_time_period_unit(const NativeValue &receiver,
     throw NativeBailout();
   }
   if (receiver.tag == NativeValue::Tag::Integer) {
+using NativeArgKwArgs =
+    std::initializer_list<std::pair<std::string, NativeValue>>;
+
+static const NativeValue *native_arg_kw(NativeArgKwArgs kwargs,
+                                        const std::string &name) {
+  for (const auto &entry : kwargs) {
+    if (entry.first == name) return &entry.second;
+  }
+  return nullptr;
+}
+
+static void native_arg_reject_unknown(
+    NativeArgKwArgs kwargs, std::initializer_list<const char *> allowed) {
+  for (const auto &entry : kwargs) {
+    bool ok = false;
+    for (const char *name : allowed) {
+      if (entry.first == name) {
+        ok = true;
+        break;
+      }
+    }
+    if (!ok) throw NativeBailout();
+  }
+}
+
+static bool native_arg_starts_with(const std::string &text,
+                                   const std::string &prefix) {
+  return text.size() >= prefix.size() &&
+         text.compare(0, prefix.size(), prefix) == 0;
+}
+
+static std::string native_arg_lower_ascii(std::string text) {
+  for (char &ch : text) {
+    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+  }
+  return text;
+}
+
+static std::string native_arg_text(const NativeValue &value) {
+  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (value.tag == NativeValue::Tag::Symbol) {
+    return native_symbol_text(value.scalar_value);
+  }
+  throw NativeBailout();
+}
+
+static std::vector<std::string> native_arg_string_list(
+    const NativeValue &value) {
+  std::vector<std::string> out;
+  const NativeList &list = as_list(value);
+  out.reserve(list.items.size());
+  for (const NativeValue &item : list.items) {
+    out.push_back(native_arg_text(item));
+  }
+  return out;
+}
+
+static std::vector<std::pair<std::string, std::string>>
+native_arg_string_map(const NativeValue &value) {
+  std::vector<std::pair<std::string, std::string>> out;
+  const NativeMap &map = as_map(value);
+  out.reserve(map.entries.size());
+  for (const auto &entry : map.entries) {
+    out.push_back({native_key_text(entry.first),
+                   native_arg_text(entry.second)});
+  }
+  return out;
+}
+
+static std::optional<std::string> native_arg_optional_text(
+    NativeArgKwArgs kwargs, const std::string &name) {
+  const NativeValue *value = native_arg_kw(kwargs, name);
+  if (value == nullptr || value->tag == NativeValue::Tag::Null) {
+    return std::nullopt;
+  }
+  return native_arg_text(*value);
+}
+
+static bool native_arg_bool_kw(NativeArgKwArgs kwargs,
+                               const std::string &name, bool fallback) {
+  const NativeValue *value = native_arg_kw(kwargs, name);
+  if (value == nullptr) return fallback;
+  if (value->tag != NativeValue::Tag::Bool) throw NativeBailout();
+  return value->scalar_value != 0;
+}
+
+static NativeArgValueType native_arg_type_kw(NativeArgKwArgs kwargs,
+                                             NativeArgValueType fallback) {
+  const NativeValue *value = native_arg_kw(kwargs, "type");
+  if (value == nullptr) return fallback;
+  switch (value->tag) {
+  case NativeValue::Tag::StrType:
+    return NativeArgValueType::Str;
+  case NativeValue::Tag::IntType:
+    return NativeArgValueType::Int;
+  case NativeValue::Tag::FloatType:
+    return NativeArgValueType::Float;
+  case NativeValue::Tag::BoolType:
+    return NativeArgValueType::Bool;
+  case NativeValue::Tag::SymbolType:
+    return NativeArgValueType::Symbol;
+  default:
+    throw NativeBailout();
+  }
+}
+
+static std::string native_arg_derive_name(const std::string &spelling) {
+  std::size_t offset = 0;
+  while (offset < spelling.size() && spelling[offset] == '-') ++offset;
+  std::string name = spelling.substr(offset);
+  for (char &ch : name) {
+    if (ch == '-') ch = '_';
+  }
+  return name;
+}
+
+static bool native_arg_spelling_valid(const std::string &spelling) {
+  if (spelling.size() < 2U || spelling[0] != '-') return false;
+  if (spelling.find_first_of(" \t\r\n") != std::string::npos) return false;
+  if (native_arg_starts_with(spelling, "--")) {
+    return spelling.size() > 2U && spelling[2] != '-';
+  }
+  return spelling[1] != '-';
+}
+
+static bool native_arg_spelling_used(const NativeArgParser &parser,
+                                     const std::string &spelling) {
+  for (const NativeArgParser::Spec &spec : parser.specs) {
+    for (const std::string &existing : spec.spellings) {
+      if (existing == spelling) return true;
+    }
+    if (spec.kind == NativeArgParser::SpecKind::Flag && spec.negatable &&
+        native_arg_starts_with(spelling, "--no-")) {
+      const std::string positive = "--" + spelling.substr(5);
+      for (const std::string &existing : spec.spellings) {
+        if (existing == positive) return true;
+      }
+    }
+  }
+  return false;
+}
+
+static void native_arg_validate_spelling(const NativeArgParser &parser,
+                                         const std::string &spelling) {
+  if (!native_arg_spelling_valid(spelling)) throw NativeBailout();
+  if (native_arg_spelling_used(parser, spelling)) throw NativeBailout();
+  if ((spelling == "-h" || spelling == "--help") && parser.add_help) {
+    throw NativeBailout();
+  }
+}
+
+static NativeValue native_argparser_new(const NativeValue &module,
+                                        NativeArgKwArgs kwargs) {
+  if (module.tag != NativeValue::Tag::ArgParserModule) throw NativeBailout();
+  native_arg_reject_unknown(kwargs,
+                            {"cmdline", "name", "about", "env", "add_help"});
+  NativeArgParser parser;
+  if (const NativeValue *cmdline = native_arg_kw(kwargs, "cmdline")) {
+    parser.cmdline = native_arg_string_list(*cmdline);
+  }
+  if (auto name = native_arg_optional_text(kwargs, "name")) {
+    parser.name = *name;
+  }
+  if (auto about = native_arg_optional_text(kwargs, "about")) {
+    parser.about = *about;
+  }
+  if (const NativeValue *env = native_arg_kw(kwargs, "env")) {
+    parser.env = native_arg_string_map(*env);
+  }
+  parser.add_help = native_arg_bool_kw(kwargs, "add_help", parser.add_help);
+  return NativeValue::arg_parser(std::move(parser));
+}
+
+static NativeValue native_argparser_named(const NativeValue &receiver,
+                                          const NativeValue &text_value,
+                                          const std::string &selector) {
+  NativeArgParser &parser = as_mutable_arg_parser(receiver);
+  if (selector == "name") {
+    parser.name = native_arg_text(text_value);
+  } else if (selector == "about") {
+    parser.about = native_arg_text(text_value);
+  } else {
+    throw NativeBailout();
+  }
+  return receiver;
+}
+
+static void native_arg_apply_choices(NativeArgParser::Spec *spec,
+                                     NativeArgKwArgs kwargs) {
+  const NativeValue *choices = native_arg_kw(kwargs, "choices");
+  if (choices == nullptr || choices->tag == NativeValue::Tag::Null) return;
+  const NativeList &list = as_list(*choices);
+  spec->has_choices = true;
+  spec->choices = list.items;
+}
+
+static NativeValue native_argparser_option(
+    const NativeValue &receiver, const std::string &selector,
+    std::initializer_list<NativeValue> args, NativeArgKwArgs kwargs) {
+  NativeArgParser &parser = as_mutable_arg_parser(receiver);
+  const bool flag = selector == "flag";
+  native_arg_reject_unknown(kwargs,
+                            {"name", "type", "default", "required",
+                             "choices", "multiple", "env", "negatable"});
+  NativeArgParser::Spec spec;
+  spec.kind = flag ? NativeArgParser::SpecKind::Flag
+                   : NativeArgParser::SpecKind::Option;
+  spec.type = flag ? NativeArgValueType::Bool : NativeArgValueType::Str;
+  for (const NativeValue &arg : args) {
+    if (arg.tag == NativeValue::Tag::Null) continue;
+    const std::string spelling = native_arg_text(arg);
+    native_arg_validate_spelling(parser, spelling);
+    spec.spellings.push_back(spelling);
+  }
+  if (spec.spellings.empty()) throw NativeBailout();
+  if (auto name = native_arg_optional_text(kwargs, "name")) {
+    spec.name = *name;
+  } else {
+    spec.name = native_arg_derive_name(spec.spellings.back());
+  }
+  spec.type = native_arg_type_kw(kwargs, spec.type);
+  spec.required = native_arg_bool_kw(kwargs, "required", false);
+  spec.multiple = native_arg_bool_kw(kwargs, "multiple", false);
+  spec.negatable = flag && native_arg_bool_kw(kwargs, "negatable", false);
+  if (const NativeValue *default_value = native_arg_kw(kwargs, "default")) {
+    spec.has_default = true;
+    spec.default_value = *default_value;
+  }
+  native_arg_apply_choices(&spec, kwargs);
+  if (auto env = native_arg_optional_text(kwargs, "env")) spec.env = *env;
+  parser.specs.push_back(std::move(spec));
+  return receiver;
+}
+
+static NativeValue native_argparser_positional(
+    const NativeValue &receiver, const std::string &selector,
+    const NativeValue &name_value, NativeArgKwArgs kwargs) {
+  NativeArgParser &parser = as_mutable_arg_parser(receiver);
+  const bool rest = selector == "rest";
+  native_arg_reject_unknown(kwargs, {"type", "default", "required",
+                                     "choices", "multiple", "env"});
+  NativeArgParser::Spec spec;
+  spec.kind = rest ? NativeArgParser::SpecKind::Rest
+                   : NativeArgParser::SpecKind::Positional;
+  spec.name = native_arg_text(name_value);
+  spec.type = native_arg_type_kw(kwargs, NativeArgValueType::Str);
+  spec.required = native_arg_bool_kw(kwargs, "required", !rest);
+  spec.multiple = rest || native_arg_bool_kw(kwargs, "multiple", rest);
+  if (const NativeValue *default_value = native_arg_kw(kwargs, "default")) {
+    spec.has_default = true;
+    spec.default_value = *default_value;
+  }
+  native_arg_apply_choices(&spec, kwargs);
+  if (auto env = native_arg_optional_text(kwargs, "env")) spec.env = *env;
+  parser.specs.push_back(std::move(spec));
+  return receiver;
+}
+
+static bool native_arg_parse_bool(const std::string &text, bool *out) {
+  const std::string lowered = native_arg_lower_ascii(text);
+  if (lowered == "true" || lowered == "1" || lowered == "yes" ||
+      lowered == "on") {
+    *out = true;
+    return true;
+  }
+  if (lowered == "false" || lowered == "0" || lowered == "no" ||
+      lowered == "off") {
+    *out = false;
+    return true;
+  }
+  return false;
+}
+
+static NativeValue native_arg_convert(const std::string &text,
+                                      NativeArgValueType type) {
+  switch (type) {
+  case NativeArgValueType::Str:
+    return NativeValue::string_ref(native_intern_string(text));
+  case NativeArgValueType::Int: {
+    char *end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(text.c_str(), &end, 10);
+    if (errno == ERANGE || end == text.c_str() || *end != '\0') {
+      throw NativeBailout();
+    }
+    return NativeValue::integer(static_cast<std::int64_t>(parsed));
+  }
+  case NativeArgValueType::Float: {
+    char *end = nullptr;
+    errno = 0;
+    const double parsed = std::strtod(text.c_str(), &end);
+    if (errno == ERANGE || end == text.c_str() || *end != '\0') {
+      throw NativeBailout();
+    }
+    return NativeValue::floating(parsed);
+  }
+  case NativeArgValueType::Bool: {
+    bool parsed = false;
+    if (!native_arg_parse_bool(text, &parsed)) throw NativeBailout();
+    return NativeValue::boolean(parsed);
+  }
+  case NativeArgValueType::Symbol:
+    return NativeValue::symbol_ref(native_intern_symbol(text));
+  }
+  throw NativeBailout();
+}
+
+static bool native_arg_simple_equal(const NativeValue &lhs,
+                                    const NativeValue &rhs) {
+  if (lhs.tag != rhs.tag) return false;
+  switch (lhs.tag) {
+  case NativeValue::Tag::Null:
+    return true;
+  case NativeValue::Tag::Bool:
+  case NativeValue::Tag::Integer:
+  case NativeValue::Tag::String:
+  case NativeValue::Tag::Symbol:
+    return lhs.scalar_value == rhs.scalar_value;
+  case NativeValue::Tag::Float:
+    return lhs.float_value == rhs.float_value;
+  default:
+    return false;
+  }
+}
+
+static NativeValue native_arg_apply_value(const NativeArgParser::Spec &spec,
+                                          const std::string &raw) {
+  NativeValue value = native_arg_convert(raw, spec.type);
+  if (spec.has_choices) {
+    bool ok = false;
+    for (const NativeValue &choice : spec.choices) {
+      if (native_arg_simple_equal(value, choice)) {
+        ok = true;
+        break;
+      }
+    }
+    if (!ok) throw NativeBailout();
+  }
+  return value;
+}
+
+static void native_arg_set_value(
+    const NativeArgParser::Spec &spec, std::size_t index, NativeValue value,
+    std::vector<NativeValue> *scalar_values,
+    std::vector<std::vector<NativeValue>> *multi_values,
+    std::vector<bool> *seen) {
+  if (spec.multiple) {
+    (*multi_values)[index].push_back(value);
+  } else {
+    (*scalar_values)[index] = value;
+  }
+  (*seen)[index] = true;
+}
+
+static const NativeArgParser::Spec *native_arg_find_option(
+    const NativeArgParser &parser, const std::string &token, bool *negated,
+    std::size_t *index) {
+  *negated = false;
+  for (std::size_t i = 0; i < parser.specs.size(); ++i) {
+    const NativeArgParser::Spec &spec = parser.specs[i];
+    if (spec.kind != NativeArgParser::SpecKind::Option &&
+        spec.kind != NativeArgParser::SpecKind::Flag) {
+      continue;
+    }
+    for (const std::string &spelling : spec.spellings) {
+      if (spelling == token) {
+        *index = i;
+        return &spec;
+      }
+    }
+    if (spec.kind == NativeArgParser::SpecKind::Flag && spec.negatable &&
+        native_arg_starts_with(token, "--no-")) {
+      const std::string positive = "--" + token.substr(5);
+      for (const std::string &spelling : spec.spellings) {
+        if (spelling == positive) {
+          *negated = true;
+          *index = i;
+          return &spec;
+        }
+      }
+    }
+  }
+  return nullptr;
+}
+
+static bool native_arg_env_lookup(const NativeArgParser &parser,
+                                  const std::string &name,
+                                  std::string *out) {
+  for (const auto &entry : parser.env) {
+    if (entry.first == name) {
+      *out = entry.second;
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::vector<std::string> native_arg_cmdline(
+    const NativeArgParser &parser, NativeArgKwArgs kwargs) {
+  const NativeValue *override_value = native_arg_kw(kwargs, "cmdline");
+  if (override_value == nullptr) return parser.cmdline;
+  return native_arg_string_list(*override_value);
+}
+
+static NativeValue native_argparser_parse_or_raise(const NativeValue &receiver,
+                                                   NativeArgKwArgs kwargs) {
+  native_arg_reject_unknown(kwargs, {"cmdline"});
+  const NativeArgParser &parser = as_arg_parser(receiver);
+  const std::vector<std::string> cmdline = native_arg_cmdline(parser, kwargs);
+  for (const std::string &token : cmdline) {
+    if (parser.add_help && (token == "-h" || token == "--help")) {
+      throw NativeBailout();
+    }
+  }
+  std::vector<NativeValue> scalar_values(parser.specs.size(),
+                                         NativeValue::nullv());
+  std::vector<std::vector<NativeValue>> multi_values(parser.specs.size());
+  std::vector<bool> seen(parser.specs.size(), false);
+  std::vector<std::string> positionals;
+  bool parse_options = true;
+  for (std::size_t i = 0; i < cmdline.size(); ++i) {
+    const std::string &token = cmdline[i];
+    if (parse_options && token == "--") {
+      parse_options = false;
+      continue;
+    }
+    if (parse_options && native_arg_starts_with(token, "-") &&
+        token.size() > 1U) {
+      std::string spelling = token;
+      std::string attached_value;
+      const std::size_t equals = token.find('=');
+      if (equals != std::string::npos &&
+          native_arg_starts_with(token, "--")) {
+        spelling = token.substr(0, equals);
+        attached_value = token.substr(equals + 1U);
+      }
+      bool negated = false;
+      std::size_t spec_index = 0;
+      const NativeArgParser::Spec *spec =
+          native_arg_find_option(parser, spelling, &negated, &spec_index);
+      if (spec == nullptr) throw NativeBailout();
+      if (spec->kind == NativeArgParser::SpecKind::Flag) {
+        NativeValue value = NativeValue::boolean(!negated);
+        if (!attached_value.empty()) {
+          bool parsed = false;
+          if (!native_arg_parse_bool(attached_value, &parsed)) {
+            throw NativeBailout();
+          }
+          value = NativeValue::boolean(parsed);
+        }
+        native_arg_set_value(*spec, spec_index, value, &scalar_values,
+                             &multi_values, &seen);
+        continue;
+      }
+      std::string raw_value = attached_value;
+      if (raw_value.empty()) {
+        if (i + 1U >= cmdline.size()) throw NativeBailout();
+        raw_value = cmdline[++i];
+      }
+      native_arg_set_value(*spec, spec_index,
+                           native_arg_apply_value(*spec, raw_value),
+                           &scalar_values, &multi_values, &seen);
+      continue;
+    }
+    positionals.push_back(token);
+  }
+  std::size_t positional_index = 0;
+  bool has_rest = false;
+  for (std::size_t i = 0; i < parser.specs.size(); ++i) {
+    const NativeArgParser::Spec &spec = parser.specs[i];
+    if (spec.kind == NativeArgParser::SpecKind::Positional) {
+      if (positional_index >= positionals.size()) continue;
+      native_arg_set_value(
+          spec, i, native_arg_apply_value(spec, positionals[positional_index]),
+          &scalar_values, &multi_values, &seen);
+      ++positional_index;
+    } else if (spec.kind == NativeArgParser::SpecKind::Rest) {
+      has_rest = true;
+      while (positional_index < positionals.size()) {
+        multi_values[i].push_back(
+            native_arg_apply_value(spec, positionals[positional_index]));
+        ++positional_index;
+      }
+      seen[i] = !multi_values[i].empty();
+    }
+  }
+  if (positional_index < positionals.size() && !has_rest) {
+    throw NativeBailout();
+  }
+  for (std::size_t i = 0; i < parser.specs.size(); ++i) {
+    const NativeArgParser::Spec &spec = parser.specs[i];
+    if (seen[i]) continue;
+    if (!spec.env.empty()) {
+      std::string env_value;
+      if (native_arg_env_lookup(parser, spec.env, &env_value)) {
+        native_arg_set_value(spec, i, native_arg_apply_value(spec, env_value),
+                             &scalar_values, &multi_values, &seen);
+        continue;
+      }
+    }
+    if (spec.has_default) {
+      scalar_values[i] = spec.default_value;
+      seen[i] = true;
+      continue;
+    }
+    if (spec.kind == NativeArgParser::SpecKind::Flag) {
+      scalar_values[i] = NativeValue::boolean(false);
+      seen[i] = true;
+      continue;
+    }
+    if (spec.multiple || spec.kind == NativeArgParser::SpecKind::Rest) {
+      seen[i] = true;
+      continue;
+    }
+    if (spec.required || spec.kind == NativeArgParser::SpecKind::Positional) {
+      throw NativeBailout();
+    }
+  }
+  std::vector<std::pair<std::string, NativeValue>> entries;
+  entries.reserve(parser.specs.size());
+  for (std::size_t i = 0; i < parser.specs.size(); ++i) {
+    const NativeArgParser::Spec &spec = parser.specs[i];
+    if (spec.multiple || spec.kind == NativeArgParser::SpecKind::Rest) {
+      entries.push_back({spec.name, NativeValue::list(std::move(multi_values[i]))});
+    } else {
+      entries.push_back({spec.name, scalar_values[i]});
+    }
+  }
+  return NativeValue::map(std::move(entries));
+}
+
     const std::int64_t scalar = receiver.scalar_value;
     return NativeValue::time_period(NativeTimePeriod{
         native_checked_i128(static_cast<__int128>(scalar) * months_per),
@@ -7219,7 +8106,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "native_time_add(lhs, rhs);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
-         "NativeValue::integer(checked_add_int64(lhs.scalar_value, "
+         "NativeValue::integer(profile_add_int64(lhs.scalar_value, "
          "rhs.scalar_value));\n";
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
          "NativeValue::floating(as_double_numeric(lhs) + "
@@ -7239,18 +8126,100 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "native_time_sub(lhs, rhs);\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
-         "NativeValue::integer(checked_sub_int64(lhs.scalar_value, "
+         "NativeValue::integer(profile_sub_int64(lhs.scalar_value, "
          "rhs.scalar_value));\n";
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
          "NativeValue::floating(as_double_numeric(lhs) - "
          "as_double_numeric(rhs));\n";
+  out << "static NativeValue native_math_send(const NativeValue &module, "
+         "const std::string &selector, "
+         "std::initializer_list<NativeValue> args) {\n";
+  out << "  if (module.tag != NativeValue::Tag::MathModule) "
+         "throw NativeBailout();\n";
+  out << "  const NativeValue *argv = args.begin();\n";
+  out << "  if (selector == \"PI\" && args.size() == 0U) return "
+         "NativeValue::floating(3.141592653589793238462643383279502884);\n";
+  out << "  if (selector == \"E\" && args.size() == 0U) return "
+         "NativeValue::floating(2.718281828459045235360287471352662498);\n";
+  out << "  const auto math_arg = [&](std::size_t index) -> double {\n";
+  out << "    if (index >= args.size() || !numeric_tag(argv[index])) "
+         "throw NativeBailout();\n";
+  out << "    return as_double_numeric(argv[index]);\n";
+  out << "  };\n";
+  out << "  if (selector == \"abs\" && args.size() == 1U) {\n";
+  out << "    const NativeValue &value = argv[0];\n";
+  out << "    if (value.tag == NativeValue::Tag::Integer) {\n";
+  out << "      if (value.scalar_value == "
+         "std::numeric_limits<std::int64_t>::min()) throw NativeBailout();\n";
+  out << "      return value.scalar_value < 0 ? "
+         "NativeValue::integer(-value.scalar_value) : value;\n";
+  out << "    }\n";
+  out << "    return NativeValue::floating(std::fabs(math_arg(0U)));\n";
+  out << "  }\n";
+  out << "  if (selector == \"sign\" && args.size() == 1U) {\n";
+  out << "    const double value = math_arg(0U);\n";
+  out << "    return NativeValue::integer(value > 0.0 ? 1 : "
+         "(value < 0.0 ? -1 : 0));\n";
+  out << "  }\n";
+  out << "  if ((selector == \"min\" || selector == \"max\") && "
+         "args.size() == 2U) {\n";
+  out << "    const double lhs = math_arg(0U);\n";
+  out << "    const double rhs = math_arg(1U);\n";
+  out << "    const bool pick_first = selector == \"min\" ? "
+         "(lhs <= rhs) : (lhs >= rhs);\n";
+  out << "    return pick_first ? argv[0] : argv[1];\n";
+  out << "  }\n";
+  out << "  if ((selector == \"pow\" || selector == \"hypot\" || "
+         "selector == \"atan2\") && args.size() == 2U) {\n";
+  out << "    const double lhs = math_arg(0U);\n";
+  out << "    const double rhs = math_arg(1U);\n";
+  out << "    if (selector == \"pow\") return "
+         "NativeValue::floating(std::pow(lhs, rhs));\n";
+  out << "    if (selector == \"hypot\") return "
+         "NativeValue::floating(std::hypot(lhs, rhs));\n";
+  out << "    return NativeValue::floating(std::atan2(lhs, rhs));\n";
+  out << "  }\n";
+  out << "  if (args.size() != 1U) throw NativeBailout();\n";
+  out << "  const double value = math_arg(0U);\n";
+  out << "  if (selector == \"sqrt\") return "
+         "NativeValue::floating(std::sqrt(value));\n";
+  out << "  if (selector == \"cbrt\") return "
+         "NativeValue::floating(std::cbrt(value));\n";
+  out << "  if (selector == \"exp\") return "
+         "NativeValue::floating(std::exp(value));\n";
+  out << "  if (selector == \"log2\") return "
+         "NativeValue::floating(std::log2(value));\n";
+  out << "  if (selector == \"log10\") return "
+         "NativeValue::floating(std::log10(value));\n";
+  out << "  if (selector == \"sin\") return "
+         "NativeValue::floating(std::sin(value));\n";
+  out << "  if (selector == \"cos\") return "
+         "NativeValue::floating(std::cos(value));\n";
+  out << "  if (selector == \"tan\") return "
+         "NativeValue::floating(std::tan(value));\n";
+  out << "  if (selector == \"asin\") return "
+         "NativeValue::floating(std::asin(value));\n";
+  out << "  if (selector == \"acos\") return "
+         "NativeValue::floating(std::acos(value));\n";
+  out << "  if (selector == \"atan\") return "
+         "NativeValue::floating(std::atan(value));\n";
+  out << "  if (selector == \"floor\") return "
+         "NativeValue::floating(std::floor(value));\n";
+  out << "  if (selector == \"ceil\") return "
+         "NativeValue::floating(std::ceil(value));\n";
+  out << "  if (selector == \"round\") return "
+         "NativeValue::floating(std::round(value));\n";
+  out << "  if (selector == \"trunc\") return "
+         "NativeValue::floating(std::trunc(value));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static NativeValue numeric_mul(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
-         "NativeValue::integer(checked_mul_int64(lhs.scalar_value, "
+         "NativeValue::integer(profile_mul_int64(lhs.scalar_value, "
          "rhs.scalar_value));\n";
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
          "NativeValue::floating(as_double_numeric(lhs) * "
@@ -7263,7 +8232,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "const NativeValue &rhs) {\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
-         "NativeValue::integer(checked_div_int64(lhs.scalar_value, "
+         "NativeValue::integer(profile_div_int64(lhs.scalar_value, "
          "rhs.scalar_value));\n";
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) {\n";
   out << "    const double divisor = as_double_numeric(rhs);\n";
@@ -7293,7 +8262,22 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "const NativeValue &rhs) {\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
-         "NativeValue::integer(floor_div_int64(lhs.scalar_value, "
+  out << "static NativeValue numeric_pow(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) {\n";
+  out << "    if (rhs.scalar_value < 0) return NativeValue::floating("
+         "std::pow(static_cast<double>(lhs.scalar_value), "
+         "static_cast<double>(rhs.scalar_value)));\n";
+  out << "    return NativeValue::integer(profile_pow_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  }\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::floating(std::pow(as_double_numeric(lhs), "
+         "as_double_numeric(rhs)));\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+         "NativeValue::integer(profile_floor_div_int64(lhs.scalar_value, "
          "rhs.scalar_value));\n";
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) {\n";
   out << "    const double divisor = as_double_numeric(rhs);\n";
@@ -7424,6 +8408,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "rhs.tag == NativeValue::Tag::Range || "
          "rhs.tag == NativeValue::Tag::Time || "
          "rhs.tag == NativeValue::Tag::TimePeriod || "
+         "lhs.tag == NativeValue::Tag::MathModule || "
          "rhs.tag == NativeValue::Tag::Closure) throw NativeBailout();\n";
   out << "  bool equal;\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
@@ -7431,18 +8416,21 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "lhs.scalar_value == rhs.scalar_value;\n";
   out << "  else if (numeric_tag(lhs) && numeric_tag(rhs)) equal = "
          "as_double_numeric(lhs) == as_double_numeric(rhs);\n";
+         "lhs.tag == NativeValue::Tag::ArgParserModule || "
   out << "  else if (lhs.tag != rhs.tag) equal = false;\n";
   out << "  else if (lhs.tag == NativeValue::Tag::Null) equal = true;\n";
   out << "  else equal = lhs.scalar_value == rhs.scalar_value;\n";
   out << "  return NativeValue::boolean(negate ? !equal : equal);\n";
   out << "}\n\n";
   out << "static bool native_parse_int_text(const std::string &text, "
+         "lhs.tag == NativeValue::Tag::ArgParser || "
          "std::int64_t *out_value) {\n";
   out << "  if (text.empty()) return false;\n";
   out << "  const char *begin = text.data();\n";
   out << "  const char *end = text.data() + text.size();\n";
   out << "  const auto parsed = std::from_chars(begin, end, *out_value, 10);\n";
   out << "  return parsed.ec == std::errc{} && parsed.ptr == end;\n";
+         "rhs.tag == NativeValue::Tag::MathModule || "
   out << "}\n\n";
   out << "static bool native_parse_float_text(const std::string &text, "
          "double *out_value) {\n";
@@ -7450,12 +8438,14 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  for (unsigned char c : text) {\n";
   out << "    if (std::isspace(c) != 0) return false;\n";
   out << "  }\n";
+         "rhs.tag == NativeValue::Tag::ArgParserModule || "
   out << "  try {\n";
   out << "    std::size_t consumed = 0;\n";
   out << "    const double parsed = std::stod(text, &consumed);\n";
   out << "    if (consumed != text.size()) return false;\n";
   out << "    *out_value = parsed;\n";
   out << "    return true;\n";
+         "rhs.tag == NativeValue::Tag::ArgParser || "
   out << "  } catch (const std::exception &) {\n";
   out << "    return false;\n";
   out << "  }\n";
@@ -7528,6 +8518,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "}\n\n";
   out << "static NativeValue native_to_int(const NativeValue &value) {\n";
   out << "  if (value.tag == NativeValue::Tag::Integer) return value;\n";
+  out << "  case NativeValue::Tag::ArgParser:\n";
   out << "  if (value.tag == NativeValue::Tag::Float) {\n";
   out << "    if (!std::isfinite(value.float_value)) throw NativeBailout();\n";
   out << "    const long double raw = "
@@ -7538,6 +8529,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "throw NativeBailout();\n";
   out << "    const std::int64_t as_int = "
          "static_cast<std::int64_t>(value.float_value);\n";
+  out << "  case NativeValue::Tag::MathModule:\n";
   out << "    if (static_cast<double>(as_int) != value.float_value) "
          "throw NativeBailout();\n";
   out << "    return NativeValue::integer(as_int);\n";
@@ -7545,6 +8537,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  if (value.tag == NativeValue::Tag::String) {\n";
   out << "    std::int64_t parsed = 0;\n";
   out << "    if (!native_parse_int_text(native_string_text(value), &parsed)) "
+  out << "  case NativeValue::Tag::ArgParserModule:\n";
          "throw NativeBailout();\n";
   out << "    return NativeValue::integer(parsed);\n";
   out << "  }\n";
@@ -7922,6 +8915,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "    text << \"]\"; return text.str();\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Tuple: {\n";
+  out << "  case NativeValue::Tag::MathModule: return \"Math\";\n";
   out << "    const auto &items = as_tuple(value).items;\n";
   out << "    std::ostringstream text; text << \"(\";\n";
   out << "    for (std::size_t i = 0; i < items.size(); ++i) {\n";
@@ -7929,6 +8923,7 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "      text << native_value_to_debug_string(items[i]);\n";
   out << "    }\n";
   out << "    text << \")\"; return text.str();\n";
+  out << "  case NativeValue::Tag::ArgParserModule: return \"ArgParser\";\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Set: {\n";
   out << "    const auto &items = as_set(value).items;\n";
@@ -7938,6 +8933,8 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "      text << native_value_to_debug_string(items[i]);\n";
   out << "    }\n";
   out << "    text << \"}\"; return text.str();\n";
+  out << "  case NativeValue::Tag::ArgParser: return "
+         "\"<instance ArgParser>\";\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Map: {\n";
   out << "    const auto &entries = as_map(value).entries;\n";
