@@ -1222,7 +1222,12 @@ bool native_cpp_collection_selector(const std::string &selector,
            selector == "has_index?") &&
           pos_count == 1U) ||
          (selector == "[]=" && pos_count == 2U) ||
-         (selector == "each" && pos_count == 0U) ||
+         ((selector == "each" || selector == "map" ||
+           selector == "select" || selector == "reject" ||
+           selector == "find" || selector == "any?" ||
+           selector == "all?" || selector == "none?") &&
+          pos_count == 0U) ||
+         (selector == "reduce" && (pos_count == 0U || pos_count == 1U)) ||
          ((selector == "count" || selector == "length" || selector == "size" ||
            selector == "empty?" || selector == "bytesize" ||
            selector == "deconstruct" || selector == "to_array" ||
@@ -1507,8 +1512,13 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       const std::size_t block_index = kw_index + 1U + kw_count * 2U;
       const bool no_block = operand_is_no_block(instruction, block_index);
       const bool collection_block_send =
-          selector == "each" && pos_count == 0U && kw_count == 0U &&
-          !no_block;
+          ((selector == "each" || selector == "map" ||
+            selector == "select" || selector == "reject" ||
+            selector == "find" || selector == "any?" ||
+            selector == "all?" || selector == "none?") &&
+           pos_count == 0U && kw_count == 0U && !no_block) ||
+          (selector == "reduce" && (pos_count == 0U || pos_count == 1U) &&
+           kw_count == 0U && !no_block);
       bool json_send = false;
       if ((selector == "to_json" && pos_count == 0U && kw_count == 0U &&
            no_block) ||
@@ -2556,6 +2566,44 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
           out << "  throw NativeBailout();\n";
         } else {
           write_reg_stmt(dst, "native_each(" + read_reg_expr(recv) + ", " +
+                                  read_reg_expr(static_cast<std::uint32_t>(
+                                      block_reg)) +
+                                  ")");
+        }
+      } else if (selector == "map" || selector == "select" ||
+                 selector == "reject" || selector == "find") {
+        if (block_reg < 0) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          write_reg_stmt(dst, "native_sequence_higher_order(" +
+                                  read_reg_expr(recv) + ", " +
+                                  read_reg_expr(static_cast<std::uint32_t>(
+                                      block_reg)) +
+                                  ", native_hex_to_string(\"" +
+                                  string_to_hex_text(selector) + "\"))");
+        }
+      } else if (selector == "any?" || selector == "all?" ||
+                 selector == "none?") {
+        write_reg_stmt(dst, "native_sequence_predicate(" +
+                                read_reg_expr(recv) + ", " +
+                                (block_reg >= 0 ? read_reg_expr(
+                                                      static_cast<std::uint32_t>(
+                                                          block_reg))
+                                                : "NativeValue::nullv()") +
+                                ", " + (block_reg >= 0 ? "true" : "false") +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
+      } else if (selector == "reduce") {
+        if (block_reg < 0) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          write_reg_stmt(dst, "native_sequence_reduce(" +
+                                  read_reg_expr(recv) + ", " +
+                                  (pos_count == 1U
+                                       ? read_reg_expr(arg)
+                                       : "NativeValue::nullv()") +
+                                  ", " + (pos_count == 1U ? "true" : "false") +
+                                  ", " +
                                   read_reg_expr(static_cast<std::uint32_t>(
                                       block_reg)) +
                                   ")");
@@ -4581,6 +4629,11 @@ static NativeValue native_concat(const NativeValue &lhs,
 )AMBERCPP";
   out << R"AMBERCPP(static NativeValue amber_native_call_closure(const NativeValue &value, std::initializer_list<NativeValue> args);
 
+static bool native_truthy(const NativeValue &value) {
+  return value.tag != NativeValue::Tag::Null &&
+         !(value.tag == NativeValue::Tag::Bool && value.scalar_value == 0);
+}
+
 static const std::string &native_key_text(const NativeValue &value) {
   if (value.tag == NativeValue::Tag::String) return native_string_text(value);
   if (value.tag == NativeValue::Tag::Symbol) return native_symbol_text(value.scalar_value);
@@ -4641,14 +4694,92 @@ static NativeValue native_each(const NativeValue &value,
     }
     return value;
   }
-  if (value.tag == NativeValue::Tag::List) {
-    const auto items = as_list(value).items;
+  if (native_is_sequence(value)) {
+    const auto items = native_sequence_items_copy(value);
     for (const NativeValue &item : items) {
       (void)amber_native_call_closure(block_value, {item});
     }
     return value;
   }
   throw NativeBailout();
+}
+
+static NativeValue native_sequence_higher_order(
+    const NativeValue &value, const NativeValue &block_value,
+    const std::string &selector) {
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  if (selector == "map") {
+    std::vector<NativeValue> mapped;
+    mapped.reserve(items.size());
+    for (const NativeValue &item : items) {
+      mapped.push_back(amber_native_call_closure(block_value, {item}));
+    }
+    return NativeValue::list(std::move(mapped));
+  }
+  if (selector == "select" || selector == "reject") {
+    std::vector<NativeValue> filtered;
+    filtered.reserve(items.size());
+    for (const NativeValue &item : items) {
+      const bool keep =
+          native_truthy(amber_native_call_closure(block_value, {item}));
+      if ((selector == "select" && keep) ||
+          (selector == "reject" && !keep)) {
+        filtered.push_back(item);
+      }
+    }
+    return NativeValue::list(std::move(filtered));
+  }
+  if (selector == "find") {
+    for (const NativeValue &item : items) {
+      if (native_truthy(amber_native_call_closure(block_value, {item}))) {
+        return item;
+      }
+    }
+    return NativeValue::nullv();
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_sequence_predicate(
+    const NativeValue &value, const NativeValue &block_value, bool has_block,
+    const std::string &selector) {
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  bool saw_any = false;
+  bool all_match = true;
+  bool any_match = false;
+  for (const NativeValue &item : items) {
+    saw_any = true;
+    const NativeValue predicate =
+        has_block ? amber_native_call_closure(block_value, {item}) : item;
+    const bool truthy = native_truthy(predicate);
+    any_match = any_match || truthy;
+    all_match = all_match && truthy;
+    if ((selector == "any?" && any_match) ||
+        (selector == "all?" && !all_match) ||
+        (selector == "none?" && any_match)) {
+      break;
+    }
+  }
+  if (selector == "any?") return NativeValue::boolean(any_match);
+  if (selector == "all?") return NativeValue::boolean(!saw_any || all_match);
+  if (selector == "none?") return NativeValue::boolean(!any_match);
+  throw NativeBailout();
+}
+
+static NativeValue native_sequence_reduce(
+    const NativeValue &value, const NativeValue &initial_value,
+    bool has_initial, const NativeValue &block_value) {
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  if (items.empty() && !has_initial) throw NativeBailout();
+  NativeValue accumulator =
+      has_initial ? initial_value : (items.empty() ? NativeValue::nullv()
+                                                  : items.front());
+  std::size_t index = has_initial ? 0U : 1U;
+  for (; index < items.size(); ++index) {
+    accumulator =
+        amber_native_call_closure(block_value, {accumulator, items[index]});
+  }
+  return accumulator;
 }
 
 static NativeValue native_index(const NativeValue &value, const NativeValue &key) {

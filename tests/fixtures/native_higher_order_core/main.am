@@ -1,0 +1,48 @@
+package native.higher_order_core
+
+export main
+
+def main():
+  score = 0
+  factor = 10
+  sum = 0
+  [1, 2, 3].each |x|:
+    sum = sum + x
+  if sum == 6:
+    score = score + 1
+  scaled = [1, 2, 3, 4].map |x|: x * factor
+  if scaled[0] == 10 and scaled[3] == 40:
+    score = score + 1
+  evens = scaled.select |x|: x % 20 == 0
+  if evens.count() == 2 and evens[0] == 20 and evens[1] == 40:
+    score = score + 1
+  odds = scaled.reject |x|: x % 20 == 0
+  if odds.count() == 2 and odds[0] == 10 and odds[1] == 30:
+    score = score + 1
+  first_large = scaled.find |x|: x > 25
+  if first_large == 30:
+    score = score + 1
+  total = scaled.reduce(0) |a, b|: a + b
+  if total == 100:
+    score = score + 1
+  folded = [2, 3, 4].reduce |a, b|: a * b
+  if folded == 24:
+    score = score + 1
+  if [false, 0, null].any?() == true and [true, 1, "x"].all?():
+    score = score + 1
+  has_two = [1, 2, 3].any? |x|: x == 2
+  if has_two:
+    score = score + 1
+  all_even = [2, 4, 6].all? |x|: x % 2 == 0
+  if all_even:
+    score = score + 1
+  tuple = (1, 2, 3).map |x|: x + 1
+  if tuple[0] == 2 and tuple[2] == 4:
+    score = score + 1
+  range_sum = (1..4).reduce(0) |a, b|: a + b
+  if range_sum == 10:
+    score = score + 1
+  found = Range.new(2, 8, step: 2).find |x|: x > 4
+  if found == 6:
+    score = score + 1
+  score
