@@ -37,6 +37,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Hex";
   case RuntimeNativeTypeKind::Digest:
     return "Digest";
+  case RuntimeNativeTypeKind::Benchmark:
+    return "Benchmark";
   case RuntimeNativeTypeKind::Url:
     return "Url";
   case RuntimeNativeTypeKind::SecureRandom:

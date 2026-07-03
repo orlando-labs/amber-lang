@@ -1121,6 +1121,14 @@ struct NativeCoverageRecord {
   std::string reason;
 };
 
+struct NativeCppNumericProfile {
+  std::string int_type = "Int64";
+  std::string overflow = "checked";
+  amber::runtime::NumericPolicy policy;
+  bool supported = true;
+  std::string reason;
+};
+
 struct NativeCppBuildPlan {
   std::string source;
   std::set<std::uint32_t> native_code_ids;
@@ -1128,6 +1136,9 @@ struct NativeCppBuildPlan {
   std::vector<NativeCoverageRecord> coverage;
   std::string fallback_reason;
   std::string backend = "cpp-bytecode-direct-v1";
+  std::string numeric_int_type = "Int64";
+  std::string numeric_overflow = "checked";
+  amber::runtime::NumericPolicy numeric_policy;
   bool entry_native = false;
   bool uses_bytecode_fallback = true;
 };
@@ -1155,14 +1166,6 @@ bool operand_u32_value(const amber::bytecode::Instruction &instruction,
     return false;
   }
   const amber::bytecode::InstructionOperand &operand =
-struct NativeCppNumericProfile {
-  std::string int_type = "Int64";
-  std::string overflow = "checked";
-  amber::runtime::NumericPolicy policy;
-  bool supported = true;
-  std::string reason;
-};
-
       instruction.operands[index];
   if (operand.value < 0 || static_cast<std::uint64_t>(operand.value) >
                                static_cast<std::uint64_t>(
@@ -1170,9 +1173,6 @@ struct NativeCppNumericProfile {
     return false;
   }
   *out = static_cast<std::uint32_t>(operand.value);
-  std::string numeric_int_type = "Int64";
-  std::string numeric_overflow = "checked";
-  amber::runtime::NumericPolicy numeric_policy;
   return true;
 }
 
@@ -1194,40 +1194,6 @@ std::string cpp_decimal_i64(std::int64_t value) {
   return "static_cast<std::int64_t>(" + std::to_string(value) + "LL)";
 }
 
-std::string native_cpp_next(std::size_t pc, std::size_t size) {
-  if (pc + 1U < size) {
-    return "goto pc_" + std::to_string(pc + 1U) + ";";
-  }
-  return "throw NativeBailout();";
-}
-
-bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
-                                std::uint32_t symbol_id,
-                                std::string *selector) {
-  if (symbol_id >= module.symbols.size()) {
-    return false;
-  }
-  *selector = module.symbols[symbol_id];
-  return *selector == "+" || *selector == "-" || *selector == "*" ||
-         *selector == "/" || *selector == "%" || *selector == "//" ||
-         *selector == "<" || *selector == ">" || *selector == "<=" ||
-         *selector == ">=" || *selector == "==" || *selector == "!=" ||
-         *selector == "<=>" || *selector == "&" || *selector == "|" ||
-         *selector == "^" || *selector == "<<" || *selector == ">>";
-}
-
-bool native_cpp_scalar_nullary_selector(const std::string &selector) {
-  return selector == "u+" || selector == "u-" || selector == "abs" ||
-         selector == "class";
-}
-
-bool native_cpp_scalar_conversion_selector(const std::string &selector) {
-  return selector == "to_str" || selector == "to_int" ||
-         selector == "to_float" || selector == "to_bool" ||
-         selector == "to_symbol";
-}
-
-bool native_cpp_collection_selector(const std::string &selector,
 std::string cpp_native_i64_expr(std::int64_t value) {
   if (value == std::numeric_limits<std::int64_t>::min()) {
     return "std::numeric_limits<std::int64_t>::min()";
@@ -1285,6 +1251,41 @@ native_cpp_numeric_profile(const amber::bytecode::BcModule &module) {
   return profile;
 }
 
+std::string native_cpp_next(std::size_t pc, std::size_t size) {
+  if (pc + 1U < size) {
+    return "goto pc_" + std::to_string(pc + 1U) + ";";
+  }
+  return "throw NativeBailout();";
+}
+
+bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
+                                std::uint32_t symbol_id,
+                                std::string *selector) {
+  if (symbol_id >= module.symbols.size()) {
+    return false;
+  }
+  *selector = module.symbols[symbol_id];
+  return *selector == "+" || *selector == "-" || *selector == "*" ||
+         *selector == "/" || *selector == "%" || *selector == "//" ||
+         *selector == "**" ||
+         *selector == "<" || *selector == ">" || *selector == "<=" ||
+         *selector == ">=" || *selector == "==" || *selector == "!=" ||
+         *selector == "<=>" || *selector == "&" || *selector == "|" ||
+         *selector == "^" || *selector == "<<" || *selector == ">>";
+}
+
+bool native_cpp_scalar_nullary_selector(const std::string &selector) {
+  return selector == "u+" || selector == "u-" || selector == "abs" ||
+         selector == "class";
+}
+
+bool native_cpp_scalar_conversion_selector(const std::string &selector) {
+  return selector == "to_str" || selector == "to_int" ||
+         selector == "to_float" || selector == "to_bool" ||
+         selector == "to_symbol";
+}
+
+bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
   return ((selector == "[]" || selector == "[]?" ||
            selector == "has_index?") &&
@@ -1301,7 +1302,6 @@ native_cpp_numeric_profile(const amber::bytecode::BcModule &module) {
          ((selector == "count" || selector == "length" || selector == "size" ||
            selector == "empty?" || selector == "bytesize" ||
            selector == "deconstruct" || selector == "to_array" ||
-         *selector == "**" ||
            selector == "keys" || selector == "values" ||
            selector == "entries" ||
            selector == "reversed" || selector == "sorted" ||
@@ -1380,6 +1380,44 @@ bool native_cpp_url_selector(const std::string &selector,
          pos_count == 1U;
 }
 
+bool native_cpp_benchmark_selector(const std::string &selector,
+                                   std::uint32_t pos_count, bool has_block) {
+  if ((selector == "time" || selector == "measure" ||
+       selector == "profile" || selector == "run") &&
+      pos_count <= 1U) {
+    return has_block;
+  }
+  if (selector == "section" && pos_count == 1U) {
+    return has_block;
+  }
+  if (has_block) {
+    return false;
+  }
+  if (selector == "compare") {
+    return pos_count >= 1U;
+  }
+  if (selector == "format" || selector == "table" || selector == "pretty" ||
+      selector == "to_map" || selector == "to_json" || selector == "map") {
+    return pos_count <= 1U;
+  }
+  return (selector == "from_map" || selector == "from_json") && pos_count == 1U;
+}
+
+bool native_cpp_math_selector(const std::string &selector,
+                              std::uint32_t pos_count) {
+  return ((selector == "PI" || selector == "E") && pos_count == 0U) ||
+         ((selector == "abs" || selector == "sign" || selector == "sqrt" ||
+           selector == "cbrt" || selector == "exp" || selector == "log2" ||
+           selector == "log10" || selector == "sin" || selector == "cos" ||
+           selector == "tan" || selector == "asin" || selector == "acos" ||
+           selector == "atan" || selector == "floor" || selector == "ceil" ||
+           selector == "round" || selector == "trunc") &&
+          pos_count == 1U) ||
+         ((selector == "min" || selector == "max" || selector == "pow" ||
+           selector == "hypot" || selector == "atan2") &&
+          pos_count == 2U);
+}
+
 // Eligibility allowlist for the cpp-bytecode-direct backend.
 //
 // INVARIANT (amber.native-backend-equivalence.v1): every opcode/selector
@@ -1414,21 +1452,6 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                                   instruction.opcode == Opcode::IGeK ||
                                   instruction.opcode == Opcode::IEqK ||
                                   instruction.opcode == Opcode::INeK ||
-bool native_cpp_math_selector(const std::string &selector,
-                              std::uint32_t pos_count) {
-  return ((selector == "PI" || selector == "E") && pos_count == 0U) ||
-         ((selector == "abs" || selector == "sign" || selector == "sqrt" ||
-           selector == "cbrt" || selector == "exp" || selector == "log2" ||
-           selector == "log10" || selector == "sin" || selector == "cos" ||
-           selector == "tan" || selector == "asin" || selector == "acos" ||
-           selector == "atan" || selector == "floor" || selector == "ceil" ||
-           selector == "round" || selector == "trunc") &&
-          pos_count == 1U) ||
-         ((selector == "min" || selector == "max" || selector == "pow" ||
-           selector == "hypot" || selector == "atan2") &&
-          pos_count == 2U);
-}
-
                                   instruction.opcode == Opcode::ICmpK ||
                                   instruction.opcode == Opcode::IBitAndK ||
                                   instruction.opcode == Opcode::IBitOrK ||
@@ -1778,43 +1801,44 @@ bool native_cpp_math_selector(const std::string &selector,
       }
       const bool url_send = native_cpp_url_selector(selector, pos_count) &&
                             kw_count == 0U && no_block;
-      if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
-          !json_send && !codec_send && !digest_send && !range_send &&
-          !random_send && !time_send && !uuid_send && !url_send &&
-          !math_send && !argparser_send) {
-        *reason = "unsupported SEND still uses VM fallback";
-        return false;
-      }
-      if (!json_send && !codec_send && !digest_send && !range_send &&
-          !random_send && !time_send && !uuid_send && !url_send &&
-          (kw_count != 0U || (!no_block && !collection_block_send))) {
-        *reason = "keyword/block SEND still uses VM fallback";
-        return false;
-      }
-      break;
-    }
-    default:
-      *reason = "unsupported opcode for direct native C++: " +
-                amber::bytecode::opcode_name(instruction.opcode);
-      return false;
-    }
-  }
-  return true;
-}
-
-// Per-function VM fallback (amber.native-backend-equivalence.v1, step 2).
-//
-// A non-native code object may instead execute through an embedded VM call
-// at runtime — without restarting the whole program — when it provably
-// cannot observe or mutate state shared with the native lane and cannot
-// produce observable effects:
-//   - no captures (cross-function references in this design are captures);
-//   - no closure creation, calls, dynamic sends, or object/class state;
-//   - every send selector is from the pure compute allow-list below.
-// The call site additionally gates at runtime: arguments must be immutable
-// bridge values (null/bool/Int/Float/Uuid) and the result must convert back to
       const bool math_send = native_cpp_math_selector(selector, pos_count) &&
                              kw_count == 0U && no_block;
+      bool benchmark_send =
+          native_cpp_benchmark_selector(selector, pos_count, !no_block);
+      if (benchmark_send) {
+        std::set<std::string> allowed_benchmark_keywords;
+        if (selector == "time" || selector == "measure" ||
+            selector == "profile") {
+          allowed_benchmark_keywords = {"gc"};
+        } else if (selector == "section") {
+          allowed_benchmark_keywords = {"data"};
+        } else if (selector == "run") {
+          allowed_benchmark_keywords = {"iterations", "warmup", "samples",
+                                        "min_time", "gc"};
+        } else if (selector == "format" || selector == "table" ||
+                   selector == "pretty") {
+          allowed_benchmark_keywords = {"layout", "unit", "style", "highlight",
+                                        "sort", "metric"};
+        } else if (selector == "to_map" || selector == "map") {
+          allowed_benchmark_keywords = {"value"};
+        } else if (selector == "to_json") {
+          allowed_benchmark_keywords = {"pretty"};
+        }
+        for (std::uint32_t kw_i = 0; kw_i < kw_count; ++kw_i) {
+          std::uint32_t kw_symbol_id = 0;
+          if (!operand_u32_value(instruction, kw_index + 1U + kw_i * 2U,
+                                 &kw_symbol_id) ||
+              kw_symbol_id >= module.symbols.size()) {
+            *reason = "invalid Benchmark keyword operand";
+            return false;
+          }
+          if (allowed_benchmark_keywords.find(module.symbols[kw_symbol_id]) ==
+              allowed_benchmark_keywords.end()) {
+            *reason = "unsupported Benchmark keyword shape";
+            return false;
+          }
+        }
+      }
       bool argparser_send = false;
       const auto kw_allowed = [&](std::initializer_list<const char *> names) {
         for (std::uint32_t kw_i = 0; kw_i < kw_count; ++kw_i) {
@@ -1859,6 +1883,42 @@ bool native_cpp_math_selector(const std::string &selector,
                  kw_count <= 1U && no_block) {
         argparser_send = kw_allowed({"cmdline"});
       }
+      if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
+          !json_send && !codec_send && !digest_send && !range_send &&
+          !random_send && !time_send && !uuid_send && !url_send &&
+          !math_send && !benchmark_send && !argparser_send) {
+        *reason = "unsupported SEND still uses VM fallback";
+        return false;
+      }
+      if (!json_send && !codec_send && !digest_send && !range_send &&
+          !random_send && !time_send && !uuid_send && !url_send &&
+          !math_send && !benchmark_send && !argparser_send &&
+          (kw_count != 0U || (!no_block && !collection_block_send))) {
+        *reason = "keyword/block SEND still uses VM fallback";
+        return false;
+      }
+      break;
+    }
+    default:
+      *reason = "unsupported opcode for direct native C++: " +
+                amber::bytecode::opcode_name(instruction.opcode);
+      return false;
+    }
+  }
+  return true;
+}
+
+// Per-function VM fallback (amber.native-backend-equivalence.v1, step 2).
+//
+// A non-native code object may instead execute through an embedded VM call
+// at runtime — without restarting the whole program — when it provably
+// cannot observe or mutate state shared with the native lane and cannot
+// produce observable effects:
+//   - no captures (cross-function references in this design are captures);
+//   - no closure creation, calls, dynamic sends, or object/class state;
+//   - every send selector is from the pure compute allow-list below.
+// The call site additionally gates at runtime: arguments must be immutable
+// bridge values (null/bool/Int/Float/Uuid) and the result must convert back to
 // a native value; otherwise the program falls back to the whole-program
 // restart, which stays sound because these functions are effect-free.
 bool native_vm_callable_pure_selector(const std::string &selector) {
@@ -1867,7 +1927,6 @@ bool native_vm_callable_pure_selector(const std::string &selector) {
   // perform IO. Soundness does not actually require it to be non-mutating
   // (a bridged function can only reach scalars and values it constructed
   // itself -- never shared state -- and emits no output before it can bail),
-          !math_send && !argparser_send &&
   // but we keep the list to side-effect-free *value transforms* so it mirrors
   // the runtime's own pure/`!`-mutator split (vm.cpp RFC §7.1/§8.x) and the
   // "pure compute" framing of amber.native-backend-equivalence.v1. The
@@ -2591,6 +2650,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::null_type()";
           } else if (name == "Object") {
             native_module_expr = "NativeValue::object_type()";
+          } else if (name == "Math") {
+            native_module_expr = "NativeValue::math_module()";
           } else if (name == "Json") {
             native_module_expr = "NativeValue::json_module()";
           } else if (name == "Bytes") {
@@ -2603,8 +2664,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::hex_module()";
           } else if (name == "Digest") {
             native_module_expr = "NativeValue::digest_module()";
+          } else if (name == "Benchmark") {
+            native_module_expr = "NativeValue::benchmark_module()";
           } else if (name == "Url") {
             native_module_expr = "NativeValue::url_module()";
+          } else if (name == "ArgParser") {
+            native_module_expr = "NativeValue::argparser_module()";
+          } else if (name == "fs") {
+            native_module_expr = "NativeValue::fs_module()";
           } else if (name == "SecureRandom") {
             native_module_expr = "NativeValue::secure_random_module()";
           } else if (name == "Uuid" || name == "UUID") {
@@ -2625,8 +2692,6 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
-          } else if (name == "Math") {
-            native_module_expr = "NativeValue::math_module()";
     }
     case Opcode::GetLast: {
       std::uint32_t dst = 0;
@@ -2641,8 +2706,6 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       out << "  frame.last = " << read_reg_expr(src) << ";\n";
       out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
       break;
-          } else if (name == "ArgParser") {
-            native_module_expr = "NativeValue::argparser_module()";
     }
     case Opcode::LoadUpval: {
       std::uint32_t dst = 0;
@@ -2778,9 +2841,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         operand_u32_value(instruction, kw_index + 4U, &kw_value_reg2);
       }
       const std::size_t block_index = kw_index + 1U + kw_count * 2U;
-      if (block_index < instruction.operands.size()) {
+      const bool no_block =
+          block_index >= instruction.operands.size() ||
+          operand_is_no_block(instruction, block_index);
+      if (!no_block) {
         block_reg = instruction.operands[block_index].value;
       }
+      const bool has_block = !no_block;
       const std::string selector = module.symbols[symbol_id];
       const auto pos_args_expr = [&](std::uint32_t first_index) {
         std::ostringstream args_expr;
@@ -2876,6 +2943,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
+      } else if (selector == "**") {
+        write_reg_stmt(dst, "numeric_pow(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "<<") {
         out << "  if (as_int(" << read_reg_expr(arg) << ") < 0 || as_int("
             << read_reg_expr(arg) << ") >= 64) throw NativeBailout();\n";
@@ -2896,6 +2966,34 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_abs(" + read_reg_expr(recv) + ")");
       } else if (selector == "class") {
         write_reg_stmt(dst, "native_value_class(" + read_reg_expr(recv) + ")");
+      } else if (native_cpp_benchmark_selector(selector, pos_count,
+                                               has_block)) {
+        write_reg_stmt(dst,
+                       "native_benchmark_send(" + read_reg_expr(recv) +
+                           ", native_hex_to_string(\"" +
+                           string_to_hex_text(selector) + "\"), " +
+                           pos_args_expr(0U) + ", " + kw_args_expr() + ", " +
+                           (has_block
+                                ? read_reg_expr(
+                                      static_cast<std::uint32_t>(block_reg))
+                                : "NativeValue::nullv()") +
+                           ", " + (has_block ? "true" : "false") + ")");
+      } else if (selector == "Path") {
+        write_reg_stmt(dst, "native_fs_path_new(" + read_reg_expr(recv) +
+                                ", " +
+                                (pos_count == 1U ? read_reg_expr(arg)
+                                                  : "NativeValue::nullv()") +
+                                ", " + (pos_count == 1U ? "true" : "false") +
+                                ")");
+      } else if (selector == "/" || selector == "join") {
+        write_reg_stmt(dst, "native_fs_path_join(" + read_reg_expr(recv) +
+                                ", " + pos_args_expr(0U) + ")");
+      } else if (selector == "basename" || selector == "extname" ||
+                 selector == "parent" || selector == "absolute?" ||
+                 selector == "normalize") {
+        write_reg_stmt(dst, "native_fs_path_nullary(" + read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
       } else if (selector == "[]") {
         write_reg_stmt(dst, "native_index(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
@@ -2910,10 +3008,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_has_index(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
       } else if (selector == "each") {
-      } else if (selector == "**") {
-        write_reg_stmt(dst, "numeric_pow(" + read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
-        if (block_reg < 0) {
+        if (!has_block) {
           out << "  throw NativeBailout();\n";
         } else {
           write_reg_stmt(dst, "native_each(" + read_reg_expr(recv) + ", " +
@@ -2925,7 +3020,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                  selector == "reject" || selector == "find" ||
                  selector == "transform_keys" ||
                  selector == "transform_values") {
-        if (block_reg < 0) {
+        if (!has_block) {
           out << "  throw NativeBailout();\n";
         } else {
           write_reg_stmt(dst, "native_sequence_higher_order(" +
@@ -2939,15 +3034,15 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                  selector == "none?") {
         write_reg_stmt(dst, "native_sequence_predicate(" +
                                 read_reg_expr(recv) + ", " +
-                                (block_reg >= 0 ? read_reg_expr(
-                                                      static_cast<std::uint32_t>(
-                                                          block_reg))
-                                                : "NativeValue::nullv()") +
-                                ", " + (block_reg >= 0 ? "true" : "false") +
+                                (has_block ? read_reg_expr(
+                                                 static_cast<std::uint32_t>(
+                                                     block_reg))
+                                           : "NativeValue::nullv()") +
+                                ", " + (has_block ? "true" : "false") +
                                 ", native_hex_to_string(\"" +
                                 string_to_hex_text(selector) + "\"))");
       } else if (selector == "reduce") {
-        if (block_reg < 0) {
+        if (!has_block) {
           out << "  throw NativeBailout();\n";
         } else {
           write_reg_stmt(dst, "native_sequence_reduce(" +
@@ -3225,7 +3320,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                                                : "false") +
                                 ")");
       } else if (selector == "stream_parse_file") {
-        if (block_reg < 0) {
+        if (!has_block) {
           out << "  throw NativeBailout();\n";
         } else {
           write_reg_stmt(
@@ -3254,6 +3349,32 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                      ", " + (kw_count == 1U ? "true" : "false") + ", true)");
       } else if (selector == "uuid") {
         write_reg_stmt(dst, "native_secure_random_uuid(" + read_reg_expr(recv) +
+                                ")");
+      } else if (selector == "new" && pos_count == 0U) {
+        write_reg_stmt(dst, "native_argparser_new(" + read_reg_expr(recv) +
+                                ", " + kw_args_expr() + ")");
+      } else if ((selector == "name" || selector == "about") &&
+                 pos_count == 1U) {
+        write_reg_stmt(dst, "native_argparser_named(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
+      } else if (selector == "arg" || selector == "flag") {
+        write_reg_stmt(dst, "native_argparser_option(" + read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"), " +
+                                pos_args_expr(0U) + ", " + kw_args_expr() +
+                                ")");
+      } else if (selector == "pos" || selector == "rest") {
+        write_reg_stmt(dst, "native_argparser_positional(" +
+                                read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"), " +
+                                read_reg_expr(arg) + ", " + kw_args_expr() +
+                                ")");
+      } else if (selector == "parse_or_raise") {
+        write_reg_stmt(dst, "native_argparser_parse_or_raise(" +
+                                read_reg_expr(recv) + ", " + kw_args_expr() +
                                 ")");
       } else if (selector == "new") {
         if (pos_count == 1U) {
@@ -3289,32 +3410,6 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                   (first_step || second_step ? "true" : "false") + ")");
         }
       } else if (selector == "encode") {
-      } else if (selector == "new" && pos_count == 0U) {
-        write_reg_stmt(dst, "native_argparser_new(" + read_reg_expr(recv) +
-                                ", " + kw_args_expr() + ")");
-      } else if ((selector == "name" || selector == "about") &&
-                 pos_count == 1U) {
-        write_reg_stmt(dst, "native_argparser_named(" + read_reg_expr(recv) +
-                                ", " + read_reg_expr(arg) +
-                                ", native_hex_to_string(\"" +
-                                string_to_hex_text(selector) + "\"))");
-      } else if (selector == "arg" || selector == "flag") {
-        write_reg_stmt(dst, "native_argparser_option(" + read_reg_expr(recv) +
-                                ", native_hex_to_string(\"" +
-                                string_to_hex_text(selector) + "\"), " +
-                                pos_args_expr(0U) + ", " + kw_args_expr() +
-                                ")");
-      } else if (selector == "pos" || selector == "rest") {
-        write_reg_stmt(dst, "native_argparser_positional(" +
-                                read_reg_expr(recv) +
-                                ", native_hex_to_string(\"" +
-                                string_to_hex_text(selector) + "\"), " +
-                                read_reg_expr(arg) + ", " + kw_args_expr() +
-                                ")");
-      } else if (selector == "parse_or_raise") {
-        write_reg_stmt(dst, "native_argparser_parse_or_raise(" +
-                                read_reg_expr(recv) + ", " + kw_args_expr() +
-                                ")");
         write_reg_stmt(dst, "native_codec_encode(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ", " +
                                 (kw_count == 1U ? read_reg_expr(kw_value_reg)
@@ -3956,6 +4051,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include \"runtime/digest.h\"\n";
   out << "#include \"runtime/stdlib_url.h\"\n";
   out << "#include \"runtime/vm.h\"\n\n";
+  out << "#include <algorithm>\n";
   out << "#include <array>\n";
   out << "#include <chrono>\n";
   out << "#include <cerrno>\n";
@@ -3964,7 +4060,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include <cstdint>\n";
   out << "#include <cstring>\n";
   out << "#include <exception>\n";
+  out << "#include <filesystem>\n";
   out << "#include <fstream>\n";
+  out << "#include <iomanip>\n";
   out << "#include <initializer_list>\n";
   out << "#include <iostream>\n";
   out << "#include <limits>\n";
@@ -3992,11 +4090,27 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  const char *what() const noexcept override { return "
          "\"native bailout\"; }\n";
   out << "};\n\n";
+  out << "enum class NativeNumericOverflowMode { Checked, Wrapping, "
+         "Saturating };\n";
+  out << "struct NativeNumericPolicy {\n";
+  out << "  NativeNumericOverflowMode mode = "
+         "NativeNumericOverflowMode::Checked;\n";
+  out << "  std::int64_t min = std::numeric_limits<std::int64_t>::min();\n";
+  out << "  std::int64_t max = std::numeric_limits<std::int64_t>::max();\n";
+  out << "  std::uint32_t bits = 64;\n";
+  out << "};\n";
+  out << "static constexpr NativeNumericPolicy kNativeNumericPolicy{"
+      << native_cpp_numeric_mode_expr(plan.numeric_policy.mode) << ", "
+      << cpp_native_i64_expr(plan.numeric_policy.min) << ", "
+      << cpp_native_i64_expr(plan.numeric_policy.max) << ", "
+      << plan.numeric_policy.bits << "U};\n\n";
   out << "struct NativeList;\n";
   out << "struct NativeTuple;\n";
   out << "struct NativeSet;\n";
   out << "struct NativeMap;\n";
   out << "struct NativeRange;\n";
+  out << "struct NativeArgParser;\n";
+  out << "struct NativeFsPath;\n";
   out << "using NativeTime = amber::runtime::RuntimeTimeValue;\n";
   out << "using NativeTimePeriod = amber::runtime::RuntimeTimePeriodValue;\n";
   out << "using NativeUuid = amber::runtime::RuntimeUuidValue;\n";
@@ -4007,10 +4121,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "StrType, IntType, BigIntType, FloatType, BoolType, SymbolType, "
          "NullType, ObjectType, MathModule, JsonModule, BytesModule, "
          "Base64Module, Base64UrlModule, HexModule, "
-         "DigestModule, UrlModule, ArgParserModule, SecureRandomModule, UuidModule, "
+         "DigestModule, BenchmarkModule, UrlModule, ArgParserModule, FsModule, SecureRandomModule, UuidModule, "
          "RangeModule, TimeModule, "
          "TimePeriodModule, Bytes, List, Tuple, Set, Map, Range, ArgParser, "
-         "Uuid, Time, TimePeriod, Closure };\n";
+         "FsPath, Uuid, Time, TimePeriod, Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
@@ -4026,26 +4140,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue floating(double value) { NativeValue out; "
          "out.tag = Tag::Float; out.float_value = value; return out; }\n";
   out << "  static NativeValue string_ref(std::int64_t string_id) { "
-  out << "enum class NativeNumericOverflowMode { Checked, Wrapping, "
-         "Saturating };\n";
-  out << "struct NativeNumericPolicy {\n";
-  out << "  NativeNumericOverflowMode mode = "
-         "NativeNumericOverflowMode::Checked;\n";
-  out << "  std::int64_t min = std::numeric_limits<std::int64_t>::min();\n";
-  out << "  std::int64_t max = std::numeric_limits<std::int64_t>::max();\n";
-  out << "  std::uint32_t bits = 64;\n";
-  out << "};\n";
-  out << "static constexpr NativeNumericPolicy kNativeNumericPolicy{"
-      << native_cpp_numeric_mode_expr(plan.numeric_policy.mode) << ", "
-      << cpp_native_i64_expr(plan.numeric_policy.min) << ", "
-      << cpp_native_i64_expr(plan.numeric_policy.max) << ", "
-      << plan.numeric_policy.bits << "U};\n\n";
          "NativeValue out; out.tag = Tag::String; out.scalar_value = "
          "string_id; return out; }\n";
   out << "  static NativeValue symbol_ref(std::int64_t symbol_id) { "
          "NativeValue out; out.tag = Tag::Symbol; out.scalar_value = "
          "symbol_id; return out; }\n";
-  out << "struct NativeArgParser;\n";
   out << "  static NativeValue str_type() { NativeValue out; out.tag = "
          "Tag::StrType; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue int_type() { NativeValue out; out.tag = "
@@ -4062,6 +4161,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Tag::NullType; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue object_type() { NativeValue out; out.tag = "
          "Tag::ObjectType; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue math_module() { NativeValue out; out.tag = "
+         "Tag::MathModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue json_module() { NativeValue out; out.tag = "
          "Tag::JsonModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue bytes_module() { NativeValue out; out.tag = "
@@ -4074,8 +4175,15 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Tag::HexModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue digest_module() { NativeValue out; out.tag = "
          "Tag::DigestModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue benchmark_module() { NativeValue out; out.tag = "
+         "Tag::BenchmarkModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue url_module() { NativeValue out; out.tag = "
          "Tag::UrlModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue argparser_module() { NativeValue out; "
+         "out.tag = Tag::ArgParserModule; out.scalar_value = 0; return "
+         "out; }\n";
+  out << "  static NativeValue fs_module() { NativeValue out; "
+         "out.tag = Tag::FsModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue secure_random_module() { NativeValue out; "
          "out.tag = Tag::SecureRandomModule; out.scalar_value = 0; return "
          "out; }\n";
@@ -4096,10 +4204,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "NativeValue>> entries);\n";
   out << "  static NativeValue map_entries("
          "std::vector<std::pair<NativeValue, NativeValue>> entries, "
-  out << "  static NativeValue math_module() { NativeValue out; out.tag = "
-         "Tag::MathModule; out.scalar_value = 0; return out; }\n";
          "bool strict = false);\n";
   out << "  static NativeValue range(NativeRange value);\n";
+  out << "  static NativeValue arg_parser(NativeArgParser value);\n";
+  out << "  static NativeValue fs_path(NativeFsPath value);\n";
   out << "  static NativeValue uuid(amber::runtime::RuntimeUuidValue value);\n";
   out << "  static NativeValue time(amber::runtime::RuntimeTimeValue value);\n";
   out << "  static NativeValue time_period("
@@ -4112,9 +4220,6 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeSet { std::vector<NativeValue> items; };\n";
   out << "struct NativeMap { "
          "std::vector<std::pair<NativeValue, NativeValue>> entries; "
-  out << "  static NativeValue argparser_module() { NativeValue out; "
-         "out.tag = Tag::ArgParserModule; out.scalar_value = 0; return "
-         "out; }\n";
          "bool strict = false; };\n";
   out << "struct NativeRange {\n";
   out << "  std::int64_t start = 0;\n";
@@ -4122,41 +4227,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::int64_t step = 1;\n";
   out << "  bool inclusive_end = true;\n";
   out << "};\n";
-  out << "struct NativeCell { NativeValue value; };\n";
-  out << "struct NativeClosure {\n";
-  out << "  std::uint32_t code_id = 0;\n";
-  out << "  std::vector<NativeCell *> captures;\n";
-  out << "  NativeValue self = NativeValue::nullv();\n";
-  out << "};\n\n";
-  out << "struct NativeArena {\n";
-  out << "  std::vector<std::unique_ptr<NativeBytes>> bytes;\n";
-  out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
-  out << "  std::vector<std::unique_ptr<NativeTuple>> tuples;\n";
-  out << "  std::vector<std::unique_ptr<NativeSet>> sets;\n";
-  out << "  std::vector<std::unique_ptr<NativeMap>> maps;\n";
-  out << "  std::vector<std::unique_ptr<NativeRange>> ranges;\n";
-  out << "  std::vector<std::unique_ptr<NativeUuid>> uuids;\n";
-  out << "  std::vector<std::unique_ptr<NativeTime>> times;\n";
-  out << "  static NativeValue arg_parser(NativeArgParser value);\n";
-  out << "  std::vector<std::unique_ptr<NativeTimePeriod>> periods;\n";
-  out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
-  out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
-  out << "};\n";
-  out << "static NativeArena native_arena;\n\n";
-  out << "NativeValue NativeValue::bytes(std::string value) {\n";
-  out << "  NativeValue out; out.tag = Tag::Bytes;\n";
-  out << "  auto bytes = std::make_unique<NativeBytes>();\n";
-  out << "  bytes->bytes = std::move(value); out.heap_value = bytes.get();\n";
-  out << "  native_arena.bytes.push_back(std::move(bytes)); return out;\n";
-  out << "}\n";
-  out << "NativeValue NativeValue::list(std::vector<NativeValue> items) {\n";
-  out << "  NativeValue out; out.tag = Tag::List;\n";
-  out << "  auto list = std::make_unique<NativeList>();\n";
-  out << "  list->items = std::move(items); out.heap_value = list.get();\n";
-  out << "  native_arena.lists.push_back(std::move(list)); return out;\n";
-  out << "}\n";
-  out << "NativeValue NativeValue::tuple(std::vector<NativeValue> items) {\n";
-  out << "  NativeValue out; out.tag = Tag::Tuple;\n";
+  out << "struct NativeFsPath { std::string path; };\n";
   out << "enum class NativeArgValueType { Str, Int, Float, Bool, Symbol };\n";
   out << "struct NativeArgParser {\n";
   out << "  enum class SpecKind { Option, Flag, Positional, Rest };\n";
@@ -4181,6 +4252,42 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  bool add_help = true;\n";
   out << "  std::vector<Spec> specs;\n";
   out << "};\n";
+  out << "struct NativeCell { NativeValue value; };\n";
+  out << "struct NativeClosure {\n";
+  out << "  std::uint32_t code_id = 0;\n";
+  out << "  std::vector<NativeCell *> captures;\n";
+  out << "  NativeValue self = NativeValue::nullv();\n";
+  out << "};\n\n";
+  out << "struct NativeArena {\n";
+  out << "  std::vector<std::unique_ptr<NativeBytes>> bytes;\n";
+  out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
+  out << "  std::vector<std::unique_ptr<NativeTuple>> tuples;\n";
+  out << "  std::vector<std::unique_ptr<NativeSet>> sets;\n";
+  out << "  std::vector<std::unique_ptr<NativeMap>> maps;\n";
+  out << "  std::vector<std::unique_ptr<NativeRange>> ranges;\n";
+  out << "  std::vector<std::unique_ptr<NativeArgParser>> argparsers;\n";
+  out << "  std::vector<std::unique_ptr<NativeFsPath>> fs_paths;\n";
+  out << "  std::vector<std::unique_ptr<NativeUuid>> uuids;\n";
+  out << "  std::vector<std::unique_ptr<NativeTime>> times;\n";
+  out << "  std::vector<std::unique_ptr<NativeTimePeriod>> periods;\n";
+  out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
+  out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
+  out << "};\n";
+  out << "static NativeArena native_arena;\n\n";
+  out << "NativeValue NativeValue::bytes(std::string value) {\n";
+  out << "  NativeValue out; out.tag = Tag::Bytes;\n";
+  out << "  auto bytes = std::make_unique<NativeBytes>();\n";
+  out << "  bytes->bytes = std::move(value); out.heap_value = bytes.get();\n";
+  out << "  native_arena.bytes.push_back(std::move(bytes)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::list(std::vector<NativeValue> items) {\n";
+  out << "  NativeValue out; out.tag = Tag::List;\n";
+  out << "  auto list = std::make_unique<NativeList>();\n";
+  out << "  list->items = std::move(items); out.heap_value = list.get();\n";
+  out << "  native_arena.lists.push_back(std::move(list)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::tuple(std::vector<NativeValue> items) {\n";
+  out << "  NativeValue out; out.tag = Tag::Tuple;\n";
   out << "  auto tuple = std::make_unique<NativeTuple>();\n";
   out << "  tuple->items = std::move(items); out.heap_value = tuple.get();\n";
   out << "  native_arena.tuples.push_back(std::move(tuple)); return out;\n";
@@ -4194,7 +4301,6 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "NativeValue NativeValue::map_entries("
          "std::vector<std::pair<NativeValue, NativeValue>> entries, "
          "bool strict) {\n";
-  out << "  std::vector<std::unique_ptr<NativeArgParser>> argparsers;\n";
   out << "  NativeValue out; out.tag = Tag::Map;\n";
   out << "  auto map = std::make_unique<NativeMap>();\n";
   out << "  map->entries = std::move(entries); map->strict = strict; "
@@ -4217,6 +4323,18 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  auto range = std::make_unique<NativeRange>(value);\n";
   out << "  out.heap_value = range.get();\n";
   out << "  native_arena.ranges.push_back(std::move(range)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::arg_parser(NativeArgParser value) {\n";
+  out << "  NativeValue out; out.tag = Tag::ArgParser;\n";
+  out << "  auto parser = std::make_unique<NativeArgParser>(std::move(value));\n";
+  out << "  out.heap_value = parser.get();\n";
+  out << "  native_arena.argparsers.push_back(std::move(parser)); return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::fs_path(NativeFsPath value) {\n";
+  out << "  NativeValue out; out.tag = Tag::FsPath;\n";
+  out << "  auto path = std::make_unique<NativeFsPath>(std::move(value));\n";
+  out << "  out.heap_value = path.get();\n";
+  out << "  native_arena.fs_paths.push_back(std::move(path)); return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::uuid(amber::runtime::RuntimeUuidValue "
          "value) {\n";
@@ -4252,12 +4370,6 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  auto cell = std::make_unique<NativeCell>(); cell->value = value;\n";
   out << "  NativeCell *raw = cell.get();\n";
   out << "  native_arena.cells.push_back(std::move(cell)); return raw;\n";
-  out << "NativeValue NativeValue::arg_parser(NativeArgParser value) {\n";
-  out << "  NativeValue out; out.tag = Tag::ArgParser;\n";
-  out << "  auto parser = std::make_unique<NativeArgParser>(std::move(value));\n";
-  out << "  out.heap_value = parser.get();\n";
-  out << "  native_arena.argparsers.push_back(std::move(parser)); return out;\n";
-  out << "}\n";
   out << "}\n\n";
   out << "struct NativeFrame {\n";
   out << "  NativeValue *regs = nullptr;\n";
@@ -4361,6 +4473,24 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeRange *>(value.heap_value);\n";
   out << "}\n";
+  out << "static const NativeArgParser &as_arg_parser("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::ArgParser || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeArgParser *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static NativeArgParser &as_mutable_arg_parser("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::ArgParser || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeArgParser *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static const NativeFsPath &as_fs_path("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::FsPath || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeFsPath *>(value.heap_value);\n";
+  out << "}\n";
   out << "static const NativeUuid &as_uuid(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Uuid || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
@@ -4395,18 +4525,6 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "std::size_t size) {\n";
   out << "  const std::optional<std::size_t> normalized = "
          "native_optional_sequence_index(index, size);\n";
-  out << "static const NativeArgParser &as_arg_parser("
-         "const NativeValue &value) {\n";
-  out << "  if (value.tag != NativeValue::Tag::ArgParser || "
-         "value.heap_value == nullptr) throw NativeBailout();\n";
-  out << "  return *static_cast<NativeArgParser *>(value.heap_value);\n";
-  out << "}\n";
-  out << "static NativeArgParser &as_mutable_arg_parser("
-         "const NativeValue &value) {\n";
-  out << "  if (value.tag != NativeValue::Tag::ArgParser || "
-         "value.heap_value == nullptr) throw NativeBailout();\n";
-  out << "  return *static_cast<NativeArgParser *>(value.heap_value);\n";
-  out << "}\n";
   out << "  if (!normalized.has_value()) throw NativeBailout();\n";
   out << "  return *normalized;\n";
   out << "}\n";
@@ -4515,13 +4633,17 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  case NativeValue::Tag::SymbolType: return \"Symbol\";\n";
   out << "  case NativeValue::Tag::NullType: return \"Null\";\n";
   out << "  case NativeValue::Tag::ObjectType: return \"Object\";\n";
+  out << "  case NativeValue::Tag::MathModule: return \"Math\";\n";
   out << "  case NativeValue::Tag::JsonModule: return \"Json\";\n";
   out << "  case NativeValue::Tag::BytesModule: return \"Bytes\";\n";
   out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
   out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
   out << "  case NativeValue::Tag::HexModule: return \"Hex\";\n";
   out << "  case NativeValue::Tag::DigestModule: return \"Digest\";\n";
+  out << "  case NativeValue::Tag::BenchmarkModule: return \"Benchmark\";\n";
   out << "  case NativeValue::Tag::UrlModule: return \"Url\";\n";
+  out << "  case NativeValue::Tag::ArgParserModule: return \"ArgParser\";\n";
+  out << "  case NativeValue::Tag::FsModule: return \"fs\";\n";
   out << "  case NativeValue::Tag::SecureRandomModule: return "
          "\"SecureRandom\";\n";
   out << "  case NativeValue::Tag::UuidModule: return \"Uuid\";\n";
@@ -4549,7 +4671,6 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (lhs > rhs) return 1;\n";
   out << "  return 0;\n";
   out << "}\n\n";
-  out << "  case NativeValue::Tag::MathModule: return \"Math\";\n";
   out << "static std::int64_t floor_div_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  if (rhs == 0) throw NativeBailout();\n";
@@ -4557,7 +4678,6 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::int64_t quotient = lhs / rhs;\n";
   out << "  const std::int64_t remainder = lhs % rhs;\n";
   out << "  if (remainder != 0 && ((remainder < 0) != (rhs < 0))) "
-  out << "  case NativeValue::Tag::ArgParserModule: return \"ArgParser\";\n";
          "--quotient;\n";
   out << "  return quotient;\n";
   out << "}\n\n";
@@ -4636,6 +4756,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  if (value == std::numeric_limits<std::int64_t>::min()) {\n";
   out << "    if (!native_numeric_resolve(value, true, true, &result)) "
          "throw NativeBailout();\n";
+  out << "    return result;\n";
+  out << "  }\n";
+  out << "  if (!native_numeric_resolve(-value, false, value < 0, "
+         "&result)) throw NativeBailout();\n";
   out << "  return result;\n";
   out << "}\n\n";
   out << "static std::int64_t profile_div_int64(std::int64_t lhs, "
@@ -4709,10 +4833,6 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "static_cast<std::uint64_t>(lhs) & "
          "static_cast<std::uint64_t>(rhs));\n";
   out << "}\n\n";
-  out << "    return result;\n";
-  out << "  }\n";
-  out << "  if (!native_numeric_resolve(-value, false, value < 0, "
-         "&result)) throw NativeBailout();\n";
   out << "static std::int64_t bit_or_int64(std::int64_t lhs, "
          "std::int64_t rhs) {\n";
   out << "  return static_cast<std::int64_t>("
@@ -6315,6 +6435,11 @@ static NativeValue native_type_matches(const NativeValue &module,
               value.tag == NativeValue::Tag::RangeModule;
   } else if (module.tag == NativeValue::Tag::UrlModule) {
     matched = value.tag == NativeValue::Tag::UrlModule;
+  } else if (module.tag == NativeValue::Tag::BenchmarkModule) {
+    matched = value.tag == NativeValue::Tag::BenchmarkModule;
+  } else if (module.tag == NativeValue::Tag::ArgParserModule) {
+    matched = value.tag == NativeValue::Tag::ArgParser ||
+              value.tag == NativeValue::Tag::ArgParserModule;
   } else {
     throw NativeBailout();
   }
@@ -6349,9 +6474,6 @@ static std::string native_base64_decode_text(const std::string &text,
     if (pad_count > 2U || normalized.size() % 4U != 0U) throw NativeBailout();
   } else {
     const std::size_t residue = normalized.size() % 4U;
-  } else if (module.tag == NativeValue::Tag::ArgParserModule) {
-    matched = value.tag == NativeValue::Tag::ArgParser ||
-              value.tag == NativeValue::Tag::ArgParserModule;
     if (residue == 1U) throw NativeBailout();
     if (residue != 0U) normalized.append(4U - residue, '=');
   }
@@ -7369,40 +7491,6 @@ static NativeValue native_parse_value(const NativeValue &module,
   return native_json_parse_value(text_value);
 }
 
-static NativeValue native_time_period_unit(const NativeValue &receiver,
-                                           const std::string &selector) {
-  std::int64_t months_per = 0;
-  std::int64_t days_per = 0;
-  std::int64_t nanos_per = 0;
-  bool calendar = false;
-  if (selector == "nanosecond" || selector == "nanoseconds") {
-    nanos_per = 1;
-  } else if (selector == "microsecond" || selector == "microseconds") {
-    nanos_per = 1000;
-  } else if (selector == "millisecond" || selector == "milliseconds") {
-    nanos_per = 1000000;
-  } else if (selector == "second" || selector == "seconds") {
-    nanos_per = 1000000000;
-  } else if (selector == "minute" || selector == "minutes") {
-    nanos_per = 60LL * 1000000000LL;
-  } else if (selector == "hour" || selector == "hours") {
-    nanos_per = 60LL * 60LL * 1000000000LL;
-  } else if (selector == "day" || selector == "days") {
-    days_per = 1;
-    calendar = true;
-  } else if (selector == "week" || selector == "weeks") {
-    days_per = 7;
-    calendar = true;
-  } else if (selector == "month" || selector == "months") {
-    months_per = 1;
-    calendar = true;
-  } else if (selector == "year" || selector == "years") {
-    months_per = 12;
-    calendar = true;
-  } else {
-    throw NativeBailout();
-  }
-  if (receiver.tag == NativeValue::Tag::Integer) {
 using NativeArgKwArgs =
     std::initializer_list<std::pair<std::string, NativeValue>>;
 
@@ -7934,6 +8022,40 @@ static NativeValue native_argparser_parse_or_raise(const NativeValue &receiver,
   return NativeValue::map(std::move(entries));
 }
 
+static NativeValue native_time_period_unit(const NativeValue &receiver,
+                                           const std::string &selector) {
+  std::int64_t months_per = 0;
+  std::int64_t days_per = 0;
+  std::int64_t nanos_per = 0;
+  bool calendar = false;
+  if (selector == "nanosecond" || selector == "nanoseconds") {
+    nanos_per = 1;
+  } else if (selector == "microsecond" || selector == "microseconds") {
+    nanos_per = 1000;
+  } else if (selector == "millisecond" || selector == "milliseconds") {
+    nanos_per = 1000000;
+  } else if (selector == "second" || selector == "seconds") {
+    nanos_per = 1000000000;
+  } else if (selector == "minute" || selector == "minutes") {
+    nanos_per = 60LL * 1000000000LL;
+  } else if (selector == "hour" || selector == "hours") {
+    nanos_per = 60LL * 60LL * 1000000000LL;
+  } else if (selector == "day" || selector == "days") {
+    days_per = 1;
+    calendar = true;
+  } else if (selector == "week" || selector == "weeks") {
+    days_per = 7;
+    calendar = true;
+  } else if (selector == "month" || selector == "months") {
+    months_per = 1;
+    calendar = true;
+  } else if (selector == "year" || selector == "years") {
+    months_per = 12;
+    calendar = true;
+  } else {
+    throw NativeBailout();
+  }
+  if (receiver.tag == NativeValue::Tag::Integer) {
     const std::int64_t scalar = receiver.scalar_value;
     return NativeValue::time_period(NativeTimePeriod{
         native_checked_i128(static_cast<__int128>(scalar) * months_per),
@@ -8091,6 +8213,52 @@ static NativeValue native_time_compare_value(const NativeValue &lhs,
   throw NativeBailout();
 }
 
+static std::string native_fs_path_text(const NativeValue &value) {
+  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (value.tag == NativeValue::Tag::FsPath) return as_fs_path(value).path;
+  throw NativeBailout();
+}
+
+static NativeValue native_fs_path_new(const NativeValue &module,
+                                      const NativeValue &path_value,
+                                      bool has_path) {
+  if (module.tag != NativeValue::Tag::FsModule || !has_path) {
+    throw NativeBailout();
+  }
+  return NativeValue::fs_path(NativeFsPath{native_fs_path_text(path_value)});
+}
+
+static NativeValue native_fs_path_join(
+    const NativeValue &receiver, std::initializer_list<NativeValue> parts) {
+  if (parts.size() == 0U) throw NativeBailout();
+  std::filesystem::path joined(as_fs_path(receiver).path);
+  for (const NativeValue &part : parts) {
+    joined /= native_fs_path_text(part);
+  }
+  return NativeValue::fs_path(NativeFsPath{joined.string()});
+}
+
+static NativeValue native_fs_path_nullary(const NativeValue &receiver,
+                                          const std::string &selector) {
+  const std::filesystem::path path(as_fs_path(receiver).path);
+  if (selector == "basename") {
+    return NativeValue::string_ref(native_intern_string(path.filename().string()));
+  }
+  if (selector == "extname") {
+    return NativeValue::string_ref(native_intern_string(path.extension().string()));
+  }
+  if (selector == "parent") {
+    return NativeValue::fs_path(NativeFsPath{path.parent_path().string()});
+  }
+  if (selector == "absolute?") {
+    return NativeValue::boolean(path.is_absolute());
+  }
+  if (selector == "normalize") {
+    return NativeValue::fs_path(NativeFsPath{path.lexically_normal().string()});
+  }
+  throw NativeBailout();
+}
+
 static bool native_fs_read_allowed(const std::string &path) {
   for (const auto &grant : embedded_capability_grants()) {
     if (grant.name != "fs.read") continue;
@@ -8133,40 +8301,675 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
 }
 
 )AMBERCPP";
-  out << "static NativeValue numeric_add(const NativeValue &lhs, "
-         "const NativeValue &rhs) {\n";
-  out << "  if (lhs.tag == NativeValue::Tag::Time || "
-         "lhs.tag == NativeValue::Tag::TimePeriod || "
-         "rhs.tag == NativeValue::Tag::Time || "
-         "rhs.tag == NativeValue::Tag::TimePeriod) return "
-         "native_time_add(lhs, rhs);\n";
-  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
-         "rhs.tag == NativeValue::Tag::Integer) return "
-         "NativeValue::integer(profile_add_int64(lhs.scalar_value, "
-         "rhs.scalar_value));\n";
-  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
-         "NativeValue::floating(as_double_numeric(lhs) + "
-         "as_double_numeric(rhs));\n";
-  out << "  if (lhs.tag == NativeValue::Tag::String) return "
-         "native_string_concat(lhs, rhs);\n";
-  out << "  if (native_is_sequence(lhs)) return "
-         "native_sequence_concat(lhs, rhs);\n";
-  out << "  throw NativeBailout();\n";
-  out << "}\n\n";
-  out << "static NativeValue numeric_sub(const NativeValue &lhs, "
-         "const NativeValue &rhs) {\n";
-  out << "  if (lhs.tag == NativeValue::Tag::Time || "
-         "lhs.tag == NativeValue::Tag::TimePeriod || "
-         "rhs.tag == NativeValue::Tag::Time || "
-         "rhs.tag == NativeValue::Tag::TimePeriod) return "
-         "native_time_sub(lhs, rhs);\n";
-  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
-         "rhs.tag == NativeValue::Tag::Integer) return "
-         "NativeValue::integer(profile_sub_int64(lhs.scalar_value, "
-         "rhs.scalar_value));\n";
-  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
-         "NativeValue::floating(as_double_numeric(lhs) - "
-         "as_double_numeric(rhs));\n";
+  out << R"AMBERCPP(
+static constexpr const char *kNativeBenchmarkSchema = "amber.benchmark.v1";
+static constexpr const char *kNativeBenchmarkProfilerSchema =
+    "amber.benchmark.profiler.v1";
+
+struct NativeBenchmarkProfileSpan {
+  std::string label;
+  NativeValue data = NativeValue::nullv();
+  std::int64_t elapsed_ns = 0;
+  std::int64_t self_ns = 0;
+  std::int64_t parent = -1;
+  std::int64_t depth = 0;
+  std::vector<std::size_t> children;
+};
+
+struct NativeBenchmarkProfileState {
+  std::int64_t id = 0;
+  std::vector<NativeBenchmarkProfileSpan> spans;
+  std::vector<std::size_t> stack;
+};
+
+static thread_local std::int64_t native_benchmark_next_profile_id = 1;
+static thread_local std::vector<NativeBenchmarkProfileState *>
+    native_benchmark_profiles;
+
+static std::int64_t native_benchmark_now_ns() {
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+}
+
+static NativeValue native_benchmark_string(const std::string &text) {
+  return NativeValue::string_ref(native_intern_string(text));
+}
+
+static std::string native_benchmark_text(const NativeValue &value) {
+  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (value.tag == NativeValue::Tag::Symbol) {
+    return native_symbol_text(value.scalar_value);
+  }
+  if (value.tag == NativeValue::Tag::Null) return "";
+  throw NativeBailout();
+}
+
+static const NativeValue *native_benchmark_kw(
+    const std::vector<std::pair<std::string, NativeValue>> &kwargs,
+    const std::string &name) {
+  for (const auto &entry : kwargs) {
+    if (entry.first == name) return &entry.second;
+  }
+  return nullptr;
+}
+
+static bool native_benchmark_bool_kw(
+    const std::vector<std::pair<std::string, NativeValue>> &kwargs,
+    const std::string &name, bool fallback) {
+  const NativeValue *value = native_benchmark_kw(kwargs, name);
+  if (value == nullptr) return fallback;
+  if (value->tag != NativeValue::Tag::Bool) throw NativeBailout();
+  return value->scalar_value != 0;
+}
+
+static std::int64_t native_benchmark_int_kw(
+    const std::vector<std::pair<std::string, NativeValue>> &kwargs,
+    const std::string &name, std::int64_t fallback, std::int64_t min_value) {
+  const NativeValue *value = native_benchmark_kw(kwargs, name);
+  if (value == nullptr) return fallback;
+  if (value->tag != NativeValue::Tag::Integer ||
+      value->scalar_value < min_value) {
+    throw NativeBailout();
+  }
+  return value->scalar_value;
+}
+
+static std::int64_t native_benchmark_period_kw_ns(
+    const std::vector<std::pair<std::string, NativeValue>> &kwargs,
+    const std::string &name) {
+  const NativeValue *value = native_benchmark_kw(kwargs, name);
+  if (value == nullptr || value->tag == NativeValue::Tag::Null) return 0;
+  if (value->tag != NativeValue::Tag::TimePeriod) throw NativeBailout();
+  const NativeTimePeriod &period = as_time_period(*value);
+  if (period.months != 0) throw NativeBailout();
+  const __int128 ns =
+      static_cast<__int128>(period.days) * 86400 * 1000000000 +
+      period.nanoseconds;
+  return native_checked_i128(ns < 0 ? 0 : ns);
+}
+
+static std::string native_benchmark_format_decimal(double value,
+                                                   int precision = 2) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(precision) << value;
+  return out.str();
+}
+
+static std::string native_benchmark_format_ns(std::int64_t ns,
+                                              std::string unit = "auto") {
+  const double value = static_cast<double>(ns);
+  if (unit == "auto") {
+    const double abs_value = std::fabs(value);
+    if (abs_value < 1000.0) unit = "ns";
+    else if (abs_value < 1000000.0) unit = "us";
+    else if (abs_value < 1000000000.0) unit = "ms";
+    else unit = "s";
+  }
+  if (unit == "ns") return std::to_string(ns) + " ns";
+  if (unit == "us") return native_benchmark_format_decimal(value / 1000.0, 3) + " us";
+  if (unit == "ms") return native_benchmark_format_decimal(value / 1000000.0, 3) + " ms";
+  if (unit == "s") return native_benchmark_format_decimal(value / 1000000000.0, 3) + " s";
+  throw NativeBailout();
+}
+
+static NativeValue native_benchmark_map(
+    std::initializer_list<std::pair<std::string, NativeValue>> entries) {
+  return NativeValue::map(std::vector<std::pair<std::string, NativeValue>>(
+      entries.begin(), entries.end()));
+}
+
+static const NativeValue *native_benchmark_map_get(const NativeValue &map,
+                                                   const std::string &key) {
+  if (map.tag != NativeValue::Tag::Map) return nullptr;
+  for (const auto &entry : as_map(map).entries) {
+    if (native_key_text(entry.first) == key) return &entry.second;
+  }
+  return nullptr;
+}
+
+static bool native_benchmark_has_schema(const NativeValue &value,
+                                        const std::string &schema) {
+  const NativeValue *raw = native_benchmark_map_get(value, "schema");
+  return raw != nullptr && raw->tag == NativeValue::Tag::String &&
+         native_string_text(*raw) == schema;
+}
+
+static std::string native_benchmark_kind(const NativeValue &result) {
+  if (!native_benchmark_has_schema(result, kNativeBenchmarkSchema)) {
+    throw NativeBailout();
+  }
+  const NativeValue *kind = native_benchmark_map_get(result, "kind");
+  if (kind == nullptr || kind->tag != NativeValue::Tag::String) {
+    throw NativeBailout();
+  }
+  return native_string_text(*kind);
+}
+
+static const NativeValue &native_benchmark_data(const NativeValue &result) {
+  const NativeValue *data = native_benchmark_map_get(result, "data");
+  if (data == nullptr || data->tag != NativeValue::Tag::Map) {
+    throw NativeBailout();
+  }
+  return *data;
+}
+
+static std::int64_t native_benchmark_int_field(const NativeValue &map,
+                                               const std::string &key) {
+  const NativeValue *value = native_benchmark_map_get(map, key);
+  if (value == nullptr) return 0;
+  if (value->tag != NativeValue::Tag::Integer) throw NativeBailout();
+  return value->scalar_value;
+}
+
+static double native_benchmark_float_field(const NativeValue &map,
+                                           const std::string &key) {
+  const NativeValue *value = native_benchmark_map_get(map, key);
+  if (value == nullptr) return 0.0;
+  if (value->tag == NativeValue::Tag::Float) return value->float_value;
+  if (value->tag == NativeValue::Tag::Integer) {
+    return static_cast<double>(value->scalar_value);
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_benchmark_sanitize(const NativeValue &result) {
+  (void)native_benchmark_kind(result);
+  std::vector<std::pair<NativeValue, NativeValue>> entries;
+  for (const auto &entry : as_map(result).entries) {
+    if (native_key_text(entry.first) == "value") continue;
+    entries.push_back(entry);
+  }
+  return NativeValue::map_entries(std::move(entries), as_map(result).strict);
+}
+
+static NativeValue native_benchmark_result(
+    const std::string &kind, const NativeValue &label, const NativeValue &data,
+    const NativeValue &value, bool include_value) {
+  std::vector<std::pair<std::string, NativeValue>> entries{
+      {"schema", native_benchmark_string(kNativeBenchmarkSchema)},
+      {"kind", native_benchmark_string(kind)},
+      {"label", label},
+      {"data", data},
+  };
+  if (include_value) entries.push_back({"value", value});
+  return NativeValue::map(std::move(entries));
+}
+
+static NativeValue native_benchmark_label_arg(
+    const std::vector<NativeValue> &args) {
+  if (args.empty() || args[0].tag == NativeValue::Tag::Null) {
+    return NativeValue::nullv();
+  }
+  return native_benchmark_string(native_benchmark_text(args[0]));
+}
+
+static NativeValue native_benchmark_measurement(
+    const NativeValue &label, std::int64_t elapsed_ns,
+    const NativeValue &value, const std::string &kind) {
+  NativeValue data = native_benchmark_map({
+      {"elapsed_ns", NativeValue::integer(elapsed_ns)},
+      {"elapsed_text", native_benchmark_string(native_benchmark_format_ns(elapsed_ns))},
+      {"iterations", NativeValue::integer(1)},
+  });
+  return native_benchmark_result(kind, label, data, value, true);
+}
+
+static NativeValue native_benchmark_time_period(std::int64_t ns) {
+  NativeTimePeriod period;
+  period.nanoseconds = ns;
+  return NativeValue::time_period(period);
+}
+
+static std::size_t native_benchmark_percentile_index(std::size_t size,
+                                                     double percentile) {
+  if (size == 0U) return 0U;
+  const double rank = std::ceil(percentile * static_cast<double>(size));
+  const std::size_t index =
+      static_cast<std::size_t>(std::max(1.0, rank)) - 1U;
+  return std::min(index, size - 1U);
+}
+
+static NativeValue native_benchmark_report(
+    const NativeValue &label, std::int64_t iterations,
+    const std::vector<std::int64_t> &sample_ns) {
+  std::int64_t elapsed = 0;
+  std::vector<std::int64_t> per_iter;
+  for (std::int64_t ns : sample_ns) {
+    elapsed = native_checked_i128(static_cast<__int128>(elapsed) + ns);
+    per_iter.push_back(ns / std::max<std::int64_t>(1, iterations));
+  }
+  std::vector<std::int64_t> sorted = per_iter;
+  std::sort(sorted.begin(), sorted.end());
+  const std::int64_t min_ns = sorted.empty() ? 0 : sorted.front();
+  const std::int64_t max_ns = sorted.empty() ? 0 : sorted.back();
+  const std::int64_t total_iterations =
+      iterations * static_cast<std::int64_t>(sample_ns.size());
+  const std::int64_t mean_ns =
+      total_iterations <= 0 ? 0 : elapsed / std::max<std::int64_t>(1, total_iterations);
+  const auto percentile = [&](double p) {
+    return sorted.empty() ? 0 : sorted[native_benchmark_percentile_index(sorted.size(), p)];
+  };
+  const double seconds = static_cast<double>(elapsed) / 1000000000.0;
+  const double ops = seconds <= 0.0 ? 0.0 : static_cast<double>(total_iterations) / seconds;
+  std::vector<NativeValue> samples;
+  for (std::int64_t ns : sample_ns) samples.push_back(NativeValue::integer(ns));
+  NativeValue data = native_benchmark_map({
+      {"iterations", NativeValue::integer(total_iterations)},
+      {"iterations_per_sample", NativeValue::integer(iterations)},
+      {"samples", NativeValue::integer(static_cast<std::int64_t>(sample_ns.size()))},
+      {"elapsed_ns", NativeValue::integer(elapsed)},
+      {"elapsed_text", native_benchmark_string(native_benchmark_format_ns(elapsed))},
+      {"per_iteration_ns", NativeValue::integer(mean_ns)},
+      {"mean_ns", NativeValue::integer(mean_ns)},
+      {"min_ns", NativeValue::integer(min_ns)},
+      {"max_ns", NativeValue::integer(max_ns)},
+      {"p50_ns", NativeValue::integer(percentile(0.50))},
+      {"p90_ns", NativeValue::integer(percentile(0.90))},
+      {"p95_ns", NativeValue::integer(percentile(0.95))},
+      {"p99_ns", NativeValue::integer(percentile(0.99))},
+      {"ops_per_second", NativeValue::floating(ops)},
+      {"sample_ns", NativeValue::list(std::move(samples))},
+  });
+  return native_benchmark_result("report", label, data, NativeValue::nullv(), false);
+}
+
+static NativeValue native_benchmark_profiler_map(std::int64_t id) {
+  return native_benchmark_map({
+      {"schema", native_benchmark_string(kNativeBenchmarkProfilerSchema)},
+      {"id", NativeValue::integer(id)},
+  });
+}
+
+static NativeBenchmarkProfileState *native_benchmark_active_profile(
+    const NativeValue &profiler) {
+  if (native_benchmark_profiles.empty() ||
+      !native_benchmark_has_schema(profiler, kNativeBenchmarkProfilerSchema)) {
+    throw NativeBailout();
+  }
+  const NativeValue *id = native_benchmark_map_get(profiler, "id");
+  if (id == nullptr || id->tag != NativeValue::Tag::Integer) {
+    throw NativeBailout();
+  }
+  NativeBenchmarkProfileState *state = native_benchmark_profiles.back();
+  if (state == nullptr || state->id != id->scalar_value) throw NativeBailout();
+  return state;
+}
+
+static void native_benchmark_finalize_profile(NativeBenchmarkProfileState *state) {
+  for (NativeBenchmarkProfileSpan &span : state->spans) {
+    std::int64_t children_ns = 0;
+    for (std::size_t child : span.children) {
+      children_ns = native_checked_i128(static_cast<__int128>(children_ns) +
+                                        state->spans[child].elapsed_ns);
+    }
+    span.self_ns = std::max<std::int64_t>(0, span.elapsed_ns - children_ns);
+  }
+}
+
+static NativeValue native_benchmark_span_map(
+    const NativeBenchmarkProfileState &state, std::size_t index) {
+  const NativeBenchmarkProfileSpan &span = state.spans[index];
+  std::vector<NativeValue> children;
+  for (std::size_t child : span.children) {
+    children.push_back(native_benchmark_span_map(state, child));
+  }
+  return native_benchmark_map({
+      {"label", native_benchmark_string(span.label)},
+      {"data", span.data},
+      {"elapsed_ns", NativeValue::integer(span.elapsed_ns)},
+      {"elapsed_text", native_benchmark_string(native_benchmark_format_ns(span.elapsed_ns))},
+      {"self_ns", NativeValue::integer(span.self_ns)},
+      {"self_text", native_benchmark_string(native_benchmark_format_ns(span.self_ns))},
+      {"depth", NativeValue::integer(span.depth)},
+      {"parent_index", NativeValue::integer(span.parent)},
+      {"children", NativeValue::list(std::move(children))},
+  });
+}
+
+static NativeValue native_benchmark_profile_spans(
+    const NativeBenchmarkProfileState &state) {
+  std::vector<NativeValue> spans;
+  for (std::size_t i = 0; i < state.spans.size(); ++i) {
+    spans.push_back(native_benchmark_span_map(state, i));
+  }
+  return NativeValue::list(std::move(spans));
+}
+
+static NativeValue native_benchmark_profile_summary(
+    const NativeBenchmarkProfileState &state) {
+  struct Row {
+    std::string label;
+    std::int64_t count = 0;
+    std::int64_t total_ns = 0;
+    std::int64_t self_ns = 0;
+    std::int64_t min_ns = std::numeric_limits<std::int64_t>::max();
+    std::int64_t max_ns = 0;
+  };
+  std::vector<Row> rows;
+  for (const NativeBenchmarkProfileSpan &span : state.spans) {
+    auto it = std::find_if(rows.begin(), rows.end(), [&](const Row &row) {
+      return row.label == span.label;
+    });
+    if (it == rows.end()) {
+      rows.push_back(Row{span.label});
+      it = rows.end() - 1;
+    }
+    it->count += 1;
+    it->total_ns = native_checked_i128(static_cast<__int128>(it->total_ns) +
+                                       span.elapsed_ns);
+    it->self_ns = native_checked_i128(static_cast<__int128>(it->self_ns) +
+                                      span.self_ns);
+    it->min_ns = std::min(it->min_ns, span.elapsed_ns);
+    it->max_ns = std::max(it->max_ns, span.elapsed_ns);
+  }
+  std::vector<NativeValue> out;
+  for (const Row &row : rows) {
+    const std::int64_t mean =
+        row.count <= 0 ? 0 : row.total_ns / std::max<std::int64_t>(1, row.count);
+    const std::int64_t min_ns =
+        row.min_ns == std::numeric_limits<std::int64_t>::max() ? 0 : row.min_ns;
+    out.push_back(native_benchmark_map({
+        {"label", native_benchmark_string(row.label)},
+        {"count", NativeValue::integer(row.count)},
+        {"total_ns", NativeValue::integer(row.total_ns)},
+        {"self_ns", NativeValue::integer(row.self_ns)},
+        {"mean_ns", NativeValue::integer(mean)},
+        {"min_ns", NativeValue::integer(min_ns)},
+        {"max_ns", NativeValue::integer(row.max_ns)},
+    }));
+  }
+  return NativeValue::list(std::move(out));
+}
+
+static NativeValue native_benchmark_compare(const std::vector<NativeValue> &args) {
+  std::vector<NativeValue> reports;
+  if (args.size() == 1U && args[0].tag == NativeValue::Tag::List) {
+    reports = as_list(args[0]).items;
+  } else {
+    reports = args;
+  }
+  if (reports.empty()) throw NativeBailout();
+  std::int64_t fastest = std::numeric_limits<std::int64_t>::max();
+  std::int64_t slowest = std::numeric_limits<std::int64_t>::min();
+  std::size_t fastest_index = 0;
+  std::size_t slowest_index = 0;
+  std::vector<NativeValue> clean;
+  for (std::size_t i = 0; i < reports.size(); ++i) {
+    if (native_benchmark_kind(reports[i]) != "report") throw NativeBailout();
+    const NativeValue &data = native_benchmark_data(reports[i]);
+    const std::int64_t mean = native_benchmark_int_field(data, "mean_ns");
+    if (mean < fastest) { fastest = mean; fastest_index = i; }
+    if (mean > slowest) { slowest = mean; slowest_index = i; }
+    clean.push_back(native_benchmark_sanitize(reports[i]));
+  }
+  std::vector<NativeValue> relative;
+  for (std::size_t i = 0; i < reports.size(); ++i) {
+    const NativeValue &data = native_benchmark_data(reports[i]);
+    std::string label = "case " + std::to_string(i + 1U);
+    if (const NativeValue *raw = native_benchmark_map_get(reports[i], "label")) {
+      if (raw->tag == NativeValue::Tag::String) label = native_string_text(*raw);
+    }
+    const std::int64_t mean = native_benchmark_int_field(data, "mean_ns");
+    relative.push_back(native_benchmark_map({
+        {"label", native_benchmark_string(label)},
+        {"mean_ns", NativeValue::integer(mean)},
+        {"ratio_to_fastest", NativeValue::floating(
+            fastest <= 0 ? 1.0 : static_cast<double>(mean) / static_cast<double>(fastest))},
+    }));
+  }
+  NativeValue data = native_benchmark_map({
+      {"cases", NativeValue::list(std::move(clean))},
+      {"fastest_index", NativeValue::integer(static_cast<std::int64_t>(fastest_index))},
+      {"slowest_index", NativeValue::integer(static_cast<std::int64_t>(slowest_index))},
+      {"relative", NativeValue::list(std::move(relative))},
+  });
+  return native_benchmark_result("compare_report", NativeValue::nullv(), data,
+                                 NativeValue::nullv(), false);
+}
+
+static std::string native_benchmark_label(const NativeValue &result,
+                                          std::size_t index) {
+  const NativeValue *label = native_benchmark_map_get(result, "label");
+  if (label != nullptr && label->tag == NativeValue::Tag::String) {
+    return native_string_text(*label);
+  }
+  return "case " + std::to_string(index + 1U);
+}
+
+static NativeValue native_benchmark_format(
+    const NativeValue &result,
+    const std::vector<std::pair<std::string, NativeValue>> &kwargs,
+    const std::string &default_layout) {
+  (void)default_layout;
+  const std::string unit = native_benchmark_kw(kwargs, "unit") == nullptr
+                               ? "auto"
+                               : native_benchmark_text(*native_benchmark_kw(kwargs, "unit"));
+  const std::string style = native_benchmark_kw(kwargs, "style") == nullptr
+                                ? "plain"
+                                : native_benchmark_text(*native_benchmark_kw(kwargs, "style"));
+  const std::string highlight = native_benchmark_kw(kwargs, "highlight") == nullptr
+                                    ? "none"
+                                    : native_benchmark_text(*native_benchmark_kw(kwargs, "highlight"));
+  const std::string kind = native_benchmark_kind(result);
+  std::ostringstream out;
+  if (kind == "measurement") {
+    const NativeValue &data = native_benchmark_data(result);
+    out << "label | elapsed\n"
+        << native_benchmark_label(result, 0) << " | "
+        << native_benchmark_format_ns(
+               native_benchmark_int_field(data, "elapsed_ns"), unit);
+  } else if (kind == "report") {
+    const NativeValue &data = native_benchmark_data(result);
+    out << "case | iterations | mean | p95 | ops/s\n"
+        << native_benchmark_label(result, 0) << " | "
+        << native_benchmark_int_field(data, "iterations") << " | "
+        << native_benchmark_format_ns(native_benchmark_int_field(data, "mean_ns"), unit) << " | "
+        << native_benchmark_format_ns(native_benchmark_int_field(data, "p95_ns"), unit) << " | "
+        << native_benchmark_format_decimal(native_benchmark_float_field(data, "ops_per_second"));
+  } else if (kind == "compare_report") {
+    const NativeValue &data = native_benchmark_data(result);
+    const NativeValue *cases_value = native_benchmark_map_get(data, "cases");
+    if (cases_value == nullptr || cases_value->tag != NativeValue::Tag::List) {
+      throw NativeBailout();
+    }
+    const auto &cases = as_list(*cases_value).items;
+    const std::int64_t fastest_index =
+        native_benchmark_int_field(data, "fastest_index");
+    std::int64_t fastest_mean = 0;
+    if (fastest_index >= 0 && static_cast<std::size_t>(fastest_index) < cases.size()) {
+      fastest_mean = native_benchmark_int_field(
+          native_benchmark_data(cases[static_cast<std::size_t>(fastest_index)]), "mean_ns");
+    }
+    out << "case | iterations | mean | p95 | ops/s | relative";
+    for (std::size_t i = 0; i < cases.size(); ++i) {
+      const NativeValue &case_data = native_benchmark_data(cases[i]);
+      std::ostringstream row;
+      const std::int64_t mean = native_benchmark_int_field(case_data, "mean_ns");
+      const double ratio = fastest_mean <= 0
+                               ? 1.0
+                               : static_cast<double>(mean) / static_cast<double>(fastest_mean);
+      row << native_benchmark_label(cases[i], i) << " | "
+          << native_benchmark_int_field(case_data, "iterations") << " | "
+          << native_benchmark_format_ns(mean, unit) << " | "
+          << native_benchmark_format_ns(native_benchmark_int_field(case_data, "p95_ns"), unit) << " | "
+          << native_benchmark_format_decimal(native_benchmark_float_field(case_data, "ops_per_second")) << " | "
+          << native_benchmark_format_decimal(ratio) << "x";
+      const bool bold = (style == "ansi" || style == "xterm") &&
+                        highlight == "best" &&
+                        static_cast<std::int64_t>(i) == fastest_index;
+      out << "\n" << (bold ? "\x1b[1m" : "") << row.str()
+          << (bold ? "\x1b[22m" : "");
+    }
+  } else if (kind == "profile") {
+    const NativeValue &data = native_benchmark_data(result);
+    const NativeValue *summary = native_benchmark_map_get(data, "summary");
+    if (summary != nullptr && summary->tag == NativeValue::Tag::List &&
+        !as_list(*summary).items.empty()) {
+      out << "section | count | total | self | mean | max";
+      for (const NativeValue &row : as_list(*summary).items) {
+        out << "\n"
+            << native_benchmark_text(*native_benchmark_map_get(row, "label")) << " | "
+            << native_benchmark_int_field(row, "count") << " | "
+            << native_benchmark_format_ns(native_benchmark_int_field(row, "total_ns"), unit) << " | "
+            << native_benchmark_format_ns(native_benchmark_int_field(row, "self_ns"), unit) << " | "
+            << native_benchmark_format_ns(native_benchmark_int_field(row, "mean_ns"), unit) << " | "
+            << native_benchmark_format_ns(native_benchmark_int_field(row, "max_ns"), unit);
+      }
+    } else {
+      out << "profile | total\n" << native_benchmark_label(result, 0) << " | "
+          << native_benchmark_format_ns(native_benchmark_int_field(data, "total_ns"), unit);
+    }
+  } else {
+    throw NativeBailout();
+  }
+  return native_benchmark_string(out.str());
+}
+
+static NativeValue native_benchmark_send(
+    const NativeValue &receiver, const std::string &selector,
+    std::initializer_list<NativeValue> args_init,
+    std::initializer_list<std::pair<std::string, NativeValue>> kwargs_init,
+    const NativeValue &block_value, bool has_block) {
+  const std::vector<NativeValue> args(args_init.begin(), args_init.end());
+  const std::vector<std::pair<std::string, NativeValue>> kwargs(
+      kwargs_init.begin(), kwargs_init.end());
+
+  if (selector == "section") {
+    if (!has_block || args.size() != 1U) throw NativeBailout();
+    NativeBenchmarkProfileState *state = native_benchmark_active_profile(receiver);
+    NativeBenchmarkProfileSpan span;
+    span.label = native_benchmark_text(args[0]);
+    if (const NativeValue *data = native_benchmark_kw(kwargs, "data")) span.data = *data;
+    span.parent = state->stack.empty() ? -1 : static_cast<std::int64_t>(state->stack.back());
+    span.depth = static_cast<std::int64_t>(state->stack.size());
+    const std::size_t index = state->spans.size();
+    state->spans.push_back(span);
+    if (span.parent >= 0) {
+      state->spans[static_cast<std::size_t>(span.parent)].children.push_back(index);
+    }
+    state->stack.push_back(index);
+    const std::int64_t start = native_benchmark_now_ns();
+    NativeValue value = amber_native_call_closure(block_value, {});
+    const std::int64_t finish = native_benchmark_now_ns();
+    state->stack.pop_back();
+    state->spans[index].elapsed_ns = std::max<std::int64_t>(0, finish - start);
+    return value;
+  }
+
+  const bool receiver_is_module =
+      receiver.tag == NativeValue::Tag::BenchmarkModule;
+  if (selector == "time" || selector == "measure") {
+    if (!receiver_is_module || !has_block || args.size() > 1U ||
+        native_benchmark_bool_kw(kwargs, "gc", false)) {
+      throw NativeBailout();
+    }
+    const NativeValue label = native_benchmark_label_arg(args);
+    const std::int64_t start = native_benchmark_now_ns();
+    NativeValue value = amber_native_call_closure(block_value, {});
+    const std::int64_t elapsed = std::max<std::int64_t>(0, native_benchmark_now_ns() - start);
+    if (selector == "time") return native_benchmark_time_period(elapsed);
+    return native_benchmark_measurement(label, elapsed, value, "measurement");
+  }
+  if (selector == "run") {
+    if (!receiver_is_module || !has_block || args.size() > 1U ||
+        native_benchmark_bool_kw(kwargs, "gc", false)) {
+      throw NativeBailout();
+    }
+    const NativeValue label = native_benchmark_label_arg(args);
+    std::int64_t iterations =
+        native_benchmark_int_kw(kwargs, "iterations", 1, 0);
+    const std::int64_t warmup = native_benchmark_int_kw(kwargs, "warmup", 0, 0);
+    const std::int64_t samples = native_benchmark_int_kw(kwargs, "samples", 1, 1);
+    const std::int64_t min_time_ns =
+        native_benchmark_period_kw_ns(kwargs, "min_time");
+    if (iterations == 0 && min_time_ns == 0) throw NativeBailout();
+    iterations = std::max<std::int64_t>(1, iterations);
+    for (std::int64_t i = 0; i < warmup; ++i) {
+      (void)amber_native_call_closure(block_value, {NativeValue::integer(i)});
+    }
+    std::vector<std::int64_t> sample_ns;
+    for (std::int64_t sample = 0; sample < samples; ++sample) {
+      std::int64_t elapsed = 0;
+      do {
+        const std::int64_t start = native_benchmark_now_ns();
+        for (std::int64_t i = 0; i < iterations; ++i) {
+          (void)amber_native_call_closure(block_value, {NativeValue::integer(i)});
+        }
+        elapsed = std::max<std::int64_t>(0, native_benchmark_now_ns() - start);
+        if (min_time_ns > 0 && elapsed < min_time_ns) {
+          iterations = std::max<std::int64_t>(iterations + 1, iterations * 2);
+        }
+      } while (min_time_ns > 0 && elapsed < min_time_ns);
+      sample_ns.push_back(elapsed);
+    }
+    return native_benchmark_report(label, iterations, sample_ns);
+  }
+  if (selector == "profile") {
+    if (!receiver_is_module || !has_block || args.size() > 1U ||
+        native_benchmark_bool_kw(kwargs, "gc", false)) {
+      throw NativeBailout();
+    }
+    const NativeValue label = native_benchmark_label_arg(args);
+    NativeBenchmarkProfileState state;
+    state.id = native_benchmark_next_profile_id++;
+    const NativeValue profiler = native_benchmark_profiler_map(state.id);
+    native_benchmark_profiles.push_back(&state);
+    const std::int64_t start = native_benchmark_now_ns();
+    NativeValue value = amber_native_call_closure(block_value, {profiler});
+    const std::int64_t total = std::max<std::int64_t>(0, native_benchmark_now_ns() - start);
+    native_benchmark_profiles.pop_back();
+    native_benchmark_finalize_profile(&state);
+    NativeValue data = native_benchmark_map({
+        {"total_ns", NativeValue::integer(total)},
+        {"total_text", native_benchmark_string(native_benchmark_format_ns(total))},
+        {"spans", native_benchmark_profile_spans(state)},
+        {"summary", native_benchmark_profile_summary(state)},
+    });
+    return native_benchmark_result("profile", label, data, value, true);
+  }
+  if (selector == "compare") {
+    if (!receiver_is_module || has_block) throw NativeBailout();
+    return native_benchmark_compare(args);
+  }
+  if (selector == "from_map") {
+    if (!receiver_is_module || args.size() != 1U) throw NativeBailout();
+    return native_benchmark_sanitize(args[0]);
+  }
+  if (selector == "from_json") {
+    if (!receiver_is_module || args.size() != 1U ||
+        args[0].tag != NativeValue::Tag::String) {
+      throw NativeBailout();
+    }
+    return native_benchmark_sanitize(native_json_parse_value(args[0]));
+  }
+
+  NativeValue result = receiver;
+  if (receiver_is_module) {
+    if (args.size() != 1U) throw NativeBailout();
+    result = args[0];
+  } else if (!args.empty()) {
+    throw NativeBailout();
+  }
+  if (selector == "map" || selector == "to_map") {
+    const NativeValue *mode = native_benchmark_kw(kwargs, "value");
+    if (mode != nullptr && native_benchmark_text(*mode) == "raw") return result;
+    return native_benchmark_sanitize(result);
+  }
+  if (selector == "to_json") {
+    if (!native_benchmark_has_schema(result, kNativeBenchmarkSchema)) {
+      const bool pretty = native_benchmark_bool_kw(kwargs, "pretty", false);
+      return native_json_generate_value(result, pretty);
+    }
+    const bool pretty = native_benchmark_bool_kw(kwargs, "pretty", false);
+    return native_json_generate_value(native_benchmark_sanitize(result), pretty);
+  }
+  if (selector == "format" || selector == "table" || selector == "pretty") {
+    return native_benchmark_format(result, kwargs, selector == "table" ? "table" : "summary");
+  }
+  throw NativeBailout();
+}
+
+)AMBERCPP";
   out << "static NativeValue native_math_send(const NativeValue &module, "
          "const std::string &selector, "
          "std::initializer_list<NativeValue> args) {\n";
@@ -8249,6 +9052,40 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "NativeValue::floating(std::trunc(value));\n";
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
+  out << "static NativeValue numeric_add(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "native_time_add(lhs, rhs);\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(profile_add_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::floating(as_double_numeric(lhs) + "
+         "as_double_numeric(rhs));\n";
+  out << "  if (lhs.tag == NativeValue::Tag::String) return "
+         "native_string_concat(lhs, rhs);\n";
+  out << "  if (native_is_sequence(lhs)) return "
+         "native_sequence_concat(lhs, rhs);\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_sub(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Time || "
+         "lhs.tag == NativeValue::Tag::TimePeriod || "
+         "rhs.tag == NativeValue::Tag::Time || "
+         "rhs.tag == NativeValue::Tag::TimePeriod) return "
+         "native_time_sub(lhs, rhs);\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) return "
+         "NativeValue::integer(profile_sub_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::floating(as_double_numeric(lhs) - "
+         "as_double_numeric(rhs));\n";
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static NativeValue numeric_mul(const NativeValue &lhs, "
@@ -8262,6 +9099,21 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "as_double_numeric(rhs));\n";
   out << "  if (native_is_sequence(lhs)) return "
          "native_sequence_repeat(lhs, rhs);\n";
+  out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue numeric_pow(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
+         "rhs.tag == NativeValue::Tag::Integer) {\n";
+  out << "    if (rhs.scalar_value < 0) return NativeValue::floating("
+         "std::pow(static_cast<double>(lhs.scalar_value), "
+         "static_cast<double>(rhs.scalar_value)));\n";
+  out << "    return NativeValue::integer(profile_pow_int64(lhs.scalar_value, "
+         "rhs.scalar_value));\n";
+  out << "  }\n";
+  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
+         "NativeValue::floating(std::pow(as_double_numeric(lhs), "
+         "as_double_numeric(rhs)));\n";
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static NativeValue numeric_div(const NativeValue &lhs, "
@@ -8298,21 +9150,6 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "const NativeValue &rhs) {\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
          "rhs.tag == NativeValue::Tag::Integer) return "
-  out << "static NativeValue numeric_pow(const NativeValue &lhs, "
-         "const NativeValue &rhs) {\n";
-  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
-         "rhs.tag == NativeValue::Tag::Integer) {\n";
-  out << "    if (rhs.scalar_value < 0) return NativeValue::floating("
-         "std::pow(static_cast<double>(lhs.scalar_value), "
-         "static_cast<double>(rhs.scalar_value)));\n";
-  out << "    return NativeValue::integer(profile_pow_int64(lhs.scalar_value, "
-         "rhs.scalar_value));\n";
-  out << "  }\n";
-  out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
-         "NativeValue::floating(std::pow(as_double_numeric(lhs), "
-         "as_double_numeric(rhs)));\n";
-  out << "  throw NativeBailout();\n";
-  out << "}\n\n";
          "NativeValue::integer(profile_floor_div_int64(lhs.scalar_value, "
          "rhs.scalar_value));\n";
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) {\n";
@@ -8410,41 +9247,52 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "lhs.tag == NativeValue::Tag::Set || "
          "lhs.tag == NativeValue::Tag::Closure || "
          "lhs.tag == NativeValue::Tag::Map || "
+         "lhs.tag == NativeValue::Tag::MathModule || "
          "lhs.tag == NativeValue::Tag::JsonModule || "
          "lhs.tag == NativeValue::Tag::BytesModule || "
          "lhs.tag == NativeValue::Tag::Base64Module || "
          "lhs.tag == NativeValue::Tag::Base64UrlModule || "
          "lhs.tag == NativeValue::Tag::HexModule || "
          "lhs.tag == NativeValue::Tag::DigestModule || "
+         "lhs.tag == NativeValue::Tag::BenchmarkModule || "
          "lhs.tag == NativeValue::Tag::UrlModule || "
+         "lhs.tag == NativeValue::Tag::ArgParserModule || "
+         "lhs.tag == NativeValue::Tag::FsModule || "
          "lhs.tag == NativeValue::Tag::SecureRandomModule || "
          "lhs.tag == NativeValue::Tag::RangeModule || "
          "lhs.tag == NativeValue::Tag::TimeModule || "
          "lhs.tag == NativeValue::Tag::TimePeriodModule || "
          "lhs.tag == NativeValue::Tag::Bytes || "
          "lhs.tag == NativeValue::Tag::Range || "
+         "lhs.tag == NativeValue::Tag::ArgParser || "
+         "lhs.tag == NativeValue::Tag::FsPath || "
          "lhs.tag == NativeValue::Tag::Time || "
          "lhs.tag == NativeValue::Tag::TimePeriod || "
          "rhs.tag == NativeValue::Tag::List || "
          "rhs.tag == NativeValue::Tag::Tuple || "
          "rhs.tag == NativeValue::Tag::Set || "
          "rhs.tag == NativeValue::Tag::Map || "
+         "rhs.tag == NativeValue::Tag::MathModule || "
          "rhs.tag == NativeValue::Tag::JsonModule || "
          "rhs.tag == NativeValue::Tag::BytesModule || "
          "rhs.tag == NativeValue::Tag::Base64Module || "
          "rhs.tag == NativeValue::Tag::Base64UrlModule || "
          "rhs.tag == NativeValue::Tag::HexModule || "
          "rhs.tag == NativeValue::Tag::DigestModule || "
+         "rhs.tag == NativeValue::Tag::BenchmarkModule || "
          "rhs.tag == NativeValue::Tag::UrlModule || "
+         "rhs.tag == NativeValue::Tag::ArgParserModule || "
+         "rhs.tag == NativeValue::Tag::FsModule || "
          "rhs.tag == NativeValue::Tag::SecureRandomModule || "
          "rhs.tag == NativeValue::Tag::RangeModule || "
          "rhs.tag == NativeValue::Tag::TimeModule || "
          "rhs.tag == NativeValue::Tag::TimePeriodModule || "
          "rhs.tag == NativeValue::Tag::Bytes || "
          "rhs.tag == NativeValue::Tag::Range || "
+         "rhs.tag == NativeValue::Tag::ArgParser || "
+         "rhs.tag == NativeValue::Tag::FsPath || "
          "rhs.tag == NativeValue::Tag::Time || "
          "rhs.tag == NativeValue::Tag::TimePeriod || "
-         "lhs.tag == NativeValue::Tag::MathModule || "
          "rhs.tag == NativeValue::Tag::Closure) throw NativeBailout();\n";
   out << "  bool equal;\n";
   out << "  if (lhs.tag == NativeValue::Tag::Integer && "
@@ -8452,21 +9300,18 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "lhs.scalar_value == rhs.scalar_value;\n";
   out << "  else if (numeric_tag(lhs) && numeric_tag(rhs)) equal = "
          "as_double_numeric(lhs) == as_double_numeric(rhs);\n";
-         "lhs.tag == NativeValue::Tag::ArgParserModule || "
   out << "  else if (lhs.tag != rhs.tag) equal = false;\n";
   out << "  else if (lhs.tag == NativeValue::Tag::Null) equal = true;\n";
   out << "  else equal = lhs.scalar_value == rhs.scalar_value;\n";
   out << "  return NativeValue::boolean(negate ? !equal : equal);\n";
   out << "}\n\n";
   out << "static bool native_parse_int_text(const std::string &text, "
-         "lhs.tag == NativeValue::Tag::ArgParser || "
          "std::int64_t *out_value) {\n";
   out << "  if (text.empty()) return false;\n";
   out << "  const char *begin = text.data();\n";
   out << "  const char *end = text.data() + text.size();\n";
   out << "  const auto parsed = std::from_chars(begin, end, *out_value, 10);\n";
   out << "  return parsed.ec == std::errc{} && parsed.ptr == end;\n";
-         "rhs.tag == NativeValue::Tag::MathModule || "
   out << "}\n\n";
   out << "static bool native_parse_float_text(const std::string &text, "
          "double *out_value) {\n";
@@ -8474,14 +9319,12 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  for (unsigned char c : text) {\n";
   out << "    if (std::isspace(c) != 0) return false;\n";
   out << "  }\n";
-         "rhs.tag == NativeValue::Tag::ArgParserModule || "
   out << "  try {\n";
   out << "    std::size_t consumed = 0;\n";
   out << "    const double parsed = std::stod(text, &consumed);\n";
   out << "    if (consumed != text.size()) return false;\n";
   out << "    *out_value = parsed;\n";
   out << "    return true;\n";
-         "rhs.tag == NativeValue::Tag::ArgParser || "
   out << "  } catch (const std::exception &) {\n";
   out << "    return false;\n";
   out << "  }\n";
@@ -8515,11 +9358,15 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::Bytes: return "
          "NativeValue::string_ref(native_intern_string(as_bytes(value).bytes));"
          "\n";
+  out << "  case NativeValue::Tag::FsPath: return "
+         "NativeValue::string_ref(native_intern_string(as_fs_path(value).path));"
+         "\n";
   out << "  case NativeValue::Tag::List:\n";
   out << "  case NativeValue::Tag::Tuple:\n";
   out << "  case NativeValue::Tag::Set:\n";
   out << "  case NativeValue::Tag::Map:\n";
   out << "  case NativeValue::Tag::Range:\n";
+  out << "  case NativeValue::Tag::ArgParser:\n";
   out << "    return NativeValue::string_ref(native_intern_string("
          "native_value_to_debug_string(value)));\n";
   out << "  case NativeValue::Tag::StrType:\n";
@@ -8530,13 +9377,17 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::SymbolType:\n";
   out << "  case NativeValue::Tag::NullType:\n";
   out << "  case NativeValue::Tag::ObjectType:\n";
+  out << "  case NativeValue::Tag::MathModule:\n";
   out << "  case NativeValue::Tag::JsonModule:\n";
   out << "  case NativeValue::Tag::BytesModule:\n";
   out << "  case NativeValue::Tag::Base64Module:\n";
   out << "  case NativeValue::Tag::Base64UrlModule:\n";
   out << "  case NativeValue::Tag::HexModule:\n";
   out << "  case NativeValue::Tag::DigestModule:\n";
+  out << "  case NativeValue::Tag::BenchmarkModule:\n";
   out << "  case NativeValue::Tag::UrlModule:\n";
+  out << "  case NativeValue::Tag::ArgParserModule:\n";
+  out << "  case NativeValue::Tag::FsModule:\n";
   out << "  case NativeValue::Tag::SecureRandomModule:\n";
   out << "  case NativeValue::Tag::UuidModule:\n";
   out << "  case NativeValue::Tag::RangeModule:\n";
@@ -8554,7 +9405,6 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "}\n\n";
   out << "static NativeValue native_to_int(const NativeValue &value) {\n";
   out << "  if (value.tag == NativeValue::Tag::Integer) return value;\n";
-  out << "  case NativeValue::Tag::ArgParser:\n";
   out << "  if (value.tag == NativeValue::Tag::Float) {\n";
   out << "    if (!std::isfinite(value.float_value)) throw NativeBailout();\n";
   out << "    const long double raw = "
@@ -8565,7 +9415,6 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
          "throw NativeBailout();\n";
   out << "    const std::int64_t as_int = "
          "static_cast<std::int64_t>(value.float_value);\n";
-  out << "  case NativeValue::Tag::MathModule:\n";
   out << "    if (static_cast<double>(as_int) != value.float_value) "
          "throw NativeBailout();\n";
   out << "    return NativeValue::integer(as_int);\n";
@@ -8573,7 +9422,6 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  if (value.tag == NativeValue::Tag::String) {\n";
   out << "    std::int64_t parsed = 0;\n";
   out << "    if (!native_parse_int_text(native_string_text(value), &parsed)) "
-  out << "  case NativeValue::Tag::ArgParserModule:\n";
          "throw NativeBailout();\n";
   out << "    return NativeValue::integer(parsed);\n";
   out << "  }\n";
@@ -8917,13 +9765,17 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::ObjectType:\n";
   out << "    return std::string(\"<type \") + native_type_tag_name(value) + "
          "\">\";\n";
+  out << "  case NativeValue::Tag::MathModule: return \"Math\";\n";
   out << "  case NativeValue::Tag::JsonModule: return \"Json\";\n";
   out << "  case NativeValue::Tag::BytesModule: return \"Bytes\";\n";
   out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
   out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
   out << "  case NativeValue::Tag::HexModule: return \"Hex\";\n";
   out << "  case NativeValue::Tag::DigestModule: return \"Digest\";\n";
+  out << "  case NativeValue::Tag::BenchmarkModule: return \"Benchmark\";\n";
   out << "  case NativeValue::Tag::UrlModule: return \"Url\";\n";
+  out << "  case NativeValue::Tag::ArgParserModule: return \"ArgParser\";\n";
+  out << "  case NativeValue::Tag::FsModule: return \"fs\";\n";
   out << "  case NativeValue::Tag::SecureRandomModule: return "
          "\"SecureRandom\";\n";
   out << "  case NativeValue::Tag::UuidModule: return \"Uuid\";\n";
@@ -8933,6 +9785,9 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "  case NativeValue::Tag::Bytes: return \"<bytes \" + "
          "std::to_string(as_bytes(value).bytes.size()) + \">\";\n";
   out << "  case NativeValue::Tag::Range: return \"<instance Range>\";\n";
+  out << "  case NativeValue::Tag::ArgParser: return "
+         "\"<instance ArgParser>\";\n";
+  out << "  case NativeValue::Tag::FsPath: return as_fs_path(value).path;\n";
   out << "  case NativeValue::Tag::Uuid: return "
          "amber::runtime::runtime_uuid_to_string(as_uuid(value));\n";
   out << "  case NativeValue::Tag::Time: return "
@@ -8951,7 +9806,6 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "    text << \"]\"; return text.str();\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Tuple: {\n";
-  out << "  case NativeValue::Tag::MathModule: return \"Math\";\n";
   out << "    const auto &items = as_tuple(value).items;\n";
   out << "    std::ostringstream text; text << \"(\";\n";
   out << "    for (std::size_t i = 0; i < items.size(); ++i) {\n";
@@ -8959,7 +9813,6 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "      text << native_value_to_debug_string(items[i]);\n";
   out << "    }\n";
   out << "    text << \")\"; return text.str();\n";
-  out << "  case NativeValue::Tag::ArgParserModule: return \"ArgParser\";\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Set: {\n";
   out << "    const auto &items = as_set(value).items;\n";
@@ -8969,8 +9822,6 @@ static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
   out << "      text << native_value_to_debug_string(items[i]);\n";
   out << "    }\n";
   out << "    text << \"}\"; return text.str();\n";
-  out << "  case NativeValue::Tag::ArgParser: return "
-         "\"<instance ArgParser>\";\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Map: {\n";
   out << "    const auto &entries = as_map(value).entries;\n";
@@ -9276,6 +10127,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/stdlib_json.cpp",
       "runtime/stdlib_codecs.cpp",
       "runtime/stdlib_digest.cpp",
+      "runtime/stdlib_benchmark.cpp",
       "runtime/stdlib_secure_random.cpp",
       "runtime/stdlib_argparser.cpp",
       "runtime/stdlib_uuid.cpp",

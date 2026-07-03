@@ -6425,6 +6425,96 @@ private:
     return map->entries;
   }
 
+  bool map_has_schema(const Frame &frame, const Value &value,
+                      std::string_view expected_schema) {
+    const std::optional<std::vector<MapEntry>> entries =
+        extract_map_entries(frame, value);
+    if (fault_.has_value() || !entries.has_value()) {
+      return false;
+    }
+    for (const MapEntry &entry : *entries) {
+      std::optional<std::string> key;
+      if (entry.key.is_string()) {
+        key = string_text_from_id(entry.key.as_string().string_id);
+      } else if (entry.key.is_symbol()) {
+        const std::uint32_t symbol_id = entry.key.as_symbol().symbol_id;
+        if (symbol_id < module_.symbols.size()) {
+          key = module_.symbols[symbol_id];
+        }
+      }
+      if (!key.has_value() || *key != "schema" || !entry.value.is_string()) {
+        continue;
+      }
+      const std::optional<std::string> schema =
+          string_text_from_id(entry.value.as_string().string_id);
+      return schema.has_value() && *schema == expected_schema;
+    }
+    return false;
+  }
+
+  SendStatus apply_benchmark_module_method(
+      const Frame &frame, const Value &receiver, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out,
+      const std::string &benchmark_selector_name) {
+    const std::optional<NativeStdlibHandler> handler =
+        dispatch_registry().native_handler(RuntimeNativeTypeKind::Benchmark);
+    if (!handler.has_value()) {
+      set_fault(frame, "VMError", "Benchmark stdlib handler is not registered");
+      return SendStatus::Faulted;
+    }
+    std::vector<Value> forwarded;
+    forwarded.reserve(args.size() + 1U);
+    forwarded.push_back(receiver);
+    forwarded.insert(forwarded.end(), args.begin(), args.end());
+    const Value benchmark_receiver =
+        Value::native_type(RuntimeNativeTypeKind::Benchmark);
+    NativeStdlibCall call{*this,
+                          &frame,
+                          benchmark_receiver,
+                          RuntimeNativeTypeKind::Benchmark,
+                          benchmark_selector_name,
+                          forwarded,
+                          block,
+                          kw_args,
+                          out};
+    return (*handler)(call);
+  }
+
+  SendStatus apply_benchmark_result_method(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (!receiver.is_map()) {
+      return SendStatus::NotHandled;
+    }
+    const bool benchmark_selector =
+        selector == "map" || selector == "to_map" || selector == "to_json" ||
+        selector == "format" || selector == "table" || selector == "pretty";
+    if (!benchmark_selector ||
+        !map_has_schema(frame, receiver, "amber.benchmark.v1")) {
+      return fault_.has_value() ? SendStatus::Faulted : SendStatus::NotHandled;
+    }
+    const std::string benchmark_selector_name =
+        selector == "map" ? "to_map" : selector;
+    return apply_benchmark_module_method(frame, receiver, args, block, kw_args, out,
+                                         benchmark_selector_name);
+  }
+
+  SendStatus apply_benchmark_profiler_method(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (selector != "section" || !receiver.is_map()) {
+      return SendStatus::NotHandled;
+    }
+    if (!map_has_schema(frame, receiver, "amber.benchmark.profiler.v1")) {
+      return fault_.has_value() ? SendStatus::Faulted : SendStatus::NotHandled;
+    }
+    return apply_benchmark_module_method(frame, receiver, args, block, kw_args,
+                                         out, selector);
+  }
+
   Value materialize_sequence_rest(const PreparedSeqState &state) {
     std::vector<Value> rest;
     const std::size_t end = std::min(state.rest_end, state.items.size());
@@ -20166,6 +20256,18 @@ private:
       }
       return native_status;
     }
+    const SendStatus early_benchmark_result_status =
+        apply_benchmark_result_method(frame, receiver, selector, args, block,
+                                      kw_args, out);
+    if (early_benchmark_result_status != SendStatus::NotHandled) {
+      return early_benchmark_result_status;
+    }
+    const SendStatus early_benchmark_profiler_status =
+        apply_benchmark_profiler_method(frame, receiver, selector, args, block,
+                                        kw_args, out);
+    if (early_benchmark_profiler_status != SendStatus::NotHandled) {
+      return early_benchmark_profiler_status;
+    }
     if (selector == "to_json" && !receiver.is_instance_object() &&
         !receiver.is_class_object()) {
       if (args.size() != 0U) {
@@ -21127,6 +21229,11 @@ private:
           collection_selector == "sort!") &&
          (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
           receiver_is_range || receiver_is_lazy_seq));
+    const SendStatus benchmark_result_status = apply_benchmark_result_method(
+        frame, receiver, selector, args, block, kw_args, out);
+    if (benchmark_result_status != SendStatus::NotHandled) {
+      return benchmark_result_status;
+    }
     if (!kw_args.empty() && builtin_selector &&
         !keyword_compatible_builtin_selector) {
       set_fault(frame, "TypeError",

@@ -178,6 +178,7 @@ enum class RuntimeNativeTypeKind {
   Base64Url,
   Hex,
   Digest,
+  Benchmark,
   Url,
   SecureRandom,
   ArgParser,

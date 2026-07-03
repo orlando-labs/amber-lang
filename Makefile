@@ -110,7 +110,7 @@ BYTECODE_SRCS := bytecode/format.cpp bytecode/emitter.cpp
 IO_SRCS := runtime/io.cpp runtime/reactor.cpp
 DIGEST_SRCS := runtime/digest.cpp
 HTTP_SRCS := runtime/http_codec.cpp runtime/net_http.cpp runtime/net_http_transport.cpp
-STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_io.cpp runtime/stdlib_fs.cpp runtime/stdlib_net.cpp runtime/stdlib_net_http.cpp runtime/stdlib_task.cpp runtime/stdlib_math.cpp runtime/stdlib_json.cpp runtime/stdlib_codecs.cpp runtime/stdlib_digest.cpp runtime/stdlib_secure_random.cpp runtime/stdlib_argparser.cpp runtime/stdlib_uuid.cpp runtime/stdlib_time.cpp runtime/stdlib_url.cpp
+STDLIB_SRCS := runtime/stdlib_registry.cpp runtime/stdlib_io.cpp runtime/stdlib_fs.cpp runtime/stdlib_net.cpp runtime/stdlib_net_http.cpp runtime/stdlib_task.cpp runtime/stdlib_math.cpp runtime/stdlib_json.cpp runtime/stdlib_codecs.cpp runtime/stdlib_digest.cpp runtime/stdlib_benchmark.cpp runtime/stdlib_secure_random.cpp runtime/stdlib_argparser.cpp runtime/stdlib_uuid.cpp runtime/stdlib_time.cpp runtime/stdlib_url.cpp
 RUNTIME_SRCS := runtime/context.cpp runtime/text.cpp runtime/watch.cpp runtime/value.cpp runtime/value_display.cpp runtime/errors.cpp runtime/numeric.cpp runtime/objects.cpp runtime/heap.cpp runtime/concurrency.cpp runtime/world.cpp $(IO_SRCS) $(DIGEST_SRCS) $(HTTP_SRCS) runtime/vm.cpp $(STDLIB_SRCS) runtime/amber_ext.cpp runtime/module_loader.cpp runtime/native_bridge.cpp
 FROZEN_RUNTIME_SRCS := runtime/frozen_image.cpp
 PACKAGE_SRCS := package/package.cpp
@@ -141,6 +141,7 @@ STDLIB_REGISTRY_TEST_SRCS := tests/stdlib_registry_tests.cpp $(CORE_SRCS) $(RUNT
 STDLIB_JSON_TEST_SRCS := tests/stdlib_json_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_CODECS_TEST_SRCS := tests/stdlib_codecs_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_DIGEST_TEST_SRCS := tests/stdlib_digest_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
+STDLIB_BENCHMARK_TEST_SRCS := tests/stdlib_benchmark_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_SECURE_RANDOM_TEST_SRCS := tests/stdlib_secure_random_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_ARGPARSER_TEST_SRCS := tests/stdlib_argparser_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 STDLIB_UUID_TEST_SRCS := tests/stdlib_uuid_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
@@ -246,6 +247,7 @@ FORMAT_FILES := \
 	runtime/stdlib_json.cpp \
 	runtime/stdlib_codecs.cpp \
 	runtime/stdlib_digest.cpp \
+	runtime/stdlib_benchmark.cpp \
 	runtime/stdlib_secure_random.cpp \
 	runtime/stdlib_argparser.cpp \
 	runtime/stdlib_uuid.h \
@@ -284,6 +286,7 @@ FORMAT_FILES := \
 	tests/stdlib_json_tests.cpp \
 	tests/stdlib_codecs_tests.cpp \
 	tests/stdlib_digest_tests.cpp \
+	tests/stdlib_benchmark_tests.cpp \
 	tests/stdlib_secure_random_tests.cpp \
 	tests/stdlib_argparser_tests.cpp \
 	tests/stdlib_uuid_tests.cpp \
@@ -297,7 +300,7 @@ FORMAT_FILES := \
 
 all: build
 
-build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/stdlib_registry_tests $(BUILD_DIR)/stdlib_json_tests $(BUILD_DIR)/stdlib_codecs_tests $(BUILD_DIR)/stdlib_digest_tests $(BUILD_DIR)/stdlib_secure_random_tests $(BUILD_DIR)/stdlib_argparser_tests $(BUILD_DIR)/stdlib_uuid_tests $(BUILD_DIR)/stdlib_time_tests $(BUILD_DIR)/stdlib_url_tests $(BUILD_DIR)/amber_ext_tests $(BUILD_DIR)/io_tests $(BUILD_DIR)/http_codec_tests $(BUILD_DIR)/net_http_tests $(BUILD_DIR)/net_http_tcp_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
+build: $(BUILD_DIR)/amberc $(BUILD_DIR)/ambertest $(BUILD_DIR)/iamber $(BUILD_DIR)/lexer_tests $(BUILD_DIR)/parser_tests $(BUILD_DIR)/binder_tests $(BUILD_DIR)/checker_tests $(BUILD_DIR)/wasm_accel_tests $(BUILD_DIR)/modern_profile_tests $(BUILD_DIR)/build_tests $(BUILD_DIR)/hir_tests $(BUILD_DIR)/mir_tests $(BUILD_DIR)/native_tests $(BUILD_DIR)/frozen_image_tests $(BUILD_DIR)/bytecode_tests $(BUILD_DIR)/emitter_tests $(BUILD_DIR)/vm_tests $(BUILD_DIR)/stdlib_collections_tests $(BUILD_DIR)/stdlib_task_tests $(BUILD_DIR)/stdlib_registry_tests $(BUILD_DIR)/stdlib_json_tests $(BUILD_DIR)/stdlib_codecs_tests $(BUILD_DIR)/stdlib_digest_tests $(BUILD_DIR)/stdlib_benchmark_tests $(BUILD_DIR)/stdlib_secure_random_tests $(BUILD_DIR)/stdlib_argparser_tests $(BUILD_DIR)/stdlib_uuid_tests $(BUILD_DIR)/stdlib_time_tests $(BUILD_DIR)/stdlib_url_tests $(BUILD_DIR)/amber_ext_tests $(BUILD_DIR)/io_tests $(BUILD_DIR)/http_codec_tests $(BUILD_DIR)/net_http_tests $(BUILD_DIR)/net_http_tcp_tests $(BUILD_DIR)/module_loader_tests $(BUILD_DIR)/package_tests $(BUILD_DIR)/iamber_tests
 
 $(BUILD_DIR)/.dir:
 	mkdir -p $(BUILD_DIR)
@@ -375,6 +378,9 @@ $(BUILD_DIR)/stdlib_codecs_tests: $(STDLIB_CODECS_TEST_SRCS) | $(BUILD_DIR)/.dir
 $(BUILD_DIR)/stdlib_digest_tests: $(STDLIB_DIGEST_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STDLIB_DIGEST_TEST_SRCS) $(LDFLAGS) -o $@
 
+$(BUILD_DIR)/stdlib_benchmark_tests: $(STDLIB_BENCHMARK_TEST_SRCS) | $(BUILD_DIR)/.dir
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STDLIB_BENCHMARK_TEST_SRCS) $(LDFLAGS) -o $@
+
 $(BUILD_DIR)/stdlib_secure_random_tests: $(STDLIB_SECURE_RANDOM_TEST_SRCS) | $(BUILD_DIR)/.dir
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(STDLIB_SECURE_RANDOM_TEST_SRCS) $(LDFLAGS) -o $@
 
@@ -435,6 +441,7 @@ test: build
 	$(BUILD_DIR)/stdlib_json_tests
 	$(BUILD_DIR)/stdlib_codecs_tests
 	$(BUILD_DIR)/stdlib_digest_tests
+	$(BUILD_DIR)/stdlib_benchmark_tests
 	$(BUILD_DIR)/stdlib_secure_random_tests
 	$(BUILD_DIR)/stdlib_argparser_tests
 	$(BUILD_DIR)/stdlib_uuid_tests
@@ -553,6 +560,13 @@ test: build
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_capability_modules_core/main.am > $(BUILD_DIR)/native-capability-modules-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-capability-modules-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-capability-modules-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_benchmark_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-benchmark-core > $(BUILD_DIR)/native-benchmark-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-benchmark-core-build.json
+	$(BUILD_DIR)/native-benchmark-core > $(BUILD_DIR)/native-benchmark-core.out
+	grep -q '^3$$' $(BUILD_DIR)/native-benchmark-core.out
+	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_benchmark_core/main.am > $(BUILD_DIR)/native-benchmark-core.dump
+	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-benchmark-core.dump
+	grep -q 'mode=direct-native' $(BUILD_DIR)/native-benchmark-core.dump
 	$(BUILD_DIR)/amberc build bench/polyglot/amber/src/calls_collections.am --entry init -o $(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native-build.json
 	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["native_entry"] and result["native_code_count"] == result["bytecode_code_count"], result' $(BUILD_DIR)/calls-collections-native-build.json
 	$(BUILD_DIR)/calls-collections-native > $(BUILD_DIR)/calls-collections-native.out

@@ -1,0 +1,35 @@
+package native.benchmark_core
+
+export main
+
+def main():
+  score = 0
+
+  measurement = Benchmark.measure("calc"):
+    21 * 2
+  measured = measurement.map
+  measured_json = measurement.to_json(pretty: true)
+  measured_copy = Benchmark.from_json(measured_json)
+  if measured["schema"] == "amber.benchmark.v1" and measured["kind"] == "measurement" and measured_copy["data"]["elapsed_ns"] >= 0 and measurement["value"] == 42:
+    score = score + 1
+
+  a = Benchmark.run("a", iterations: 2, samples: 2) |i|:
+    i + 1
+  b = Benchmark.run("b", iterations: 2, samples: 2) |i|:
+    i + 2
+  cmp = Benchmark.compare(a, b)
+  table = cmp.table(style: :ansi, highlight: :best)
+  if a.to_map["kind"] == "report" and a.to_json.contains?("sample_ns") and cmp.map["data"]["cases"].count() == 2 and table.contains?("[1m"):
+    score = score + 1
+
+  profile = Benchmark.profile("checkout") |p|:
+    loaded = p.section("load"):
+      2
+    p.section("persist"):
+      loaded + 40
+  profile_map = profile.map
+  profile_text = profile.pretty(unit: :ns)
+  if profile["value"] == 42 and profile_map["kind"] == "profile" and profile_map["data"]["summary"].count() == 2 and profile.to_json.contains?("persist") and profile_text.contains?("section"):
+    score = score + 1
+
+  score

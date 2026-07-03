@@ -498,6 +498,7 @@ void register_builtin_stdlib(NativeRegistry &registry) {
   register_json(registry);
   register_codecs(registry);
   register_digest(registry);
+  register_benchmark(registry);
   register_secure_random(registry);
   register_argparser(registry);
   register_uuid(registry);
@@ -518,6 +519,7 @@ void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
   register_json_runtime_module(modules, dispatch, types, errors);
   register_codecs_runtime_module(modules, dispatch, types, errors);
   register_digest_runtime_module(modules, dispatch, types);
+  register_benchmark_runtime_module(modules, dispatch, types, errors);
   register_secure_random_runtime_module(modules, dispatch, types, errors);
   register_argparser_runtime_module(modules, dispatch, types, errors);
   register_uuid_runtime_module(modules, dispatch, types, errors);
