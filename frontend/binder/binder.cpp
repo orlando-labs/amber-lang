@@ -1358,6 +1358,7 @@ bool is_native_prelude_name(const std::string &name) {
       "ThreadedCollection",
       "Time",
       "TimePeriod",
+      "TimeZone",
       "Tuple",
       "Url",
       "UUID",

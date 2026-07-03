@@ -67,6 +67,11 @@ entries:
     intrinsic_id: amber.prelude.TimePeriod.v1
     dispatch: constant_lookup
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: TimeZone
+    kind: prelude_class
+    intrinsic_id: amber.prelude.TimeZone.v1
+    dispatch: constant_lookup
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: ArgParser
     kind: prelude_class
     intrinsic_id: amber.prelude.ArgParser.v1

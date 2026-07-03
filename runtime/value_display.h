@@ -22,6 +22,7 @@ struct RuntimePrettyPrintOptions {
 
 std::string runtime_uuid_to_string(const RuntimeUuidValue &value);
 std::string runtime_time_to_iso8601(const RuntimeTimeValue &value);
+std::string runtime_time_zone_to_string(const RuntimeTimeZoneValue &value);
 std::string runtime_time_period_to_string(const RuntimeTimePeriodValue &value);
 
 std::string runtime_stringify_value(

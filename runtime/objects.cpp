@@ -319,6 +319,17 @@ bool value_equals(const Value &lhs, const Value &rhs) {
            left->epoch_seconds == right->epoch_seconds &&
            left->nanosecond == right->nanosecond;
   }
+  if (lhs.is_time_zone()) {
+    const std::shared_ptr<RuntimeTimeZoneValue> left = lhs.as_time_zone();
+    const std::shared_ptr<RuntimeTimeZoneValue> right = rhs.as_time_zone();
+    if (left == right) {
+      return true;
+    }
+    return left != nullptr && right != nullptr &&
+           left->offset_seconds == right->offset_seconds &&
+           left->name == right->name &&
+           left->fixed_offset == right->fixed_offset;
+  }
   if (lhs.is_time_period()) {
     const std::shared_ptr<RuntimeTimePeriodValue> left = lhs.as_time_period();
     const std::shared_ptr<RuntimeTimePeriodValue> right = rhs.as_time_period();

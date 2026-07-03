@@ -37,8 +37,6 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Hex";
   case RuntimeNativeTypeKind::Digest:
     return "Digest";
-  case RuntimeNativeTypeKind::Benchmark:
-    return "Benchmark";
   case RuntimeNativeTypeKind::Url:
     return "Url";
   case RuntimeNativeTypeKind::SecureRandom:
@@ -51,6 +49,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Time";
   case RuntimeNativeTypeKind::TimePeriod:
     return "TimePeriod";
+  case RuntimeNativeTypeKind::TimeZone:
+    return "TimeZone";
   case RuntimeNativeTypeKind::Io:
     return "io";
   case RuntimeNativeTypeKind::TextBuffer:
@@ -330,6 +330,10 @@ Value Value::time_period(std::shared_ptr<RuntimeTimePeriodValue> value) {
   return {std::move(value)};
 }
 
+Value Value::time_zone(std::shared_ptr<RuntimeTimeZoneValue> value) {
+  return {std::move(value)};
+}
+
 bool Value::is_null() const {
   return std::holds_alternative<std::monostate>(payload);
 }
@@ -477,6 +481,10 @@ bool Value::is_time_period() const {
       payload);
 }
 
+bool Value::is_time_zone() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeTimeZoneValue>>(payload);
+}
+
 bool Value::as_bool() const { return std::get<bool>(payload); }
 
 std::int64_t Value::as_integer() const {
@@ -612,6 +620,10 @@ std::shared_ptr<RuntimeTimeValue> Value::as_time() const {
 
 std::shared_ptr<RuntimeTimePeriodValue> Value::as_time_period() const {
   return std::get<std::shared_ptr<RuntimeTimePeriodValue>>(payload);
+}
+
+std::shared_ptr<RuntimeTimeZoneValue> Value::as_time_zone() const {
+  return std::get<std::shared_ptr<RuntimeTimeZoneValue>>(payload);
 }
 
 Value Value::list(IntrusivePtr<ListValue> value) { return {std::move(value)}; }

@@ -174,6 +174,14 @@ struct Generator {
       write_json_string(runtime_time_to_iso8601(*time), out);
       return true;
     }
+    if (value.is_time_zone()) {
+      const std::shared_ptr<RuntimeTimeZoneValue> zone = value.as_time_zone();
+      if (zone == nullptr) {
+        return fail("TimeZone value is null");
+      }
+      write_json_string(runtime_time_zone_to_string(*zone), out);
+      return true;
+    }
     if (value.is_uuid()) {
       const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
       if (uuid == nullptr) {

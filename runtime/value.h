@@ -24,6 +24,7 @@ struct ResultValue; // value-based Result[T,E] payload; defined after Value
 struct ErrorInstanceValue;
 struct BigIntValue;
 struct RuntimeTimeValue;
+struct RuntimeTimeZoneValue;
 struct RuntimeTimePeriodValue;
 struct RuntimeUuidValue;
 struct RuntimeForeignHandle;
@@ -178,7 +179,6 @@ enum class RuntimeNativeTypeKind {
   Base64Url,
   Hex,
   Digest,
-  Benchmark,
   Url,
   SecureRandom,
   ArgParser,
@@ -226,7 +226,8 @@ enum class RuntimeNativeTypeKind {
   NetHttpJsonPostJson,
   NetHttpForm,
   NetHttpFormBody,
-  Uuid
+  Uuid,
+  TimeZone
 };
 
 struct NativeTypeValue {
@@ -270,6 +271,15 @@ std::string big_int_to_decimal_string(const BigIntValue &value);
 struct RuntimeTimeValue {
   std::int64_t epoch_seconds = 0;
   std::uint32_t nanosecond = 0;
+  std::int32_t zone_offset_seconds = 0;
+  std::string zone_name = "UTC";
+  bool zone_fixed_offset = true;
+};
+
+struct RuntimeTimeZoneValue {
+  std::int32_t offset_seconds = 0;
+  std::string name = "UTC";
+  bool fixed_offset = true;
 };
 
 struct RuntimeUuidValue {
@@ -387,7 +397,8 @@ struct RuntimeForeignHandle {
     TimePeriod)                                                                \
   X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)                            \
   X(foreign_handle, is_foreign_handle, as_foreign_handle,                      \
-    RuntimeForeignHandle, ForeignHandle)
+    RuntimeForeignHandle, ForeignHandle)                                       \
+  X(time_zone, is_time_zone, as_time_zone, RuntimeTimeZoneValue, TimeZone)
 
 #ifndef AMBER_VALUE_REPR_TAGGED
 // ---- Variant representation (default, 24 bytes) ---------------------------
@@ -408,7 +419,8 @@ struct Value {
       std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>,
       std::shared_ptr<RuntimeArgParserValue>, std::shared_ptr<RuntimeTimeValue>,
       std::shared_ptr<RuntimeTimePeriodValue>,
-      std::shared_ptr<RuntimeUuidValue>, std::shared_ptr<RuntimeForeignHandle>>;
+      std::shared_ptr<RuntimeUuidValue>, std::shared_ptr<RuntimeForeignHandle>,
+      std::shared_ptr<RuntimeTimeZoneValue>>;
 
   Payload payload;
 
@@ -450,6 +462,7 @@ struct Value {
   static Value foreign_handle(std::shared_ptr<RuntimeForeignHandle> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
   static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
+  static Value time_zone(std::shared_ptr<RuntimeTimeZoneValue> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -488,6 +501,7 @@ struct Value {
   bool is_foreign_handle() const;
   bool is_time() const;
   bool is_time_period() const;
+  bool is_time_zone() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -525,6 +539,7 @@ struct Value {
   std::shared_ptr<RuntimeForeignHandle> as_foreign_handle() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
   std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
+  std::shared_ptr<RuntimeTimeZoneValue> as_time_zone() const;
 
   // Representation-agnostic helpers (see the doc comment above): a distinct
   // value per active alternative, and a pointer to the inline integer payload
@@ -586,6 +601,7 @@ enum class ValueTailKind : std::uint8_t {
   TimePeriod,
   Uuid,
   ForeignHandle,
+  TimeZone,
 };
 
 struct ValueTailBox; // refcounted tail box; defined in value.cpp
@@ -636,6 +652,7 @@ struct Value {
   static Value foreign_handle(std::shared_ptr<RuntimeForeignHandle> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
   static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
+  static Value time_zone(std::shared_ptr<RuntimeTimeZoneValue> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -674,6 +691,7 @@ struct Value {
   bool is_foreign_handle() const;
   bool is_time() const;
   bool is_time_period() const;
+  bool is_time_zone() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -711,6 +729,7 @@ struct Value {
   std::shared_ptr<RuntimeForeignHandle> as_foreign_handle() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
   std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
+  std::shared_ptr<RuntimeTimeZoneValue> as_time_zone() const;
 
   std::uint32_t kind_index() const;
   const std::int64_t *integer_if() const;

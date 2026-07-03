@@ -119,6 +119,14 @@ errors:
     parent: Exception
   - name: TimeParseError
     parent: TimeError
+  - name: TimeZoneError
+    parent: TimeError
+  - name: TimeZoneLookupError
+    parent: TimeZoneError
+  - name: TimeZoneGapError
+    parent: TimeZoneError
+  - name: TimeZoneAmbiguousError
+    parent: TimeZoneError
   - name: UuidError
     parent: Exception
   - name: UuidParseError

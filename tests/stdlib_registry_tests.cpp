@@ -441,6 +441,10 @@ void test_path_resolution(const NativeRegistry &registry) {
       registry.kind_for_path("TimePeriod");
   expect(period.has_value() && *period == RuntimeNativeTypeKind::TimePeriod,
          "kind_for_path(\"TimePeriod\") resolves to TimePeriod");
+  const std::optional<RuntimeNativeTypeKind> zone =
+      registry.kind_for_path("TimeZone");
+  expect(zone.has_value() && *zone == RuntimeNativeTypeKind::TimeZone,
+         "kind_for_path(\"TimeZone\") resolves to TimeZone");
   const std::optional<RuntimeNativeTypeKind> uuid =
       registry.kind_for_path("Uuid");
   expect(uuid.has_value() && *uuid == RuntimeNativeTypeKind::Uuid,
@@ -523,6 +527,8 @@ void test_handler_table(const NativeRegistry &registry) {
          "Time handler is registered");
   expect(registry.handler_for(RuntimeNativeTypeKind::TimePeriod) != nullptr,
          "TimePeriod handler is registered");
+  expect(registry.handler_for(RuntimeNativeTypeKind::TimeZone) != nullptr,
+         "TimeZone handler is registered");
   // Kernel has not migrated onto the registry; it must stay on the legacy
   // chain.
   expect(registry.handler_for(RuntimeNativeTypeKind::Kernel) == nullptr,
@@ -635,7 +641,9 @@ void test_builtin_runtime_module_descriptors() {
   expect_path("SecureRandom", RuntimeNativeTypeKind::SecureRandom);
   expect_path("ArgParser", RuntimeNativeTypeKind::ArgParser);
   expect_path("UUID", RuntimeNativeTypeKind::Uuid);
+  expect_path("Time", RuntimeNativeTypeKind::Time);
   expect_path("TimePeriod", RuntimeNativeTypeKind::TimePeriod);
+  expect_path("TimeZone", RuntimeNativeTypeKind::TimeZone);
   expect_path("Url", RuntimeNativeTypeKind::Url);
 
   expect_handler(RuntimeNativeTypeKind::Math, "Math");
@@ -646,6 +654,8 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::ArgParser, "ArgParser");
   expect_handler(RuntimeNativeTypeKind::Uuid, "Uuid");
   expect_handler(RuntimeNativeTypeKind::Time, "Time");
+  expect_handler(RuntimeNativeTypeKind::TimePeriod, "TimePeriod");
+  expect_handler(RuntimeNativeTypeKind::TimeZone, "TimeZone");
   expect_handler(RuntimeNativeTypeKind::Url, "Url");
   expect_handler(RuntimeNativeTypeKind::Io, "io");
   expect_handler(RuntimeNativeTypeKind::TextBuffer, "io.Buffer");
@@ -1126,19 +1136,21 @@ void test_runtime_module_error_descriptors() {
   const auto entropy = errors.error_id("EntropyError");
   const auto uuid_parse = errors.error_id("UuidParseError");
   const auto time_parse = errors.error_id("TimeParseError");
+  const auto time_zone_lookup = errors.error_id("TimeZoneLookupError");
   const auto url_parse = errors.error_id("UrlParseError");
   const auto url_build = errors.error_id("UrlBuildError");
   expect(json_error.has_value() && json_parse.has_value() &&
              codec_error.has_value() && codec_decode.has_value() &&
              entropy.has_value() && uuid_parse.has_value() &&
-             time_parse.has_value() && url_parse.has_value() &&
-             url_build.has_value(),
+             time_parse.has_value() && time_zone_lookup.has_value() &&
+             url_parse.has_value() && url_build.has_value(),
          "stdlib descriptors register non-http module error families");
   expect(errors.error_is_a(*json_parse, *json_error) &&
              errors.error_is_a(*codec_decode, *codec_error) &&
              errors.error_is_a(*entropy, *exception) &&
              errors.error_is_a(*uuid_parse, *exception) &&
              errors.error_is_a(*time_parse, *exception) &&
+             errors.error_is_a(*time_zone_lookup, *exception) &&
              errors.error_is_a(*url_parse, *exception) &&
              errors.error_is_a(*url_build, *exception),
          "non-http descriptor error inheritance is registered");

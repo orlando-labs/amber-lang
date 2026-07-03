@@ -1018,11 +1018,6 @@ void register_digest(NativeRegistry &registry);
 void register_digest_runtime_module(RuntimeModuleRegistry &modules,
                                     RuntimeDispatchRegistry &dispatch,
                                     RuntimeTypeRegistry &types);
-void register_benchmark(NativeRegistry &registry);
-void register_benchmark_runtime_module(RuntimeModuleRegistry &modules,
-                                       RuntimeDispatchRegistry &dispatch,
-                                       RuntimeTypeRegistry &types,
-                                       RuntimeErrorRegistry *errors = nullptr);
 void register_secure_random(NativeRegistry &registry);
 void register_secure_random_runtime_module(RuntimeModuleRegistry &modules,
                                            RuntimeDispatchRegistry &dispatch,

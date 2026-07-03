@@ -489,6 +489,48 @@ void test_native_trampoline_requires_frozen_world_and_executes() {
          "native trampoline returns bytecode-equivalent result");
 }
 
+void test_native_trampoline_executes_time_stdlib_module() {
+  const CompiledArtifacts artifacts = compile_ok(
+      "def time_stdlib_roundtrip():\n"
+      "  t = Time.parse(\"2026-07-02T12:00:00Z\")\n"
+      "  ny = TimeZone[\"America/New_York\"]\n"
+      "  shifted = t.in_tz(ny)\n"
+      "  assumed = t.as_tz(ny)\n"
+      "  parsed = Time.parse(\"2026-03-08 02:30\", "
+      "format: :datetime, zone: \"America/New_York\", on_gap: :forward)\n"
+      "  period = 1.day + 2.hours\n"
+      "  boundary = shifted.start_of_day\n"
+      "  if Time === t and TimeZone === ny and TimePeriod === period and "
+      "ny.fixed? == false and "
+      "shifted.to_str(:iso8601) == \"2026-07-02T08:00:00-04:00\" and "
+      "assumed.in_tz(:utc).to_str(:iso8601) == "
+      "\"2026-07-02T16:00:00Z\" and "
+      "parsed.to_str(:iso8601) == \"2026-03-08T03:30:00-04:00\" and "
+      "boundary.to_str(:datetime) == \"2026-07-02 00:00:00\" and "
+      "period.days == 1 and period.nanoseconds == 7200000000000:\n"
+      "    42\n"
+      "  else:\n"
+      "    0\n");
+  const amber::bytecode::BcMethod *method =
+      method_by_name(artifacts.bytecode_module, "time_stdlib_roundtrip");
+  expect(method != nullptr, "time_stdlib_roundtrip method exists");
+  const amber::native::NativeCodeObject *code =
+      native_code_for_bc(artifacts.native_module, method->entry_code_id);
+  expect(code != nullptr, "native code object exists for time stdlib method");
+
+  amber::runtime::RuntimeWorld world(artifacts.bytecode_module);
+  expect(world.freeze_world().ok(), "freeze_world should succeed");
+  const amber::native::NativeModule bound =
+      amber::runtime::bind_native_module_to_world(artifacts.native_module,
+                                                  world.world_mirror());
+  const amber::runtime::ExecutionResult native_result =
+      amber::runtime::execute_native_code(world, bound, code->native_id, {});
+  expect(native_result.ok(), "native time stdlib execution succeeds");
+  expect(native_result.value.is_integer() &&
+             native_result.value.as_integer() == 42,
+         "native time stdlib execution returns expected result");
+}
+
 void test_stale_native_assumption_can_fall_back_to_bytecode() {
   const CompiledArtifacts artifacts = compile_ok("def id(x):\n"
                                                  "  x\n");
@@ -535,6 +577,7 @@ int main() {
   test_native_trampoline_safepoint_preserves_heap_argument_root();
   test_native_validation_rejects_missing_slowpath_metadata();
   test_native_trampoline_requires_frozen_world_and_executes();
+  test_native_trampoline_executes_time_stdlib_module();
   test_stale_native_assumption_can_fall_back_to_bytecode();
   return 0;
 }

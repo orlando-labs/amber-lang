@@ -142,6 +142,113 @@ void test_calendar_arithmetic_and_difference() {
   expect_ok_integer(result, 42, "calendar arithmetic and difference");
 }
 
+void test_time_zone_conversion_and_type() {
+  const amber::runtime::ExecutionResult result = execute_source_or_die(
+      "t = Time.parse(\"2026-07-02T12:00:00Z\")\n"
+      "moscow = TimeZone[\"Europe/Moscow\"]\n"
+      "fixed = Time.time_zone(\"+03:00\")\n"
+      "inside = t.in_tz(moscow)\n"
+      "assumed = t.as_tz(moscow)\n"
+      "if TimeZone === moscow and moscow.name == \"Europe/Moscow\" and "
+      "moscow.fixed? == false and fixed.fixed? and "
+      "fixed.offset_seconds == 10800 and "
+      "moscow.abbreviation_at(t) == \"MSK\" and "
+      "inside.iso8601 == \"2026-07-02T15:00:00+03:00\" and "
+      "inside.unix_seconds == t.unix_seconds and "
+      "inside.time_zone.name == \"Europe/Moscow\" and "
+      "assumed.iso8601 == \"2026-07-02T12:00:00+03:00\" and "
+      "assumed.in_tz(:utc).iso8601 == \"2026-07-02T09:00:00Z\":\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "time zone conversion and type");
+}
+
+void test_iana_dst_offsets_and_local_zone() {
+  const amber::runtime::ExecutionResult result = execute_source_or_die(
+      "ny = TimeZone[\"America/New_York\"]\n"
+      "winter = Time.parse(\"2026-01-15T12:00:00Z\").in_tz(ny)\n"
+      "summer = Time.parse(\"2026-07-15T12:00:00Z\").in_tz(ny)\n"
+      "local = TimeZone.local\n"
+      "local_again = TimeZone[local.name]\n"
+      "if winter.iso8601 == \"2026-01-15T07:00:00-05:00\" and "
+      "summer.iso8601 == \"2026-07-15T08:00:00-04:00\" and "
+      "ny.offset_at(winter).total_nanoseconds == -18000000000000 and "
+      "ny.offset_at(summer).total_nanoseconds == -14400000000000 and "
+      "ny.abbreviation_at(winter) == \"EST\" and "
+      "ny.abbreviation_at(summer) == \"EDT\" and "
+      "TimeZone === local and local_again == local:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "IANA DST offsets and local zone");
+}
+
+void test_dst_gap_fold_and_calendar_arithmetic() {
+  const amber::runtime::ExecutionResult result = execute_source_or_die(
+      "gap_forward = Time.parse(\"2026-03-08 02:30\", "
+      "format: :datetime, zone: \"America/New_York\", on_gap: :forward)\n"
+      "gap_backward = Time.parse(\"2026-03-08 02:30\", "
+      "format: :datetime, zone: \"America/New_York\", on_gap: :backward)\n"
+      "fold_earlier = Time.parse(\"2026-11-01 01:30\", "
+      "format: :datetime, zone: \"America/New_York\")\n"
+      "fold_later = Time.parse(\"2026-11-01 01:30\", "
+      "format: :datetime, zone: \"America/New_York\", on_fold: :later)\n"
+      "before = Time.parse(\"2026-03-07 12:00\", "
+      "format: :datetime, zone: \"America/New_York\")\n"
+      "calendar_day = before + 1.day\n"
+      "fixed_day = before + 24.hours\n"
+      "if gap_forward.iso8601 == \"2026-03-08T03:30:00-04:00\" and "
+      "gap_backward.iso8601 == \"2026-03-08T01:30:00-05:00\" and "
+      "fold_earlier.iso8601 == \"2026-11-01T01:30:00-04:00\" and "
+      "fold_later.iso8601 == \"2026-11-01T01:30:00-05:00\" and "
+      "calendar_day.iso8601 == \"2026-03-08T12:00:00-04:00\" and "
+      "fixed_day.iso8601 == \"2026-03-08T13:00:00-04:00\":\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "DST gap/fold policies and arithmetic");
+}
+
+void test_parse_formats_and_to_str() {
+  const amber::runtime::ExecutionResult result = execute_source_or_die(
+      "date = Time.parse(\"2026-06-17\")\n"
+      "ru = Time.parse(\"02.07.2026 15:30\", "
+      "format: :ru_datetime, zone: \"Europe/Moscow\")\n"
+      "pattern = Time.parse(\"02/07/2026 15:30\", "
+      "format: \"%d/%m/%Y %H:%M\", zone: \"+03:00\")\n"
+      "preserved = Time.parse(\"2026-07-02T15:30:00+03:00\", "
+      "zone: :parsed)\n"
+      "if date.iso8601 == \"2026-06-17T00:00:00Z\" and "
+      "ru.iso8601 == \"2026-07-02T15:30:00+03:00\" and "
+      "ru.in_tz(:utc).iso8601 == \"2026-07-02T12:30:00Z\" and "
+      "ru.to_str(:ru_date) == \"02.07.2026\" and "
+      "ru.to_str(:ru_long) == \"2 июля 2026 15:30\" and "
+      "ru.to_str(\"%Y/%m/%d %H:%M %:z\") == \"2026/07/02 15:30 +03:00\" and "
+      "pattern.iso8601 == \"2026-07-02T15:30:00+03:00\" and "
+      "preserved.hour == 15 and preserved.time_zone.name == \"+03:00\":\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "parse formats and to_str");
+}
+
+void test_local_boundary_helpers() {
+  const amber::runtime::ExecutionResult result = execute_source_or_die(
+      "t = Time.parse(\"2026-07-02T15:45:10Z\").in_tz(\"Europe/Moscow\")\n"
+      "if t.start_of_day.iso8601 == \"2026-07-02T00:00:00+03:00\" and "
+      "t.end_of_day.iso8601 == \"2026-07-02T23:59:59.999999999+03:00\" and "
+      "t.start_of_week(week_start: :monday).iso8601 == "
+      "\"2026-06-29T00:00:00+03:00\" and "
+      "t.beginning_of_month.iso8601 == \"2026-07-01T00:00:00+03:00\" and "
+      "t.start_of_quarter.iso8601 == \"2026-07-01T00:00:00+03:00\" and "
+      "t.end_of_year.iso8601 == \"2026-12-31T23:59:59.999999999+03:00\":\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "local boundary helpers");
+}
+
 void test_live_clock_shapes_and_replay_fault() {
   const amber::runtime::ExecutionResult shape_result = execute_source_or_die(
       "if Time === Time.now and TimePeriod === Time.monotonic:\n"
@@ -162,8 +269,16 @@ void test_live_clock_shapes_and_replay_fault() {
 }
 
 void test_faults() {
-  expect_fault("Time.parse(\"2026-06-17\")\n", "TimeParseError",
+  expect_fault("Time.parse(\"17/06/2026\")\n", "TimeParseError",
                "invalid parse shape");
+  expect_fault("TimeZone[\"Mars/Base\"]\n", "TimeZoneLookupError",
+               "unknown time zone");
+  expect_fault("Time.parse(\"2026-03-08 02:30\", format: :datetime, "
+               "zone: \"America/New_York\")\n",
+               "TimeZoneGapError", "DST gap should fault by default");
+  expect_fault("Time.parse(\"2026-11-01 01:30\", format: :datetime, "
+               "zone: \"America/New_York\", on_fold: \"raise\")\n",
+               "TimeZoneAmbiguousError", "DST fold can fault explicitly");
   expect_fault("1.5.months\n", "TypeError", "fractional calendar period");
   expect_fault("Time.utc(2026, 2, 29)\n", "ArgumentError",
                "invalid calendar date");
@@ -175,6 +290,11 @@ int main() {
   test_period_literals_and_time_addition();
   test_parse_epoch_fields_and_json();
   test_calendar_arithmetic_and_difference();
+  test_time_zone_conversion_and_type();
+  test_iana_dst_offsets_and_local_zone();
+  test_dst_gap_fold_and_calendar_arithmetic();
+  test_parse_formats_and_to_str();
+  test_local_boundary_helpers();
   test_live_clock_shapes_and_replay_fault();
   test_faults();
 

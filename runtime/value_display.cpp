@@ -311,6 +311,11 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     const std::shared_ptr<RuntimeTimeValue> time = value.as_time();
     return time == nullptr ? "<time null>" : runtime_time_to_iso8601(*time);
   }
+  if (value.is_time_zone()) {
+    const std::shared_ptr<RuntimeTimeZoneValue> zone = value.as_time_zone();
+    return zone == nullptr ? "<time-zone null>"
+                           : runtime_time_zone_to_string(*zone);
+  }
   if (value.is_time_period()) {
     const std::shared_ptr<RuntimeTimePeriodValue> period =
         value.as_time_period();
@@ -680,6 +685,11 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> time = value.as_time();
     return time == nullptr ? "<time null>" : runtime_time_to_iso8601(*time);
+  }
+  if (value.is_time_zone()) {
+    const std::shared_ptr<RuntimeTimeZoneValue> zone = value.as_time_zone();
+    return zone == nullptr ? "<time-zone null>"
+                           : runtime_time_zone_to_string(*zone);
   }
   if (value.is_time_period()) {
     const std::shared_ptr<RuntimeTimePeriodValue> period =
