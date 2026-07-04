@@ -1066,7 +1066,7 @@ private:
         deferred->push_back(std::move(entry.key));
         deferred->push_back(std::move(entry.value));
       }
-      map->entries.clear();
+      map_value_clear_entries(map);
       map->entries.shrink_to_fit();
       map->frozen = false;
       map->header.shape = dead_shape;
@@ -1327,9 +1327,9 @@ Value RuntimeHeap::make_symbol_map_value(std::vector<MapEntry> entries,
             frozen ? OwnerTokenKind::Shareable : OwnerTokenKind::Confined;
         value.header.generation =
             frozen ? ObjectGeneration::Shared : ObjectGeneration::Young;
-        value.entries = std::move(*normalized);
         value.frozen = frozen;
         value.strict = strict;
+        map_value_assign_entries(&value, std::move(*normalized));
       });
   return Value::map(std::move(value));
 }

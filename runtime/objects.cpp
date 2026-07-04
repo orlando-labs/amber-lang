@@ -540,6 +540,14 @@ bool map_entries_same_key(const MapEntry &a, const MapEntry &b, bool strict) {
   return value_equals(a.key, b.key);
 }
 
+namespace {
+
+bool map_entry_uses_name_index(const MapEntry &entry, bool strict) {
+  return !strict && map_key_is_nameable(entry.key);
+}
+
+} // namespace
+
 void upsert_normalized_map_entry(std::vector<MapEntry> *entries, MapEntry entry,
                                  bool strict) {
   auto existing = std::find_if(
@@ -552,6 +560,114 @@ void upsert_normalized_map_entry(std::vector<MapEntry> *entries, MapEntry entry,
   }
   // First occurrence's key representation wins; last assignment's value wins.
   existing->value = std::move(entry.value);
+}
+
+void map_value_rebuild_index(MapValue *map) {
+  if (map == nullptr) {
+    return;
+  }
+  map->name_index.clear();
+  if (map->strict) {
+    return;
+  }
+  map->name_index.reserve(map->entries.size());
+  for (std::size_t i = 0; i < map->entries.size(); ++i) {
+    const MapEntry &entry = map->entries[i];
+    if (map_entry_uses_name_index(entry, map->strict)) {
+      map->name_index.emplace(entry.symbol_id, i);
+    }
+  }
+}
+
+void map_value_assign_entries(MapValue *map, std::vector<MapEntry> entries) {
+  if (map == nullptr) {
+    return;
+  }
+  map->entries = std::move(entries);
+  map_value_rebuild_index(map);
+}
+
+void map_value_clear_entries(MapValue *map) {
+  if (map == nullptr) {
+    return;
+  }
+  map->entries.clear();
+  map->name_index.clear();
+}
+
+std::optional<std::size_t>
+map_value_find_entry_index(const MapValue &map, const Value &lookup_key,
+                           std::optional<std::uint32_t> lookup_id) {
+  if (!map.strict && lookup_id.has_value() && map_key_is_nameable(lookup_key)) {
+    const auto found = map.name_index.find(*lookup_id);
+    if (found != map.name_index.end() && found->second < map.entries.size()) {
+      const MapEntry &entry = map.entries[found->second];
+      if (map_entry_key_equivalent(entry, lookup_key, lookup_id, map.strict)) {
+        return found->second;
+      }
+    }
+  }
+  for (std::size_t i = 0; i < map.entries.size(); ++i) {
+    if (map_entry_key_equivalent(map.entries[i], lookup_key, lookup_id,
+                                 map.strict)) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+const MapEntry *
+map_value_find_entry(const MapValue &map, const Value &lookup_key,
+                     std::optional<std::uint32_t> lookup_id) {
+  const std::optional<std::size_t> index =
+      map_value_find_entry_index(map, lookup_key, lookup_id);
+  if (!index.has_value()) {
+    return nullptr;
+  }
+  return &map.entries[*index];
+}
+
+MapEntry *map_value_find_entry(MapValue *map, const Value &lookup_key,
+                               std::optional<std::uint32_t> lookup_id) {
+  if (map == nullptr) {
+    return nullptr;
+  }
+  const std::optional<std::size_t> index =
+      map_value_find_entry_index(*map, lookup_key, lookup_id);
+  if (!index.has_value()) {
+    return nullptr;
+  }
+  return &map->entries[*index];
+}
+
+void map_value_upsert_entry(MapValue *map, MapEntry entry) {
+  if (map == nullptr) {
+    return;
+  }
+  if (map_entry_uses_name_index(entry, map->strict)) {
+    const auto found = map->name_index.find(entry.symbol_id);
+    if (found != map->name_index.end() && found->second < map->entries.size()) {
+      map->entries[found->second].value = std::move(entry.value);
+      return;
+    }
+  }
+  auto existing = std::find_if(
+      map->entries.begin(), map->entries.end(),
+      [&](const MapEntry &candidate) {
+        return map_entries_same_key(candidate, entry, map->strict);
+      });
+  if (existing != map->entries.end()) {
+    existing->value = std::move(entry.value);
+    map_value_rebuild_index(map);
+    return;
+  }
+  const std::size_t new_index = map->entries.size();
+  const bool indexable = map_entry_uses_name_index(entry, map->strict);
+  const std::uint32_t symbol_id = entry.symbol_id;
+  map->entries.push_back(std::move(entry));
+  if (indexable) {
+    map->name_index.emplace(symbol_id, new_index);
+  }
 }
 
 std::optional<std::vector<MapEntry>>

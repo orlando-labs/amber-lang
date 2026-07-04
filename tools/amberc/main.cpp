@@ -474,10 +474,15 @@ struct CompiledModuleArtifact {
   amber::native::NativeModule native_module;
 };
 
+// Temporary declaration for the macro provider pre-pass; the real macro driver
+// cleanup can move this once the staging code settles.
+std::vector<amber::macros::MacroExport>
+harvest_macro_exports(const std::string &source, const std::string &path);
+
 CompiledModuleArtifact compile_source_to_module_artifact(
     const std::string &path, const std::string &expected_module_name,
-    const std::vector<amber::capability::CapabilityRequest> &capabilities =
-        {}) {
+    const std::vector<amber::capability::CapabilityRequest> &capabilities = {},
+    const amber::macros::MacroProviderMap *macro_providers = nullptr) {
   const std::string source = read_file(path);
   amber::lexer::LexResult lex_result = lex_source(source, path);
   if (!lex_result.ok()) {
@@ -498,11 +503,16 @@ CompiledModuleArtifact compile_source_to_module_artifact(
                              parse_result.module_name + "' in " + path);
   }
 
-  // F1.5: expand macro calls, then quote/unquote, before binding.
+  // F1.5: expand macro calls, then quote/unquote, before binding. Package /
+  // image builds pass the staged provider table (§11 cross-module macros).
   {
     const amber::macros::ExpandResult macro_result =
-        amber::macros::expand_macros(parse_result.items,
-                                     parse_result.module_name, source);
+        macro_providers != nullptr
+            ? amber::macros::expand_macros(parse_result.items,
+                                           parse_result.module_name, source,
+                                           *macro_providers)
+            : amber::macros::expand_macros(parse_result.items,
+                                           parse_result.module_name, source);
     if (!macro_result.ok) {
       throw std::runtime_error("macro expansion error: " + macro_result.error);
     }
@@ -634,11 +644,11 @@ amber::bytecode::BcModule compile_source_text_to_module(
 
 std::vector<std::uint8_t> compile_source_to_bytecode(
     const std::string &path, const std::string &expected_module_name,
-    const std::vector<amber::capability::CapabilityRequest> &capabilities =
-        {}) {
+    const std::vector<amber::capability::CapabilityRequest> &capabilities = {},
+    const amber::macros::MacroProviderMap *macro_providers = nullptr) {
   const std::string source = read_file(path);
   amber::bytecode::BcModule module = compile_source_text_to_module(
-      source, path, expected_module_name, capabilities);
+      source, path, expected_module_name, capabilities, macro_providers);
   const std::vector<std::uint8_t> bytes =
       amber::bytecode::serialize_module(module);
   amber::bytecode::DecodeResult decode_result =
@@ -3832,17 +3842,27 @@ std::string emit_module_strings_cpp(const amber::bytecode::BcModule &module) {
   out << "  }();\n";
   out << "  return *table;\n";
   out << "}\n\n";
-  out << "static std::unordered_map<std::string, std::int64_t> &"
+  out << "static std::unordered_map<std::size_t, std::vector<std::int64_t>> &"
          "native_string_index() {\n";
-  out << "  static std::unordered_map<std::string, std::int64_t> *index = "
-         "[] {\n";
-  out << "    auto *out_index = new std::unordered_map<std::string, "
-         "std::int64_t>();\n";
+  out << "  static std::unordered_map<std::size_t, "
+         "std::vector<std::int64_t>> *index = [] {\n";
+  out << "    auto *out_index = new std::unordered_map<std::size_t, "
+         "std::vector<std::int64_t>>();\n";
   out << "    const std::vector<std::string> &table = native_strings();\n";
   out << "    for (std::size_t i = 0; i < table.size(); ++i) {\n";
-  // First content match wins, mirroring the VM's linear intern scan.
-  out << "      out_index->emplace(table[i], "
-         "static_cast<std::int64_t>(i));\n";
+  out << "      std::vector<std::int64_t> &bucket = "
+         "(*out_index)[std::hash<std::string>{}(table[i])];\n";
+  out << "      bool duplicate = false;\n";
+  out << "      for (const std::int64_t existing_id : bucket) {\n";
+  out << "        if (existing_id >= 0 && "
+         "static_cast<std::size_t>(existing_id) < table.size() && "
+         "table[static_cast<std::size_t>(existing_id)] == table[i]) {\n";
+  out << "          duplicate = true;\n";
+  out << "          break;\n";
+  out << "        }\n";
+  out << "      }\n";
+  out << "      if (!duplicate) "
+         "bucket.push_back(static_cast<std::int64_t>(i));\n";
   out << "    }\n";
   out << "    return out_index;\n";
   out << "  }();\n";
@@ -3851,13 +3871,19 @@ std::string emit_module_strings_cpp(const amber::bytecode::BcModule &module) {
   out << "static std::int64_t native_intern_string(const std::string &text) "
          "{\n";
   out << "  auto &index = native_string_index();\n";
-  out << "  const auto found = index.find(text);\n";
-  out << "  if (found != index.end()) return found->second;\n";
+  out << "  const std::size_t hash = std::hash<std::string>{}(text);\n";
   out << "  std::vector<std::string> &table = native_strings();\n";
+  out << "  const auto found = index.find(hash);\n";
+  out << "  if (found != index.end()) {\n";
+  out << "    for (const std::int64_t id : found->second) {\n";
+  out << "      if (id >= 0 && static_cast<std::size_t>(id) < table.size() && "
+         "table[static_cast<std::size_t>(id)] == text) return id;\n";
+  out << "    }\n";
+  out << "  }\n";
   out << "  const std::int64_t id = "
          "static_cast<std::int64_t>(table.size());\n";
   out << "  table.push_back(text);\n";
-  out << "  index.emplace(text, id);\n";
+  out << "  index[hash].push_back(id);\n";
   out << "  return id;\n";
   out << "}\n\n";
   out << "static const char *kModuleSymbolHex[] = {\n";
@@ -4109,6 +4135,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include <exception>\n";
   out << "#include <filesystem>\n";
   out << "#include <fstream>\n";
+  out << "#include <functional>\n";
   out << "#include <iomanip>\n";
   out << "#include <initializer_list>\n";
   out << "#include <iostream>\n";
@@ -4265,9 +4292,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeList { std::vector<NativeValue> items; };\n";
   out << "struct NativeTuple { std::vector<NativeValue> items; };\n";
   out << "struct NativeSet { std::vector<NativeValue> items; };\n";
-  out << "struct NativeMap { "
-         "std::vector<std::pair<NativeValue, NativeValue>> entries; "
-         "bool strict = false; };\n";
+  out << "struct NativeMap {\n";
+  out << "  std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
+  out << "  std::unordered_map<std::int64_t, std::size_t> name_index;\n";
+  out << "  bool strict = false;\n";
+  out << "};\n";
   out << "struct NativeRange {\n";
   out << "  std::int64_t start = 0;\n";
   out << "  std::int64_t finish = 0;\n";
@@ -4321,6 +4350,26 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
   out << "};\n";
   out << "static NativeArena native_arena;\n\n";
+  out << "static const std::string &native_string_text("
+         "const NativeValue &value);\n";
+  out << "static std::optional<std::int64_t> native_map_index_key_id("
+         "const NativeValue &key, bool strict) {\n";
+  out << "  if (strict) return std::nullopt;\n";
+  out << "  if (key.tag == NativeValue::Tag::String) return key.scalar_value;\n";
+  out << "  if (key.tag == NativeValue::Tag::Symbol) return "
+         "native_intern_string(native_symbol_text(key.scalar_value));\n";
+  out << "  return std::nullopt;\n";
+  out << "}\n";
+  out << "static void native_map_rebuild_index(NativeMap &map) {\n";
+  out << "  map.name_index.clear();\n";
+  out << "  if (map.strict) return;\n";
+  out << "  map.name_index.reserve(map.entries.size());\n";
+  out << "  for (std::size_t i = 0; i < map.entries.size(); ++i) {\n";
+  out << "    const std::optional<std::int64_t> key_id = "
+         "native_map_index_key_id(map.entries[i].first, map.strict);\n";
+  out << "    if (key_id.has_value()) map.name_index.emplace(*key_id, i);\n";
+  out << "  }\n";
+  out << "}\n\n";
   out << "NativeValue NativeValue::bytes(std::string value) {\n";
   out << "  NativeValue out; out.tag = Tag::Bytes;\n";
   out << "  auto bytes = std::make_unique<NativeBytes>();\n";
@@ -4351,7 +4400,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  NativeValue out; out.tag = Tag::Map;\n";
   out << "  auto map = std::make_unique<NativeMap>();\n";
   out << "  map->entries = std::move(entries); map->strict = strict; "
-         "out.heap_value = map.get();\n";
+         "native_map_rebuild_index(*map); out.heap_value = map.get();\n";
   out << "  native_arena.maps.push_back(std::move(map)); return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::map(std::vector<std::pair<std::string, "
@@ -5271,6 +5320,15 @@ static const std::pair<NativeValue, NativeValue> *
 native_map_find_entry(const NativeValue &map_value, const NativeValue &key) {
   const NativeMap &map = as_map(map_value);
   const NativeValue normalized = native_normalize_map_key(key);
+  const std::optional<std::int64_t> key_id =
+      native_map_index_key_id(normalized, map.strict);
+  if (key_id.has_value()) {
+    const auto found = map.name_index.find(*key_id);
+    if (found != map.name_index.end() && found->second < map.entries.size()) {
+      return &map.entries[found->second];
+    }
+    if (native_map_key_is_nameable(normalized)) return nullptr;
+  }
   for (const auto &entry : map.entries) {
     if (native_map_keys_equivalent(entry.first, normalized, map.strict)) {
       return &entry;
@@ -5306,6 +5364,37 @@ static void native_map_store(
     }
   }
   entries.emplace_back(std::move(normalized), std::move(value));
+}
+
+static void native_map_store(NativeMap &map, NativeValue key,
+                             NativeValue value) {
+  NativeValue normalized = native_normalize_map_key(key);
+  const std::optional<std::int64_t> key_id =
+      native_map_index_key_id(normalized, map.strict);
+  if (key_id.has_value()) {
+    const auto found = map.name_index.find(*key_id);
+    if (found != map.name_index.end() && found->second < map.entries.size()) {
+      map.entries[found->second].second = std::move(value);
+      return;
+    }
+    if (native_map_key_is_nameable(normalized)) {
+      const std::size_t index = map.entries.size();
+      map.entries.emplace_back(std::move(normalized), std::move(value));
+      map.name_index[*key_id] = index;
+      return;
+    }
+  }
+  for (std::size_t i = 0; i < map.entries.size(); ++i) {
+    if (native_map_keys_equivalent(map.entries[i].first, normalized,
+                                   map.strict)) {
+      map.entries[i].second = std::move(value);
+      if (key_id.has_value()) map.name_index[*key_id] = i;
+      return;
+    }
+  }
+  const std::size_t index = map.entries.size();
+  map.entries.emplace_back(std::move(normalized), std::move(value));
+  if (key_id.has_value()) map.name_index[*key_id] = index;
 }
 
 static void native_map_append_entries(
@@ -5859,8 +5948,7 @@ static NativeValue native_map_set(const NativeValue &value,
                                   const NativeValue &key,
                                   const NativeValue &next_value) {
   if (value.tag != NativeValue::Tag::Map) throw NativeBailout();
-  native_map_store(as_mutable_map(value).entries, key, next_value,
-                   as_map(value).strict);
+  native_map_store(as_mutable_map(value), key, next_value);
   return next_value;
 }
 
@@ -10948,13 +11036,24 @@ int run_package_command(int argc, char **argv) {
     options.target_triple = native_target_triple();
     options.native_blobs =
         collect_native_blobs(manifest.manifest.native_extensions, root_dir);
+    // Cross-module macro staging (§11): parse-only pre-pass over the package
+    // modules harvests every `export macro` table before anything compiles.
+    amber::macros::MacroProviderMap macro_providers;
+    for (const amber::pkg::PackageModule &module : manifest.manifest.modules) {
+      std::vector<amber::macros::MacroExport> exports = harvest_macro_exports(
+          read_file(join_path(root_dir, module.path)), module.path);
+      if (!exports.empty()) {
+        macro_providers[module.name] = std::move(exports);
+      }
+    }
     for (const amber::pkg::PackageModule &module : manifest.manifest.modules) {
       amber::pkg::PackageModuleBlob blob;
       blob.name = module.name;
       blob.path = module.path;
       blob.bytes = compile_source_to_bytecode(join_path(root_dir, module.path),
                                               module.name,
-                                              manifest.manifest.capabilities);
+                                              manifest.manifest.capabilities,
+                                              &macro_providers);
       modules.push_back(std::move(blob));
     }
     const amber::pkg::PackageBuildResult built =
@@ -12678,10 +12777,20 @@ int run_image_command(int argc, char **argv) {
     package_options.target_triple = native_target_triple();
     package_options.native_blobs =
         collect_native_blobs(manifest.manifest.native_extensions, root_dir);
+    // Cross-module macro staging (§11): same parse-only provider pre-pass as
+    // the build/package paths, so image builds expand imported macros too.
+    amber::macros::MacroProviderMap macro_providers;
+    for (const amber::pkg::PackageModule &module : manifest.manifest.modules) {
+      std::vector<amber::macros::MacroExport> exports = harvest_macro_exports(
+          read_file(join_path(root_dir, module.path)), module.path);
+      if (!exports.empty()) {
+        macro_providers[module.name] = std::move(exports);
+      }
+    }
     for (const amber::pkg::PackageModule &module : manifest.manifest.modules) {
       CompiledModuleArtifact compiled = compile_source_to_module_artifact(
           join_path(root_dir, module.path), module.name,
-          manifest.manifest.capabilities);
+          manifest.manifest.capabilities, &macro_providers);
       amber::pkg::PackageModuleBlob blob;
       blob.name = module.name;
       blob.path = module.path;

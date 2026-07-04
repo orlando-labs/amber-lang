@@ -2009,7 +2009,7 @@ private:
     if (value.is_map()) {
       const IntrusivePtr<MapValue> map = value.as_map();
       if (map != nullptr) {
-        map->entries.clear();
+        map_value_clear_entries(map.get());
         map->entries.shrink_to_fit();
         map->frozen = false;
         map->header.shape = state_->dead_shape;
@@ -2381,11 +2381,12 @@ private:
       if (!ensure_lifecycle_access(caller, receiver)) {
         return FastCallStatus::Faulted;
       }
-      for (const MapEntry &entry : map->entries) {
-        if (map_key_is_nameable(entry.key) && entry.symbol_id == symbol_id) {
-          *out = entry.value;
-          return FastCallStatus::Matched;
-        }
+      const MapEntry *entry =
+          map_value_find_entry(*map, Value::symbol(symbol_id),
+                               std::optional<std::uint32_t>{symbol_id});
+      if (entry != nullptr) {
+        *out = entry->value;
+        return FastCallStatus::Matched;
       }
       set_fault(caller, "KeyError", "map key is absent");
       return FastCallStatus::Faulted;
@@ -3956,11 +3957,15 @@ private:
           out.opcode = Opcode::IShr;
         } else if (collection_selector == "[]") {
           out.quick_opcode = QuickOpcode::SendSeqIndex;
+        } else if (collection_selector == "include?") {
+          out.quick_opcode = QuickOpcode::SendSeqContains;
         } else if (collection_selector == "first") {
           out.quick_opcode = QuickOpcode::SendSeqFirst;
         }
       } else {
-        if (collection_selector == "count") {
+        if (selector == "to_str") {
+          out.quick_opcode = QuickOpcode::SendIntToStr;
+        } else if (collection_selector == "count") {
           out.quick_opcode = QuickOpcode::SendSeqCount;
         } else if (collection_selector == "first") {
           out.quick_opcode = QuickOpcode::SendSeqFirst;
@@ -8725,27 +8730,52 @@ private:
     return module_.strings[string_id];
   }
 
+  const std::string *string_text_ptr_from_id(std::uint32_t string_id) {
+    if (string_id >= module_.strings.size()) {
+      return nullptr;
+    }
+    return &module_.strings[string_id];
+  }
+
   // Fold any string-table slots that were appended outside intern (e.g.
   // nested-module splicing) into the hash index. The table only grows, so a
-  // folded-count watermark suffices; emplace keeps the first id for a given
-  // text, matching the old linear scan's "return first match" semantics.
+  // folded-count watermark suffices; each hash bucket stores table ids rather
+  // than another owned copy of the text. First content match still wins.
   void fold_string_index() {
     for (std::size_t i = string_index_folded_; i < module_.strings.size();
          ++i) {
-      string_index_.emplace(module_.strings[i], static_cast<std::uint32_t>(i));
+      const std::string &text = module_.strings[i];
+      const std::size_t hash = std::hash<std::string>{}(text);
+      std::vector<std::uint32_t> &bucket = string_index_[hash];
+      bool duplicate = false;
+      for (const std::uint32_t existing_id : bucket) {
+        if (existing_id < module_.strings.size() &&
+            module_.strings[existing_id] == text) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) {
+        bucket.push_back(static_cast<std::uint32_t>(i));
+      }
     }
     string_index_folded_ = module_.strings.size();
   }
 
   std::uint32_t intern_runtime_string(const std::string &text) {
     fold_string_index();
-    const auto existing = string_index_.find(text);
+    const std::size_t hash = std::hash<std::string>{}(text);
+    const auto existing = string_index_.find(hash);
     if (existing != string_index_.end()) {
-      return existing->second;
+      for (const std::uint32_t id : existing->second) {
+        if (id < module_.strings.size() && module_.strings[id] == text) {
+          return id;
+        }
+      }
     }
     const std::uint32_t id = static_cast<std::uint32_t>(module_.strings.size());
     module_.strings.push_back(text);
-    string_index_.emplace(text, id);
+    string_index_[hash].push_back(id);
     string_index_folded_ = module_.strings.size();
     return id;
   }
@@ -19995,9 +20025,8 @@ private:
         set_fault(frame, error.error_name, error.message);
         return SendStatus::Faulted;
       }
-      upsert_normalized_map_entry(
-          &map->entries, make_canonical_map_entry(*key, args[1], map->strict),
-          map->strict);
+      map_value_upsert_entry(
+          map.get(), make_canonical_map_entry(*key, args[1], map->strict));
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -20022,7 +20051,7 @@ private:
           kept.push_back(entry);
         }
       }
-      map->entries = std::move(kept);
+      map_value_assign_entries(map.get(), std::move(kept));
       *out = removed;
       return SendStatus::Matched;
     }
@@ -20036,6 +20065,7 @@ private:
       }
       const MapEntry first = map->entries.front();
       map->entries.erase(map->entries.begin());
+      map_value_rebuild_index(map.get());
       *out = make_tuple_value({first.key, first.value});
       return SendStatus::Matched;
     }
@@ -20043,7 +20073,7 @@ private:
       if (!reject_block() || !require_args(0)) {
         return SendStatus::Faulted;
       }
-      map->entries.clear();
+      map_value_clear_entries(map.get());
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -20060,7 +20090,7 @@ private:
         set_fault(frame, "TypeError", "replace! expects a map");
         return SendStatus::Faulted;
       }
-      map->entries = *other;
+      map_value_assign_entries(map.get(), *other);
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -20075,7 +20105,7 @@ private:
           kept.push_back(entry);
         }
       }
-      map->entries = std::move(kept);
+      map_value_assign_entries(map.get(), std::move(kept));
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -20094,7 +20124,7 @@ private:
         set_fault(frame, "TypeError", "merge! result is not a map");
         return SendStatus::Faulted;
       }
-      map->entries = merged_map->entries;
+      map_value_assign_entries(map.get(), merged_map->entries);
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -20121,7 +20151,7 @@ private:
           kept.push_back(entry);
         }
       }
-      map->entries = std::move(kept);
+      map_value_assign_entries(map.get(), std::move(kept));
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -20155,8 +20185,10 @@ private:
       const Value rebuilt =
           make_symbol_map_value(std::move(result), false, map->strict);
       const IntrusivePtr<MapValue> rebuilt_map = rebuilt.as_map();
-      map->entries = rebuilt_map != nullptr ? rebuilt_map->entries
-                                            : std::vector<MapEntry>{};
+      std::vector<MapEntry> rebuilt_entries =
+          rebuilt_map != nullptr ? rebuilt_map->entries
+                                 : std::vector<MapEntry>{};
+      map_value_assign_entries(map.get(), std::move(rebuilt_entries));
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -20182,7 +20214,7 @@ private:
         rekeyed.value = *new_value;
         result.push_back(std::move(rekeyed));
       }
-      map->entries = std::move(result);
+      map_value_assign_entries(map.get(), std::move(result));
       *out = receiver;
       return SendStatus::Matched;
     }
@@ -21615,9 +21647,8 @@ private:
         set_fault(frame, error.error_name, error.message);
         return SendStatus::Faulted;
       }
-      upsert_normalized_map_entry(
-          &map->entries, make_canonical_map_entry(*key, args[1], map->strict),
-          map->strict);
+      map_value_upsert_entry(
+          map.get(), make_canonical_map_entry(*key, args[1], map->strict));
       *out = args[1];
       return SendStatus::Matched;
     }
@@ -22728,16 +22759,281 @@ private:
     }
 
     if (receiver.is_map()) {
-      const std::optional<std::vector<MapEntry>> extracted =
-          extract_map_entries(frame, receiver);
-      if (fault_.has_value()) {
+      const IntrusivePtr<MapValue> map = receiver.as_map();
+      if (map == nullptr) {
+        set_fault(frame, "TypeError", "map value is null");
         return SendStatus::Faulted;
       }
-      // Name-indifferent vs exact-key behavior follows the receiver map's
-      // strictness; deconstructed non-map receivers behave as ordinary.
-      const bool source_strict = receiver.is_map() &&
-                                 receiver.as_map() != nullptr &&
-                                 receiver.as_map()->strict;
+      if (!ensure_lifecycle_access(frame, receiver)) {
+        return SendStatus::Faulted;
+      }
+      const bool source_strict = map->strict;
+      if (collection_selector == "empty?") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(map->entries.empty());
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "count") {
+        if (!require_arity(0)) {
+          return SendStatus::Faulted;
+        }
+        if (!count_alias_accepts_block && !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (block.is_null()) {
+          *out = Value::integer(static_cast<std::int64_t>(map->entries.size()));
+          return SendStatus::Matched;
+        }
+      }
+      if (collection_selector == "contains?" ||
+          collection_selector == "include?") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        CollectionKeyError error;
+        const std::optional<Value> key = normalize_map_key(args[0], &error);
+        if (!key.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::uint32_t> lookup_id =
+            map_lookup_key_id(*key);
+        *out = Value::boolean(
+            map_value_find_entry(*map, *key, lookup_id) != nullptr);
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "value?" ||
+          collection_selector == "has_value?") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const bool found =
+            std::find_if(map->entries.begin(), map->entries.end(),
+                         [&](const MapEntry &entry) {
+                           return value_equals(entry.value, args[0]);
+                         }) != map->entries.end();
+        *out = Value::boolean(found);
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "[]" || collection_selector == "[]?") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        CollectionKeyError error;
+        const std::optional<Value> key = normalize_map_key(args[0], &error);
+        if (!key.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return SendStatus::Faulted;
+        }
+        const std::optional<std::uint32_t> lookup_id =
+            map_lookup_key_id(*key);
+        const MapEntry *found = map_value_find_entry(*map, *key, lookup_id);
+        if (found == nullptr) {
+          if (collection_selector == "[]?") {
+            *out = Value::null();
+            return SendStatus::Matched;
+          }
+          set_fault(frame, "KeyError", "map key is absent");
+          return SendStatus::Faulted;
+        }
+        *out = found->value;
+        return SendStatus::Matched;
+      }
+      const std::vector<MapEntry> &entries_view = map->entries;
+      if (collection_selector == "deconstruct_keys") {
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        bool keyset_is_valid = false;
+        if (args[0].is_tuple() || args[0].is_list()) {
+          bool keyset_source_was_tuple = false;
+          const std::optional<std::vector<Value>> keyset_items =
+              extract_sequence_items(frame, args[0], &keyset_source_was_tuple);
+          if (fault_.has_value()) {
+            return SendStatus::Faulted;
+          }
+          keyset_is_valid = keyset_items.has_value();
+          if (keyset_items.has_value()) {
+            for (const Value &item : *keyset_items) {
+              if (!item.is_symbol()) {
+                keyset_is_valid = false;
+                break;
+              }
+            }
+          }
+        }
+        if (!keyset_is_valid) {
+          set_fault(frame, "TypeError",
+                    "deconstruct_keys expects Symbol tuple/list keyset");
+          return SendStatus::Faulted;
+        }
+        *out = receiver;
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "keys") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> keys;
+        keys.reserve(entries_view.size());
+        for (const MapEntry &entry : entries_view) {
+          keys.push_back(entry.key);
+        }
+        *out = make_list_value(std::move(keys));
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "values") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> values;
+        values.reserve(entries_view.size());
+        for (const MapEntry &entry : entries_view) {
+          values.push_back(entry.value);
+        }
+        *out = make_list_value(std::move(values));
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "entries" ||
+          collection_selector == "to_array") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> entries;
+        entries.reserve(entries_view.size());
+        for (const MapEntry &entry : entries_view) {
+          entries.push_back(make_tuple_value({entry.key, entry.value}));
+        }
+        *out = make_list_value(std::move(entries));
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "each_pair" && block.is_null()) {
+        if (!require_arity(0)) {
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> entries;
+        entries.reserve(entries_view.size());
+        for (const MapEntry &entry : entries_view) {
+          entries.push_back(make_tuple_value({entry.key, entry.value}));
+        }
+        *out = make_list_value(std::move(entries));
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "merge" || collection_selector == "+" ||
+          collection_selector == "|") {
+        if (!require_arity(1)) {
+          return SendStatus::Faulted;
+        }
+        const std::optional<Value> merged =
+            merge_map_entries(frame, receiver, entries_view, args[0], block);
+        if (!merged.has_value()) {
+          return SendStatus::Faulted;
+        }
+        *out = *merged;
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "with") {
+        if (!require_arity(2) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        CollectionKeyError error;
+        std::optional<Value> key = normalize_map_key(args[0], &error);
+        if (!key.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return SendStatus::Faulted;
+        }
+        std::vector<MapEntry> result = entries_view;
+        upsert_normalized_map_entry(
+            &result, make_canonical_map_entry(*key, args[1], source_strict),
+            source_strict);
+        *out = make_symbol_map_value(std::move(result), false, source_strict);
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "without" ||
+          collection_selector == "except") {
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args.empty() ||
+            (collection_selector == "without" && args.size() != 1U)) {
+          set_fault(frame, "TypeError", "wrong builtin SEND arity");
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> remove_keys;
+        remove_keys.reserve(args.size());
+        for (const Value &arg : args) {
+          CollectionKeyError error;
+          std::optional<Value> key = normalize_map_key(arg, &error);
+          if (!key.has_value()) {
+            set_fault(frame, error.error_name, error.message);
+            return SendStatus::Faulted;
+          }
+          remove_keys.push_back(*key);
+        }
+        std::vector<MapEntry> result;
+        result.reserve(entries_view.size());
+        for (const MapEntry &entry : entries_view) {
+          bool drop = false;
+          for (const Value &key : remove_keys) {
+            if (map_entry_key_equivalent(entry, key, map_lookup_key_id(key),
+                                         source_strict)) {
+              drop = true;
+              break;
+            }
+          }
+          if (!drop) {
+            result.push_back(entry);
+          }
+        }
+        *out = make_symbol_map_value(std::move(result), false, source_strict);
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "slice") {
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::vector<Value> wanted;
+        wanted.reserve(args.size());
+        for (const Value &arg : args) {
+          CollectionKeyError error;
+          std::optional<Value> key = normalize_map_key(arg, &error);
+          if (!key.has_value()) {
+            set_fault(frame, error.error_name, error.message);
+            return SendStatus::Faulted;
+          }
+          wanted.push_back(*key);
+        }
+        std::vector<MapEntry> result;
+        for (const MapEntry &entry : entries_view) {
+          for (const Value &key : wanted) {
+            if (map_entry_key_equivalent(entry, key, map_lookup_key_id(key),
+                                         source_strict)) {
+              result.push_back(entry);
+              break;
+            }
+          }
+        }
+        *out = make_symbol_map_value(std::move(result), false, source_strict);
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "compact") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        std::vector<MapEntry> result;
+        result.reserve(entries_view.size());
+        for (const MapEntry &entry : entries_view) {
+          if (!entry.value.is_null()) {
+            result.push_back(entry);
+          }
+        }
+        *out = make_symbol_map_value(std::move(result), false, source_strict);
+        return SendStatus::Matched;
+      }
+
+      const std::optional<std::vector<MapEntry>> extracted = map->entries;
       if (extracted.has_value()) {
         if (collection_selector == "empty?") {
           if (!require_arity(0) || !require_no_block()) {
@@ -23923,6 +24219,35 @@ private:
       return FastSendStatus::Faulted;
     }
     if (!rhs_fast) {
+      if (opcode == QuickOpcode::SendIAdd) {
+        const Value lhs_value = read_reg(frame, recv_reg);
+        if (fault_.has_value()) {
+          return FastSendStatus::Faulted;
+        }
+        const Value rhs_value = read_reg(frame, arg_reg);
+        if (fault_.has_value()) {
+          return FastSendStatus::Faulted;
+        }
+        if (lhs_value.is_string() && rhs_value.is_string()) {
+          const std::string *left =
+              string_text_ptr_from_id(lhs_value.as_string().string_id);
+          const std::string *right =
+              string_text_ptr_from_id(rhs_value.as_string().string_id);
+          if (left == nullptr || right == nullptr) {
+            set_fault(frame, "VMError", "string ref is invalid");
+            return FastSendStatus::Faulted;
+          }
+          std::string text;
+          text.reserve(left->size() + right->size());
+          text.append(*left);
+          text.append(*right);
+          return write_reg_fast_plain(
+                     frame, dst,
+                     Value::string(intern_runtime_string(text)))
+                     ? FastSendStatus::Matched
+                     : FastSendStatus::Faulted;
+        }
+      }
       return FastSendStatus::NotHandled;
     }
     const bool lhs_fast = read_integer_reg_unboxed(frame, recv_reg, &lhs);
@@ -24065,14 +24390,30 @@ private:
     }
   }
 
+  FastSendStatus step_quick_int_to_str(Frame &frame, std::uint32_t dst,
+                                       std::uint32_t recv_reg) {
+    std::int64_t value = 0;
+    const bool value_fast = read_integer_reg_unboxed(frame, recv_reg, &value);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+    if (!value_fast) {
+      return FastSendStatus::NotHandled;
+    }
+    return write_reg_fast_plain(
+               frame, dst,
+               Value::string(intern_runtime_string(std::to_string(value))))
+               ? FastSendStatus::Matched
+               : FastSendStatus::Faulted;
+  }
+
   FastSendStatus step_quick_sequence_send(Frame &frame, QuickOpcode opcode,
                                           std::uint32_t dst,
                                           std::uint32_t recv_reg,
                                           std::uint32_t arg_reg,
                                           std::int64_t pos_count) {
     std::int64_t integer_arg = 0;
-    if (opcode == QuickOpcode::SendSeqIndexSet ||
-        (opcode == QuickOpcode::SendSeqFirst && pos_count == 1)) {
+    if (opcode == QuickOpcode::SendSeqFirst && pos_count == 1) {
       const bool arg_fast =
           read_integer_reg_unboxed(frame, arg_reg, &integer_arg);
       if (fault_.has_value()) {
@@ -24083,15 +24424,57 @@ private:
       }
     }
 
+    const Value receiver = read_reg(frame, recv_reg);
+    if (fault_.has_value()) {
+      return FastSendStatus::Faulted;
+    }
+
     if (opcode == QuickOpcode::SendSeqIndexSet) {
-      // imm carries the value register. Mirrors the generic list `[]=`
-      // handler; non-list receivers, frozen lists, and non-integer indexes
-      // fall back to the generic send for identical fault classification.
-      const Value receiver = read_reg(frame, recv_reg);
+      // imm carries the value register. Mirrors the generic list/map `[]=`
+      // handlers; unsupported key/receiver shapes fall back for identical
+      // fault classification.
+      if (receiver.is_map()) {
+        const IntrusivePtr<MapValue> map = receiver.as_map();
+        if (map == nullptr) {
+          set_fault(frame, "TypeError", "map value is null");
+          return FastSendStatus::Faulted;
+        }
+        if (map->strict) {
+          return FastSendStatus::NotHandled;
+        }
+        if (map->frozen) {
+          set_fault(frame, "FrozenError", "cannot modify frozen map");
+          return FastSendStatus::Faulted;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return FastSendStatus::Faulted;
+        }
+        const Value key = read_reg(frame, arg_reg);
+        if (fault_.has_value()) {
+          return FastSendStatus::Faulted;
+        }
+        if (!map_key_is_nameable(key)) {
+          return FastSendStatus::NotHandled;
+        }
+        Value stored = read_reg(frame, static_cast<std::uint32_t>(pos_count));
+        if (fault_.has_value()) {
+          return FastSendStatus::Faulted;
+        }
+        map_value_upsert_entry(map.get(),
+                               make_canonical_map_entry(key, stored, false));
+        return write_reg_fast_plain(frame, dst, std::move(stored))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (!receiver.is_list()) {
+        return FastSendStatus::NotHandled;
+      }
+      const bool arg_fast =
+          read_integer_reg_unboxed(frame, arg_reg, &integer_arg);
       if (fault_.has_value()) {
         return FastSendStatus::Faulted;
       }
-      if (!receiver.is_list()) {
+      if (!arg_fast) {
         return FastSendStatus::NotHandled;
       }
       const IntrusivePtr<ListValue> list = receiver.as_list();
@@ -24116,11 +24499,9 @@ private:
                  : FastSendStatus::Faulted;
     }
 
-    const Value receiver = read_reg(frame, recv_reg);
-    if (fault_.has_value()) {
-      return FastSendStatus::Faulted;
-    }
-    if (opcode == QuickOpcode::SendSeqIndex && receiver.is_map()) {
+    if ((opcode == QuickOpcode::SendSeqIndex ||
+         opcode == QuickOpcode::SendSeqContains) &&
+        receiver.is_map()) {
       const IntrusivePtr<MapValue> map = receiver.as_map();
       if (map == nullptr) {
         set_fault(frame, "TypeError", "map value is null");
@@ -24136,19 +24517,39 @@ private:
       if (fault_.has_value()) {
         return FastSendStatus::Faulted;
       }
-      if (!key.is_symbol()) {
+      if (!map_key_is_nameable(key)) {
         return FastSendStatus::NotHandled;
       }
-      const std::uint32_t symbol_id = key.as_symbol().symbol_id;
-      for (const MapEntry &entry : map->entries) {
-        if (map_key_is_nameable(entry.key) && entry.symbol_id == symbol_id) {
-          return write_reg_fast_plain(frame, dst, entry.value)
-                     ? FastSendStatus::Matched
-                     : FastSendStatus::Faulted;
-        }
+      const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(key);
+      const MapEntry *entry = map_value_find_entry(*map, key, lookup_id);
+      if (opcode == QuickOpcode::SendSeqContains) {
+        return write_reg_fast_plain(frame, dst,
+                                    Value::boolean(entry != nullptr))
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
+      }
+      if (entry != nullptr) {
+        return write_reg_fast_plain(frame, dst, entry->value)
+                   ? FastSendStatus::Matched
+                   : FastSendStatus::Faulted;
       }
       set_fault(frame, "KeyError", "map key is absent");
       return FastSendStatus::Faulted;
+    }
+
+    if (opcode == QuickOpcode::SendSeqCount && receiver.is_map()) {
+      const IntrusivePtr<MapValue> map = receiver.as_map();
+      if (map == nullptr) {
+        set_fault(frame, "TypeError", "map value is null");
+        return FastSendStatus::Faulted;
+      }
+      if (!ensure_lifecycle_access(frame, receiver)) {
+        return FastSendStatus::Faulted;
+      }
+      return write_integer_reg_unboxed(
+                 frame, dst, static_cast<std::int64_t>(map->entries.size()))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
     }
 
     if (opcode == QuickOpcode::SendSeqIndex) {
@@ -24186,6 +24587,17 @@ private:
                                        static_cast<std::int64_t>(items->size()))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
+    case QuickOpcode::SendSeqContains: {
+      const Value needle = read_reg(frame, arg_reg);
+      if (fault_.has_value()) {
+        return FastSendStatus::Faulted;
+      }
+      return write_reg_fast_plain(
+                 frame, dst, Value::boolean(sequence_contains_value(*items,
+                                                                    needle)))
+                 ? FastSendStatus::Matched
+                 : FastSendStatus::Faulted;
+    }
     case QuickOpcode::SendSeqFirst:
       if (pos_count == 0) {
         return write_reg_fast_plain(
@@ -25175,6 +25587,18 @@ private:
         }
         break;
       }
+      case QuickOpcode::SendIntToStr: {
+        const FastSendStatus status =
+            step_quick_int_to_str(frame, quick->a, quick->b);
+        if (status == FastSendStatus::Faulted) {
+          return;
+        }
+        if (status == FastSendStatus::Matched) {
+          ++frame.pc;
+          return;
+        }
+        break;
+      }
       case QuickOpcode::LoadIvar:
       case QuickOpcode::StoreIvar: {
         const FastSendStatus status =
@@ -25192,6 +25616,7 @@ private:
       }
       case QuickOpcode::SendSeqIndex:
       case QuickOpcode::SendSeqIndexSet:
+      case QuickOpcode::SendSeqContains:
       case QuickOpcode::SendSeqCount:
       case QuickOpcode::SendSeqFirst: {
         const FastSendStatus status =
@@ -26883,10 +27308,12 @@ private:
   std::size_t initial_symbol_count_ = 0;
   // O(1) interning indices over module_.strings / module_.symbols, folded
   // lazily (see fold_string_index/fold_symbol_index) so they stay consistent
-  // when the tables are appended to outside intern. Replaces the former O(n)
-  // linear intern scans -- string-heavy code was O(n^2). Does not yet bound
-  // table growth (Layer-2b); ids and dedup semantics are unchanged.
-  std::unordered_map<std::string, std::uint32_t> string_index_;
+  // when the tables are appended to outside intern. The string index stores
+  // hash buckets of canonical ids to avoid a second permanent copy of every
+  // runtime-created string; collisions are resolved against module_.strings.
+  // Does not yet bound table growth (Layer-2b); ids and dedup semantics remain
+  // unchanged.
+  std::unordered_map<std::size_t, std::vector<std::uint32_t>> string_index_;
   std::size_t string_index_folded_ = 0;
   std::unordered_map<std::string, std::uint32_t> symbol_index_;
   std::size_t symbol_index_folded_ = 0;

@@ -114,6 +114,10 @@ struct MapEntry {
 struct MapValue {
   ObjHeader header;
   std::vector<MapEntry> entries;
+  // Ordered entries remain the semantic source of truth. Ordinary maps keep an
+  // auxiliary index for Symbol/Str keys by canonical symbol id so hot lookup and
+  // upsert paths avoid scanning the ordered vector.
+  std::unordered_map<std::uint32_t, std::size_t> name_index;
   bool frozen = false;
   // Exact-key (StrictMap / StrictHashMap) vs name-indifferent ordinary Map /
   // HashMap (spec v20.7/v20.8). Ordinary maps treat a Symbol key and a Str key
@@ -158,6 +162,18 @@ bool map_entry_key_equivalent(const MapEntry &entry, const Value &lookup_key,
 bool map_entries_same_key(const MapEntry &a, const MapEntry &b, bool strict);
 void upsert_normalized_map_entry(std::vector<MapEntry> *entries, MapEntry entry,
                                  bool strict);
+void map_value_rebuild_index(MapValue *map);
+void map_value_assign_entries(MapValue *map, std::vector<MapEntry> entries);
+void map_value_clear_entries(MapValue *map);
+std::optional<std::size_t>
+map_value_find_entry_index(const MapValue &map, const Value &lookup_key,
+                           std::optional<std::uint32_t> lookup_id);
+const MapEntry *
+map_value_find_entry(const MapValue &map, const Value &lookup_key,
+                     std::optional<std::uint32_t> lookup_id);
+MapEntry *map_value_find_entry(MapValue *map, const Value &lookup_key,
+                               std::optional<std::uint32_t> lookup_id);
+void map_value_upsert_entry(MapValue *map, MapEntry entry);
 std::optional<std::vector<MapEntry>>
 normalize_map_entries(std::vector<MapEntry> entries, bool strict,
                       CollectionKeyError *error);
