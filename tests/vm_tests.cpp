@@ -8,6 +8,7 @@
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
 #include "package/package.h"
+#include "runtime/macro_expander.h"
 
 #include <atomic>
 #include <chrono>
@@ -9091,9 +9092,208 @@ void test_native_tag_registry() {
          "collected descriptor resolves with a reclaim and no destructor");
 }
 
+// M1: the first-class `Ast` value model. Parse a snippet, wrap a subnode as an
+// Ast value, and confirm the runtime tail kind + accessors round-trip the node
+// kind and return the verbatim source slice for the node's span.
+void test_ast_value_model() {
+  const std::string source = "x > 5\n";
+  amber::lexer::Lexer lexer(source, "<ast-test>");
+  amber::lexer::LexResult lex = lexer.lex();
+  expect(lex.ok(), "ast value: lex ok");
+  amber::parser::Parser parser(lex.tokens);
+  amber::parser::ParseModuleResult mod = parser.parse_module_unit();
+  expect(mod.ok() && mod.items.size() == 1, "ast value: parse ok");
+
+  const amber::ast::Expr *expr = nullptr;
+  for (const auto &nf : mod.items[0]->node_fields) {
+    if (nf.name == "expr") {
+      expr = nf.value.get();
+    }
+  }
+  expect(expr != nullptr, "ast value: found statement expr");
+
+  auto root = std::shared_ptr<const amber::ast::Expr>(std::move(mod.items[0]));
+  auto src = std::make_shared<const std::string>(source);
+  auto node = std::make_shared<amber::runtime::RuntimeAstNode>();
+  node->root = root;
+  node->node = expr; // aliasing pointer into the root-owned tree
+  node->source = src;
+  amber::runtime::Value value = amber::runtime::Value::ast_node(node);
+
+  expect(value.is_ast_node(), "value is an ast_node");
+  expect(!value.is_integer() && !value.is_string() && !value.is_list(),
+         "ast_node is distinct from scalar/collection kinds");
+  const std::shared_ptr<amber::runtime::RuntimeAstNode> got = value.as_ast_node();
+  expect(got != nullptr && got->node == expr,
+         "as_ast_node round-trips the aliasing node pointer");
+  expect(!amber::runtime::runtime_ast_node_kind(*got).empty() &&
+             amber::runtime::runtime_ast_node_kind(*got) == expr->kind,
+         "runtime_ast_node_kind reports the node's amber.ast.v1 kind");
+  expect(amber::runtime::runtime_ast_node_source(*got) == "x > 5",
+         "runtime_ast_node_source returns the verbatim span slice");
+
+  // Copy/move must preserve the payload (exercises both Value reps' refcounting).
+  amber::runtime::Value copy = value;
+  expect(copy.is_ast_node() && copy.as_ast_node()->node == expr,
+         "ast_node survives value copy");
+}
+
+// Run F1.5 expansion over a source module and return the result.
+amber::macros::ExpandResult expand_source(const std::string &source) {
+  amber::lexer::Lexer lexer(source, "<macro-sandbox-test>");
+  amber::lexer::LexResult lex = lexer.lex();
+  expect(lex.ok(), "macro sandbox: lex ok");
+  amber::parser::Parser parser(lex.tokens);
+  amber::parser::ParseModuleResult mod = parser.parse_module_unit();
+  expect(mod.ok(), "macro sandbox: parse ok");
+  return amber::macros::expand_macros(mod.items, "sandbox.test", source);
+}
+
+void test_macro_expander_sandbox() {
+  // Positive control: an ordinary macro expands under the sandbox.
+  {
+    const amber::macros::ExpandResult ok = expand_source(
+        "macro def double(x):\n"
+        "  quote:\n"
+        "    unquote(x) + unquote(x)\n"
+        "\n"
+        "double(21)\n");
+    expect(ok.ok, "sandboxed expansion still succeeds for pure macros");
+  }
+
+  // A macro attempting IO at expansion time is a build diagnostic: the
+  // expander VM runs with the capability gate armed and nothing granted
+  // (DESIGN-macro-system §10).
+  {
+    const amber::macros::ExpandResult denied = expand_source(
+        "macro def sneaky(x):\n"
+        "  data = fs.read_text(\"/etc/hosts\")\n"
+        "  return quote:\n"
+        "    1\n"
+        "\n"
+        "sneaky(1)\n");
+    expect(!denied.ok, "macro IO is rejected");
+    expect(denied.error.find("AMB_MACRO_CAPABILITY") != std::string::npos,
+           "macro IO reports AMB_MACRO_CAPABILITY, got: " + denied.error);
+  }
+
+  // A non-terminating macro exhausts the step budget instead of hanging the
+  // build; the budget is shared with nested block VMs via RuntimeState.
+  {
+    const amber::macros::ExpandResult spun = expand_source(
+        "macro def spin(x):\n"
+        "  n = 0\n"
+        "  while true:\n"
+        "    n = n + 1\n"
+        "  return quote:\n"
+        "    1\n"
+        "\n"
+        "spin(1)\n");
+    expect(!spun.ok, "looping macro is rejected");
+    expect(spun.error.find("AMB_MACRO_BUDGET") != std::string::npos,
+           "looping macro reports AMB_MACRO_BUDGET, got: " + spun.error);
+  }
+}
+
+void test_cross_module_macro_staging() {
+  // Provider module: exports a macro through the macro-marked export table
+  // (DESIGN-macro-system §11 exports/imports).
+  const std::string provider_source = "package provider.mod\n"
+                                      "export macro run_twice\n"
+                                      "\n"
+                                      "macro def run_twice(blk):\n"
+                                      "  #{blk}\n"
+                                      "  #{blk}\n"
+                                      "\n"
+                                      "macro def private_macro(x):\n"
+                                      "  #{x}\n";
+  amber::lexer::Lexer provider_lexer(provider_source, "<provider>");
+  amber::lexer::LexResult provider_lex = provider_lexer.lex();
+  expect(provider_lex.ok(), "staging: provider lex ok");
+  amber::parser::Parser provider_parser(provider_lex.tokens);
+  amber::parser::ParseModuleResult provider_mod =
+      provider_parser.parse_module_unit();
+  expect(provider_mod.ok(), "staging: provider parse ok");
+  std::vector<amber::macros::MacroExport> exports =
+      amber::macros::collect_macro_exports(provider_mod.items);
+  expect(exports.size() == 1 && exports[0].public_name == "run_twice",
+         "only the macro-marked export is harvested (private stays private)");
+
+  amber::macros::MacroProviderMap providers;
+  providers["provider.mod"] = std::move(exports);
+
+  // Importer: binds the provider macro under a local alias and invokes it
+  // through the paren-less block trigger, which only a macro can consume.
+  const std::string importer_source = "package app.main\n"
+                                      "from provider.mod import run_twice as loop2\n"
+                                      "\n"
+                                      "def probe():\n"
+                                      "  y = 0\n"
+                                      "  loop2:\n"
+                                      "    y = y + 21\n"
+                                      "  y\n";
+  amber::lexer::Lexer importer_lexer(importer_source, "<importer>");
+  amber::lexer::LexResult importer_lex = importer_lexer.lex();
+  expect(importer_lex.ok(), "staging: importer lex ok");
+  amber::parser::Parser importer_parser(importer_lex.tokens);
+  amber::parser::ParseModuleResult importer_mod =
+      importer_parser.parse_module_unit();
+  expect(importer_mod.ok(), "staging: importer parse ok");
+
+  const amber::macros::ExpandResult expanded = amber::macros::expand_macros(
+      importer_mod.items, importer_mod.module_name, importer_source, providers);
+  expect(expanded.ok,
+         "cross-module expansion succeeds, got: " + expanded.error);
+
+  // Compile and run the expanded importer: the imported macro spliced the
+  // block twice, so probe() == 42.
+  amber::ast::expand_quotes(importer_mod.items);
+  amber::binder::BindResult bind =
+      amber::binder::bind_module(importer_mod.items, importer_mod.module_name);
+  expect(bind.ok(), "staging: expanded importer binds");
+  amber::hir::Program program = amber::hir::lower_module(
+      importer_mod.items, importer_mod.module_name, bind.graph);
+  amber::bytecode::EmitResult emit =
+      amber::bytecode::emit_program(program, importer_mod.module_name);
+  expect(emit.ok(), "staging: expanded importer emits");
+  const amber::bytecode::BcMethod *probe =
+      method_by_name(emit.module, "probe");
+  expect(probe != nullptr, "staging: probe method exists");
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(emit.module, probe->entry_code_id);
+  expect(exec.ok(), "staging: probe executes");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "imported macro expanded at the call site (probe == 42)");
+
+  // A local macro def colliding with an imported alias is a diagnostic.
+  const std::string collision_source = "package app.other\n"
+                                       "from provider.mod import run_twice\n"
+                                       "\n"
+                                       "macro def run_twice(x):\n"
+                                       "  #{x}\n"
+                                       "\n"
+                                       "def probe():\n"
+                                       "  run_twice(1)\n";
+  amber::lexer::Lexer collision_lexer(collision_source, "<collision>");
+  amber::lexer::LexResult collision_lex = collision_lexer.lex();
+  amber::parser::Parser collision_parser(collision_lex.tokens);
+  amber::parser::ParseModuleResult collision_mod =
+      collision_parser.parse_module_unit();
+  expect(collision_mod.ok(), "staging: collision module parses");
+  const amber::macros::ExpandResult collided = amber::macros::expand_macros(
+      collision_mod.items, collision_mod.module_name, collision_source,
+      providers);
+  expect(!collided.ok &&
+             collided.error.find("collides") != std::string::npos,
+         "import/local macro name collision is a diagnostic");
+}
+
 } // namespace
 
 int main() {
+  test_ast_value_model();
+  test_macro_expander_sandbox();
+  test_cross_module_macro_staging();
   test_execute_emitted_method();
   test_direct_entry_materializes_sibling_captures();
   test_execute_return_keyword();

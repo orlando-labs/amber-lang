@@ -6,6 +6,7 @@
 #include "frontend/hir/hir.h"
 #include "frontend/lexer/lexer.h"
 #include "frontend/parser/parser.h"
+#include "runtime/macro_expander.h"
 #include "runtime/module_loader.h"
 #include "runtime/vm.h"
 
@@ -318,6 +319,19 @@ bool compile_case_to_module(const TestCase &test_case,
     return false;
   }
 
+  // F1.5: expand macro calls, then quote/unquote, before binding.
+  {
+    const amber::macros::ExpandResult macro_result =
+        amber::macros::expand_macros(parse_result.items,
+                                     parse_result.module_name, source);
+    if (!macro_result.ok) {
+      std::cerr << test_case.directory << ": macro expansion error:\n"
+                << macro_result.error << "\n";
+      return false;
+    }
+  }
+  amber::ast::expand_quotes(parse_result.items);
+
   amber::binder::BindResult bind_result =
       amber::binder::bind_module(parse_result.items, parse_result.module_name);
   if (!bind_result.ok()) {
@@ -583,6 +597,19 @@ bool run_bind_case(const TestCase &test_case) {
     return false;
   }
 
+  // F1.5: expand macro calls, then quote/unquote, before binding.
+  {
+    const amber::macros::ExpandResult macro_result =
+        amber::macros::expand_macros(parse_result.items,
+                                     parse_result.module_name, source);
+    if (!macro_result.ok) {
+      std::cerr << test_case.directory << ": macro expansion error:\n"
+                << macro_result.error << "\n";
+      return false;
+    }
+  }
+  amber::ast::expand_quotes(parse_result.items);
+
   amber::binder::BindResult bind_result =
       amber::binder::bind_module(parse_result.items, parse_result.module_name);
   if (!bind_result.ok()) {
@@ -620,6 +647,19 @@ bool run_check_case(const TestCase &test_case) {
     return false;
   }
 
+  // F1.5: expand macro calls, then quote/unquote, before binding.
+  {
+    const amber::macros::ExpandResult macro_result =
+        amber::macros::expand_macros(parse_result.items,
+                                     parse_result.module_name, source);
+    if (!macro_result.ok) {
+      std::cerr << test_case.directory << ": macro expansion error:\n"
+                << macro_result.error << "\n";
+      return false;
+    }
+  }
+  amber::ast::expand_quotes(parse_result.items);
+
   amber::binder::BindResult bind_result =
       amber::binder::bind_module(parse_result.items, parse_result.module_name);
   if (!bind_result.ok()) {
@@ -655,6 +695,19 @@ bool run_typed_case(const TestCase &test_case) {
               << amber::lexer::diagnostics_to_json(parse_result.diagnostics);
     return false;
   }
+
+  // F1.5: expand macro calls, then quote/unquote, before binding.
+  {
+    const amber::macros::ExpandResult macro_result =
+        amber::macros::expand_macros(parse_result.items,
+                                     parse_result.module_name, source);
+    if (!macro_result.ok) {
+      std::cerr << test_case.directory << ": macro expansion error:\n"
+                << macro_result.error << "\n";
+      return false;
+    }
+  }
+  amber::ast::expand_quotes(parse_result.items);
 
   amber::binder::BindResult bind_result =
       amber::binder::bind_module(parse_result.items, parse_result.module_name);
@@ -745,6 +798,19 @@ bool run_hir_case(const TestCase &test_case) {
     return false;
   }
 
+  // F1.5: expand macro calls, then quote/unquote, before binding.
+  {
+    const amber::macros::ExpandResult macro_result =
+        amber::macros::expand_macros(parse_result.items,
+                                     parse_result.module_name, source);
+    if (!macro_result.ok) {
+      std::cerr << test_case.directory << ": macro expansion error:\n"
+                << macro_result.error << "\n";
+      return false;
+    }
+  }
+  amber::ast::expand_quotes(parse_result.items);
+
   amber::binder::BindResult bind_result =
       amber::binder::bind_module(parse_result.items, parse_result.module_name);
   if (!bind_result.ok()) {
@@ -782,6 +848,19 @@ bool run_bc_case(const TestCase &test_case) {
               << amber::lexer::diagnostics_to_json(parse_result.diagnostics);
     return false;
   }
+
+  // F1.5: expand macro calls, then quote/unquote, before binding.
+  {
+    const amber::macros::ExpandResult macro_result =
+        amber::macros::expand_macros(parse_result.items,
+                                     parse_result.module_name, source);
+    if (!macro_result.ok) {
+      std::cerr << test_case.directory << ": macro expansion error:\n"
+                << macro_result.error << "\n";
+      return false;
+    }
+  }
+  amber::ast::expand_quotes(parse_result.items);
 
   amber::binder::BindResult bind_result =
       amber::binder::bind_module(parse_result.items, parse_result.module_name);
@@ -839,6 +918,19 @@ bool run_bc_disasm_case(const TestCase &test_case) {
               << amber::lexer::diagnostics_to_json(parse_result.diagnostics);
     return false;
   }
+
+  // F1.5: expand macro calls, then quote/unquote, before binding.
+  {
+    const amber::macros::ExpandResult macro_result =
+        amber::macros::expand_macros(parse_result.items,
+                                     parse_result.module_name, source);
+    if (!macro_result.ok) {
+      std::cerr << test_case.directory << ": macro expansion error:\n"
+                << macro_result.error << "\n";
+      return false;
+    }
+  }
+  amber::ast::expand_quotes(parse_result.items);
 
   amber::binder::BindResult bind_result =
       amber::binder::bind_module(parse_result.items, parse_result.module_name);

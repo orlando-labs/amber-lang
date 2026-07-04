@@ -30,6 +30,8 @@ private:
   bool comment_starts_here() const;
   bool next_non_space_is_line_break_or_comment() const;
   bool has_inline_text_after_current() const;
+  bool macro_splice_active() const;
+  void update_macro_region(TokenKind kind, const std::string &lexeme);
 
   Position position() const;
   Span span_from(Position start) const;
@@ -45,6 +47,7 @@ private:
   void lex_identifier_or_keyword();
   void lex_number();
   void lex_string(char quote);
+  void lex_text_block();
   bool consume_interpolation_in_string(Position interpolation_start);
   bool consume_nested_string_in_interpolation(char quote);
   bool validate_string_escape(Position escape_start, char quote);
@@ -71,6 +74,15 @@ private:
   int bracket_depth_ = 0;
   bool one_line_block_active_ = false;
   std::vector<int> indent_stack_;
+  // Macro template-region tracker (DESIGN-macro-system §6/§17 Q2). Inside a
+  // `macro def` body `#{` opens a template splice hole instead of a comment;
+  // a bare `#` still starts a comment. States: 0 = outside, 1 = saw `macro`,
+  // 2 = inside the `macro def` header, 3 = after the header colon (covers
+  // one-line bodies and the gap before the body INDENT), 4 = inside the
+  // indented body until its matching DEDENT.
+  int macro_region_state_ = 0;
+  std::size_t macro_body_indent_size_ = 0;
+  int macro_body_inline_tokens_ = 0;
   LexResult result_;
 };
 

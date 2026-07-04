@@ -10,6 +10,10 @@
 #include <variant>
 #include <vector>
 
+namespace amber::ast {
+struct Expr; // homoiconic AST node reused as the macro `Ast` value model
+} // namespace amber::ast
+
 namespace amber::runtime {
 
 struct ClosureValue;
@@ -29,6 +33,25 @@ struct RuntimeTimePeriodValue;
 struct RuntimeUuidValue;
 struct RuntimeForeignHandle;
 struct RuntimeArgParserValue;
+
+// First-class macro `Ast` value (macro.v1 profile, DESIGN-macro-system §4).
+// Immutable wrapper over a parsed/expanded `amber.ast.v1` node. `node` is an
+// aliasing shared_ptr into a tree owned by `root`, so subtrees are shareable
+// without copying; `source` (may be null) is the original module text so
+// `.source` / `.to_source` can return the verbatim span slice.
+struct RuntimeAstNode {
+  std::shared_ptr<const ast::Expr> root;
+  const ast::Expr *node = nullptr;
+  std::shared_ptr<const std::string> source;
+};
+
+// Accessors implemented in value.cpp (the one runtime TU that includes the AST
+// header), so other runtime files can render/introspect an Ast value without
+// depending on frontend/ast. `kind` returns the node's `amber.ast.v1` kind
+// string; `source` returns the verbatim source-text slice for the node's span
+// (empty when no source is retained).
+std::string runtime_ast_node_kind(const RuntimeAstNode &node);
+std::string runtime_ast_node_source(const RuntimeAstNode &node);
 
 class RuntimeAtomic;
 class RuntimeBarrier;
@@ -179,6 +202,7 @@ enum class RuntimeNativeTypeKind {
   Base64Url,
   Hex,
   Digest,
+  Benchmark,
   Url,
   SecureRandom,
   ArgParser,
@@ -188,6 +212,7 @@ enum class RuntimeNativeTypeKind {
   TextBuffer,
   Logger,
   Amber,
+  Ast,
   Str,
   Int,
   BigInt,
@@ -398,6 +423,7 @@ struct RuntimeForeignHandle {
   X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)                            \
   X(foreign_handle, is_foreign_handle, as_foreign_handle,                      \
     RuntimeForeignHandle, ForeignHandle)                                       \
+  X(ast_node, is_ast_node, as_ast_node, RuntimeAstNode, AstNode)               \
   X(time_zone, is_time_zone, as_time_zone, RuntimeTimeZoneValue, TimeZone)
 
 #ifndef AMBER_VALUE_REPR_TAGGED
@@ -420,6 +446,7 @@ struct Value {
       std::shared_ptr<RuntimeArgParserValue>, std::shared_ptr<RuntimeTimeValue>,
       std::shared_ptr<RuntimeTimePeriodValue>,
       std::shared_ptr<RuntimeUuidValue>, std::shared_ptr<RuntimeForeignHandle>,
+      std::shared_ptr<RuntimeAstNode>,
       std::shared_ptr<RuntimeTimeZoneValue>>;
 
   Payload payload;
@@ -460,9 +487,10 @@ struct Value {
   static Value arg_parser(std::shared_ptr<RuntimeArgParserValue> value);
   static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
   static Value foreign_handle(std::shared_ptr<RuntimeForeignHandle> value);
+  static Value ast_node(std::shared_ptr<RuntimeAstNode> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
-  static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
   static Value time_zone(std::shared_ptr<RuntimeTimeZoneValue> value);
+  static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -499,9 +527,10 @@ struct Value {
   bool is_arg_parser() const;
   bool is_uuid() const;
   bool is_foreign_handle() const;
+  bool is_ast_node() const;
   bool is_time() const;
-  bool is_time_period() const;
   bool is_time_zone() const;
+  bool is_time_period() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -537,9 +566,10 @@ struct Value {
   std::shared_ptr<RuntimeArgParserValue> as_arg_parser() const;
   std::shared_ptr<RuntimeUuidValue> as_uuid() const;
   std::shared_ptr<RuntimeForeignHandle> as_foreign_handle() const;
+  std::shared_ptr<RuntimeAstNode> as_ast_node() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
-  std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
   std::shared_ptr<RuntimeTimeZoneValue> as_time_zone() const;
+  std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
 
   // Representation-agnostic helpers (see the doc comment above): a distinct
   // value per active alternative, and a pointer to the inline integer payload
@@ -601,6 +631,7 @@ enum class ValueTailKind : std::uint8_t {
   TimePeriod,
   Uuid,
   ForeignHandle,
+  AstNode,
   TimeZone,
 };
 
@@ -650,9 +681,10 @@ struct Value {
   static Value arg_parser(std::shared_ptr<RuntimeArgParserValue> value);
   static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
   static Value foreign_handle(std::shared_ptr<RuntimeForeignHandle> value);
+  static Value ast_node(std::shared_ptr<RuntimeAstNode> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
-  static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
   static Value time_zone(std::shared_ptr<RuntimeTimeZoneValue> value);
+  static Value time_period(std::shared_ptr<RuntimeTimePeriodValue> value);
 
   bool is_null() const;
   bool is_bool() const;
@@ -689,9 +721,10 @@ struct Value {
   bool is_arg_parser() const;
   bool is_uuid() const;
   bool is_foreign_handle() const;
+  bool is_ast_node() const;
   bool is_time() const;
-  bool is_time_period() const;
   bool is_time_zone() const;
+  bool is_time_period() const;
 
   bool as_bool() const;
   std::int64_t as_integer() const;
@@ -727,9 +760,10 @@ struct Value {
   std::shared_ptr<RuntimeArgParserValue> as_arg_parser() const;
   std::shared_ptr<RuntimeUuidValue> as_uuid() const;
   std::shared_ptr<RuntimeForeignHandle> as_foreign_handle() const;
+  std::shared_ptr<RuntimeAstNode> as_ast_node() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
-  std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
   std::shared_ptr<RuntimeTimeZoneValue> as_time_zone() const;
+  std::shared_ptr<RuntimeTimePeriodValue> as_time_period() const;
 
   std::uint32_t kind_index() const;
   const std::int64_t *integer_if() const;

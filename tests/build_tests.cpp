@@ -72,6 +72,14 @@ void test_runtime_feature_support_surface() {
          "runtime should support core.v1");
   expect(!amber::build::runtime_supports_feature("ffi.v1"),
          "runtime should not support ffi.v1 by default");
+  // macro.v1 is an opt-in build profile (DESIGN-macro-system §14). Post-
+  // expansion bytecode carries no macro nodes, so the loader must accept a
+  // module that stamps macro.v1 in its PROF metadata.
+  expect(amber::build::runtime_supports_feature("macro.v1"),
+         "runtime should support macro.v1");
+  const amber::build::BuildProfileSet macro_profiles = {{"macro.v1"}, {}, {}};
+  expect((amber::build::profile_flags_for(macro_profiles) & (1U << 16U)) != 0U,
+         "macro.v1 profile flag should be set");
 }
 
 void test_native_extensions_parse_and_gate() {

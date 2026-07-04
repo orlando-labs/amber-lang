@@ -1,11 +1,29 @@
 #include "runtime/value.h"
 #include "runtime/objects.h"
 
+#include "frontend/ast/expr.h"
+
 #include <atomic>
 #include <utility>
 #include <variant>
 
 namespace amber::runtime {
+
+std::string runtime_ast_node_kind(const RuntimeAstNode &node) {
+  return node.node != nullptr ? node.node->kind : std::string{};
+}
+
+std::string runtime_ast_node_source(const RuntimeAstNode &node) {
+  if (node.node == nullptr || node.source == nullptr) {
+    return {};
+  }
+  const std::size_t begin = node.node->span.start.offset;
+  const std::size_t end = node.node->span.end.offset;
+  if (begin > end || end > node.source->size()) {
+    return {};
+  }
+  return node.source->substr(begin, end - begin);
+}
 
 const char *native_type_name(RuntimeNativeTypeKind kind) {
   switch (kind) {
@@ -37,6 +55,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Hex";
   case RuntimeNativeTypeKind::Digest:
     return "Digest";
+  case RuntimeNativeTypeKind::Benchmark:
+    return "Benchmark";
   case RuntimeNativeTypeKind::Url:
     return "Url";
   case RuntimeNativeTypeKind::SecureRandom:
@@ -59,6 +79,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "io.Logger";
   case RuntimeNativeTypeKind::Amber:
     return "Amber";
+  case RuntimeNativeTypeKind::Ast:
+    return "Ast";
   case RuntimeNativeTypeKind::Str:
     return "Str";
   case RuntimeNativeTypeKind::Int:
@@ -322,15 +344,19 @@ Value Value::foreign_handle(std::shared_ptr<RuntimeForeignHandle> value) {
   return {std::move(value)};
 }
 
+Value Value::ast_node(std::shared_ptr<RuntimeAstNode> value) {
+  return {std::move(value)};
+}
+
 Value Value::time(std::shared_ptr<RuntimeTimeValue> value) {
   return {std::move(value)};
 }
 
-Value Value::time_period(std::shared_ptr<RuntimeTimePeriodValue> value) {
+Value Value::time_zone(std::shared_ptr<RuntimeTimeZoneValue> value) {
   return {std::move(value)};
 }
 
-Value Value::time_zone(std::shared_ptr<RuntimeTimeZoneValue> value) {
+Value Value::time_period(std::shared_ptr<RuntimeTimePeriodValue> value) {
   return {std::move(value)};
 }
 
@@ -472,17 +498,21 @@ bool Value::is_foreign_handle() const {
   return std::holds_alternative<std::shared_ptr<RuntimeForeignHandle>>(payload);
 }
 
+bool Value::is_ast_node() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeAstNode>>(payload);
+}
+
 bool Value::is_time() const {
   return std::holds_alternative<std::shared_ptr<RuntimeTimeValue>>(payload);
+}
+
+bool Value::is_time_zone() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeTimeZoneValue>>(payload);
 }
 
 bool Value::is_time_period() const {
   return std::holds_alternative<std::shared_ptr<RuntimeTimePeriodValue>>(
       payload);
-}
-
-bool Value::is_time_zone() const {
-  return std::holds_alternative<std::shared_ptr<RuntimeTimeZoneValue>>(payload);
 }
 
 bool Value::as_bool() const { return std::get<bool>(payload); }
@@ -614,16 +644,20 @@ std::shared_ptr<RuntimeForeignHandle> Value::as_foreign_handle() const {
   return std::get<std::shared_ptr<RuntimeForeignHandle>>(payload);
 }
 
+std::shared_ptr<RuntimeAstNode> Value::as_ast_node() const {
+  return std::get<std::shared_ptr<RuntimeAstNode>>(payload);
+}
+
 std::shared_ptr<RuntimeTimeValue> Value::as_time() const {
   return std::get<std::shared_ptr<RuntimeTimeValue>>(payload);
 }
 
-std::shared_ptr<RuntimeTimePeriodValue> Value::as_time_period() const {
-  return std::get<std::shared_ptr<RuntimeTimePeriodValue>>(payload);
-}
-
 std::shared_ptr<RuntimeTimeZoneValue> Value::as_time_zone() const {
   return std::get<std::shared_ptr<RuntimeTimeZoneValue>>(payload);
+}
+
+std::shared_ptr<RuntimeTimePeriodValue> Value::as_time_period() const {
+  return std::get<std::shared_ptr<RuntimeTimePeriodValue>>(payload);
 }
 
 Value Value::list(IntrusivePtr<ListValue> value) { return {std::move(value)}; }

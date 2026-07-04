@@ -1,0 +1,12 @@
+package conformance.run
+
+# Block payload introspection: list fields come back as List[Ast], so a block
+# macro can measure (or walk) its unevaluated body at expansion time.
+macro def count_stmts(blk):
+  #{blk.body.size}
+
+def probe():
+  n = count_stmts():
+    a = 1
+    b = 2
+  n * 21

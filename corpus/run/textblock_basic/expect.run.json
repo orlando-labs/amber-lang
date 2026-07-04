@@ -1,0 +1,6 @@
+{
+  "schema": "amber.run.v1",
+  "entry": "probe",
+  "status": "ok",
+  "value": "\"line one\nvalue: 42\n\n  indented deeper\ntail joined\n\""
+}

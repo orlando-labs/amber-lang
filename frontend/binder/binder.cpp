@@ -206,13 +206,15 @@ private:
     return index;
   }
 
-  Binding *find_local_binding(int scope_index, const std::string &name) {
+  Binding *find_local_binding(int scope_index, const std::string &name,
+                              const std::string &context = "") {
     if (scope_index < 0) {
       return nullptr;
     }
     for (const std::string &id : graph_.scopes[scope_index].bindings) {
       Binding *binding = binding_by_id(id);
-      if (binding != nullptr && binding->name == name) {
+      if (binding != nullptr && binding->name == name &&
+          binding->context == context) {
         return binding;
       }
     }
@@ -228,13 +230,23 @@ private:
     return nullptr;
   }
 
-  Binding *resolve(int scope_index, const std::string &name) {
+  // Resolve a (name, context) reference up the scope chain. For a hygienic
+  // reference (non-empty context), if no binding carries that context we fall
+  // back to the ordinary (context-free) binding, so a macro's free references
+  // to globals/builtins still resolve (DESIGN-macro-system §9). Binding
+  // positions pass fallback=false so a hygienic assignment target creates its
+  // own isolated binding rather than aliasing the caller's same-named local.
+  Binding *resolve(int scope_index, const std::string &name,
+                   const std::string &context = "", bool fallback = true) {
     for (int current = scope_index; current >= 0;
          current = graph_.scopes[current].parent_index) {
-      Binding *binding = find_local_binding(current, name);
+      Binding *binding = find_local_binding(current, name, context);
       if (binding != nullptr) {
         return binding;
       }
+    }
+    if (fallback && !context.empty()) {
+      return resolve(scope_index, name, "", false);
     }
     return nullptr;
   }
@@ -243,8 +255,9 @@ private:
       int scope_index, const std::string &name, const std::string &kind,
       const std::string &role, const lexer::Span &span, bool read_only,
       const std::string &source = "",
-      DuplicatePolicy duplicate_policy = DuplicatePolicy::AllowExisting) {
-    if (Binding *existing = find_local_binding(scope_index, name)) {
+      DuplicatePolicy duplicate_policy = DuplicatePolicy::AllowExisting,
+      const std::string &context = "") {
+    if (Binding *existing = find_local_binding(scope_index, name, context)) {
       if (duplicate_policy == DuplicatePolicy::Error) {
         diagnostic("B0001", "error", "binder",
                    "duplicate lexical binding in one scope", span);
@@ -262,6 +275,7 @@ private:
     binding.id = "b" + std::to_string(index);
     binding.scope_index = scope_index;
     binding.name = name;
+    binding.context = context;
     binding.kind = kind;
     binding.role = role;
     binding.read_only = read_only;
@@ -336,12 +350,13 @@ private:
 
   void add_reference(int scope_index, const std::string &name,
                      const std::string &ref_kind, const lexer::Span &span,
-                     Binding *binding) {
+                     Binding *binding, const std::string &context = "") {
     const int index = static_cast<int>(graph_.references.size());
     Reference ref;
     ref.id = "r" + std::to_string(index);
     ref.scope_index = scope_index;
     ref.name = name;
+    ref.context = context;
     ref.ref_kind = ref_kind;
     ref.span = span;
     if (binding != nullptr) {
@@ -527,6 +542,16 @@ private:
 
   void visit_def(int parent_scope, const ast::Expr &item) {
     const std::string name = string_value(item, "name");
+    // `macro def` is a compile-time definition consumed by the F1.5 macro
+    // expansion pass before binding. That pass is not implemented yet, so a
+    // macro def that reaches the binder cannot be compiled — reject it cleanly
+    // rather than silently binding it as an ordinary runtime function.
+    if (bool_value(item, "is_macro")) {
+      diagnostic("AMB_MACRO_UNSUPPORTED", "error", "binder",
+                 "macro definitions require the macro.v1 profile and macro "
+                 "expansion (F1.5), which is not implemented yet",
+                 item.span);
+    }
     const std::string scope_kind =
         item.kind == "AstClassMethodDef" ? "class_method" : "function";
     const int scope = add_scope(scope_kind, name, parent_scope, item.span);
@@ -898,22 +923,35 @@ private:
   }
 
   void visit_expr(int scope_index, const ast::Expr &expr) {
+    // Quasiquote nodes are consumed by the F1.5 macro expansion pass before
+    // binding. That pass is not implemented yet, so a quote/unquote node that
+    // survives to the binder cannot be compiled — reject it cleanly instead of
+    // letting it reach HIR lowering unhandled.
+    if (expr.kind == "AstQuote" || expr.kind == "AstUnquote" ||
+        expr.kind == "AstUnquoteSplice") {
+      diagnostic("AMB_MACRO_UNSUPPORTED", "error", "binder",
+                 "quote/unquote requires the macro.v1 profile and macro "
+                 "expansion (F1.5), which is not implemented yet",
+                 expr.span);
+      return;
+    }
     if (expr.kind == "AstName") {
       const std::string name = string_value(expr, "name");
+      const std::string context = string_value(expr, "syntax_context");
       if (name == "_") {
         diagnostic("B0002", "error", "binder",
                    "wildcard '_' cannot be used as an ordinary reference",
                    expr.span);
-        add_reference(scope_index, name, "name", expr.span, nullptr);
+        add_reference(scope_index, name, "name", expr.span, nullptr, context);
         return;
       }
-      Binding *binding = resolve(scope_index, name);
+      Binding *binding = resolve(scope_index, name, context);
       if (binding != nullptr && binding_is_property(*binding) &&
           !binding->property_has_getter) {
         diagnostic("AMB_PROP_MISSING_GETTER", "error", "binder",
                    "cannot read from write-only property", expr.span);
       }
-      add_reference(scope_index, name, "name", expr.span, binding);
+      add_reference(scope_index, name, "name", expr.span, binding, context);
       return;
     }
     if (expr.kind == "AstLastValue") {
@@ -1074,6 +1112,18 @@ private:
     if (tails == nullptr) {
       return;
     }
+    // A paren-less block-suffix chain (`name:` + INDENT) is a macro trigger
+    // surface only; F1.5 consumes it when `name` is a macro. One that reaches
+    // the binder has no runtime meaning — reject it cleanly.
+    if (!tails->values.empty() && tails->values.front() &&
+        tails->values.front()->kind == "AstTailBlockSuffix") {
+      diagnostic("AMB_MACRO_UNSUPPORTED", "error", "binder",
+                 "a paren-less block suffix (`name:` block) requires `name` "
+                 "to be a macro (macro.v1); no macro with this name is in "
+                 "scope",
+                 expr.span);
+      return;
+    }
     if (base != nullptr && base->kind == "AstName" && !tails->values.empty() &&
         tails->values.front()->kind == "AstTailCall") {
       const Binding *binding =
@@ -1150,17 +1200,23 @@ private:
   void visit_assignment_left(int scope_index, const ast::Expr &left) {
     if (left.kind == "AstName") {
       const std::string name = string_value(left, "name");
+      const std::string context = string_value(left, "syntax_context");
       if (name == "_") {
         diagnostic("B0002", "error", "binder",
                    "wildcard '_' cannot be used as an ordinary binding",
                    left.span);
-        add_reference(scope_index, name, "write", left.span, nullptr);
+        add_reference(scope_index, name, "write", left.span, nullptr, context);
         return;
       }
-      Binding *binding = resolve(scope_index, name);
+      // Binding position: a hygienic target resolves without fallback, so it
+      // declares its own (name, context) binding instead of aliasing an
+      // ordinary same-named local.
+      Binding *binding =
+          resolve(scope_index, name, context, /*fallback=*/false);
       if (binding == nullptr) {
         binding = declare_binding(scope_index, name, "local", "local",
-                                  left.span, false);
+                                  left.span, false, "",
+                                  DuplicatePolicy::AllowExisting, context);
       } else if (binding_is_property(*binding)) {
         if (!binding->property_has_setter) {
           diagnostic("AMB_PROP_MISSING_SETTER", "error", "binder",
@@ -1170,7 +1226,7 @@ private:
         diagnostic("E2007", "error", "binder", "assignment to imported alias",
                    left.span);
       }
-      add_reference(scope_index, name, "write", left.span, binding);
+      add_reference(scope_index, name, "write", left.span, binding, context);
       return;
     }
     if (left.kind == "AstIvar" || left.kind == "AstCvar") {

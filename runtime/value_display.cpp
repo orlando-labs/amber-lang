@@ -307,6 +307,13 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
     }
     return "#<native " + handle->tag + (handle->live ? ">" : " destroyed>");
   }
+  if (value.is_ast_node()) {
+    const std::shared_ptr<RuntimeAstNode> node = value.as_ast_node();
+    if (node == nullptr || node->node == nullptr) {
+      return "#<Ast null>";
+    }
+    return "#<Ast " + runtime_ast_node_kind(*node) + ">";
+  }
   if (value.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> time = value.as_time();
     return time == nullptr ? "<time null>" : runtime_time_to_iso8601(*time);
@@ -681,6 +688,13 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
       return "<native handle null>";
     }
     return "#<native " + handle->tag + (handle->live ? ">" : " destroyed>");
+  }
+  if (value.is_ast_node()) {
+    const std::shared_ptr<RuntimeAstNode> node = value.as_ast_node();
+    if (node == nullptr || node->node == nullptr) {
+      return "#<Ast null>";
+    }
+    return "#<Ast " + runtime_ast_node_kind(*node) + ">";
   }
   if (value.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> time = value.as_time();

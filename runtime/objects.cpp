@@ -309,6 +309,9 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   if (lhs.is_foreign_handle()) {
     return lhs.as_foreign_handle() == rhs.as_foreign_handle();
   }
+  if (lhs.is_ast_node()) {
+    return lhs.as_ast_node() == rhs.as_ast_node();
+  }
   if (lhs.is_time()) {
     const std::shared_ptr<RuntimeTimeValue> left = lhs.as_time();
     const std::shared_ptr<RuntimeTimeValue> right = rhs.as_time();

@@ -924,6 +924,49 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     }
   }
 
+  // `macro` is a contextual definition modifier: `macro def` declares a
+  // compile-time macro (F1.5 expansion). Like `native`, it only leads a
+  // definition when immediately followed by `def`; anywhere else (`macro = 3`,
+  // `obj.macro`, `def macro()`) it stays an ordinary identifier.
+  if (current().kind == lexer::TokenKind::Identifier &&
+      current().lexeme == "macro") {
+    const lexer::TokenKind after = peek(1).kind;
+    if (after == lexer::TokenKind::KeywordDef) {
+      const lexer::Token start = advance();
+      consume(lexer::TokenKind::KeywordDef, "expected 'def' after macro");
+      return parse_def_stmt(false, &start, /*is_native=*/false,
+                            /*is_macro=*/true);
+    }
+  }
+
+  // Paren-less block-suffix statement `name:` + INDENT — the block-macro DSL
+  // entry (DESIGN-macro-system §8.2, e.g. `routes:`). Statement position only
+  // and newline-gated (same gate as `quote:`), so control headers (`if x:`),
+  // map keys, and inline `name:` labels are unaffected. `quote` keeps its
+  // dedicated quasiquote node. F1.5 expands the chain when the name resolves
+  // to a macro; a leftover reaching the binder is rejected there.
+  if (current().kind == lexer::TokenKind::Identifier &&
+      current().lexeme != "quote" &&
+      peek(1).kind == lexer::TokenKind::Colon &&
+      peek(2).kind == lexer::TokenKind::Newline) {
+    const lexer::Token name = advance();
+    auto base = ast::make_expr("AstName", name.span);
+    base->string_field("name", name.lexeme);
+    std::unique_ptr<ast::Expr> block = parse_block_suffix(StopMode::Normal);
+    auto block_tail = ast::make_expr("AstTailBlockSuffix", block->span);
+    const lexer::Span end_span = block->span;
+    block_tail->node_field("block", std::move(block));
+    std::vector<std::unique_ptr<ast::Expr>> tails;
+    tails.push_back(std::move(block_tail));
+    auto chain = ast::make_expr("AstPostfixChain",
+                                ast::join_spans(name.span, end_span));
+    chain->node_field("base", std::move(base));
+    chain->list_field("tails", std::move(tails));
+    auto stmt = ast::make_expr("AstExprStmt", chain->span);
+    stmt->node_field("expr", std::move(chain));
+    return stmt;
+  }
+
   switch (current().kind) {
   case lexer::TokenKind::KeywordPackage:
     return parse_package_decl();
@@ -1145,6 +1188,20 @@ std::unique_ptr<ast::Expr> Parser::parse_export_stmt() {
   std::vector<std::unique_ptr<ast::Expr>> items;
   while (!at_end() && !check(lexer::TokenKind::Newline)) {
     const lexer::Token local = current();
+    // `export macro name [as public]` marks a compile-time macro export
+    // (DESIGN-macro-system §11). The marker is load-bearing: an importer's
+    // F1.5 classifies imported names as macros from this statically readable
+    // table, without compiling the provider's runtime. `macro` stays an
+    // ordinary exportable identifier when it is the exported name itself
+    // (`export macro` alone or `export macro as m`).
+    bool is_macro = false;
+    if (current().kind == lexer::TokenKind::Identifier &&
+        current().lexeme == "macro" &&
+        peek(1).kind == lexer::TokenKind::Identifier &&
+        peek(1).lexeme != "as") {
+      advance();
+      is_macro = true;
+    }
     const std::string local_name =
         consume_identifier_text("expected exported name");
     std::string public_name = local_name;
@@ -1155,6 +1212,9 @@ std::unique_ptr<ast::Expr> Parser::parse_export_stmt() {
                                ast::join_spans(local.span, previous().span));
     item->string_field("local_name", local_name);
     item->string_field("public_name", public_name);
+    if (is_macro) {
+      item->bool_field("is_macro", true);
+    }
     items.push_back(std::move(item));
     if (!match(lexer::TokenKind::Comma)) {
       break;
@@ -1168,13 +1228,16 @@ std::unique_ptr<ast::Expr> Parser::parse_export_stmt() {
 
 std::unique_ptr<ast::Expr>
 Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
-                       bool is_native) {
+                       bool is_native, bool is_macro) {
   const lexer::Token start =
       start_override != nullptr ? *start_override : advance();
   const std::string name_text =
       consume_method_name_text("expected function name");
   std::unique_ptr<ast::Expr> signature;
-  if (!class_method && !is_native && is_simple_many_def_header()) {
+  // A `macro def` always takes the standard single-signature path so the
+  // emitted def node is uniformly tagged `is_macro`; multi-clause macro
+  // arities are a later-milestone concern.
+  if (!class_method && !is_native && !is_macro && is_simple_many_def_header()) {
     lexer::Span signature_span{};
     std::vector<std::string> patterns =
         parse_many_def_patterns(&signature_span);
@@ -1274,7 +1337,7 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
   }
 
   consume(lexer::TokenKind::Colon, "expected ':' after function signature");
-  if (!class_method && !is_native && starts_clause_body()) {
+  if (!class_method && !is_native && !is_macro && starts_clause_body()) {
     ClauseBody clause_body = parse_clause_body();
     lexer::Span end_span = signature->span;
     if (!clause_body.else_body.empty()) {
@@ -1291,7 +1354,16 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
     return node;
   }
 
+  // A `macro def` body is a template by default (implicit quote, M4), so the
+  // splice vocabulary (`unquote` / `unquote_splice` / `unhygienic`) is live in
+  // it exactly as inside an explicit `quote:` block.
+  if (is_macro) {
+    ++quote_depth_;
+  }
   std::vector<std::unique_ptr<ast::Expr>> body = parse_body(BodyContext::Def);
+  if (is_macro) {
+    --quote_depth_;
+  }
   const lexer::Span body_end_span =
       body.empty() ? previous().span : body.back()->span;
   HandlerSuffix handlers = parse_handler_suffix(body_end_span, BodyContext::Def);
@@ -1316,6 +1388,10 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
     node->bool_field("is_native", is_native);
     node->bool_field("native_only", false);
     node->string_field("native_binding", native_binding);
+  }
+  // Only stamped when true, so ordinary def AST dumps (goldens) are unchanged.
+  if (is_macro) {
+    node->bool_field("is_macro", true);
   }
   return node;
 }
@@ -3228,7 +3304,78 @@ Parser::parse_comparison_chain(std::unique_ptr<ast::Expr> left,
 
 std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   const lexer::Token token = advance();
+  // Template splice hole in a `macro def` body (M4 surface): `#{expr}` is
+  // sugar for `unquote(expr)`, `#{*expr}` for `unquote_splice(expr)`. The
+  // lexer emits HASH_LBRACE only inside macro-def bodies, so no gating is
+  // needed here; the nodes are consumed by the implicit template quote.
+  if (token.kind == lexer::TokenKind::HashLBrace) {
+    const bool splice = match(lexer::TokenKind::Star);
+    std::unique_ptr<ast::Expr> inner = parse_expression(1, StopMode::Normal);
+    const lexer::Token close = consume(
+        lexer::TokenKind::RBrace, "expected '}' after template splice hole");
+    auto node = ast::make_expr(splice ? "AstUnquoteSplice" : "AstUnquote",
+                               ast::join_spans(token.span, close.span));
+    if (inner) {
+      node->node_field("expr", std::move(inner));
+    }
+    return node;
+  }
   if (is_identifier_like_token(token.kind)) {
+    // Macro quasiquote surface (macro.v1 profile). `quote:` in block form
+    // (a newline must follow the colon) yields an AstQuote whose body is
+    // unevaluated template AST. Requiring the newline keeps `{quote: 1}` map
+    // keys and inline `quote:`-labelled forms unaffected; `quote` stays an
+    // ordinary identifier everywhere else.
+    if (token.lexeme == "quote" && check(lexer::TokenKind::Colon) &&
+        peek(1).kind == lexer::TokenKind::Newline) {
+      advance(); // consume ':'
+      ++quote_depth_;
+      std::vector<std::unique_ptr<ast::Expr>> body =
+          parse_body(BodyContext::Def);
+      --quote_depth_;
+      const lexer::Span end_span =
+          body.empty() ? previous().span : body.back()->span;
+      auto node =
+          ast::make_expr("AstQuote", ast::join_spans(token.span, end_span));
+      node->list_field("body", std::move(body));
+      return node;
+    }
+    // Inside a quote, `unquote(expr)` / `unquote_splice(expr)` are splice holes
+    // — they escape the quote and are evaluated at expansion time. Outside any
+    // quote they remain ordinary calls (so user code may still name a function
+    // `unquote`).
+    if (quote_depth_ > 0 &&
+        (token.lexeme == "unquote" || token.lexeme == "unquote_splice") &&
+        check(lexer::TokenKind::LParen)) {
+      const bool splice = token.lexeme == "unquote_splice";
+      advance(); // consume '('
+      std::unique_ptr<ast::Expr> inner =
+          parse_expression(1, StopMode::Normal);
+      const lexer::Token close = consume(lexer::TokenKind::RParen,
+                                         "expected ')' after unquote argument");
+      auto node = ast::make_expr(splice ? "AstUnquoteSplice" : "AstUnquote",
+                                 ast::join_spans(token.span, close.span));
+      if (inner) {
+        node->node_field("expr", std::move(inner));
+      }
+      return node;
+    }
+    // `unhygienic(expr)` inside a quote opts the enclosed identifiers out of
+    // hygiene so they bind into the caller's context (Elixir `var!`). Consumed
+    // by quote lowering into a plain unmarked name; never reaches the binder.
+    if (quote_depth_ > 0 && token.lexeme == "unhygienic" &&
+        check(lexer::TokenKind::LParen)) {
+      advance(); // consume '('
+      std::unique_ptr<ast::Expr> inner = parse_expression(1, StopMode::Normal);
+      const lexer::Token close = consume(
+          lexer::TokenKind::RParen, "expected ')' after unhygienic argument");
+      auto node = ast::make_expr("AstUnhygienic",
+                                 ast::join_spans(token.span, close.span));
+      if (inner) {
+        node->node_field("expr", std::move(inner));
+      }
+      return node;
+    }
     const bool typed_map = token.lexeme == "Map" || token.lexeme == "HashMap" ||
                            token.lexeme == "StrictMap" ||
                            token.lexeme == "StrictHashMap";
@@ -3707,10 +3854,18 @@ Parser::parse_string_literal_expr(const lexer::Token &token) {
     return literal();
   }
 
-  const std::size_t content_end = token.lexeme.size() - 1U;
+  // A multiline text block arrives as a `"""`-delimited lexeme whose content
+  // is already dedented by the lexer; the same parts scanning applies over
+  // the wider content window, and quote_kind records the block form.
+  const bool block =
+      token.lexeme.size() >= 6U &&
+      token.lexeme.compare(0, 3, "\"\"\"") == 0 &&
+      token.lexeme.compare(token.lexeme.size() - 3U, 3, "\"\"\"") == 0;
+  const std::size_t content_begin = block ? 3U : 1U;
+  const std::size_t content_end = token.lexeme.size() - (block ? 3U : 1U);
   std::vector<std::unique_ptr<ast::Expr>> parts;
-  std::size_t text_begin = 1U;
-  std::size_t cursor = 1U;
+  std::size_t text_begin = content_begin;
+  std::size_t cursor = content_begin;
   bool saw_interpolation = false;
 
   auto push_text_part = [&](std::size_t begin, std::size_t end) {
@@ -3855,7 +4010,7 @@ Parser::parse_string_literal_expr(const lexer::Token &token) {
   push_text_part(text_begin, content_end);
 
   auto expr = ast::make_expr("AstStringLiteral", token.span);
-  expr->string_field("quote_kind", "double");
+  expr->string_field("quote_kind", block ? "block" : "double");
   expr->bool_field("interpolation", saw_interpolation);
   expr->list_field("parts", std::move(parts));
   return expr;
@@ -4456,6 +4611,13 @@ bool Parser::can_accept_direct_block_suffix(const ast::Expr &expr) const {
 bool Parser::is_assignable(const ast::Expr &expr) const {
   if (expr.kind == "AstName" || expr.kind == "AstIvar" ||
       expr.kind == "AstCvar") {
+    return true;
+  }
+  // `unhygienic(target)` inside a quote is an assignable macro-hygiene escape
+  // hatch; quote lowering rewrites it to a plain assignable name. A `#{a}` /
+  // `unquote(a)` splice hole is assignable for the same reason: expansion
+  // substitutes an assignable target (`swap`-style macros assign through it).
+  if (expr.kind == "AstUnhygienic" || expr.kind == "AstUnquote") {
     return true;
   }
   const ast::Expr *tail = last_postfix_tail(expr);

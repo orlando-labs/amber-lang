@@ -1,0 +1,14 @@
+package conformance.run
+
+# Paren-less block-suffix trigger (§8.2): `name:` + INDENT passes the
+# unevaluated block as the macro's trailing Ast argument; splicing it at
+# statement position flattens the block into its statements.
+macro def twice_do(blk):
+  #{blk}
+  #{blk}
+
+def probe():
+  y = 0
+  twice_do:
+    y = y + 21
+  y

@@ -1,0 +1,8 @@
+{
+  "format": "amber.ast.v1",
+  "module": null,
+  "items": [
+    {"kind":"AstDefStmt","span":{"file":"corpus/parse/macro/basic/source.am","start":{"line":1,"col":1,"offset":0},"end":{"line":2,"col":8,"offset":32}},"name":"assert","is_macro":true,"signature":{"kind":"AstSignature","span":{"file":"corpus/parse/macro/basic/source.am","start":{"line":1,"col":17,"offset":16},"end":{"line":1,"col":24,"offset":23}},"params":[{"kind":"AstParam","span":{"file":"corpus/parse/macro/basic/source.am","start":{"line":1,"col":18,"offset":17},"end":{"line":1,"col":23,"offset":22}},"param_kind":"positional","external_name":"check","local_name":"check","auto_assign_kind":"none","type_expr":""}]},"body":[{"kind":"AstExprStmt","span":{"file":"corpus/parse/macro/basic/source.am","start":{"line":2,"col":3,"offset":27},"end":{"line":2,"col":8,"offset":32}},"expr":{"kind":"AstName","span":{"file":"corpus/parse/macro/basic/source.am","start":{"line":2,"col":3,"offset":27},"end":{"line":2,"col":8,"offset":32}},"name":"check"}}]}
+  ],
+  "source_hash": "sha256:f63108169b8c13f9ee92400bf9bc91b1fd743c2a7fc023565f1a7d589a5215da"
+}

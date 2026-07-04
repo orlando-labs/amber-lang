@@ -1449,6 +1449,288 @@ void test_native_packages() {
   }
 }
 
+void test_macro_def_surface() {
+  // `macro def` (M0): the compile-time authoring form. Mirrors the `native`
+  // contextual modifier and tags the def node with is_macro.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "macro def assert(check):\n"
+        "  check\n");
+    expect(module.ok(), "macro def parses");
+    expect(module.items.size() == 1, "macro def yields one item");
+    const Expr &def = *module.items[0];
+    expect(def.kind == "AstDefStmt", "macro def is AstDefStmt");
+    expect(string_field(def, "name") == "assert", "macro def name");
+    expect(bool_field(def, "is_macro"), "macro def is_macro");
+    expect(!list_field(def, "body").values.empty(), "macro def keeps body");
+  }
+
+  // A macro with a parameter list still routes through the standard signature
+  // path (so the node is uniformly tagged), not the clause/many-def path.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "macro def swap(a, b):\n"
+        "  a\n");
+    expect(module.ok(), "macro def with params parses");
+    const Expr &def = *module.items[0];
+    expect(def.kind == "AstDefStmt", "macro def with params is AstDefStmt");
+    expect(bool_field(def, "is_macro"), "macro def with params is_macro");
+  }
+
+  // `macro` stays an ordinary identifier everywhere except immediately before
+  // `def` — no new hard keyword is introduced.
+  {
+    amber::parser::ParseModuleResult assign = parse_module_raw("macro = 1\n");
+    expect(assign.ok(), "macro is an ordinary identifier in assignment");
+    amber::parser::ParseModuleResult def_named_macro =
+        parse_module_raw("def macro():\n  1\n");
+    expect(def_named_macro.ok(), "def named macro parses");
+    const Expr &def = *def_named_macro.items[0];
+    expect(def.kind == "AstDefStmt" && string_field(def, "name") == "macro",
+           "def macro() is a plain def named macro");
+    expect(!has_bool_field(def, "is_macro"),
+           "a plain def carries no is_macro marker");
+  }
+}
+
+void test_quote_surface() {
+  // `quote:` (block form) yields an AstQuote whose body is unevaluated AST.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "q = quote:\n"
+        "  x + 1\n");
+    expect(module.ok(), "quote block parses");
+    const Expr &assign = node_field(*module.items[0], "expr");
+    expect(assign.kind == "AstAssign", "quote is assignment RHS");
+    const Expr &quote = node_field(assign, "right");
+    expect(quote.kind == "AstQuote", "quote node kind");
+    const amber::ast::ListField &body = list_field(quote, "body");
+    expect(body.values.size() == 1, "quote body has one statement");
+    expect(node_field(*body.values[0], "expr").kind == "AstBinary",
+           "quoted body preserves ordinary AST");
+  }
+
+  // Inside a quote, unquote / unquote_splice are splice holes.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "quote:\n"
+        "  unquote(a)\n"
+        "  unquote_splice(b)\n");
+    expect(module.ok(), "quote with splices parses");
+    const Expr &quote = node_field(*module.items[0], "expr");
+    expect(quote.kind == "AstQuote", "bare quote statement");
+    const amber::ast::ListField &body = list_field(quote, "body");
+    expect(body.values.size() == 2, "two splice statements");
+    const Expr &u = node_field(*body.values[0], "expr");
+    expect(u.kind == "AstUnquote", "unquote hole");
+    expect(node_field(u, "expr").kind == "AstName", "unquote wraps its expr");
+    const Expr &us = node_field(*body.values[1], "expr");
+    expect(us.kind == "AstUnquoteSplice", "unquote_splice hole");
+  }
+
+  // `unhygienic(name)` inside a quote is the hygiene escape hatch (§9); it parses
+  // to an AstUnhygienic node (consumed by quote lowering into an unmarked name).
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "quote:\n"
+        "  f(unhygienic(x))\n");
+    expect(module.ok(), "unhygienic in a quote parses");
+    const Expr &quote = node_field(*module.items[0], "expr");
+    const amber::ast::ListField &body = list_field(quote, "body");
+    const Expr &chain = node_field(*body.values[0], "expr");
+    const amber::ast::ListField &tails = list_field(chain, "tails");
+    const amber::ast::ListField &args = list_field(*tails.values[0], "args");
+    expect(args.values[0]->kind == "AstUnhygienic",
+           "unhygienic parses to AstUnhygienic in argument position");
+    // Outside a quote, `unhygienic` stays an ordinary identifier/call.
+    amber::parser::ParseModuleResult call =
+        parse_module_raw("y = unhygienic(z)\n");
+    expect(call.ok(), "unhygienic outside a quote is an ordinary call");
+    const Expr &rhs = node_field(node_field(*call.items[0], "expr"), "right");
+    expect(rhs.kind == "AstPostfixChain",
+           "unhygienic outside a quote is not special");
+  }
+
+  // Contextual, not a keyword: `unquote(...)` outside a quote is an ordinary
+  // call, `quote`/`unquote` remain usable identifiers, and inline `quote:` in a
+  // map literal is a plain key (block form needs a trailing newline).
+  {
+    amber::parser::ParseModuleResult call = parse_module_raw("y = unquote(z)\n");
+    expect(call.ok(), "unquote outside quote parses");
+    const Expr &rhs = node_field(node_field(*call.items[0], "expr"), "right");
+    expect(rhs.kind == "AstPostfixChain",
+           "unquote outside a quote stays an ordinary call");
+    amber::parser::ParseModuleResult ident =
+        parse_module_raw("quote = 1\nunquote = 2\n");
+    expect(ident.ok(), "quote/unquote are ordinary identifiers");
+    amber::parser::ParseModuleResult map = parse_module_raw("m = {quote: 1}\n");
+    expect(map.ok(), "inline quote: is a plain map key");
+    const Expr &lit = node_field(node_field(*map.items[0], "expr"), "right");
+    expect(lit.kind == "AstMapLiteral", "map literal with quote key parses");
+  }
+}
+
+void test_template_splice_surface() {
+  // M4 template surface: inside a `macro def` body, `#{expr}` is a splice
+  // hole (sugar for unquote), `#{*expr}` a sibling splice (unquote_splice).
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "macro def twice(x):\n"
+        "  #{x} + #{x}\n");
+    expect(module.ok(), "template splice parses");
+    const Expr &def = *module.items[0];
+    const amber::ast::ListField &body = list_field(def, "body");
+    const Expr &sum = node_field(*body.values[0], "expr");
+    expect(sum.kind == "AstBinary", "template body is ordinary AST");
+    expect(node_field(sum, "left").kind == "AstUnquote",
+           "#{x} parses to AstUnquote");
+    expect(node_field(node_field(sum, "left"), "expr").kind == "AstName",
+           "splice hole wraps its expression");
+  }
+
+  // `#{*list}` in argument position parses to AstUnquoteSplice; a line
+  // starting with a splice hole is code, not a comment.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "macro def call_all(*xs):\n"
+        "  f(1, #{*xs})\n"
+        "  #{xs}\n");
+    expect(module.ok(), "sibling splice parses");
+    const Expr &def = *module.items[0];
+    const amber::ast::ListField &body = list_field(def, "body");
+    const Expr &chain = node_field(*body.values[0], "expr");
+    const amber::ast::ListField &tails = list_field(chain, "tails");
+    const amber::ast::ListField &args = list_field(*tails.values[0], "args");
+    expect(args.values.size() == 2 &&
+               args.values[1]->kind == "AstUnquoteSplice",
+           "#{*xs} parses to AstUnquoteSplice");
+    expect(node_field(*body.values[1], "expr").kind == "AstUnquote",
+           "a line-leading #{ opens a splice hole inside a macro body");
+  }
+
+  // One-line macro bodies carry the template surface too.
+  {
+    amber::parser::ParseModuleResult module =
+        parse_module_raw("macro def inc(x): #{x} + 1\n");
+    expect(module.ok(), "one-line template body parses");
+    const Expr &def = *module.items[0];
+    const amber::ast::ListField &body = list_field(def, "body");
+    const Expr &sum = node_field(*body.values[0], "expr");
+    expect(sum.kind == "AstBinary" &&
+               node_field(sum, "left").kind == "AstUnquote",
+           "one-line body splice hole parses");
+  }
+
+  // The macro body parses at quote depth, so the kernel splice vocabulary
+  // (`unquote` / `unhygienic`) is live in templates without an explicit quote.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "macro def m(x):\n"
+        "  unquote(x) + unhygienic(y)\n");
+    expect(module.ok(), "kernel splices parse in template body");
+    const Expr &def = *module.items[0];
+    const amber::ast::ListField &body = list_field(def, "body");
+    const Expr &sum = node_field(*body.values[0], "expr");
+    expect(node_field(sum, "left").kind == "AstUnquote",
+           "unquote is live in a macro body");
+    expect(node_field(sum, "right").kind == "AstUnhygienic",
+           "unhygienic is live in a macro body");
+  }
+
+  // Outside a macro-def body `#{` keeps its comment reading: an inline `#{`
+  // comments out the rest of the line, and bare `#` comments inside macro
+  // bodies stay comments.
+  {
+    amber::parser::ParseModuleResult outside =
+        parse_module_raw("y = 1 #{not_a_splice}\n");
+    expect(outside.ok(), "#{ outside a macro body stays a comment");
+    const Expr &rhs =
+        node_field(node_field(*outside.items[0], "expr"), "right");
+    expect(rhs.kind == "AstLiteral", "the commented tail is dropped");
+    amber::parser::ParseModuleResult inside = parse_module_raw(
+        "macro def m(x):\n"
+        "  # plain comment\n"
+        "  #{x} + 1\n");
+    expect(inside.ok(), "bare # in a macro body is still a comment");
+    const Expr &def = *inside.items[0];
+    expect(list_field(def, "body").values.size() == 1,
+           "comment line contributes no body statement");
+  }
+}
+
+void test_export_macro_marker() {
+  // `export macro name [as public]` marks a compile-time macro export (§11);
+  // unmarked items and `macro` as an exported identifier are unaffected.
+  {
+    amber::parser::ParseModuleResult module =
+        parse_module_raw("export macro sql as psql, helper\n");
+    expect(module.ok(), "export macro parses");
+    const amber::ast::ListField &items = list_field(*module.items[0], "items");
+    expect(items.values.size() == 2, "two export items");
+    expect(bool_field(*items.values[0], "is_macro"),
+           "macro-marked item carries is_macro");
+    expect(string_field(*items.values[0], "local_name") == "sql" &&
+               string_field(*items.values[0], "public_name") == "psql",
+           "macro export keeps local/public names");
+    expect(!has_bool_field(*items.values[1], "is_macro"),
+           "unmarked export item has no is_macro field");
+  }
+  {
+    amber::parser::ParseModuleResult module =
+        parse_module_raw("export macro as m\n");
+    expect(module.ok(), "exporting an identifier named macro parses");
+    const amber::ast::ListField &items = list_field(*module.items[0], "items");
+    expect(items.values.size() == 1 &&
+               string_field(*items.values[0], "local_name") == "macro" &&
+               string_field(*items.values[0], "public_name") == "m" &&
+               !has_bool_field(*items.values[0], "is_macro"),
+           "`export macro as m` exports the identifier `macro`");
+  }
+}
+
+void test_bare_block_suffix_statement() {
+  // M5 trigger surface: `name:` + INDENT at statement position parses to a
+  // postfix chain whose only tail is a block suffix (the macro DSL entry).
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "routes:\n"
+        "  f(1)\n");
+    expect(module.ok(), "paren-less block suffix statement parses");
+    const Expr &chain = node_field(*module.items[0], "expr");
+    expect(chain.kind == "AstPostfixChain", "bare block suffix is a chain");
+    expect(node_field(chain, "base").kind == "AstName" &&
+               string_field(node_field(chain, "base"), "name") == "routes",
+           "chain base is the macro name");
+    const amber::ast::ListField &tails = list_field(chain, "tails");
+    expect(tails.values.size() == 1 &&
+               tails.values[0]->kind == "AstTailBlockSuffix",
+           "single block-suffix tail");
+    const Expr &block = node_field(*tails.values[0], "block");
+    expect(block.kind == "AstBlock" &&
+               list_field(block, "body").values.size() == 1,
+           "block carries the indented body");
+  }
+
+  // The newline gate keeps every existing `name:` reading intact: control
+  // headers, map keys, and `quote:` are unaffected.
+  {
+    amber::parser::ParseModuleResult control = parse_module_raw(
+        "if ready:\n"
+        "  1\n");
+    expect(control.ok(), "if-header colon is not a block suffix");
+    expect(node_field(*control.items[0], "expr").kind == "AstIf",
+           "if statement still parses");
+    amber::parser::ParseModuleResult map = parse_module_raw("m = {routes: 1}\n");
+    expect(map.ok(), "map key colon is not a block suffix");
+    amber::parser::ParseModuleResult quoted = parse_module_raw(
+        "quote:\n"
+        "  1\n");
+    expect(quoted.ok(), "quote block still parses");
+    expect(node_field(*quoted.items[0], "expr").kind == "AstQuote",
+           "quote keeps its quasiquote node");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -1489,6 +1771,11 @@ int main() {
   test_throw_catch_forms();
   test_typed_signature_surface();
   test_native_packages();
+  test_macro_def_surface();
+  test_quote_surface();
+  test_template_splice_surface();
+  test_export_macro_marker();
+  test_bare_block_suffix_statement();
   std::cout << "parser_tests: ok\n";
   return 0;
 }

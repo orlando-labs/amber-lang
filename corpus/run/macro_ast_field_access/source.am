@@ -1,0 +1,18 @@
+package conformance.run
+
+# Generic Ast introspection (§17 Q6): a nullary selector on an Ast value reads
+# the amber.ast.v1 field of that name — child nodes come back as Ast values
+# (aliasing the shared root) and string fields as Str.
+macro def swap_operands(x):
+  #{x.right} - #{x.left}
+
+macro def op_name(x):
+  #{x.op}
+
+def probe():
+  a = swap_operands(2 - 44)
+  b = op_name(1 + 2)
+  if b == "+":
+    a
+  else:
+    0

@@ -666,6 +666,7 @@ std::uint32_t profile_flags_for(const BuildProfileSet &profiles) {
       {"native.mir.v1", 1U << 13U},
       {"notebook.watch.v1", 1U << 14U},
       {"ffi.v1", 1U << 15U},
+      {"macro.v1", 1U << 16U},
   };
 
   std::uint32_t flags = 0;
@@ -686,7 +687,7 @@ bool runtime_supports_feature(const std::string &feature) {
       "core.v1",        "typed.v1",      "capabilities.v1",   "effects.v1",
       "replay.v1",      "schema.v1",     "data.v1",           "wasm.v1",
       "accelerator.v1", "agent.v1",      "contracts.v1",      "privacy.v1",
-      "workflow.v1",    "native.mir.v1", "notebook.watch.v1",
+      "workflow.v1",    "native.mir.v1", "notebook.watch.v1", "macro.v1",
   };
   return kSupported.find(feature) != kSupported.end();
 }

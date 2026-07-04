@@ -315,6 +315,13 @@ struct RuntimeState {
   RuntimeHeap heap;
   std::vector<ClassRuntimeState> classes;
   bool owners_initialized = false;
+  // Compile-time step budget (macro expander sandbox, DESIGN-macro-system §10):
+  // when enabled, every interpreter step decrements the counter and exhausting
+  // it faults instead of hanging the build. Lives on RuntimeState so nested Vm
+  // instances (block/callable sub-loops) share one budget; disabled it costs a
+  // single predictable branch per step.
+  bool step_budget_enabled = false;
+  std::int64_t step_budget_remaining = 0;
   // Rest parameters: maps a method body's entry code id to the register index
   // of its `*name` rest parameter, so the closure-call frame setup can pack
   // surplus positional arguments into a Tuple. Built once in
@@ -595,6 +602,9 @@ struct RuntimeVmExecutionContext {
   const RuntimeTypeRegistry *type_registry = nullptr;
   const RuntimeDispatchRegistry *dispatch_registry = nullptr;
   const RuntimeErrorRegistry *error_registry = nullptr;
+  // Interpreter step budget for this execution; 0 = unlimited. Used by the
+  // macro expander so a looping macro is a diagnostic, not a compiler hang.
+  std::int64_t step_budget = 0;
 };
 
 ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,

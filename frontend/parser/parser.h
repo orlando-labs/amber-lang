@@ -84,7 +84,7 @@ private:
   std::unique_ptr<ast::Expr>
   parse_def_stmt(bool class_method,
                  const lexer::Token *start_override = nullptr,
-                 bool is_native = false);
+                 bool is_native = false, bool is_macro = false);
   std::unique_ptr<ast::Expr> parse_prop_def(bool class_property);
   std::unique_ptr<ast::Expr> parse_attr_def();
   PropertySuite parse_property_suite(const lexer::Span &fallback_span);
@@ -219,6 +219,10 @@ private:
   // True while parsing the body of a `native class`; a plain `def ... from`
   // binding is only valid in that context (otherwise use `native def`).
   bool in_native_class_body_ = false;
+  // Nesting depth of enclosing `quote:` bodies. Inside a quote (> 0) an
+  // `unquote(...)` / `unquote_splice(...)` call is a splice hole; at depth 0 it
+  // is an ordinary call. Used by parse_prefix.
+  int quote_depth_ = 0;
   lexer::Token synthetic_error_token_;
 };
 

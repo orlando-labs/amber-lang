@@ -1,5 +1,6 @@
 #include "frontend/lexer/lexer.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string_view>
@@ -32,6 +33,17 @@ LexResult Lexer::lex() {
       advance();
       continue;
     }
+    if (c == '#' && peek() == '{' && macro_splice_active()) {
+      // Template splice hole inside a `macro def` body: `#{expr}` /
+      // `#{*expr}`. Counts as an open bracket so the hole's `}` pairs up and
+      // line breaks inside it stay suppressed.
+      const Position start = position();
+      advance();
+      advance();
+      ++bracket_depth_;
+      emit(TokenKind::HashLBrace, start, "#{");
+      continue;
+    }
     if (c == '#' && comment_starts_here()) {
       consume_comment();
       continue;
@@ -53,6 +65,10 @@ LexResult Lexer::lex() {
     }
     if (is_digit(c)) {
       lex_number();
+      continue;
+    }
+    if (c == '"' && starts_with("\"\"\"")) {
+      lex_text_block();
       continue;
     }
     if (c == '"' || c == '\'') {
@@ -345,8 +361,17 @@ bool Lexer::next_non_space_is_line_break_or_comment() const {
          (source_[cursor] == ' ' || source_[cursor] == '\t')) {
     ++cursor;
   }
-  return cursor >= source_.size() || source_[cursor] == '\n' ||
-         source_[cursor] == '\r' || source_[cursor] == '#';
+  if (cursor >= source_.size() || source_[cursor] == '\n' ||
+      source_[cursor] == '\r') {
+    return true;
+  }
+  if (source_[cursor] == '#') {
+    // Inside a macro-def body a line may start with a `#{` splice hole; that
+    // is code, not a comment.
+    return !(macro_splice_active() && cursor + 1 < source_.size() &&
+             source_[cursor + 1] == '{');
+  }
+  return false;
 }
 
 bool Lexer::has_inline_text_after_current() const {
@@ -355,8 +380,16 @@ bool Lexer::has_inline_text_after_current() const {
          (source_[cursor] == ' ' || source_[cursor] == '\t')) {
     ++cursor;
   }
-  return cursor < source_.size() && source_[cursor] != '\n' &&
-         source_[cursor] != '\r' && source_[cursor] != '#';
+  if (cursor >= source_.size() || source_[cursor] == '\n' ||
+      source_[cursor] == '\r') {
+    return false;
+  }
+  if (source_[cursor] == '#') {
+    // A `#{` splice hole in a macro-def body is inline text; a comment is not.
+    return macro_splice_active() && cursor + 1 < source_.size() &&
+           source_[cursor + 1] == '{';
+  }
+  return true;
 }
 
 Position Lexer::position() const { return Position{line_, col_, index_}; }
@@ -398,7 +431,69 @@ void Lexer::advance_line_break() {
 }
 
 void Lexer::emit(TokenKind kind, Position start, std::string lexeme) {
+  update_macro_region(kind, lexeme);
   result_.tokens.push_back(Token{kind, std::move(lexeme), span_from(start)});
+}
+
+bool Lexer::macro_splice_active() const {
+  return macro_region_state_ == 3 || macro_region_state_ == 4;
+}
+
+// Token-driven tracker for `macro def` body regions (see lexer.h). Runs on
+// every emitted token; `#{` becomes a splice hole only while a body region is
+// open, so ordinary code and comments elsewhere are untouched.
+void Lexer::update_macro_region(TokenKind kind, const std::string &lexeme) {
+  switch (macro_region_state_) {
+  case 0:
+    if (kind == TokenKind::Identifier && lexeme == "macro") {
+      macro_region_state_ = 1;
+    }
+    break;
+  case 1:
+    if (kind == TokenKind::KeywordDef) {
+      macro_region_state_ = 2;
+    } else if (!(kind == TokenKind::Identifier && lexeme == "macro")) {
+      macro_region_state_ = 0;
+    }
+    break;
+  case 2:
+    // The header ends at the first `:` outside brackets (signature colons all
+    // sit inside parens/brackets). A header line without one is malformed;
+    // reset at the line break.
+    if (kind == TokenKind::Colon && bracket_depth_ == 0) {
+      macro_region_state_ = 3;
+      macro_body_inline_tokens_ = 0;
+    } else if (kind == TokenKind::Newline || kind == TokenKind::Eof) {
+      macro_region_state_ = 0;
+    }
+    break;
+  case 3:
+    if (kind == TokenKind::Indent) {
+      macro_region_state_ = 4;
+      macro_body_indent_size_ = indent_stack_.size();
+    } else if (kind == TokenKind::Newline) {
+      // A one-line body (tokens between the colon and the newline) ends here;
+      // a blank line before an indented body keeps the region pending.
+      if (macro_body_inline_tokens_ > 0) {
+        macro_region_state_ = 0;
+      }
+    } else if (kind == TokenKind::Dedent || kind == TokenKind::Eof) {
+      macro_region_state_ = 0;
+    } else {
+      ++macro_body_inline_tokens_;
+    }
+    break;
+  case 4:
+    // Blocks nested inside the body push deeper indent levels; the region
+    // closes only when a DEDENT pops below the body's own level.
+    if (kind == TokenKind::Dedent &&
+        indent_stack_.size() < macro_body_indent_size_) {
+      macro_region_state_ = 0;
+    }
+    break;
+  default:
+    break;
+  }
 }
 
 void Lexer::error(Position start, const std::string &message) {
@@ -648,6 +743,139 @@ void Lexer::lex_string(char quote) {
   const std::string text =
       source_.substr(start.offset, position().offset - start.offset);
   emit(TokenKind::String, start, text);
+}
+
+// Multiline text block `"""…"""` (DESIGN-multiline-string-literals §4/§5/§8).
+// The span is layout-suspended (no NEWLINE/INDENT/DEDENT inside); the body is
+// dedented by the CLOSING delimiter's column, trailing whitespace per line is
+// stripped, a body line ending in `\` joins the next line (suppresses the
+// newline; on the last line it suppresses the trailing newline), and blank
+// lines contribute just `\n`. Escapes and `#{…}` interpolation are the §7
+// double-quote forms; interpolation expressions may span lines. The emitted
+// token keeps the `"""` delimiters so the parser can tell the block form
+// apart (quote_kind "block"); its content is the dedented text, so the
+// existing parts scanning applies unchanged.
+void Lexer::lex_text_block() {
+  const Position start = position();
+  advance();
+  advance();
+  advance();
+  // Opener rule (§8): only whitespace may follow the opener on its line.
+  while (!at_end() && (current() == ' ' || current() == '\t')) {
+    advance();
+  }
+  if (at_end() || !at_line_break()) {
+    error_code(start, "AMB_TEXTBLOCK_OPENER",
+               "text block opener `\"\"\"` must be immediately followed by a "
+               "newline");
+    while (!at_end() && !at_line_break()) {
+      advance();
+    }
+  }
+  if (!at_end()) {
+    advance_line_break();
+  }
+
+  // Collect logical lines. `#{…}` interpolations are copied verbatim
+  // (including any newlines inside them) so dedent and the closer scan only
+  // see line starts outside interpolation.
+  std::vector<std::string> lines;
+  std::size_t closer_indent = 0;
+  bool closed = false;
+  while (!at_end()) {
+    std::size_t indent = 0;
+    while (!at_end() && current() == ' ') {
+      ++indent;
+      advance();
+    }
+    if (!at_end() && current() == '\t') {
+      error(position(), "tabs are not allowed in text block indentation");
+      while (!at_end() && current() == '\t') {
+        advance();
+      }
+    }
+    if (starts_with("\"\"\"")) {
+      advance();
+      advance();
+      advance();
+      closer_indent = indent;
+      closed = true;
+      break;
+    }
+    std::string line(indent, ' ');
+    while (!at_end() && !at_line_break()) {
+      if (current() == '#' && peek() == '{') {
+        const std::size_t from = index_;
+        const Position interpolation_start = position();
+        advance();
+        advance();
+        if (!consume_interpolation_in_string(interpolation_start)) {
+          break;
+        }
+        line.append(source_, from, index_ - from);
+        continue;
+      }
+      if (current() == '\\') {
+        line.push_back(advance());
+        if (!at_end() && !at_line_break()) {
+          const char escaped = current();
+          if (escaped != 'n' && escaped != 'r' && escaped != 't' &&
+              escaped != '\\' && escaped != '"' && escaped != '#' &&
+              escaped != '\'' && escaped != 'u') {
+            error_code(position(), "AMB_STRING_BAD_ESCAPE",
+                       "invalid escape sequence in text block");
+          }
+          line.push_back(advance());
+        }
+        continue;
+      }
+      line.push_back(advance());
+    }
+    lines.push_back(std::move(line));
+    if (!at_end()) {
+      advance_line_break();
+    }
+  }
+  if (!closed) {
+    error_code(start, "AMB_TEXTBLOCK_UNTERMINATED", "unterminated text block");
+  }
+
+  std::string content;
+  for (std::string &line : lines) {
+    while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) {
+      line.pop_back();
+    }
+    if (line.empty()) {
+      content.push_back('\n');
+      continue;
+    }
+    std::size_t leading = 0;
+    while (leading < line.size() && line[leading] == ' ') {
+      ++leading;
+    }
+    if (leading < closer_indent) {
+      error_code(start, "AMB_TEXTBLOCK_UNDERINDENT",
+                 "text block line is indented less than the closing `\"\"\"`");
+    }
+    line.erase(0, std::min(leading, closer_indent));
+    // A trailing run of backslashes with odd length ends in the line
+    // continuation marker: drop it and suppress this line's newline.
+    std::size_t backslashes = 0;
+    while (backslashes < line.size() &&
+           line[line.size() - 1U - backslashes] == '\\') {
+      ++backslashes;
+    }
+    const bool continuation = (backslashes % 2U) == 1U;
+    if (continuation) {
+      line.pop_back();
+    }
+    content += line;
+    if (!continuation) {
+      content.push_back('\n');
+    }
+  }
+
+  emit(TokenKind::String, start, "\"\"\"" + content + "\"\"\"");
 }
 
 bool Lexer::consume_interpolation_in_string(Position interpolation_start) {

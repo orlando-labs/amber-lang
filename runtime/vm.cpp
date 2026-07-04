@@ -1,4 +1,5 @@
 #include "runtime/vm.h"
+#include "frontend/ast/expr.h"
 #include "runtime/amber_ext_runtime.h"
 #include "runtime/context.h"
 #include "runtime/http_codec.h"
@@ -1563,6 +1564,12 @@ public:
     return with_runtime_names({final_value_, std::nullopt,
                                completed_locals_for(*entry),
                                std::move(watch_events), state_->watch_epoch});
+  }
+
+  // Arm the compile-time step budget on this VM's (shared) runtime state.
+  void enable_step_budget(std::int64_t steps) {
+    state_->step_budget_enabled = true;
+    state_->step_budget_remaining = steps;
   }
 
 private:
@@ -6423,6 +6430,96 @@ private:
       return std::nullopt;
     }
     return map->entries;
+  }
+
+  bool map_has_schema(const Frame &frame, const Value &value,
+                      std::string_view expected_schema) {
+    const std::optional<std::vector<MapEntry>> entries =
+        extract_map_entries(frame, value);
+    if (fault_.has_value() || !entries.has_value()) {
+      return false;
+    }
+    for (const MapEntry &entry : *entries) {
+      std::optional<std::string> key;
+      if (entry.key.is_string()) {
+        key = string_text_from_id(entry.key.as_string().string_id);
+      } else if (entry.key.is_symbol()) {
+        const std::uint32_t symbol_id = entry.key.as_symbol().symbol_id;
+        if (symbol_id < module_.symbols.size()) {
+          key = module_.symbols[symbol_id];
+        }
+      }
+      if (!key.has_value() || *key != "schema" || !entry.value.is_string()) {
+        continue;
+      }
+      const std::optional<std::string> schema =
+          string_text_from_id(entry.value.as_string().string_id);
+      return schema.has_value() && *schema == expected_schema;
+    }
+    return false;
+  }
+
+  SendStatus apply_benchmark_module_method(
+      const Frame &frame, const Value &receiver, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out,
+      const std::string &benchmark_selector_name) {
+    const std::optional<NativeStdlibHandler> handler =
+        dispatch_registry().native_handler(RuntimeNativeTypeKind::Benchmark);
+    if (!handler.has_value()) {
+      set_fault(frame, "VMError", "Benchmark stdlib handler is not registered");
+      return SendStatus::Faulted;
+    }
+    std::vector<Value> forwarded;
+    forwarded.reserve(args.size() + 1U);
+    forwarded.push_back(receiver);
+    forwarded.insert(forwarded.end(), args.begin(), args.end());
+    const Value benchmark_receiver =
+        Value::native_type(RuntimeNativeTypeKind::Benchmark);
+    NativeStdlibCall call{*this,
+                          &frame,
+                          benchmark_receiver,
+                          RuntimeNativeTypeKind::Benchmark,
+                          benchmark_selector_name,
+                          forwarded,
+                          block,
+                          kw_args,
+                          out};
+    return (*handler)(call);
+  }
+
+  SendStatus apply_benchmark_result_method(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (!receiver.is_map()) {
+      return SendStatus::NotHandled;
+    }
+    const bool benchmark_selector =
+        selector == "map" || selector == "to_map" || selector == "to_json" ||
+        selector == "format" || selector == "table" || selector == "pretty";
+    if (!benchmark_selector ||
+        !map_has_schema(frame, receiver, "amber.benchmark.v1")) {
+      return fault_.has_value() ? SendStatus::Faulted : SendStatus::NotHandled;
+    }
+    const std::string benchmark_selector_name =
+        selector == "map" ? "to_map" : selector;
+    return apply_benchmark_module_method(frame, receiver, args, block, kw_args, out,
+                                         benchmark_selector_name);
+  }
+
+  SendStatus apply_benchmark_profiler_method(
+      const Frame &frame, const Value &receiver, const std::string &selector,
+      const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
+    if (selector != "section" || !receiver.is_map()) {
+      return SendStatus::NotHandled;
+    }
+    if (!map_has_schema(frame, receiver, "amber.benchmark.profiler.v1")) {
+      return fault_.has_value() ? SendStatus::Faulted : SendStatus::NotHandled;
+    }
+    return apply_benchmark_module_method(frame, receiver, args, block, kw_args,
+                                         out, selector);
   }
 
   Value materialize_sequence_rest(const PreparedSeqState &state) {
@@ -12258,6 +12355,127 @@ private:
     return Value::string(intern_runtime_string(text));
   }
 
+  // Macro `Ast.node(kind, fields)` builder. Constructs a fresh `ast::Expr` whose
+  // fields are read from `fields`, dispatching each entry by its runtime value
+  // type: Str -> string_field, Bool -> bool_field, Ast -> node_field (child
+  // subtree deep-copied so the new parent owns it), List[Ast] -> list_field.
+  // Returns nullopt (after set_fault) on an unsupported field shape.
+  std::optional<Value> build_ast_node_value(const Frame &frame,
+                                            const std::string &node_kind,
+                                            const MapValue &fields) {
+    auto expr = ast::make_expr(node_kind, lexer::Span{});
+    for (const MapEntry &entry : fields.entries) {
+      std::string name;
+      if (entry.key.is_symbol()) {
+        const std::uint32_t sid = entry.key.as_symbol().symbol_id;
+        if (sid < module_.symbols.size()) {
+          name = module_.symbols[sid];
+        }
+      } else if (entry.key.is_string()) {
+        name = string_text_from_id(entry.key.as_string().string_id).value_or("");
+      } else {
+        set_fault(frame, "TypeError", "Ast.node field name must be a Symbol or Str");
+        return std::nullopt;
+      }
+      const Value &v = entry.value;
+      if (v.is_string()) {
+        expr->string_field(name,
+                           string_text_from_id(v.as_string().string_id).value_or(""));
+      } else if (v.is_bool()) {
+        expr->bool_field(name, v.as_bool());
+      } else if (v.is_ast_node()) {
+        const std::shared_ptr<RuntimeAstNode> child = v.as_ast_node();
+        expr->node_field(name, (child != nullptr && child->node != nullptr)
+                                   ? ast::clone_expr(*child->node)
+                                   : nullptr);
+      } else if (v.is_list()) {
+        std::vector<std::unique_ptr<ast::Expr>> items;
+        for (const Value &el : v.as_list()->items) {
+          if (!el.is_ast_node()) {
+            set_fault(frame, "TypeError",
+                      "Ast.node list field `" + name + "` must contain Ast nodes");
+            return std::nullopt;
+          }
+          const std::shared_ptr<RuntimeAstNode> child = el.as_ast_node();
+          items.push_back((child != nullptr && child->node != nullptr)
+                              ? ast::clone_expr(*child->node)
+                              : nullptr);
+        }
+        expr->list_field(name, std::move(items));
+      } else {
+        set_fault(frame, "TypeError",
+                  "Ast.node field `" + name + "` has an unsupported value type");
+        return std::nullopt;
+      }
+    }
+    auto root = std::shared_ptr<const ast::Expr>(std::move(expr));
+    auto node = std::make_shared<RuntimeAstNode>();
+    node->root = root;
+    node->node = root.get();
+    node->source = nullptr;
+    return Value::ast_node(node);
+  }
+
+  static Value ast_value_from_expr(std::unique_ptr<ast::Expr> expr) {
+    auto root = std::shared_ptr<const ast::Expr>(std::move(expr));
+    auto node = std::make_shared<RuntimeAstNode>();
+    node->root = root;
+    node->node = root.get();
+    node->source = nullptr;
+    return Value::ast_node(node);
+  }
+
+  // Macro `Ast.lift(value)`: splice coercion for template/unquote holes. An
+  // Ast value passes through unchanged; compile-time Str/Int/Float/Bool values
+  // become the corresponding literal nodes (`#{check.source}` splices as a
+  // string literal). Anything else is a TypeError fault in the macro body.
+  std::optional<Value> lift_value_to_ast(const Frame &frame, const Value &value) {
+    if (value.is_ast_node()) {
+      return value;
+    }
+    if (value.is_string()) {
+      const std::string text =
+          string_text_from_id(value.as_string().string_id).value_or("");
+      auto lit = ast::make_expr("AstStringLiteral", lexer::Span{});
+      lit->string_field("quote_kind", "double");
+      lit->bool_field("interpolation", false);
+      auto part = ast::make_expr("AstStringText", lexer::Span{});
+      part->string_field("value", text);
+      std::vector<std::unique_ptr<ast::Expr>> parts;
+      parts.push_back(std::move(part));
+      lit->list_field("parts", std::move(parts));
+      return ast_value_from_expr(std::move(lit));
+    }
+    if (value.is_bool()) {
+      auto lit = ast::make_expr("AstLiteral", lexer::Span{});
+      lit->string_field("token", value.as_bool() ? "KEYWORD_TRUE" : "KEYWORD_FALSE");
+      lit->string_field("value", value.as_bool() ? "true" : "false");
+      return ast_value_from_expr(std::move(lit));
+    }
+    if (value.is_integer() || value.is_float()) {
+      // Negative numbers have no literal form; lift the magnitude and wrap it
+      // in unary minus, mirroring how source text parses.
+      const std::string text = value.is_integer()
+                                   ? std::to_string(value.as_integer())
+                                   : std::to_string(value.as_float());
+      const bool negative = !text.empty() && text[0] == '-';
+      auto lit = ast::make_expr("AstLiteral", lexer::Span{});
+      lit->string_field("token", value.is_integer() ? "INTEGER" : "FLOAT");
+      lit->string_field("value", negative ? text.substr(1) : text);
+      if (!negative) {
+        return ast_value_from_expr(std::move(lit));
+      }
+      auto neg = ast::make_expr("AstUnary", lexer::Span{});
+      neg->string_field("op", "-");
+      neg->node_field("operand", std::move(lit));
+      return ast_value_from_expr(std::move(neg));
+    }
+    set_fault(frame, "TypeError",
+              "Ast.lift cannot convert this value to an Ast node; splice an "
+              "Ast, Str, Int, Float, or Bool");
+    return std::nullopt;
+  }
+
   SendStatus apply_kernel_output_helper(
       const Frame &frame, RuntimeNativeFunctionKind kind,
       const std::vector<Value> &args, const Value &block,
@@ -17067,6 +17285,74 @@ private:
       }
     }
 
+    if (receiver.is_ast_node()) {
+      const std::shared_ptr<RuntimeAstNode> node = receiver.as_ast_node();
+      if (node == nullptr || node->node == nullptr) {
+        set_fault(frame, "TypeError", "Ast node is null");
+        return SendStatus::Faulted;
+      }
+      if (selector == "kind") {
+        *out = string_value_from_text(runtime_ast_node_kind(*node));
+        return SendStatus::Matched;
+      }
+      if (selector == "source" || selector == "to_source") {
+        *out = string_value_from_text(runtime_ast_node_source(*node));
+        return SendStatus::Matched;
+      }
+      // Generic Ast introspection (DESIGN-macro-system §17 Q6): a nullary
+      // selector reads the node's amber.ast.v1 field of that name — Str for
+      // string fields, Bool for bool fields, Ast for child nodes, List[Ast]
+      // for node lists. Child Ast values alias the shared immutable root (no
+      // clone); they keep the source handle so `.source` still works on
+      // subtrees. This is what lets a macro walk its payload: `bin.op`,
+      // `bin.left`, `blk.params`, `blk.body`, `tpl.parts`.
+      if (args.empty() && kw_args.empty() && block.is_null()) {
+        const auto alias_child = [&](const ast::Expr *child) {
+          auto value = std::make_shared<RuntimeAstNode>();
+          value->root = node->root;
+          value->node = child;
+          value->source = node->source;
+          return Value::ast_node(value);
+        };
+        for (const ast::StringField &field : node->node->string_fields) {
+          if (field.name == selector) {
+            *out = string_value_from_text(field.value);
+            return SendStatus::Matched;
+          }
+        }
+        for (const ast::BoolField &field : node->node->bool_fields) {
+          if (field.name == selector) {
+            *out = Value::boolean(field.value);
+            return SendStatus::Matched;
+          }
+        }
+        for (const ast::NodeField &field : node->node->node_fields) {
+          if (field.name == selector) {
+            if (field.value == nullptr) {
+              *out = Value::null();
+              return SendStatus::Matched;
+            }
+            *out = alias_child(field.value.get());
+            return SendStatus::Matched;
+          }
+        }
+        for (const ast::ListField &field : node->node->list_fields) {
+          if (field.name == selector) {
+            std::vector<Value> items;
+            items.reserve(field.values.size());
+            for (const std::unique_ptr<ast::Expr> &child : field.values) {
+              if (child) {
+                items.push_back(alias_child(child.get()));
+              }
+            }
+            *out = make_list_value(std::move(items));
+            return SendStatus::Matched;
+          }
+        }
+      }
+      return SendStatus::NotHandled;
+    }
+
     if (receiver.is_native_type()) {
       const RuntimeNativeTypeKind kind = receiver.as_native_type().kind;
       const std::string nested_error_path =
@@ -17137,6 +17423,84 @@ private:
         *out = string_value_from_text(runtime_stringify_value(
             args[0], stringify_mode, &module_, nullptr, nullptr, options));
         return SendStatus::Matched;
+      }
+      if (kind == RuntimeNativeTypeKind::Ast) {
+        if (selector == "node") {
+          if (!require_arity(2) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "Ast.node does not accept keywords");
+            return SendStatus::Faulted;
+          }
+          if (!args[0].is_string()) {
+            set_fault(frame, "TypeError", "Ast.node kind must be a Str");
+            return SendStatus::Faulted;
+          }
+          if (!args[1].is_map()) {
+            set_fault(frame, "TypeError", "Ast.node fields must be a Map");
+            return SendStatus::Faulted;
+          }
+          const std::string node_kind =
+              string_text_from_id(args[0].as_string().string_id).value_or("");
+          const std::optional<Value> built =
+              build_ast_node_value(frame, node_kind, *args[1].as_map());
+          if (!built.has_value()) {
+            return SendStatus::Faulted;
+          }
+          *out = *built;
+          return SendStatus::Matched;
+        }
+        if (selector == "lift") {
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError", "Ast.lift does not accept keywords");
+            return SendStatus::Faulted;
+          }
+          const std::optional<Value> lifted = lift_value_to_ast(frame, args[0]);
+          if (!lifted.has_value()) {
+            return SendStatus::Faulted;
+          }
+          *out = *lifted;
+          return SendStatus::Matched;
+        }
+        if (selector == "lift_list") {
+          // Splice coercion for `unquote_splice` / `#{*list}`: a compile-time
+          // List or Tuple (macro rest params bind Tuples) of splice-able
+          // values becomes a List[Ast] ready for sibling concatenation.
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Ast.lift_list does not accept keywords");
+            return SendStatus::Faulted;
+          }
+          const std::vector<Value> *items = nullptr;
+          if (args[0].is_list()) {
+            items = &args[0].as_list()->items;
+          } else if (args[0].is_tuple()) {
+            items = &args[0].as_tuple()->items;
+          } else {
+            set_fault(frame, "TypeError",
+                      "unquote_splice expects a List or Tuple of Ast values");
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> lifted_items;
+          lifted_items.reserve(items->size());
+          for (const Value &item : *items) {
+            const std::optional<Value> lifted = lift_value_to_ast(frame, item);
+            if (!lifted.has_value()) {
+              return SendStatus::Faulted;
+            }
+            lifted_items.push_back(*lifted);
+          }
+          *out = make_list_value(std::move(lifted_items));
+          return SendStatus::Matched;
+        }
+        return SendStatus::NotHandled;
       }
       // RuntimeNativeTypeKind::Math is handled by the registry above
       // (runtime/stdlib_math.cpp), the Layer 0 reference migration.
@@ -20170,6 +20534,18 @@ private:
       }
       return native_status;
     }
+    const SendStatus early_benchmark_result_status =
+        apply_benchmark_result_method(frame, receiver, selector, args, block,
+                                      kw_args, out);
+    if (early_benchmark_result_status != SendStatus::NotHandled) {
+      return early_benchmark_result_status;
+    }
+    const SendStatus early_benchmark_profiler_status =
+        apply_benchmark_profiler_method(frame, receiver, selector, args, block,
+                                        kw_args, out);
+    if (early_benchmark_profiler_status != SendStatus::NotHandled) {
+      return early_benchmark_profiler_status;
+    }
     if (selector == "to_json" && !receiver.is_instance_object() &&
         !receiver.is_class_object()) {
       if (args.size() != 0U) {
@@ -21131,6 +21507,11 @@ private:
           collection_selector == "sort!") &&
          (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
           receiver_is_range || receiver_is_lazy_seq));
+    const SendStatus benchmark_result_status = apply_benchmark_result_method(
+        frame, receiver, selector, args, block, kw_args, out);
+    if (benchmark_result_status != SendStatus::NotHandled) {
+      return benchmark_result_status;
+    }
     if (!kw_args.empty() && builtin_selector &&
         !keyword_compatible_builtin_selector) {
       set_fault(frame, "TypeError",
@@ -24260,6 +24641,22 @@ private:
       // through the general implicit nullary send below, like any other method.
       if (const std::optional<RuntimeNativeTypeKind> target =
               conversion_target_for_alias(*selector)) {
+        if (*selector == "map") {
+          Value benchmark_result = Value::null();
+          const SendStatus benchmark_status = apply_benchmark_result_method(
+              frame, receiver, *selector, args, block, kw_args,
+              &benchmark_result);
+          if (benchmark_status == SendStatus::Faulted) {
+            return false;
+          }
+          if (benchmark_status == SendStatus::Matched) {
+            if (!write_reg(frame, dst, std::move(benchmark_result))) {
+              return false;
+            }
+            ++frame.pc;
+            return true;
+          }
+        }
         if (!ensure_lifecycle_access(frame, receiver)) {
           return false;
         }
@@ -24575,6 +24972,14 @@ private:
   }
 
   void step() {
+    // Compile-time step budget (macro expander sandbox): normally disabled,
+    // one predictable branch. Exhaustion is a terminal fault — a `rescue`
+    // cannot make progress without stepping, so it re-faults immediately.
+    if (state_->step_budget_enabled && --state_->step_budget_remaining < 0) {
+      set_fault(frames_.back(), "BudgetError",
+                "compile-time step budget exceeded");
+      return;
+    }
     Frame &frame = frames_.back();
     if (frame.code == nullptr || frame.pc >= frame.code->instructions.size()) {
       set_fault(frame, "VMError", "program counter out of range");
@@ -26566,6 +26971,9 @@ ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,
         std::move(context.trace_recorder), context.native_registry,
         context.module_registry, context.type_registry,
         context.dispatch_registry, context.error_registry);
+  if (context.step_budget > 0) {
+    vm.enable_step_budget(context.step_budget);
+  }
   return vm.execute(code_id, args, std::move(self), std::move(block));
 }
 

@@ -22,6 +22,11 @@ struct Binding {
   std::string id;
   int scope_index = -1;
   std::string name;
+  // Macro hygiene syntax context (DESIGN-macro-system §9). Empty for ordinary
+  // identifiers; a fresh per-expansion mark for names introduced literally
+  // inside a `quote`. The scope-graph key is the (name, context) pair, so a
+  // macro-introduced `tmp` cannot capture or be captured by a caller's `tmp`.
+  std::string context;
   std::string kind;
   std::string role;
   bool read_only = false;
@@ -35,6 +40,7 @@ struct Reference {
   std::string id;
   int scope_index = -1;
   std::string name;
+  std::string context; // macro hygiene syntax context (see Binding::context)
   std::string ref_kind;
   bool resolved = false;
   std::string binding_id;

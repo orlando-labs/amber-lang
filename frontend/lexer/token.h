@@ -44,6 +44,7 @@ enum class TokenKind {
   RBracket,
   LBrace,
   RBrace,
+  HashLBrace,
   Pipe,
   Ampersand,
   Caret,
