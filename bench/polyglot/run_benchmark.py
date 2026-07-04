@@ -23,6 +23,8 @@ class Workload:
     cpp_binary: str
     go_source: str
     go_binary: str
+    rust_source: str
+    rust_binary: str
     requires_full_amber_native: bool = True
     amber_grants: tuple[str, ...] = ()
 
@@ -44,6 +46,8 @@ WORKLOADS = {
         cpp_binary="main",
         go_source="main.go",
         go_binary="main",
+        rust_source="main.rs",
+        rust_binary="main",
     ),
     "calls-collections": Workload(
         name="calls-collections",
@@ -57,6 +61,8 @@ WORKLOADS = {
         cpp_binary="calls_collections",
         go_source="calls_collections.go",
         go_binary="calls_collections",
+        rust_source="calls_collections.rs",
+        rust_binary="calls_collections",
     ),
     "sha-digest": Workload(
         name="sha-digest",
@@ -70,6 +76,8 @@ WORKLOADS = {
         cpp_binary="sha_digest",
         go_source="sha_digest.go",
         go_binary="sha_digest",
+        rust_source="sha_digest.rs",
+        rust_binary="sha_digest",
     ),
     "json": Workload(
         name="json",
@@ -83,7 +91,39 @@ WORKLOADS = {
         cpp_binary="json_workload",
         go_source="json_workload.go",
         go_binary="json_workload",
+        rust_source="json_workload.rs",
+        rust_binary="json_workload",
         amber_grants=("fs.read=bench/polyglot/build/json/events.jsonl",),
+    ),
+    "string-ops": Workload(
+        name="string-ops",
+        expected_checksum="280113",
+        amber_module="bench.polyglot.string_ops",
+        amber_entry="main",
+        amber_source="string_ops.am",
+        python_source="string_ops.py",
+        ruby_source="string_ops.rb",
+        cpp_source="string_ops.cpp",
+        cpp_binary="string_ops",
+        go_source="string_ops.go",
+        go_binary="string_ops",
+        rust_source="string_ops.rs",
+        rust_binary="string_ops",
+    ),
+    "map-words": Workload(
+        name="map-words",
+        expected_checksum="235174",
+        amber_module="bench.polyglot.map_words",
+        amber_entry="main",
+        amber_source="map_words.am",
+        python_source="map_words.py",
+        ruby_source="map_words.rb",
+        cpp_source="map_words.cpp",
+        cpp_binary="map_words",
+        go_source="map_words.go",
+        go_binary="map_words",
+        rust_source="map_words.rs",
+        rust_binary="map_words",
     ),
     "codecs": Workload(
         name="codecs",
@@ -97,6 +137,8 @@ WORKLOADS = {
         cpp_binary="codecs_workload",
         go_source="codecs_workload.go",
         go_binary="codecs_workload",
+        rust_source="codecs_workload.rs",
+        rust_binary="codecs_workload",
     ),
     "secure-random": Workload(
         name="secure-random",
@@ -110,6 +152,8 @@ WORKLOADS = {
         cpp_binary="secure_random",
         go_source="secure_random.go",
         go_binary="secure_random",
+        rust_source="secure_random.rs",
+        rust_binary="secure_random",
         amber_grants=("random.secure",),
     ),
     "time-flow": Workload(
@@ -124,6 +168,8 @@ WORKLOADS = {
         cpp_binary="time_flow",
         go_source="time_flow.go",
         go_binary="time_flow",
+        rust_source="time_flow.rs",
+        rust_binary="time_flow",
     ),
     "uuid": Workload(
         name="uuid",
@@ -137,6 +183,8 @@ WORKLOADS = {
         cpp_binary="uuid_workload",
         go_source="uuid_workload.go",
         go_binary="uuid_workload",
+        rust_source="uuid_workload.rs",
+        rust_binary="uuid_workload",
         amber_grants=("random.secure",),
     ),
 }
@@ -185,6 +233,10 @@ def choose_cxx() -> str:
 
 def choose_go() -> Optional[str]:
     return shutil.which("go")
+
+
+def choose_rust() -> Optional[str]:
+    return shutil.which("rustc")
 
 
 def ensure_amber_tools(root: Path) -> None:
@@ -342,6 +394,26 @@ def compile_go_program(root: Path, build_dir: Path, go: str, workload: Workload)
         ],
         root,
         env={"GOCACHE": cache_dir},
+    )
+    return output
+
+
+def compile_rust_program(
+    root: Path, build_dir: Path, rustc: str, workload: Workload
+) -> Path:
+    output = build_dir / "rust" / workload.rust_binary
+    output.parent.mkdir(parents=True, exist_ok=True)
+    run_command(
+        [
+            rustc,
+            "-O",
+            "--edition",
+            "2021",
+            "-o",
+            output,
+            root / "bench" / "polyglot" / "rust" / workload.rust_source,
+        ],
+        root,
     )
     return output
 
@@ -530,7 +602,7 @@ def print_table(results: list[dict]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run the Amber/Python/Ruby/C++/Go polyglot benchmark."
+        description="Run the Amber/Python/Ruby/C++/Go/Rust polyglot benchmark."
     )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(
@@ -571,7 +643,9 @@ def main() -> int:
 
     cxx = choose_cxx()
     go = choose_go()
+    rust = choose_rust()
     go_unavailable_reason = None
+    rust_unavailable_reason = None
     if args.no_build:
         amber_built = amber_native_path(build_dir, workload)
         amber_built_command = [amber_built]
@@ -584,6 +658,12 @@ def main() -> int:
                 go_unavailable_reason = "go not found in PATH"
             else:
                 go_unavailable_reason = f"go binary missing: {go_binary}"
+        rust_binary = build_dir / "rust" / workload.rust_binary
+        if not rust_binary.exists():
+            if rust is None:
+                rust_unavailable_reason = "rustc not found in PATH"
+            else:
+                rust_unavailable_reason = f"rust binary missing: {rust_binary}"
     else:
         ensure_amber_tools(root)
         build_amber_bytecode(root, build_dir)
@@ -595,6 +675,11 @@ def main() -> int:
             go_unavailable_reason = "go not found in PATH"
         else:
             go_binary = compile_go_program(root, build_dir, go, workload)
+        if rust is None:
+            rust_binary = None
+            rust_unavailable_reason = "rustc not found in PATH"
+        else:
+            rust_binary = compile_rust_program(root, build_dir, rust, workload)
 
     ruby = shutil.which("ruby")
     if ruby is None:
@@ -634,6 +719,8 @@ def main() -> int:
     ]
     if go_unavailable_reason is None:
         programs.append(("go", [go_binary]))
+    if rust_unavailable_reason is None:
+        programs.append(("rust", [rust_binary]))
 
     results = []
     for name, command in programs:
@@ -643,6 +730,8 @@ def main() -> int:
         )
     if go_unavailable_reason is not None:
         results.append(unavailable_result("go", go_unavailable_reason))
+    if rust_unavailable_reason is not None:
+        results.append(unavailable_result("rust", rust_unavailable_reason))
 
     print_table(results)
     default_json = (

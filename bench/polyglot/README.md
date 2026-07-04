@@ -9,6 +9,14 @@ This benchmark compares identical workloads across:
 - Ruby
 - C++ compiled with `-O2`
 - Go when `go` is available in `PATH`
+- Rust compiled with `rustc -O` when `rustc` is available in `PATH`
+
+The Rust implementations use only the standard library. Workloads that need
+primitives Rust std does not ship (digests, base64/hex codecs, civil-calendar
+time math) hand-roll them in the workload source, mirroring how the C++ rows
+link the Amber runtime's own `runtime/digest.cpp` or carry their own helpers.
+OS entropy for `secure-random` and `uuid` comes from a single `/dev/urandom`
+handle opened once per process.
 
 The Amber built path intentionally runs an already generated executable, so
 compile time is not included in the measured run. The runner still builds fresh
@@ -27,6 +35,8 @@ python3 bench/polyglot/run_benchmark.py --workload codecs --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload secure-random --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload time-flow --repeats 3
 python3 bench/polyglot/run_benchmark.py --workload uuid --repeats 3
+python3 bench/polyglot/run_benchmark.py --workload string-ops --repeats 3
+python3 bench/polyglot/run_benchmark.py --workload map-words --repeats 3
 ```
 
 The script prints mean/best wall-clock time and peak RSS reported by a small
@@ -42,6 +52,8 @@ workload:
 - `secure-random`: `296000`
 - `time-flow`: `110397732`
 - `uuid`: `1040000`
+- `string-ops`: `280113`
+- `map-words`: `235174`
 
 The `json` workload exercises compact JSON generation, parse round-trips,
 small pretty-generation round-trips, and streaming JSONL reads. The runner
@@ -87,6 +99,105 @@ equality, type matching, the `UUID` alias, and `SecureRandom.uuid`. It uses real
 OS entropy and wall time, while its checksum depends only on UUID invariants.
 The Amber executable is compiled with `--grant random.secure`, and the runner
 requires every bytecode code object to have direct native coverage.
+
+The `string-ops` workload (added 2026-07-02) exercises string building and
+transformation: `+` concatenation, `upcase`/`downcase`, `split`, `replace`,
+`trim`, `contains?`, `starts_with?`/`ends_with?`, and `length` over ~4000
+generated record lines. Every language uses its standard string type and the
+same algorithm; all strings are ASCII so codepoint- and byte-length semantics
+agree. On Amber this additionally stresses the runtime string intern table
+(every distinct runtime string becomes a permanent interned slot). The runner
+requires full direct-native coverage for this workload.
+
+The `map-words` workload (added 2026-07-02) exercises hash-map traffic: 30,000
+insert-or-update rounds over 2,000 distinct string keys (a skewed quadratic key
+stream), a full `each` iteration folding `value * key-length` (order
+independent by construction, so hash-ordered languages agree), then 10,000
+membership probes with a 2/3 hit rate. On Amber this measures the
+name-indifferent `Map` (Symbol/Str canonicalization on every key operation).
+The runner requires full direct-native coverage for this workload as well.
+
+## Optimized full-suite rerun with Rust and the new workloads (2026-07-04)
+
+Darwin arm64, `go version go1.26.4 darwin/arm64`, `rustc 1.96.0` (Homebrew),
+system Python 3.9.6, Ruby 4.0.5 from RVM. Fresh build pass into
+`/private/tmp/amber_polyglot_suite_optimized_20260704_01`, then stable reruns
+below, one workload per runner invocation:
+
+```sh
+python3 bench/polyglot/run_benchmark.py --workload <workload> --repeats 10 \
+  --no-build --build-dir /private/tmp/amber_polyglot_suite_optimized_20260704_01
+```
+
+All rows validated their workload checksum. Both new workloads (`string-ops`,
+`map-words`) report full direct-native coverage. The Amber rows include the
+2026-07-04 map/string hot-path optimizations documented in
+`PLAN-polyglot-performance-optimizations-2026-07-04.md`. The arithmetic row was
+refreshed after native int/float numeric fast-lane codegen, using a fresh build
+in `/private/tmp/amber_polyglot_arithmetic_nativefast_20260704_01` and 10
+repeats with Ruby 4.0.5 from RVM.
+
+`best_s` (best of 10):
+
+```text
+workload          amber-interpreted amber-built      python        ruby         cpp          go        rust
+-----------------------------------------------------------------------------------------------------------
+arithmetic              0.1709      0.0064      0.2030      0.0818      0.0046      0.0070      0.0041
+calls-collections       0.0157      0.0078      0.0226      0.0138      0.0023      0.0029      0.0025
+sha-digest              0.0467      0.0140      0.0226      0.0460      0.0121      0.0046      0.0115
+json                    0.0329      0.0154      0.0425      0.0223      0.0042      0.0144      0.0054
+codecs                  0.0411      0.0110      0.0255      0.0196      0.0055      0.0039      0.0048
+secure-random           0.0259      0.0105      0.0504      0.0267      0.0061      0.0061      0.0167
+time-flow               0.1205      0.0216      0.2423      0.0658      0.0031      0.0052      0.0031
+uuid                    0.0479      0.0116      0.0879      0.0514      0.0070      0.0109      0.0175
+string-ops              0.0337      0.0110      0.0156      0.0167      0.0043      0.0041      0.0049
+map-words               0.1027      0.0074      0.0205      0.0171      0.0033      0.0046      0.0047
+```
+
+`peak_rss_mb`:
+
+```text
+workload          amber-interpreted amber-built      python        ruby         cpp          go        rust
+-----------------------------------------------------------------------------------------------------------
+arithmetic                 4.5         1.4         8.3        11.9         1.3         4.0         1.5
+calls-collections          5.7         1.5         8.7        12.0         1.3         4.0         1.5
+sha-digest                 5.0         3.3         9.1        21.6         1.6         6.1         1.8
+json                       9.9        10.8         9.8        13.5         1.4         8.9         1.6
+codecs                    11.9         8.4         9.7        12.7         1.4         4.7         1.6
+secure-random              7.2         4.2        10.8        13.1         1.4         4.8         1.7
+time-flow                  5.5        13.9        12.8        13.3         1.4         4.0         1.6
+uuid                       8.6         5.5        11.0        13.5         1.4         9.2         1.6
+string-ops                16.9        11.6         8.4        12.7         1.5         5.2         1.7
+map-words                  6.5         2.6         8.5        12.3         1.4         4.4         1.8
+```
+
+Reading notes:
+
+- Rust sits on the C++ frontier as expected (each wins some workloads).
+  Rust's `secure-random`/`uuid` rows are slower than C++ because the Rust
+  implementation reads `/dev/urandom` through a file handle (one syscall per
+  request) while C++ and the Amber runtime use `arc4random_buf`, a
+  kernel-seeded userspace CSPRNG. Amber-built actually beats Rust on those two
+  workloads for the same reason.
+- `map-words` is no longer the outlier. The VM/runtime and generated-native
+  map index work moves `amber-interpreted` from 0.9344s to 0.1027s and
+  `amber-built` from 0.2920s to 0.0074s compared with the previous 2026-07-04
+  table. The built row is now in the Go/Rust band for this workload, about
+  2.2x the C++ best instead of about 88x.
+- `string-ops` still shows the string-table lifecycle issue, but the hash-bucket
+  intern index trims peak RSS (18.3 MB to 16.9 MB interpreted, 12.5 MB to
+  11.6 MB built) and the VM string-construction quick paths improve the
+  interpreted best from 0.0462s to 0.0337s.
+- `json` built RSS rose compared with the previous table (6.3 MB to 10.8 MB),
+  which is the cost side of eager per-map hash indexes on many small maps. The
+  next map optimization should use an inline/small-map index or build the hash
+  index lazily after a size/probe threshold, preserving `map-words` speed while
+  giving object-heavy JSON maps back their compact representation.
+- Native numeric fast lanes moved `arithmetic` built from 0.0239s to 0.0064s,
+  close to the C++/Rust 0.004s band. Cold-start cost is still visible in the raw
+  samples (`amber-built` mean 0.0393s, first sample 0.3286s), so a structural
+  no-fallback native launcher or split generated helper/runtime surface remains
+  the next credible startup-size/startup-time optimization.
 
 Latest local `sha-digest` API warm rerun on 2026-06-18 (Darwin arm64,
 `go version go1.26.4 darwin/arm64`):
