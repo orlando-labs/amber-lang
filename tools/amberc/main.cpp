@@ -1300,13 +1300,6 @@ native_cpp_numeric_profile(const amber::bytecode::BcModule &module) {
   return profile;
 }
 
-std::string native_cpp_next(std::size_t pc, std::size_t size) {
-  if (pc + 1U < size) {
-    return "goto pc_" + std::to_string(pc + 1U) + ";";
-  }
-  return "throw NativeBailout();";
-}
-
 bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
                                 std::uint32_t symbol_id,
                                 std::string *selector) {
@@ -2376,35 +2369,173 @@ bool native_cpp_code_uses_local_capture_cells(
   return false;
 }
 
-std::vector<std::vector<bool>> native_cpp_integer_registers_at_pc(
+enum class NativeScalarKind { Unknown, Integer, Float };
+
+struct NativeScalarFlow {
+  std::vector<std::vector<NativeScalarKind>> at_pc;
+  std::vector<std::vector<NativeScalarKind>> after_pc;
+};
+
+NativeScalarKind native_cpp_scalar_meet(NativeScalarKind lhs,
+                                        NativeScalarKind rhs) {
+  return lhs == rhs ? lhs : NativeScalarKind::Unknown;
+}
+
+bool native_cpp_scalar_numeric(NativeScalarKind kind) {
+  return kind == NativeScalarKind::Integer || kind == NativeScalarKind::Float;
+}
+
+bool native_cpp_opcode_numeric_arithmetic(amber::bytecode::Opcode opcode) {
+  using amber::bytecode::Opcode;
+  switch (opcode) {
+  case Opcode::IAdd:
+  case Opcode::ISub:
+  case Opcode::IMul:
+  case Opcode::IDiv:
+  case Opcode::IMod:
+  case Opcode::IFloorDiv:
+  case Opcode::IAddK:
+  case Opcode::ISubK:
+  case Opcode::IMulK:
+  case Opcode::IDivK:
+  case Opcode::IModK:
+  case Opcode::IFloorDivK:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool native_cpp_opcode_integer_only(amber::bytecode::Opcode opcode) {
+  using amber::bytecode::Opcode;
+  switch (opcode) {
+  case Opcode::IBitAnd:
+  case Opcode::IBitOr:
+  case Opcode::IBitXor:
+  case Opcode::IShl:
+  case Opcode::IShr:
+  case Opcode::IBitAndK:
+  case Opcode::IBitOrK:
+  case Opcode::IBitXorK:
+  case Opcode::IShlK:
+  case Opcode::IShrK:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool native_cpp_opcode_numeric_cmp(amber::bytecode::Opcode opcode) {
+  using amber::bytecode::Opcode;
+  switch (opcode) {
+  case Opcode::ICmp:
+  case Opcode::ICmpK:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool native_cpp_opcode_bool_compare(amber::bytecode::Opcode opcode) {
+  using amber::bytecode::Opcode;
+  switch (opcode) {
+  case Opcode::ILt:
+  case Opcode::IGt:
+  case Opcode::ILe:
+  case Opcode::IGe:
+  case Opcode::IEq:
+  case Opcode::INe:
+  case Opcode::ILtK:
+  case Opcode::IGtK:
+  case Opcode::ILeK:
+  case Opcode::IGeK:
+  case Opcode::IEqK:
+  case Opcode::INeK:
+    return true;
+  default:
+    return false;
+  }
+}
+
+NativeScalarKind native_cpp_numeric_binary_result_kind(
+    amber::bytecode::Opcode opcode, NativeScalarKind lhs,
+    NativeScalarKind rhs) {
+  if (native_cpp_opcode_bool_compare(opcode)) {
+    return NativeScalarKind::Unknown;
+  }
+  if (native_cpp_opcode_numeric_cmp(opcode)) {
+    return native_cpp_scalar_numeric(lhs) && native_cpp_scalar_numeric(rhs)
+               ? NativeScalarKind::Integer
+               : NativeScalarKind::Unknown;
+  }
+  if (native_cpp_opcode_integer_only(opcode)) {
+    return lhs == NativeScalarKind::Integer && rhs == NativeScalarKind::Integer
+               ? NativeScalarKind::Integer
+               : NativeScalarKind::Unknown;
+  }
+  if (!native_cpp_opcode_numeric_arithmetic(opcode) ||
+      !native_cpp_scalar_numeric(lhs) || !native_cpp_scalar_numeric(rhs)) {
+    return NativeScalarKind::Unknown;
+  }
+  return lhs == NativeScalarKind::Integer && rhs == NativeScalarKind::Integer
+             ? NativeScalarKind::Integer
+             : NativeScalarKind::Float;
+}
+
+NativeScalarKind native_cpp_numeric_k_result_kind(
+    amber::bytecode::Opcode opcode, NativeScalarKind lhs) {
+  if (native_cpp_opcode_bool_compare(opcode)) {
+    return NativeScalarKind::Unknown;
+  }
+  if (native_cpp_opcode_numeric_cmp(opcode)) {
+    return native_cpp_scalar_numeric(lhs) ? NativeScalarKind::Integer
+                                          : NativeScalarKind::Unknown;
+  }
+  if (native_cpp_opcode_integer_only(opcode)) {
+    return lhs == NativeScalarKind::Integer ? NativeScalarKind::Integer
+                                            : NativeScalarKind::Unknown;
+  }
+  if (!native_cpp_opcode_numeric_arithmetic(opcode) ||
+      !native_cpp_scalar_numeric(lhs)) {
+    return NativeScalarKind::Unknown;
+  }
+  return lhs == NativeScalarKind::Integer ? NativeScalarKind::Integer
+                                          : NativeScalarKind::Float;
+}
+
+NativeScalarFlow native_cpp_scalar_registers(
     const amber::bytecode::BcModule &module,
     const amber::bytecode::BcCode &code) {
   using amber::bytecode::Opcode;
 
   const std::size_t pc_count = code.instructions.size();
-  std::vector<std::vector<bool>> states(
-      pc_count, std::vector<bool>(code.reg_count, false));
+  NativeScalarFlow flow;
+  flow.at_pc.assign(
+      pc_count, std::vector<NativeScalarKind>(
+                    code.reg_count, NativeScalarKind::Unknown));
+  flow.after_pc = flow.at_pc;
   std::vector<bool> reached(pc_count, false);
   std::vector<std::size_t> worklist;
   if (pc_count == 0U) {
-    return states;
+    return flow;
   }
 
   const auto enqueue = [&](std::size_t target,
-                           const std::vector<bool> &state) {
+                           const std::vector<NativeScalarKind> &state) {
     if (target >= pc_count) {
       return;
     }
     bool changed = false;
     if (!reached[target]) {
-      states[target] = state;
+      flow.at_pc[target] = state;
       reached[target] = true;
       changed = true;
     } else {
       for (std::size_t reg = 0; reg < state.size(); ++reg) {
-        const bool merged = states[target][reg] && state[reg];
-        if (merged != states[target][reg]) {
-          states[target][reg] = merged;
+        const NativeScalarKind merged =
+            native_cpp_scalar_meet(flow.at_pc[target][reg], state[reg]);
+        if (merged != flow.at_pc[target][reg]) {
+          flow.at_pc[target][reg] = merged;
           changed = true;
         }
       }
@@ -2420,19 +2551,29 @@ std::vector<std::vector<bool>> native_cpp_integer_registers_at_pc(
     const std::size_t pc = worklist.back();
     worklist.pop_back();
     const amber::bytecode::Instruction &instruction = code.instructions[pc];
-    std::vector<bool> next = states[pc];
+    std::vector<NativeScalarKind> next = flow.at_pc[pc];
 
-    const auto set_dst = [&](bool is_integer) {
+    const auto set_dst = [&](NativeScalarKind kind) {
       std::uint32_t dst = 0;
       if (operand_u32_value(instruction, 0, &dst) && dst < next.size()) {
-        next[dst] = is_integer;
+        next[dst] = kind;
       }
     };
     const auto set_dst_from_reg = [&](std::uint32_t src) {
       std::uint32_t dst = 0;
       if (operand_u32_value(instruction, 0, &dst) && dst < next.size()) {
-        next[dst] = src < states[pc].size() && states[pc][src];
+        next[dst] =
+            src < flow.at_pc[pc].size() ? flow.at_pc[pc][src]
+                                        : NativeScalarKind::Unknown;
       }
+    };
+    const auto reg_kind = [&](std::size_t operand_index) {
+      std::uint32_t reg = 0;
+      if (!operand_u32_value(instruction, operand_index, &reg) ||
+          reg >= flow.at_pc[pc].size()) {
+        return NativeScalarKind::Unknown;
+      }
+      return flow.at_pc[pc][reg];
     };
 
     switch (instruction.opcode) {
@@ -2441,9 +2582,17 @@ std::vector<std::vector<bool>> native_cpp_integer_registers_at_pc(
       std::uint32_t const_id = 0;
       if (operand_u32_value(instruction, 0, &dst) &&
           operand_u32_value(instruction, 1, &const_id) && dst < next.size()) {
-        next[dst] = const_id < module.const_pool.size() &&
-                    module.const_pool[const_id].kind ==
-                        amber::bytecode::ConstantKind::Integer;
+        NativeScalarKind kind = NativeScalarKind::Unknown;
+        if (const_id < module.const_pool.size()) {
+          if (module.const_pool[const_id].kind ==
+              amber::bytecode::ConstantKind::Integer) {
+            kind = NativeScalarKind::Integer;
+          } else if (module.const_pool[const_id].kind ==
+                     amber::bytecode::ConstantKind::Float) {
+            kind = NativeScalarKind::Float;
+          }
+        }
+        next[dst] = kind;
       }
       break;
     }
@@ -2456,43 +2605,45 @@ std::vector<std::vector<bool>> native_cpp_integer_registers_at_pc(
     }
     case Opcode::IAdd:
     case Opcode::ISub:
+    case Opcode::ILt:
+    case Opcode::IGt:
     case Opcode::IMul:
     case Opcode::IDiv:
     case Opcode::IMod:
     case Opcode::IFloorDiv:
+    case Opcode::ILe:
+    case Opcode::IGe:
+    case Opcode::IEq:
+    case Opcode::INe:
     case Opcode::ICmp:
     case Opcode::IBitAnd:
     case Opcode::IBitOr:
     case Opcode::IBitXor:
     case Opcode::IShl:
     case Opcode::IShr:
+      set_dst(native_cpp_numeric_binary_result_kind(
+          instruction.opcode, reg_kind(1), reg_kind(2)));
+      break;
     case Opcode::IAddK:
     case Opcode::ISubK:
+    case Opcode::ILtK:
+    case Opcode::IGtK:
     case Opcode::IMulK:
     case Opcode::IDivK:
     case Opcode::IModK:
     case Opcode::IFloorDivK:
+    case Opcode::ILeK:
+    case Opcode::IGeK:
+    case Opcode::IEqK:
+    case Opcode::INeK:
     case Opcode::ICmpK:
     case Opcode::IBitAndK:
     case Opcode::IBitOrK:
     case Opcode::IBitXorK:
     case Opcode::IShlK:
     case Opcode::IShrK:
-      set_dst(true);
-      break;
-    case Opcode::ILt:
-    case Opcode::IGt:
-    case Opcode::ILe:
-    case Opcode::IGe:
-    case Opcode::IEq:
-    case Opcode::INe:
-    case Opcode::ILtK:
-    case Opcode::IGtK:
-    case Opcode::ILeK:
-    case Opcode::IGeK:
-    case Opcode::IEqK:
-    case Opcode::INeK:
-      set_dst(false);
+      set_dst(native_cpp_numeric_k_result_kind(instruction.opcode,
+                                               reg_kind(1)));
       break;
     case Opcode::LoadNull:
     case Opcode::LoadBool:
@@ -2510,11 +2661,13 @@ std::vector<std::vector<bool>> native_cpp_integer_registers_at_pc(
     case Opcode::Call:
     case Opcode::Send:
     case Opcode::SendSpread:
-      set_dst(false);
+      set_dst(NativeScalarKind::Unknown);
       break;
     default:
       break;
     }
+
+    flow.after_pc[pc] = next;
 
     std::uint32_t target = 0;
     if (instruction.opcode == Opcode::Jump) {
@@ -2532,7 +2685,280 @@ std::vector<std::vector<bool>> native_cpp_integer_registers_at_pc(
       enqueue(pc + 1U, next);
     }
   }
-  return states;
+  return flow;
+}
+
+std::vector<std::vector<bool>>
+native_cpp_live_registers_at_pc(const amber::bytecode::BcCode &code) {
+  using amber::bytecode::Opcode;
+
+  const std::size_t pc_count = code.instructions.size();
+  std::vector<std::vector<bool>> live_in(
+      pc_count, std::vector<bool>(code.reg_count, false));
+  if (pc_count == 0U) {
+    return live_in;
+  }
+
+  const auto add_reg = [&](std::vector<bool> &regs, std::uint32_t reg) {
+    if (reg < regs.size()) {
+      regs[reg] = true;
+    }
+  };
+  const auto remove_reg = [&](std::vector<bool> &regs, std::uint32_t reg) {
+    if (reg < regs.size()) {
+      regs[reg] = false;
+    }
+  };
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (std::size_t reverse_pc = pc_count; reverse_pc > 0U; --reverse_pc) {
+      const std::size_t pc = reverse_pc - 1U;
+      const amber::bytecode::Instruction &instruction = code.instructions[pc];
+      std::vector<bool> live(code.reg_count, false);
+      const auto merge_successor = [&](std::size_t target) {
+        if (target >= pc_count) {
+          return;
+        }
+        for (std::size_t reg = 0; reg < code.reg_count; ++reg) {
+          live[reg] = live[reg] || live_in[target][reg];
+        }
+      };
+
+      std::uint32_t target = 0;
+      if (instruction.opcode == Opcode::Jump) {
+        if (operand_u32_value(instruction, 0, &target)) {
+          merge_successor(target);
+        }
+      } else if (instruction.opcode == Opcode::JumpIfTrue ||
+                 instruction.opcode == Opcode::JumpIfFalse ||
+                 instruction.opcode == Opcode::JumpIfNull) {
+        if (operand_u32_value(instruction, 1, &target)) {
+          merge_successor(target);
+        }
+        merge_successor(pc + 1U);
+      } else if (instruction.opcode != Opcode::Return) {
+        merge_successor(pc + 1U);
+      }
+
+      const auto use_operand = [&](std::size_t index) {
+        std::uint32_t reg = 0;
+        if (operand_u32_value(instruction, index, &reg)) {
+          add_reg(live, reg);
+        }
+      };
+      const auto def_operand = [&](std::size_t index) {
+        std::uint32_t reg = 0;
+        if (operand_u32_value(instruction, index, &reg)) {
+          remove_reg(live, reg);
+        }
+      };
+
+      switch (instruction.opcode) {
+      case Opcode::LoadK:
+      case Opcode::LoadNull:
+      case Opcode::LoadBool:
+      case Opcode::LookupConst:
+      case Opcode::GetLast:
+      case Opcode::LoadUpval:
+        def_operand(0);
+        break;
+      case Opcode::Move:
+        def_operand(0);
+        use_operand(1);
+        break;
+      case Opcode::MakeList:
+      case Opcode::MakeSet:
+      case Opcode::MakeTuple: {
+        def_operand(0);
+        std::uint32_t first_reg = 0;
+        std::uint32_t count = 0;
+        if (operand_u32_value(instruction, 1, &first_reg) &&
+            operand_u32_value(instruction, 2, &count)) {
+          for (std::uint32_t index = 0; index < count; ++index) {
+            add_reg(live, first_reg + index);
+          }
+        }
+        break;
+      }
+      case Opcode::MakeSetSpread: {
+        def_operand(0);
+        std::uint32_t count = 0;
+        if (operand_u32_value(instruction, 1, &count)) {
+          std::size_t operand_index = 2U;
+          for (std::uint32_t index = 0; index < count; ++index) {
+            ++operand_index;
+            std::uint32_t value_reg = 0;
+            if (operand_u32_value(instruction, operand_index++, &value_reg)) {
+              add_reg(live, value_reg);
+            }
+          }
+        }
+        break;
+      }
+      case Opcode::MakeMap: {
+        def_operand(0);
+        std::uint32_t count = 0;
+        if (operand_u32_value(instruction, 1, &count)) {
+          count &= amber::bytecode::kMapCountMask;
+          for (std::uint32_t index = 0; index < count; ++index) {
+            use_operand(3U + index * 2U);
+          }
+        }
+        break;
+      }
+      case Opcode::MakeMapDyn: {
+        def_operand(0);
+        std::uint32_t count = 0;
+        if (operand_u32_value(instruction, 1, &count)) {
+          count &= amber::bytecode::kMapCountMask;
+          for (std::uint32_t index = 0; index < count; ++index) {
+            use_operand(2U + index * 2U);
+            use_operand(3U + index * 2U);
+          }
+        }
+        break;
+      }
+      case Opcode::MakeMapSpread: {
+        def_operand(0);
+        std::uint32_t count = 0;
+        if (operand_u32_value(instruction, 1, &count)) {
+          count &= amber::bytecode::kMapCountMask;
+          for (std::uint32_t index = 0; index < count; ++index) {
+            const std::size_t base = 2U + index * 3U;
+            std::uint32_t kind = 0;
+            if (operand_u32_value(instruction, base, &kind) &&
+                kind == amber::bytecode::kMapSpreadEntryDynamic) {
+              use_operand(base + 1U);
+            }
+            use_operand(base + 2U);
+          }
+        }
+        break;
+      }
+      case Opcode::SetLast:
+      case Opcode::StoreUpval:
+        use_operand(instruction.opcode == Opcode::SetLast ? 0U : 1U);
+        break;
+      case Opcode::MakeClosure: {
+        def_operand(0);
+        std::uint32_t capture_count = 0;
+        if (operand_u32_value(instruction, 2, &capture_count)) {
+          std::size_t operand_index = 3U;
+          for (std::uint32_t index = 0; index < capture_count; ++index) {
+            std::uint32_t kind = 0;
+            std::uint32_t slot = 0;
+            if (!operand_u32_value(instruction, operand_index++, &kind) ||
+                !operand_u32_value(instruction, operand_index++, &slot)) {
+              break;
+            }
+            if (kind == 0U) {
+              add_reg(live, slot);
+            }
+          }
+        }
+        break;
+      }
+      case Opcode::Call: {
+        def_operand(0);
+        use_operand(1);
+        std::uint32_t pos_count = 0;
+        if (operand_u32_value(instruction, 2, &pos_count)) {
+          for (std::uint32_t index = 0; index < pos_count; ++index) {
+            use_operand(3U + index);
+          }
+        }
+        break;
+      }
+      case Opcode::Send: {
+        def_operand(0);
+        use_operand(1);
+        std::uint32_t pos_count = 0;
+        if (!operand_u32_value(instruction, 3, &pos_count)) {
+          break;
+        }
+        for (std::uint32_t index = 0; index < pos_count; ++index) {
+          use_operand(4U + index);
+        }
+        const std::size_t kw_index = 4U + pos_count;
+        std::uint32_t kw_count = 0;
+        if (operand_u32_value(instruction, kw_index, &kw_count)) {
+          for (std::uint32_t index = 0; index < kw_count; ++index) {
+            use_operand(kw_index + 2U + index * 2U);
+          }
+          const std::size_t block_index = kw_index + 1U + kw_count * 2U;
+          if (block_index < instruction.operands.size() &&
+              !operand_is_no_block(instruction, block_index)) {
+            use_operand(block_index);
+          }
+        }
+        break;
+      }
+      case Opcode::SendSpread:
+        def_operand(0);
+        use_operand(1);
+        break;
+      case Opcode::IAdd:
+      case Opcode::ISub:
+      case Opcode::ILt:
+      case Opcode::IGt:
+      case Opcode::IMul:
+      case Opcode::IDiv:
+      case Opcode::IMod:
+      case Opcode::IFloorDiv:
+      case Opcode::ILe:
+      case Opcode::IGe:
+      case Opcode::IEq:
+      case Opcode::INe:
+      case Opcode::ICmp:
+      case Opcode::IBitAnd:
+      case Opcode::IBitOr:
+      case Opcode::IBitXor:
+      case Opcode::IShl:
+      case Opcode::IShr:
+        def_operand(0);
+        use_operand(1);
+        use_operand(2);
+        break;
+      case Opcode::IAddK:
+      case Opcode::ISubK:
+      case Opcode::ILtK:
+      case Opcode::IGtK:
+      case Opcode::IMulK:
+      case Opcode::IDivK:
+      case Opcode::IModK:
+      case Opcode::IFloorDivK:
+      case Opcode::ILeK:
+      case Opcode::IGeK:
+      case Opcode::IEqK:
+      case Opcode::INeK:
+      case Opcode::ICmpK:
+      case Opcode::IBitAndK:
+      case Opcode::IBitOrK:
+      case Opcode::IBitXorK:
+      case Opcode::IShlK:
+      case Opcode::IShrK:
+        def_operand(0);
+        use_operand(1);
+        break;
+      case Opcode::JumpIfTrue:
+      case Opcode::JumpIfFalse:
+      case Opcode::JumpIfNull:
+      case Opcode::Return:
+        use_operand(0);
+        break;
+      default:
+        break;
+      }
+
+      if (live != live_in[pc]) {
+        live_in[pc] = std::move(live);
+        changed = true;
+      }
+    }
+  }
+  return live_in;
 }
 
 std::string
@@ -2542,13 +2968,45 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
   const std::string fn = native_cpp_function_name(code.code_id);
   const bool uses_local_capture_cells =
       native_cpp_code_uses_local_capture_cells(code);
-  const std::vector<std::vector<bool>> integer_registers_at_pc =
-      native_cpp_integer_registers_at_pc(module, code);
-  const auto read_reg_expr = [uses_local_capture_cells](std::uint32_t reg) {
+  const NativeScalarFlow scalar_flow =
+      uses_local_capture_cells ? NativeScalarFlow{}
+                               : native_cpp_scalar_registers(module, code);
+  const std::vector<std::vector<bool>> live_registers_at_pc =
+      uses_local_capture_cells ? std::vector<std::vector<bool>>{}
+                               : native_cpp_live_registers_at_pc(code);
+  std::vector<bool> int_lane_used(code.reg_count, false);
+  std::vector<bool> float_lane_used(code.reg_count, false);
+  if (!uses_local_capture_cells) {
+    for (const std::vector<NativeScalarKind> &state : scalar_flow.at_pc) {
+      for (std::size_t reg = 0; reg < state.size(); ++reg) {
+        if (state[reg] == NativeScalarKind::Integer) {
+          int_lane_used[reg] = true;
+        } else if (state[reg] == NativeScalarKind::Float) {
+          float_lane_used[reg] = true;
+        }
+      }
+    }
+    for (const std::vector<NativeScalarKind> &state : scalar_flow.after_pc) {
+      for (std::size_t reg = 0; reg < state.size(); ++reg) {
+        if (state[reg] == NativeScalarKind::Integer) {
+          int_lane_used[reg] = true;
+        } else if (state[reg] == NativeScalarKind::Float) {
+          float_lane_used[reg] = true;
+        }
+      }
+    }
+  }
+  const auto read_frame_reg_expr = [uses_local_capture_cells](std::uint32_t reg) {
     if (uses_local_capture_cells) {
       return "read_reg(frame, " + std::to_string(reg) + ")";
     }
     return "frame.regs[" + std::to_string(reg) + "]";
+  };
+  const auto int_lane_expr = [](std::uint32_t reg) {
+    return "ireg_" + std::to_string(reg);
+  };
+  const auto float_lane_expr = [](std::uint32_t reg) {
+    return "freg_" + std::to_string(reg);
   };
   const auto write_reg_stmt = [&](std::uint32_t reg, const std::string &expr) {
     if (uses_local_capture_cells) {
@@ -2557,18 +3015,59 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       out << "  frame.regs[" << reg << "] = " << expr << ";\n";
     }
   };
-  const auto as_int_reg_expr = [&](std::uint32_t reg) {
-    return "as_int(" + read_reg_expr(reg) + ")";
+  const auto write_int_reg_stmt = [&](std::uint32_t reg,
+                                      const std::string &expr) {
+    if (!uses_local_capture_cells && reg < int_lane_used.size() &&
+        int_lane_used[reg]) {
+      out << "  " << int_lane_expr(reg) << " = " << expr << ";\n";
+    } else {
+      write_reg_stmt(reg, "NativeValue::integer(" + expr + ")");
+    }
+  };
+  const auto write_float_reg_stmt = [&](std::uint32_t reg,
+                                        const std::string &expr) {
+    if (!uses_local_capture_cells && reg < float_lane_used.size() &&
+        float_lane_used[reg]) {
+      out << "  " << float_lane_expr(reg) << " = " << expr << ";\n";
+    } else {
+      write_reg_stmt(reg, "NativeValue::floating(" + expr + ")");
+    }
+  };
+  const auto scalar_kind = [](std::uint32_t reg,
+                              const std::vector<NativeScalarKind> &state) {
+    return reg < state.size() ? state[reg] : NativeScalarKind::Unknown;
+  };
+  const auto boxed_reg_expr = [&](std::uint32_t reg,
+                                  const std::vector<NativeScalarKind> &state) {
+    if (!uses_local_capture_cells && reg < state.size()) {
+      if (state[reg] == NativeScalarKind::Integer) {
+        return "NativeValue::integer(" + int_lane_expr(reg) + ")";
+      }
+      if (state[reg] == NativeScalarKind::Float) {
+        return "NativeValue::floating(" + float_lane_expr(reg) + ")";
+      }
+    }
+    return read_frame_reg_expr(reg);
   };
   const auto int_reg_expr = [&](std::uint32_t reg,
-                                const std::vector<bool> &state) {
-    if (!uses_local_capture_cells && reg < state.size() && state[reg]) {
-      return read_reg_expr(reg) + ".scalar_value";
+                                const std::vector<NativeScalarKind> &state) {
+    if (!uses_local_capture_cells && reg < state.size() &&
+        state[reg] == NativeScalarKind::Integer) {
+      return int_lane_expr(reg);
     }
-    return as_int_reg_expr(reg);
+    return "as_int(" + boxed_reg_expr(reg, state) + ")";
   };
-  const auto native_int_expr = [](const std::string &expr) {
-    return "NativeValue::integer(" + expr + ")";
+  const auto double_reg_expr = [&](std::uint32_t reg,
+                                   const std::vector<NativeScalarKind> &state) {
+    if (!uses_local_capture_cells && reg < state.size()) {
+      if (state[reg] == NativeScalarKind::Float) {
+        return float_lane_expr(reg);
+      }
+      if (state[reg] == NativeScalarKind::Integer) {
+        return "static_cast<double>(" + int_lane_expr(reg) + ")";
+      }
+    }
+    return "as_double_numeric(" + boxed_reg_expr(reg, state) + ")";
   };
   const auto native_bool_expr = [](const std::string &expr) {
     return "NativeValue::boolean(" + expr + ")";
@@ -2596,15 +3095,78 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     out << "    frame.regs[arg_index++] = arg;\n";
   }
   out << "  }\n";
+  if (!uses_local_capture_cells) {
+    for (std::uint32_t reg = 0; reg < code.reg_count; ++reg) {
+      if (int_lane_used[reg]) {
+        out << "  std::int64_t " << int_lane_expr(reg) << " = 0;\n";
+      }
+      if (float_lane_used[reg]) {
+        out << "  double " << float_lane_expr(reg) << " = 0.0;\n";
+      }
+    }
+  }
   if (code.instructions.empty()) {
     out << "  return NativeValue::nullv();\n";
     out << "}\n\n";
     return out.str();
   }
+  const auto materialize_changed_scalars =
+      [&](const std::vector<NativeScalarKind> &from,
+          const std::vector<NativeScalarKind> &to,
+          const std::vector<bool> &live_at_target) {
+        if (uses_local_capture_cells) {
+          return;
+        }
+        const std::size_t reg_count =
+            std::min<std::size_t>(from.size(), to.size());
+        for (std::size_t reg = 0; reg < reg_count; ++reg) {
+          if (from[reg] == to[reg]) {
+            continue;
+          }
+          if (reg >= live_at_target.size() || !live_at_target[reg]) {
+            continue;
+          }
+          if (from[reg] == NativeScalarKind::Integer) {
+            write_reg_stmt(static_cast<std::uint32_t>(reg),
+                           "NativeValue::integer(" +
+                               int_lane_expr(static_cast<std::uint32_t>(reg)) +
+                               ")");
+          } else if (from[reg] == NativeScalarKind::Float) {
+            write_reg_stmt(static_cast<std::uint32_t>(reg),
+                           "NativeValue::floating(" +
+                               float_lane_expr(static_cast<std::uint32_t>(reg)) +
+                               ")");
+          }
+        }
+      };
+  const auto emit_goto_pc = [&](std::size_t target,
+                                const std::vector<NativeScalarKind> &from) {
+    if (target < code.instructions.size() && !uses_local_capture_cells) {
+      materialize_changed_scalars(from, scalar_flow.at_pc[target],
+                                  live_registers_at_pc[target]);
+    }
+    out << "  goto pc_" << target << ";\n";
+  };
+  const auto emit_next = [&](std::size_t pc,
+                             const std::vector<NativeScalarKind> &from) {
+    if (pc + 1U < code.instructions.size()) {
+      emit_goto_pc(pc + 1U, from);
+    } else {
+      out << "  throw NativeBailout();\n";
+    }
+  };
   out << "  goto pc_0;\n";
   for (std::size_t pc = 0; pc < code.instructions.size(); ++pc) {
     const amber::bytecode::Instruction &instruction = code.instructions[pc];
     using amber::bytecode::Opcode;
+    const std::vector<NativeScalarKind> empty_scalar_state;
+    const std::vector<NativeScalarKind> &pc_scalar_state =
+        uses_local_capture_cells ? empty_scalar_state : scalar_flow.at_pc[pc];
+    const std::vector<NativeScalarKind> &next_scalar_state =
+        uses_local_capture_cells ? empty_scalar_state : scalar_flow.after_pc[pc];
+    const auto read_reg_expr = [&](std::uint32_t reg) {
+      return boxed_reg_expr(reg, pc_scalar_state);
+    };
     out << "pc_" << pc << ":\n";
     switch (instruction.opcode) {
     case Opcode::LoadK: {
@@ -2612,16 +3174,24 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t const_id = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &const_id);
-      write_reg_stmt(dst,
-                     native_cpp_constant_expr(module.const_pool[const_id]));
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      const amber::bytecode::Constant &constant = module.const_pool[const_id];
+      if (constant.kind == amber::bytecode::ConstantKind::Integer) {
+        write_int_reg_stmt(dst, cpp_decimal_i64(constant.int_value));
+      } else if (constant.kind == amber::bytecode::ConstantKind::Float) {
+        char buffer[64];
+        std::snprintf(buffer, sizeof(buffer), "%a", constant.float_value);
+        write_float_reg_stmt(dst, buffer);
+      } else {
+        write_reg_stmt(dst, native_cpp_constant_expr(constant));
+      }
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::LoadNull: {
       std::uint32_t dst = 0;
       operand_u32_value(instruction, 0, &dst);
       write_reg_stmt(dst, "NativeValue::nullv()");
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::LoadBool: {
@@ -2631,7 +3201,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 1, &value);
       write_reg_stmt(dst, std::string("NativeValue::boolean(") +
                               (value != 0U ? "true" : "false") + ")");
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::Move: {
@@ -2639,8 +3209,15 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t src = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &src);
-      write_reg_stmt(dst, read_reg_expr(src));
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      const NativeScalarKind src_kind = scalar_kind(src, pc_scalar_state);
+      if (src_kind == NativeScalarKind::Integer) {
+        write_int_reg_stmt(dst, int_reg_expr(src, pc_scalar_state));
+      } else if (src_kind == NativeScalarKind::Float) {
+        write_float_reg_stmt(dst, double_reg_expr(src, pc_scalar_state));
+      } else {
+        write_reg_stmt(dst, read_reg_expr(src));
+      }
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::MakeList: {
@@ -2660,7 +3237,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       expr << "})";
       write_reg_stmt(dst, expr.str());
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::MakeSet: {
@@ -2680,7 +3257,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       expr << "})";
       write_reg_stmt(dst, expr.str());
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::MakeTuple: {
@@ -2700,7 +3277,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       expr << "})";
       write_reg_stmt(dst, expr.str());
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::MakeSetSpread: {
@@ -2734,7 +3311,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             << "] = native_set_from_items(std::move(items));\n";
       }
       out << "  }\n";
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::MakeMap: {
@@ -2769,7 +3346,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             << (strict ? "true" : "false") << ");\n";
       }
       out << "  }\n";
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::MakeMapDyn: {
@@ -2804,7 +3381,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             << (strict ? "true" : "false") << ");\n";
       }
       out << "  }\n";
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::MakeMapSpread: {
@@ -2852,7 +3429,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             << (strict ? "true" : "false") << ");\n";
       }
       out << "  }\n";
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::LookupConst: {
@@ -2924,21 +3501,21 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else {
         out << "  throw NativeBailout();\n";
       }
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::GetLast: {
       std::uint32_t dst = 0;
       operand_u32_value(instruction, 0, &dst);
       write_reg_stmt(dst, "frame.last");
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::SetLast: {
       std::uint32_t src = 0;
       operand_u32_value(instruction, 0, &src);
       out << "  frame.last = " << read_reg_expr(src) << ";\n";
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::LoadUpval: {
@@ -2947,7 +3524,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &slot);
       write_reg_stmt(dst, "read_capture(frame, " + std::to_string(slot) + ")");
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::StoreUpval: {
@@ -2957,7 +3534,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 1, &src);
       out << "  write_capture(frame, " << slot << ", " << read_reg_expr(src)
           << ");\n";
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::MakeClosure: {
@@ -3012,7 +3589,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         out << "    frame.regs[" << dst << "] = closure_value;\n";
       }
       out << "  }\n";
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::Call: {
@@ -3034,7 +3611,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       expr << "})";
       write_reg_stmt(dst, expr.str());
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::Send: {
@@ -3699,7 +4276,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 ", native_hex_to_string(\"" +
                                 string_to_hex_text(selector) + "\"))");
       }
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::IAdd:
@@ -3726,70 +4303,179 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &lhs);
       operand_u32_value(instruction, 2, &rhs);
-      const std::vector<bool> &pc_int_state = integer_registers_at_pc[pc];
-      const std::string lhs_int = int_reg_expr(lhs, pc_int_state);
-      const std::string rhs_int = int_reg_expr(rhs, pc_int_state);
-      if (instruction.opcode == Opcode::IAdd) {
-        write_reg_stmt(dst, native_int_expr("profile_add_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+      const NativeScalarKind lhs_kind = scalar_kind(lhs, pc_scalar_state);
+      const NativeScalarKind rhs_kind = scalar_kind(rhs, pc_scalar_state);
+      const bool proven_numeric_operands =
+          native_cpp_scalar_numeric(lhs_kind) &&
+          native_cpp_scalar_numeric(rhs_kind);
+      const bool proven_int_operands =
+          lhs_kind == NativeScalarKind::Integer &&
+          rhs_kind == NativeScalarKind::Integer;
+      const std::string lhs_value = read_reg_expr(lhs);
+      const std::string rhs_value = read_reg_expr(rhs);
+      const std::string lhs_int = int_reg_expr(lhs, pc_scalar_state);
+      const std::string rhs_int = int_reg_expr(rhs, pc_scalar_state);
+      const std::string lhs_double = double_reg_expr(lhs, pc_scalar_state);
+      const std::string rhs_double = double_reg_expr(rhs, pc_scalar_state);
+      const auto write_fallback = [&]() {
+        if (instruction.opcode == Opcode::IAdd) {
+          write_reg_stmt(dst, "native_numeric_fast_add(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::ISub) {
+          write_reg_stmt(dst, "native_numeric_fast_sub(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::IMul) {
+          write_reg_stmt(dst, "native_numeric_fast_mul(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::IDiv) {
+          write_reg_stmt(dst, "native_numeric_fast_div(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::IMod) {
+          write_reg_stmt(dst, "native_numeric_fast_mod(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::IFloorDiv) {
+          write_reg_stmt(dst, "native_numeric_fast_floor_div(" + lhs_value +
+                                  ", " + rhs_value + ")");
+        } else if (instruction.opcode == Opcode::ILe) {
+          write_reg_stmt(dst, "native_numeric_fast_le(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::IGe) {
+          write_reg_stmt(dst, "native_numeric_fast_ge(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::IEq) {
+          write_reg_stmt(dst, "native_numeric_fast_eq(" + lhs_value + ", " +
+                                  rhs_value + ", false)");
+        } else if (instruction.opcode == Opcode::INe) {
+          write_reg_stmt(dst, "native_numeric_fast_eq(" + lhs_value + ", " +
+                                  rhs_value + ", true)");
+        } else if (instruction.opcode == Opcode::ICmp) {
+          write_reg_stmt(dst, "native_numeric_fast_cmp(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::ILt) {
+          write_reg_stmt(dst, "native_numeric_fast_lt(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::IGt) {
+          write_reg_stmt(dst, "native_numeric_fast_gt(" + lhs_value + ", " +
+                                  rhs_value + ")");
+        } else if (instruction.opcode == Opcode::IBitAnd) {
+          write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
+                                  lhs_value + "), as_int(" + rhs_value +
+                                  ")))");
+        } else if (instruction.opcode == Opcode::IBitOr) {
+          write_reg_stmt(dst, "NativeValue::integer(bit_or_int64(as_int(" +
+                                  lhs_value + "), as_int(" + rhs_value +
+                                  ")))");
+        } else if (instruction.opcode == Opcode::IBitXor) {
+          write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
+                                  lhs_value + "), as_int(" + rhs_value +
+                                  ")))");
+        } else if (instruction.opcode == Opcode::IShl) {
+          out << "  if (as_int(" << rhs_value << ") < 0 || as_int("
+              << rhs_value << ") >= 64) throw NativeBailout();\n";
+          write_reg_stmt(dst,
+                         "NativeValue::integer(profile_shl_int64(as_int(" +
+                             lhs_value + "), as_int(" + rhs_value + ")))");
+        } else {
+          out << "  if (as_int(" << rhs_value << ") < 0 || as_int("
+              << rhs_value << ") >= 64) throw NativeBailout();\n";
+          write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
+                                  lhs_value + "), as_int(" + rhs_value +
+                                  ")))");
+        }
+      };
+
+      if (!proven_numeric_operands) {
+        write_fallback();
+      } else if (native_cpp_opcode_bool_compare(instruction.opcode)) {
+        const std::string lhs_cmp = proven_int_operands ? lhs_int : lhs_double;
+        const std::string rhs_cmp = proven_int_operands ? rhs_int : rhs_double;
+        if (instruction.opcode == Opcode::ILe) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " <= " + rhs_cmp));
+        } else if (instruction.opcode == Opcode::IGe) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " >= " + rhs_cmp));
+        } else if (instruction.opcode == Opcode::IEq) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " == " + rhs_cmp));
+        } else if (instruction.opcode == Opcode::INe) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " != " + rhs_cmp));
+        } else if (instruction.opcode == Opcode::ILt) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " < " + rhs_cmp));
+        } else {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " > " + rhs_cmp));
+        }
+      } else if (instruction.opcode == Opcode::ICmp) {
+        if (proven_int_operands) {
+          write_int_reg_stmt(dst, "compare_int64(" + lhs_int + ", " +
+                                      rhs_int + ")");
+        } else {
+          write_int_reg_stmt(dst, "compare_double_native(" + lhs_double +
+                                      ", " + rhs_double + ")");
+        }
+      } else if (!proven_int_operands &&
+                 native_cpp_opcode_numeric_arithmetic(instruction.opcode)) {
+        if (instruction.opcode == Opcode::IAdd) {
+          write_float_reg_stmt(dst, lhs_double + " + " + rhs_double);
+        } else if (instruction.opcode == Opcode::ISub) {
+          write_float_reg_stmt(dst, lhs_double + " - " + rhs_double);
+        } else if (instruction.opcode == Opcode::IMul) {
+          write_float_reg_stmt(dst, lhs_double + " * " + rhs_double);
+        } else if (instruction.opcode == Opcode::IDiv) {
+          out << "  if (" << rhs_double
+              << " == 0.0) throw NativeBailout();\n";
+          write_float_reg_stmt(dst, lhs_double + " / " + rhs_double);
+        } else if (instruction.opcode == Opcode::IMod) {
+          out << "  if (" << rhs_double
+              << " == 0.0) throw NativeBailout();\n";
+          write_float_reg_stmt(dst, "floor_mod_double_native(" + lhs_double +
+                                        ", " + rhs_double + ")");
+        } else {
+          out << "  if (" << rhs_double
+              << " == 0.0) throw NativeBailout();\n";
+          write_float_reg_stmt(dst,
+                               "std::floor(" + lhs_double + " / " +
+                                   rhs_double + ")");
+        }
+      } else if (instruction.opcode == Opcode::IAdd) {
+        write_int_reg_stmt(dst, "profile_add_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::ISub) {
-        write_reg_stmt(dst, native_int_expr("profile_sub_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "profile_sub_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IMul) {
-        write_reg_stmt(dst, native_int_expr("profile_mul_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "profile_mul_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IDiv) {
-        write_reg_stmt(dst, native_int_expr("profile_div_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "profile_div_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IMod) {
         out << "  if (" << rhs_int << " == 0) throw NativeBailout();\n";
-        write_reg_stmt(dst, native_int_expr("floor_mod_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "floor_mod_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IFloorDiv) {
-        write_reg_stmt(dst,
-                       native_int_expr("profile_floor_div_int64(" + lhs_int +
-                                       ", " + rhs_int + ")"));
-      } else if (instruction.opcode == Opcode::ILe) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " <= " + rhs_int));
-      } else if (instruction.opcode == Opcode::IGe) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " >= " + rhs_int));
-      } else if (instruction.opcode == Opcode::IEq) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " == " + rhs_int));
-      } else if (instruction.opcode == Opcode::INe) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " != " + rhs_int));
-      } else if (instruction.opcode == Opcode::ICmp) {
-        write_reg_stmt(dst, native_int_expr("compare_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "profile_floor_div_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IBitAnd) {
-        write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_int_reg_stmt(dst, "bit_and_int64(" + lhs_int + ", " + rhs_int +
+                                    ")");
       } else if (instruction.opcode == Opcode::IBitOr) {
-        write_reg_stmt(dst, "NativeValue::integer(bit_or_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_int_reg_stmt(dst, "bit_or_int64(" + lhs_int + ", " + rhs_int +
+                                    ")");
       } else if (instruction.opcode == Opcode::IBitXor) {
-        write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        write_int_reg_stmt(dst, "bit_xor_int64(" + lhs_int + ", " + rhs_int +
+                                    ")");
       } else if (instruction.opcode == Opcode::IShl) {
-        out << "  if (as_int(" << read_reg_expr(rhs) << ") < 0 || as_int("
-            << read_reg_expr(rhs) << ") >= 64) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(profile_shl_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
+        out << "  if (" << rhs_int << " < 0 || " << rhs_int
+            << " >= 64) throw NativeBailout();\n";
+        write_int_reg_stmt(dst, "profile_shl_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IShr) {
-        out << "  if (as_int(" << read_reg_expr(rhs) << ") < 0 || as_int("
-            << read_reg_expr(rhs) << ") >= 64) throw NativeBailout();\n";
-        write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
-                                read_reg_expr(lhs) + "), as_int(" +
-                                read_reg_expr(rhs) + ")))");
-      } else if (instruction.opcode == Opcode::ILt) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " < " + rhs_int));
+        out << "  if (" << rhs_int << " < 0 || " << rhs_int
+            << " >= 64) throw NativeBailout();\n";
+        write_int_reg_stmt(dst, "shr_int64(" + lhs_int + ", " + rhs_int +
+                                    ")");
       } else {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " > " + rhs_int));
+        write_fallback();
       }
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::IAddK:
@@ -3817,83 +4503,190 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 1, &lhs);
       operand_u32_value(instruction, 2, &const_id);
       const std::int64_t rhs = module.const_pool[const_id].int_value;
-      const std::vector<bool> &pc_int_state = integer_registers_at_pc[pc];
-      const std::string lhs_int = int_reg_expr(lhs, pc_int_state);
+      const NativeScalarKind lhs_kind = scalar_kind(lhs, pc_scalar_state);
+      const bool proven_numeric_lhs = native_cpp_scalar_numeric(lhs_kind);
+      const bool proven_int_lhs = lhs_kind == NativeScalarKind::Integer;
+      const std::string lhs_value = read_reg_expr(lhs);
+      const std::string lhs_int = int_reg_expr(lhs, pc_scalar_state);
+      const std::string lhs_double = double_reg_expr(lhs, pc_scalar_state);
       const std::string rhs_int = cpp_decimal_i64(rhs);
-      if (instruction.opcode == Opcode::IAddK) {
-        write_reg_stmt(dst, native_int_expr("profile_add_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+      const std::string rhs_double =
+          "static_cast<double>(" + rhs_int + ")";
+      const auto write_fallback = [&]() {
+        if (instruction.opcode == Opcode::IAddK) {
+          write_reg_stmt(dst, "native_numeric_fast_add_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::ISubK) {
+          write_reg_stmt(dst, "native_numeric_fast_sub_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::IMulK) {
+          write_reg_stmt(dst, "native_numeric_fast_mul_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::IDivK) {
+          write_reg_stmt(dst, "native_numeric_fast_div_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::IModK) {
+          write_reg_stmt(dst, "native_numeric_fast_mod_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::IFloorDivK) {
+          write_reg_stmt(dst, "native_numeric_fast_floor_div_int_rhs(" +
+                                  lhs_value + ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::ILeK) {
+          write_reg_stmt(dst, "native_numeric_fast_le_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::IGeK) {
+          write_reg_stmt(dst, "native_numeric_fast_ge_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::IEqK) {
+          write_reg_stmt(dst, "native_numeric_fast_eq_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ", false)");
+        } else if (instruction.opcode == Opcode::INeK) {
+          write_reg_stmt(dst, "native_numeric_fast_eq_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ", true)");
+        } else if (instruction.opcode == Opcode::ICmpK) {
+          write_reg_stmt(dst, "native_numeric_fast_cmp_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::ILtK) {
+          write_reg_stmt(dst, "native_numeric_fast_lt_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::IGtK) {
+          write_reg_stmt(dst, "native_numeric_fast_gt_int_rhs(" + lhs_value +
+                                  ", " + rhs_int + ")");
+        } else if (instruction.opcode == Opcode::IBitAndK) {
+          write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
+                                  lhs_value + "), " + rhs_int + "))");
+        } else if (instruction.opcode == Opcode::IBitOrK) {
+          write_reg_stmt(dst, "NativeValue::integer(bit_or_int64(as_int(" +
+                                  lhs_value + "), " + rhs_int + "))");
+        } else if (instruction.opcode == Opcode::IBitXorK) {
+          write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
+                                  lhs_value + "), " + rhs_int + "))");
+        } else if (instruction.opcode == Opcode::IShlK) {
+          if (rhs < 0 || rhs >= 64) {
+            out << "  throw NativeBailout();\n";
+          } else {
+            write_reg_stmt(dst,
+                           "NativeValue::integer(profile_shl_int64(as_int(" +
+                               lhs_value + "), " + rhs_int + "))");
+          }
+        } else if (rhs < 0 || rhs >= 64) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
+                                  lhs_value + "), " + rhs_int + "))");
+        }
+      };
+
+      if (!proven_numeric_lhs) {
+        write_fallback();
+      } else if (native_cpp_opcode_bool_compare(instruction.opcode)) {
+        const std::string lhs_cmp = proven_int_lhs ? lhs_int : lhs_double;
+        const std::string rhs_cmp = proven_int_lhs ? rhs_int : rhs_double;
+        if (instruction.opcode == Opcode::ILeK) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " <= " + rhs_cmp));
+        } else if (instruction.opcode == Opcode::IGeK) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " >= " + rhs_cmp));
+        } else if (instruction.opcode == Opcode::IEqK) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " == " + rhs_cmp));
+        } else if (instruction.opcode == Opcode::INeK) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " != " + rhs_cmp));
+        } else if (instruction.opcode == Opcode::ILtK) {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " < " + rhs_cmp));
+        } else {
+          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " > " + rhs_cmp));
+        }
+      } else if (instruction.opcode == Opcode::ICmpK) {
+        if (proven_int_lhs) {
+          write_int_reg_stmt(dst, "compare_int64(" + lhs_int + ", " +
+                                      rhs_int + ")");
+        } else {
+          write_int_reg_stmt(dst, "compare_double_native(" + lhs_double +
+                                      ", " + rhs_double + ")");
+        }
+      } else if (!proven_int_lhs &&
+                 native_cpp_opcode_numeric_arithmetic(instruction.opcode)) {
+        if (instruction.opcode == Opcode::IAddK) {
+          write_float_reg_stmt(dst, lhs_double + " + " + rhs_double);
+        } else if (instruction.opcode == Opcode::ISubK) {
+          write_float_reg_stmt(dst, lhs_double + " - " + rhs_double);
+        } else if (instruction.opcode == Opcode::IMulK) {
+          write_float_reg_stmt(dst, lhs_double + " * " + rhs_double);
+        } else if (instruction.opcode == Opcode::IDivK) {
+          if (rhs == 0) {
+            out << "  throw NativeBailout();\n";
+          } else {
+            write_float_reg_stmt(dst, lhs_double + " / " + rhs_double);
+          }
+        } else if (instruction.opcode == Opcode::IModK) {
+          if (rhs == 0) {
+            out << "  throw NativeBailout();\n";
+          } else {
+            write_float_reg_stmt(dst,
+                                 "floor_mod_double_native(" + lhs_double +
+                                     ", " + rhs_double + ")");
+          }
+        } else if (rhs == 0) {
+          out << "  throw NativeBailout();\n";
+        } else {
+          write_float_reg_stmt(dst,
+                               "std::floor(" + lhs_double + " / " +
+                                   rhs_double + ")");
+        }
+      } else if (instruction.opcode == Opcode::IAddK) {
+        write_int_reg_stmt(dst, "profile_add_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::ISubK) {
-        write_reg_stmt(dst, native_int_expr("profile_sub_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "profile_sub_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IMulK) {
-        write_reg_stmt(dst, native_int_expr("profile_mul_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "profile_mul_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IDivK) {
-        write_reg_stmt(dst, native_int_expr("profile_div_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "profile_div_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IModK) {
         if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, native_int_expr("floor_mod_int64(" + lhs_int +
-                                              ", " + rhs_int + ")"));
+          write_int_reg_stmt(dst, "floor_mod_int64(" + lhs_int + ", " +
+                                      rhs_int + ")");
         }
       } else if (instruction.opcode == Opcode::IFloorDivK) {
-        write_reg_stmt(dst,
-                       native_int_expr("profile_floor_div_int64(" + lhs_int +
-                                       ", " + rhs_int + ")"));
-      } else if (instruction.opcode == Opcode::ILeK) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " <= " + rhs_int));
-      } else if (instruction.opcode == Opcode::IGeK) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " >= " + rhs_int));
-      } else if (instruction.opcode == Opcode::IEqK) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " == " + rhs_int));
-      } else if (instruction.opcode == Opcode::INeK) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " != " + rhs_int));
-      } else if (instruction.opcode == Opcode::ICmpK) {
-        write_reg_stmt(dst, native_int_expr("compare_int64(" + lhs_int +
-                                            ", " + rhs_int + ")"));
+        write_int_reg_stmt(dst, "profile_floor_div_int64(" + lhs_int + ", " +
+                                    rhs_int + ")");
       } else if (instruction.opcode == Opcode::IBitAndK) {
-        write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
-                                read_reg_expr(lhs) + "), " +
-                                cpp_decimal_i64(rhs) + "))");
+        write_int_reg_stmt(dst, "bit_and_int64(" + lhs_int + ", " + rhs_int +
+                                    ")");
       } else if (instruction.opcode == Opcode::IBitOrK) {
-        write_reg_stmt(dst, "NativeValue::integer(bit_or_int64(as_int(" +
-                                read_reg_expr(lhs) + "), " +
-                                cpp_decimal_i64(rhs) + "))");
+        write_int_reg_stmt(dst, "bit_or_int64(" + lhs_int + ", " + rhs_int +
+                                    ")");
       } else if (instruction.opcode == Opcode::IBitXorK) {
-        write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
-                                read_reg_expr(lhs) + "), " +
-                                cpp_decimal_i64(rhs) + "))");
+        write_int_reg_stmt(dst, "bit_xor_int64(" + lhs_int + ", " + rhs_int +
+                                    ")");
       } else if (instruction.opcode == Opcode::IShlK) {
         if (rhs < 0 || rhs >= 64) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "NativeValue::integer(profile_shl_int64(as_int(" +
-                                  read_reg_expr(lhs) + "), " +
-                                  cpp_decimal_i64(rhs) + "))");
+          write_int_reg_stmt(dst, "profile_shl_int64(" + lhs_int + ", " +
+                                      rhs_int + ")");
         }
       } else if (instruction.opcode == Opcode::IShrK) {
         if (rhs < 0 || rhs >= 64) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
-                                  read_reg_expr(lhs) + "), " +
-                                  cpp_decimal_i64(rhs) + "))");
+          write_int_reg_stmt(dst, "shr_int64(" + lhs_int + ", " + rhs_int +
+                                      ")");
         }
-      } else if (instruction.opcode == Opcode::ILtK) {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " < " + rhs_int));
       } else {
-        write_reg_stmt(dst, native_bool_expr(lhs_int + " > " + rhs_int));
+        write_fallback();
       }
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::Jump: {
       std::uint32_t target = 0;
       operand_u32_value(instruction, 0, &target);
-      out << "  goto pc_" << target << ";\n";
+      emit_goto_pc(target, next_scalar_state);
       break;
     }
     case Opcode::JumpIfTrue:
@@ -3904,17 +4697,20 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 0, &cond);
       operand_u32_value(instruction, 1, &target);
       if (instruction.opcode == Opcode::JumpIfTrue) {
-        out << "  if (truthy(" << read_reg_expr(cond) << ")) goto pc_" << target
-            << ";\n";
+        out << "  if (truthy(" << read_reg_expr(cond) << ")) {\n";
+        emit_goto_pc(target, next_scalar_state);
+        out << "  }\n";
       } else if (instruction.opcode == Opcode::JumpIfFalse) {
-        out << "  if (!truthy(" << read_reg_expr(cond) << ")) goto pc_"
-            << target << ";\n";
+        out << "  if (!truthy(" << read_reg_expr(cond) << ")) {\n";
+        emit_goto_pc(target, next_scalar_state);
+        out << "  }\n";
       } else {
         out << "  if (" << read_reg_expr(cond)
-            << ".tag == NativeValue::Tag::Null) "
-            << "goto pc_" << target << ";\n";
+            << ".tag == NativeValue::Tag::Null) {\n";
+        emit_goto_pc(target, next_scalar_state);
+        out << "  }\n";
       }
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     }
     case Opcode::CloseUpvalues:
@@ -3922,7 +4718,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     case Opcode::TypeCheck:
     case Opcode::PBind:
     case Opcode::PCommit:
-      out << "  " << native_cpp_next(pc, code.instructions.size()) << "\n";
+      emit_next(pc, next_scalar_state);
       break;
     case Opcode::Return: {
       std::uint32_t src = 0;
@@ -4467,8 +5263,12 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeList { std::vector<NativeValue> items; };\n";
   out << "struct NativeTuple { std::vector<NativeValue> items; };\n";
   out << "struct NativeSet { std::vector<NativeValue> items; };\n";
+  out << "static constexpr std::size_t kNativeMapInlineNameIndexCapacity = 8;\n";
   out << "struct NativeMap {\n";
   out << "  std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
+  out << "  std::array<std::pair<std::int64_t, std::size_t>, "
+         "kNativeMapInlineNameIndexCapacity> inline_name_index{};\n";
+  out << "  std::size_t inline_name_index_size = 0;\n";
   out << "  std::unordered_map<std::int64_t, std::size_t> name_index;\n";
   out << "  bool strict = false;\n";
   out << "};\n";
@@ -4535,9 +5335,36 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "native_intern_string(native_symbol_text(key.scalar_value));\n";
   out << "  return std::nullopt;\n";
   out << "}\n";
+  out << "static std::optional<std::size_t> "
+         "native_map_find_inline_name_index(const NativeMap &map, "
+         "std::int64_t key_id) {\n";
+  out << "  for (std::size_t i = 0; i < map.inline_name_index_size; ++i) {\n";
+  out << "    const auto &entry = map.inline_name_index[i];\n";
+  out << "    if (entry.first == key_id && entry.second < map.entries.size()) "
+         "return entry.second;\n";
+  out << "  }\n";
+  out << "  return std::nullopt;\n";
+  out << "}\n";
+  out << "static void native_map_add_inline_name_index(NativeMap &map, "
+         "std::int64_t key_id, std::size_t index) {\n";
+  out << "  if (map.inline_name_index_size >= "
+         "kNativeMapInlineNameIndexCapacity) return;\n";
+  out << "  map.inline_name_index[map.inline_name_index_size++] = {key_id, "
+         "index};\n";
+  out << "}\n";
   out << "static void native_map_rebuild_index(NativeMap &map) {\n";
   out << "  map.name_index.clear();\n";
+  out << "  map.inline_name_index_size = 0;\n";
   out << "  if (map.strict) return;\n";
+  out << "  if (map.entries.size() <= kNativeMapInlineNameIndexCapacity) {\n";
+  out << "    for (std::size_t i = 0; i < map.entries.size(); ++i) {\n";
+  out << "      const std::optional<std::int64_t> key_id = "
+         "native_map_index_key_id(map.entries[i].first, map.strict);\n";
+  out << "      if (key_id.has_value()) "
+         "native_map_add_inline_name_index(map, *key_id, i);\n";
+  out << "    }\n";
+  out << "    return;\n";
+  out << "  }\n";
   out << "  map.name_index.reserve(map.entries.size());\n";
   out << "  for (std::size_t i = 0; i < map.entries.size(); ++i) {\n";
   out << "    const std::optional<std::int64_t> key_id = "
@@ -5512,11 +6339,20 @@ native_map_find_entry(const NativeValue &map_value, const NativeValue &key) {
   const std::optional<std::int64_t> key_id =
       native_map_index_key_id(normalized, map.strict);
   if (key_id.has_value()) {
-    const auto found = map.name_index.find(*key_id);
-    if (found != map.name_index.end() && found->second < map.entries.size()) {
-      return &map.entries[found->second];
+    if (!map.name_index.empty()) {
+      const auto found = map.name_index.find(*key_id);
+      if (found != map.name_index.end() && found->second < map.entries.size()) {
+        return &map.entries[found->second];
+      }
+      if (native_map_key_is_nameable(normalized)) return nullptr;
     }
-    if (native_map_key_is_nameable(normalized)) return nullptr;
+    const std::optional<std::size_t> inline_index =
+        native_map_find_inline_name_index(map, *key_id);
+    if (inline_index.has_value()) return &map.entries[*inline_index];
+    if (map.entries.size() <= kNativeMapInlineNameIndexCapacity &&
+        native_map_key_is_nameable(normalized)) {
+      return nullptr;
+    }
   }
   for (const auto &entry : map.entries) {
     if (native_map_keys_equivalent(entry.first, normalized, map.strict)) {
@@ -5560,7 +6396,7 @@ static void native_map_store(NativeMap &map, NativeValue key,
   NativeValue normalized = native_normalize_map_key(key);
   const std::optional<std::int64_t> key_id =
       native_map_index_key_id(normalized, map.strict);
-  if (key_id.has_value()) {
+  if (key_id.has_value() && !map.name_index.empty()) {
     const auto found = map.name_index.find(*key_id);
     if (found != map.name_index.end() && found->second < map.entries.size()) {
       map.entries[found->second].second = std::move(value);
@@ -5573,17 +6409,35 @@ static void native_map_store(NativeMap &map, NativeValue key,
       return;
     }
   }
+  if (key_id.has_value()) {
+    const std::optional<std::size_t> inline_index =
+        native_map_find_inline_name_index(map, *key_id);
+    if (inline_index.has_value()) {
+      map.entries[*inline_index].second = std::move(value);
+      return;
+    }
+  }
   for (std::size_t i = 0; i < map.entries.size(); ++i) {
     if (native_map_keys_equivalent(map.entries[i].first, normalized,
                                    map.strict)) {
       map.entries[i].second = std::move(value);
-      if (key_id.has_value()) map.name_index[*key_id] = i;
+      if (key_id.has_value() && !map.name_index.empty()) {
+        map.name_index[*key_id] = i;
+      }
       return;
     }
   }
   const std::size_t index = map.entries.size();
   map.entries.emplace_back(std::move(normalized), std::move(value));
-  if (key_id.has_value()) map.name_index[*key_id] = index;
+  if (key_id.has_value()) {
+    if (!map.name_index.empty()) {
+      map.name_index[*key_id] = index;
+    } else if (map.entries.size() > kNativeMapInlineNameIndexCapacity) {
+      native_map_rebuild_index(map);
+    } else {
+      native_map_add_inline_name_index(map, *key_id, index);
+    }
+  }
 }
 
 static void native_map_append_entries(
@@ -7176,19 +8030,20 @@ private:
 
   NativeValue parse_object() {
     expect('{');
-    std::vector<std::pair<std::string, NativeValue>> entries;
+    std::vector<std::pair<NativeValue, NativeValue>> entries;
     skip_ws();
-    if (consume('}')) return NativeValue::map(std::move(entries));
+    if (consume('}')) return NativeValue::map_entries(std::move(entries));
     while (true) {
       skip_ws();
-      const std::string key = parse_string();
+      NativeValue key =
+          NativeValue::string_ref(native_intern_string(parse_string()));
       expect(':');
-      native_map_store(entries, key, parse_value());
+      native_map_store(entries, std::move(key), parse_value(), false);
       skip_ws();
       if (consume('}')) break;
       expect(',');
     }
-    return NativeValue::map(std::move(entries));
+    return NativeValue::map_entries(std::move(entries));
   }
 
   NativeValue parse_number() {
@@ -7220,10 +8075,29 @@ private:
         ++pos_;
       }
     }
-    const std::string token = text_.substr(start, pos_ - start);
+    if (!floating) {
+      const bool negative = text_[start] == '-';
+      const std::size_t digits_begin = negative ? start + 1U : start;
+      constexpr std::uint64_t kInt64Max =
+          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+      const std::uint64_t limit = negative ? kInt64Max + 1U : kInt64Max;
+      std::uint64_t magnitude = 0;
+      for (std::size_t i = digits_begin; i < pos_; ++i) {
+        const std::uint64_t digit =
+            static_cast<std::uint64_t>(text_[i] - '0');
+        if (magnitude > (limit - digit) / 10U) throw NativeBailout();
+        magnitude = magnitude * 10U + digit;
+      }
+      if (negative) {
+        if (magnitude == limit) {
+          return NativeValue::integer(std::numeric_limits<std::int64_t>::min());
+        }
+        return NativeValue::integer(-static_cast<std::int64_t>(magnitude));
+      }
+      return NativeValue::integer(static_cast<std::int64_t>(magnitude));
+    }
     try {
-      if (floating) return NativeValue::floating(std::stod(token));
-      return NativeValue::integer(std::stoll(token));
+      return NativeValue::floating(std::stod(text_.substr(start, pos_ - start)));
     } catch (const std::exception &) {
       throw NativeBailout();
     }
@@ -7357,7 +8231,8 @@ static NativeTime native_time_from_utc_fields(std::int64_t year, int month,
                           nanosecond);
 }
 
-static NativeTime native_apply_period_to_time(const NativeTime &time,
+)AMBERCPP";
+  out << R"AMBERCPP(static NativeTime native_apply_period_to_time(const NativeTime &time,
                                               const NativeTimePeriod &period) {
   NativeUtcFields fields = native_utc_fields(time);
   if (period.months != 0) {

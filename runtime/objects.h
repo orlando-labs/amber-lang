@@ -2,6 +2,7 @@
 
 #include "runtime/value.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -111,13 +112,24 @@ struct MapEntry {
   MapEntry(Value entry_key, Value entry_value);
 };
 
+inline constexpr std::size_t kMapInlineNameIndexCapacity = 8;
+
+struct MapNameIndexEntry {
+  std::uint32_t symbol_id = 0;
+  std::size_t index = 0;
+};
+
 struct MapValue {
   ObjHeader header;
   std::vector<MapEntry> entries;
   // Ordered entries remain the semantic source of truth. Ordinary maps keep an
-  // auxiliary index for Symbol/Str keys by canonical symbol id so hot lookup and
-  // upsert paths avoid scanning the ordered vector.
+  // auxiliary index for Symbol/Str keys by canonical symbol id. Small maps use
+  // inline slots to avoid per-map hash allocations; larger maps promote to the
+  // unordered index.
+  std::array<MapNameIndexEntry, kMapInlineNameIndexCapacity> inline_name_index{};
+  std::size_t inline_name_index_size = 0;
   std::unordered_map<std::uint32_t, std::size_t> name_index;
+  bool name_index_complete = true;
   bool frozen = false;
   // Exact-key (StrictMap / StrictHashMap) vs name-indifferent ordinary Map /
   // HashMap (spec v20.7/v20.8). Ordinary maps treat a Symbol key and a Str key

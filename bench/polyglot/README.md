@@ -135,7 +135,11 @@ All rows validated their workload checksum. Both new workloads (`string-ops`,
 `PLAN-polyglot-performance-optimizations-2026-07-04.md`. The arithmetic row was
 refreshed after native int/float numeric fast-lane codegen, using a fresh build
 in `/private/tmp/amber_polyglot_arithmetic_nativefast_20260704_01` and 10
-repeats with Ruby 4.0.5 from RVM.
+repeats with Ruby 4.0.5 from RVM. The JSON row was refreshed after inline
+small-map name indexes, native JSON integer parsing, and direct native JSON
+object-entry construction, using a fresh build in
+`/private/tmp/amber_polyglot_json_inlineidx_intparse_directobj_20260704_02` and
+10 repeats with Ruby 4.0.5 from RVM.
 
 `best_s` (best of 10):
 
@@ -145,7 +149,7 @@ workload          amber-interpreted amber-built      python        ruby         
 arithmetic              0.1709      0.0064      0.2030      0.0818      0.0046      0.0070      0.0041
 calls-collections       0.0157      0.0078      0.0226      0.0138      0.0023      0.0029      0.0025
 sha-digest              0.0467      0.0140      0.0226      0.0460      0.0121      0.0046      0.0115
-json                    0.0329      0.0154      0.0425      0.0223      0.0042      0.0144      0.0054
+json                    0.0329      0.0117      0.0425      0.0221      0.0041      0.0143      0.0054
 codecs                  0.0411      0.0110      0.0255      0.0196      0.0055      0.0039      0.0048
 secure-random           0.0259      0.0105      0.0504      0.0267      0.0061      0.0061      0.0167
 time-flow               0.1205      0.0216      0.2423      0.0658      0.0031      0.0052      0.0031
@@ -162,7 +166,7 @@ workload          amber-interpreted amber-built      python        ruby         
 arithmetic                 4.5         1.4         8.3        11.9         1.3         4.0         1.5
 calls-collections          5.7         1.5         8.7        12.0         1.3         4.0         1.5
 sha-digest                 5.0         3.3         9.1        21.6         1.6         6.1         1.8
-json                       9.9        10.8         9.8        13.5         1.4         8.9         1.6
+json                       9.9        10.3         9.8        13.5         1.4         8.9         1.6
 codecs                    11.9         8.4         9.7        12.7         1.4         4.7         1.6
 secure-random              7.2         4.2        10.8        13.1         1.4         4.8         1.7
 time-flow                  5.5        13.9        12.8        13.3         1.4         4.0         1.6
@@ -188,11 +192,14 @@ Reading notes:
   intern index trims peak RSS (18.3 MB to 16.9 MB interpreted, 12.5 MB to
   11.6 MB built) and the VM string-construction quick paths improve the
   interpreted best from 0.0462s to 0.0337s.
-- `json` built RSS rose compared with the previous table (6.3 MB to 10.8 MB),
-  which is the cost side of eager per-map hash indexes on many small maps. The
-  next map optimization should use an inline/small-map index or build the hash
-  index lazily after a size/probe threshold, preserving `map-words` speed while
-  giving object-heavy JSON maps back their compact representation.
+- `json` no longer pays the eager-hash-index cost on every tiny object map.
+  Small ordinary maps now keep an inline name index and promote to the unordered
+  index only after eight entries, generated native JSON parses Int tokens
+  without allocating a substring, and object parsing builds native map entries
+  directly. The built row moved from 0.0154s / 10.8 MB to 0.0117s / 10.3 MB
+  (confirmation runs ranged 0.0112-0.0117s best). `map-words` guard reruns
+  stayed in band (0.0075s best, 2.6 MB RSS), so large-map lookup speed was
+  preserved.
 - Native numeric fast lanes moved `arithmetic` built from 0.0239s to 0.0064s,
   close to the C++/Rust 0.004s band. Cold-start cost is still visible in the raw
   samples (`amber-built` mean 0.0393s, first sample 0.3286s), so a structural

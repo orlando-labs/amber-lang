@@ -543,7 +543,44 @@ bool map_entries_same_key(const MapEntry &a, const MapEntry &b, bool strict) {
 namespace {
 
 bool map_entry_uses_name_index(const MapEntry &entry, bool strict) {
+  if (strict) {
+    return false;
+  }
+  if (entry.key.is_symbol()) {
+    return true;
+  }
+  return entry.key.is_string() && entry.symbol_id != 0;
+}
+
+bool map_entry_needs_name_index(const MapEntry &entry, bool strict) {
   return !strict && map_key_is_nameable(entry.key);
+}
+
+bool map_value_should_use_hash_name_index(const MapValue &map) {
+  return !map.strict && map.entries.size() > kMapInlineNameIndexCapacity;
+}
+
+std::optional<std::size_t>
+map_value_find_inline_name_index(const MapValue &map, std::uint32_t symbol_id) {
+  for (std::size_t i = 0; i < map.inline_name_index_size; ++i) {
+    const MapNameIndexEntry &entry = map.inline_name_index[i];
+    if (entry.symbol_id == symbol_id && entry.index < map.entries.size()) {
+      return entry.index;
+    }
+  }
+  return std::nullopt;
+}
+
+void map_value_add_inline_name_index(MapValue *map, std::uint32_t symbol_id,
+                                     std::size_t index) {
+  if (map == nullptr ||
+      map->inline_name_index_size >= kMapInlineNameIndexCapacity) {
+    return;
+  }
+  MapNameIndexEntry &entry =
+      map->inline_name_index[map->inline_name_index_size++];
+  entry.symbol_id = symbol_id;
+  entry.index = index;
 }
 
 } // namespace
@@ -567,7 +604,20 @@ void map_value_rebuild_index(MapValue *map) {
     return;
   }
   map->name_index.clear();
+  map->inline_name_index_size = 0;
+  map->name_index_complete = true;
   if (map->strict) {
+    return;
+  }
+  if (!map_value_should_use_hash_name_index(*map)) {
+    for (std::size_t i = 0; i < map->entries.size(); ++i) {
+      const MapEntry &entry = map->entries[i];
+      if (map_entry_uses_name_index(entry, map->strict)) {
+        map_value_add_inline_name_index(map, entry.symbol_id, i);
+      } else if (map_entry_needs_name_index(entry, map->strict)) {
+        map->name_index_complete = false;
+      }
+    }
     return;
   }
   map->name_index.reserve(map->entries.size());
@@ -575,6 +625,8 @@ void map_value_rebuild_index(MapValue *map) {
     const MapEntry &entry = map->entries[i];
     if (map_entry_uses_name_index(entry, map->strict)) {
       map->name_index.emplace(entry.symbol_id, i);
+    } else if (map_entry_needs_name_index(entry, map->strict)) {
+      map->name_index_complete = false;
     }
   }
 }
@@ -593,18 +645,37 @@ void map_value_clear_entries(MapValue *map) {
   }
   map->entries.clear();
   map->name_index.clear();
+  map->inline_name_index_size = 0;
+  map->name_index_complete = true;
 }
 
 std::optional<std::size_t>
 map_value_find_entry_index(const MapValue &map, const Value &lookup_key,
                            std::optional<std::uint32_t> lookup_id) {
   if (!map.strict && lookup_id.has_value() && map_key_is_nameable(lookup_key)) {
-    const auto found = map.name_index.find(*lookup_id);
-    if (found != map.name_index.end() && found->second < map.entries.size()) {
-      const MapEntry &entry = map.entries[found->second];
-      if (map_entry_key_equivalent(entry, lookup_key, lookup_id, map.strict)) {
-        return found->second;
+    if (!map.name_index.empty()) {
+      const auto found = map.name_index.find(*lookup_id);
+      if (found != map.name_index.end() && found->second < map.entries.size()) {
+        const MapEntry &entry = map.entries[found->second];
+        if (map_entry_key_equivalent(entry, lookup_key, lookup_id, map.strict)) {
+          return found->second;
+        }
       }
+      if (map.name_index_complete) {
+        return std::nullopt;
+      }
+    }
+    const std::optional<std::size_t> inline_index =
+        map_value_find_inline_name_index(map, *lookup_id);
+    if (inline_index.has_value()) {
+      const MapEntry &entry = map.entries[*inline_index];
+      if (map_entry_key_equivalent(entry, lookup_key, lookup_id, map.strict)) {
+        return inline_index;
+      }
+    }
+    if (map.entries.size() <= kMapInlineNameIndexCapacity &&
+        map.name_index_complete) {
+      return std::nullopt;
     }
   }
   for (std::size_t i = 0; i < map.entries.size(); ++i) {
@@ -645,10 +716,20 @@ void map_value_upsert_entry(MapValue *map, MapEntry entry) {
     return;
   }
   if (map_entry_uses_name_index(entry, map->strict)) {
-    const auto found = map->name_index.find(entry.symbol_id);
-    if (found != map->name_index.end() && found->second < map->entries.size()) {
-      map->entries[found->second].value = std::move(entry.value);
-      return;
+    if (!map->name_index.empty()) {
+      const auto found = map->name_index.find(entry.symbol_id);
+      if (found != map->name_index.end() &&
+          found->second < map->entries.size()) {
+        map->entries[found->second].value = std::move(entry.value);
+        return;
+      }
+    } else {
+      const std::optional<std::size_t> inline_index =
+          map_value_find_inline_name_index(*map, entry.symbol_id);
+      if (inline_index.has_value()) {
+        map->entries[*inline_index].value = std::move(entry.value);
+        return;
+      }
     }
   }
   auto existing = std::find_if(
@@ -663,10 +744,24 @@ void map_value_upsert_entry(MapValue *map, MapEntry entry) {
   }
   const std::size_t new_index = map->entries.size();
   const bool indexable = map_entry_uses_name_index(entry, map->strict);
+  const bool nameable = map_entry_needs_name_index(entry, map->strict);
   const std::uint32_t symbol_id = entry.symbol_id;
   map->entries.push_back(std::move(entry));
-  if (indexable) {
+  if (!indexable) {
+    if (nameable) {
+      map->name_index_complete = false;
+    }
+    if (map_value_should_use_hash_name_index(*map) && map->name_index.empty()) {
+      map_value_rebuild_index(map);
+    }
+    return;
+  }
+  if (!map->name_index.empty()) {
     map->name_index.emplace(symbol_id, new_index);
+  } else if (map_value_should_use_hash_name_index(*map)) {
+    map_value_rebuild_index(map);
+  } else {
+    map_value_add_inline_name_index(map, symbol_id, new_index);
   }
 }
 
