@@ -1,0 +1,256 @@
+id: time
+path: time.html
+title: Time
+icon: ◷
+source: runtime/stdlib_time.cpp
+description.ru: UTC instants с nanosecond precision, ISO-8601 и календарная арифметика.
+description.en: UTC instants with nanosecond precision, ISO-8601 and calendar arithmetic.
+note.ru: Time.now требует effect time; constructors и parse — pure.
+note.en: Time.now requires the time effect; constructors and parse are pure.
+# pending: timezone-aware Time API (commit 8466429) — selectors documented as a
+# TimeZone module page in a later pass; listed here so the drift gate stays green
+# while surfacing them under `pending` in modules-coverage.json.
+drift_ignore: [abbreviation_at, as_time_zone, as_tz, find, in_time_zone, in_tz, local, name, offset, offset_at, offset_seconds, time_zone]
+
+method: Time.now
+ru: Текущий wall-clock UTC instant.
+en: Current wall-clock UTC instant.
+example:
+started_at = Time.now
+.end
+
+method: Time.monotonic
+ru: Monotonic clock как TimePeriod.
+en: Monotonic clock as a TimePeriod.
+example:
+mark = Time.monotonic
+.end
+
+method: Time.epoch
+ru: Unix epoch 1970-01-01T00:00:00Z.
+en: The Unix epoch 1970-01-01T00:00:00Z.
+example:
+origin = Time.epoch
+origin.unix_seconds
+# 0
+.end
+
+method: Time.utc(year, month, day, ...)
+ru: Создаёт валидированный UTC instant.
+en: Creates a validated UTC instant.
+example:
+release = Time.utc(
+  2026, 6, 22,
+  hour: 9, minute: 30
+)
+.end
+
+method: Time.from_unix(seconds, nanosecond: 0)
+ru: Создаёт instant из Unix seconds.
+en: Creates an instant from Unix seconds.
+example:
+time = Time.from_unix(1_700_000_000)
+.end
+
+method: Time.from_unix_ms(milliseconds)
+ru: Создаёт instant из Unix milliseconds.
+en: Creates an instant from Unix milliseconds.
+example:
+time = Time.from_unix_ms(1_700_000_000_000)
+.end
+
+method: Time.from_unix_ns(nanoseconds)
+ru: Создаёт instant из Unix nanoseconds.
+en: Creates an instant from Unix nanoseconds.
+example:
+time = Time.from_unix_ns(1_000_000_999)
+.end
+
+method: Time.parse(iso8601)
+ru: Читает ISO-8601 UTC instant.
+en: Parses an ISO-8601 UTC instant.
+example:
+time = Time.parse("2026-06-22T09:30:00Z")
+.end
+
+method: time.iso8601
+ru: Возвращает canonical ISO-8601 text.
+en: Returns canonical ISO-8601 text.
+example:
+text = Time.epoch.iso8601
+# "1970-01-01T00:00:00Z"
+.end
+
+method: time.to_str
+ru: Строковая форма instant.
+en: String form of the instant.
+example:
+text = Time.epoch.to_str
+.end
+
+method: time.inspect
+ru: Inspection-форма instant.
+en: Inspection form of the instant.
+example:
+text = Time.epoch.inspect
+.end
+
+method: time.year
+ru: Год UTC.
+en: UTC year.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.year
+# 2026
+.end
+
+method: time.month
+ru: Месяц UTC 1…12.
+en: UTC month 1…12.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.month
+# 6
+.end
+
+method: time.day
+ru: День месяца UTC.
+en: UTC day of month.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.day
+# 22
+.end
+
+method: time.hour
+ru: Час UTC 0…23.
+en: UTC hour 0…23.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.hour
+# 9
+.end
+
+method: time.minute
+ru: Минута UTC.
+en: UTC minute.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.minute
+# 30
+.end
+
+method: time.second
+ru: Секунда UTC.
+en: UTC second.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.second
+# 45
+.end
+
+method: time.nanosecond
+ru: Наносекундная часть.
+en: Nanosecond component.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.nanosecond
+# 123000000
+.end
+
+method: time.weekday
+ru: ISO weekday 1…7.
+en: ISO weekday 1…7.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.weekday
+# 1
+.end
+
+method: time.yearday
+ru: Номер дня в году.
+en: Day number within the year.
+example:
+time = Time.parse("2026-06-22T09:30:45.123Z")
+value = time.yearday
+# 173
+.end
+
+method: time.unix_seconds
+ru: Unix seconds.
+en: Unix seconds.
+example:
+seconds = Time.parse("2026-06-22T00:00:00Z").unix_seconds
+.end
+
+method: time.unix_milliseconds
+ru: Unix milliseconds.
+en: Unix milliseconds.
+example:
+milliseconds = Time.now.unix_milliseconds
+.end
+
+method: time.unix_nanoseconds
+ru: Unix nanoseconds с overflow check.
+en: Unix nanoseconds with overflow checking.
+example:
+nanoseconds = Time.from_unix_ns(42).unix_nanoseconds
+# 42
+.end
+
+method: time + period
+ru: Сдвигает instant вперёд.
+en: Moves an instant forward.
+example:
+tomorrow = Time.now + 1.days
+.end
+
+method: time - period
+ru: Сдвигает instant назад.
+en: Moves an instant backward.
+example:
+yesterday = Time.now - 1.days
+.end
+
+method: time - other_time
+ru: Возвращает разность как TimePeriod.
+en: Returns the difference as a TimePeriod.
+example:
+elapsed = Time.now - Time.epoch
+.end
+
+method: time < other
+ru: Сравнивает instants.
+en: Compares instants.
+example:
+before = Time.epoch < Time.now
+.end
+
+method: time <= other
+ru: Сравнивает instants.
+en: Compares instants.
+example:
+ok = Time.epoch <= Time.now
+.end
+
+method: time > other
+ru: Сравнивает instants.
+en: Compares instants.
+example:
+after = Time.now > Time.epoch
+.end
+
+method: time >= other
+ru: Сравнивает instants.
+en: Compares instants.
+example:
+ok = Time.now >= Time.epoch
+.end
+
+method: time <=> other
+ru: Возвращает -1, 0 или 1.
+en: Returns -1, 0 or 1.
+example:
+order = Time.epoch <=> Time.now
+# -1
+.end

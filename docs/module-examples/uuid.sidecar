@@ -1,0 +1,67 @@
+id: uuid
+path: uuid.html
+title: Uuid / UUID
+icon: #
+source: runtime/stdlib_uuid.cpp
+description.ru: Immutable 128-bit UUID value type; UUID — эквивалентный alias.
+description.en: An immutable 128-bit UUID value type; UUID is an equivalent alias.
+note.ru: v4 требует random; v7 требует random + time.
+note.en: v4 requires random; v7 requires random + time.
+drift_ignore:
+
+method: Uuid.v4()
+ru: Создаёт RFC 9562 UUID version 4.
+en: Creates an RFC 9562 version 4 UUID.
+example:
+id = Uuid.v4()
+id.version
+# 4
+.end
+
+method: Uuid.v7()
+ru: Создаёт time-ordered UUID version 7.
+en: Creates a time-ordered version 7 UUID.
+example:
+id = Uuid.v7()
+id.version
+# 7
+.end
+
+method: Uuid.parse(text)
+ru: Читает canonical UUID text.
+en: Parses canonical UUID text.
+example:
+id = Uuid.parse(
+  "550e8400-e29b-41d4-a716-446655440000"
+)
+.end
+
+method: uuid.to_str
+ru: Возвращает lowercase canonical text.
+en: Returns lowercase canonical text.
+example:
+text = Uuid.v4().to_str
+.end
+
+method: uuid.inspect
+ru: Возвращает canonical text для inspection.
+en: Returns canonical text for inspection.
+example:
+text = Uuid.v7().inspect
+.end
+
+method: uuid.version
+ru: Возвращает version nibble.
+en: Returns the version nibble.
+example:
+version = Uuid.v7().version
+# 7
+.end
+
+method: uuid.to_json
+ru: Сериализует UUID как JSON string.
+en: Serializes the UUID as a JSON string.
+example:
+json = Uuid.v4().to_json
+# "\"…\""
+.end

@@ -1,0 +1,57 @@
+id: secure-random
+path: secure-random.html
+title: SecureRandom
+icon: ✦
+source: runtime/stdlib_secure_random.cpp
+description.ru: Криптографическая энтропия, unbiased sampling и готовые токены.
+description.en: Cryptographic entropy, unbiased sampling and ready-to-use tokens.
+note.ru: Требует effect random и capability random.secure.
+note.en: Requires the random effect and random.secure capability.
+drift_ignore:
+
+method: SecureRandom.bytes(n)
+ru: Возвращает n случайных байтов.
+en: Returns n random bytes.
+example:
+nonce = SecureRandom.bytes(24)
+nonce.count()
+# 24
+.end
+
+method: SecureRandom.int(finite_range)
+ru: Равномерно выбирает Int из finite Range.
+en: Uniformly samples an Int from a finite Range.
+example:
+pin = SecureRandom.int(100000..999999)
+.end
+
+method: SecureRandom.hex(n)
+ru: Создаёт hex-токен из n случайных байтов.
+en: Creates a hex token from n random bytes.
+example:
+token = SecureRandom.hex(16)
+# 32 hex characters
+.end
+
+method: SecureRandom.base64(n, padding: true)
+ru: Создаёт стандартный Base64-токен.
+en: Creates a standard Base64 token.
+example:
+token = SecureRandom.base64(18)
+.end
+
+method: SecureRandom.base64url(n, padding: false)
+ru: Создаёт URL-safe токен.
+en: Creates a URL-safe token.
+example:
+token = SecureRandom.base64url(24)
+.end
+
+method: SecureRandom.uuid
+ru: Создаёт UUID v4.
+en: Creates a UUID v4.
+example:
+request_id = SecureRandom.uuid
+request_id.version
+# 4
+.end

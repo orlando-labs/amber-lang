@@ -1,0 +1,104 @@
+id: digest
+path: digest.html
+title: Digest
+icon: ⌁
+source: runtime/stdlib_digest.cpp
+description.ru: Однопроходные checksum, hash и HMAC-функции с результатом Bytes.
+description.en: One-shot checksum, hash and HMAC functions returning Bytes.
+note.ru: Pure: алгоритмы исполняются внутри runtime.
+note.en: Pure: algorithms execute inside the runtime.
+drift_ignore:
+
+method: Digest.crc32(bytes)
+ru: CRC-32 checksum.
+en: CRC-32 checksum.
+example:
+sum = Digest.crc32(Bytes.new("amber")).hex()
+.end
+
+method: Digest.md5(bytes)
+ru: MD5 digest для совместимости.
+en: MD5 digest for compatibility.
+example:
+hash = Digest.md5(Bytes.new("amber")).hex()
+.end
+
+method: Digest.sha1(bytes)
+ru: SHA-1 digest для совместимости.
+en: SHA-1 digest for compatibility.
+example:
+hash = Digest.sha1(Bytes.new("amber")).hex()
+.end
+
+method: Digest.sha256(bytes)
+ru: SHA-256 digest.
+en: SHA-256 digest.
+example:
+hash = Digest.sha256(Bytes.new("amber")).hex()
+.end
+
+method: Digest.hmac_sha256(key, bytes)
+ru: HMAC-SHA-256 по ключу и payload.
+en: HMAC-SHA-256 over a key and payload.
+example:
+mac = Digest.hmac_sha256(
+  Bytes.new("secret"),
+  Bytes.new("payload")
+).hex()
+.end
+
+method: Digest.streebog256(bytes)
+ru: Стрибог-256.
+en: Streebog-256.
+example:
+hash = Digest.streebog256(Bytes.new("amber")).hex()
+.end
+
+method: Digest.streebog512(bytes)
+ru: Стрибог-512.
+en: Streebog-512.
+example:
+hash = Digest.streebog512(Bytes.new("amber")).hex()
+.end
+
+method: Digest.gost256(bytes)
+ru: Alias для streebog256.
+en: Alias for streebog256.
+example:
+hash = Digest.gost256(Bytes.new("amber")).hex()
+.end
+
+method: Digest.gost512(bytes)
+ru: Alias для streebog512.
+en: Alias for streebog512.
+example:
+hash = Digest.gost512(Bytes.new("amber")).hex()
+.end
+
+method: Digest.гост256(bytes)
+ru: Кириллический alias для streebog256.
+en: Cyrillic alias for streebog256.
+example:
+hash = Digest.гост256(Bytes.new("amber")).hex()
+.end
+
+method: Digest.гост512(bytes)
+ru: Кириллический alias для streebog512.
+en: Cyrillic alias for streebog512.
+example:
+hash = Digest.гост512(Bytes.new("amber")).hex()
+.end
+
+method: Digest.стрибог256(bytes)
+ru: Кириллический alias для streebog256.
+en: Cyrillic alias for streebog256.
+example:
+hash = Digest.стрибог256(Bytes.new("amber")).hex()
+.end
+
+method: Digest.стрибог512(bytes)
+ru: Кириллический alias для streebog512.
+en: Cyrillic alias for streebog512.
+example:
+hash = Digest.стрибог512(Bytes.new("amber")).hex()
+.end

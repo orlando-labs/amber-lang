@@ -1,0 +1,26 @@
+id: hex
+path: hex.html
+title: Hex
+icon: 0x
+source: runtime/stdlib_codecs.cpp
+description.ru: Lowercase hexadecimal codec для байтов.
+description.en: A lowercase hexadecimal codec for bytes.
+note.ru: Pure. Lenient decode принимает пробелы, `:`, `-` и prefix 0x.
+note.en: Pure. Lenient decode accepts whitespace, `:`, `-` and a 0x prefix.
+drift_ignore:
+
+method: Hex.encode(bytes)
+ru: Кодирует байты в lowercase hex.
+en: Encodes bytes as lowercase hex.
+example:
+text = Hex.encode(Bytes.new("hi"))
+# => "6869"
+.end
+
+method: Hex.decode(text, mode: :strict)
+ru: Декодирует hex-текст в Bytes.
+en: Decodes hex text into Bytes.
+example:
+text = Hex.decode("68 69", mode: :lenient).to_str()
+# => "hi"
+.end

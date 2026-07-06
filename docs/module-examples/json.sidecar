@@ -1,0 +1,109 @@
+id: json
+path: json.html
+title: Json
+icon: { }
+source: runtime/stdlib_json.cpp
+description.ru: Парсинг, генерация, JSONL, path-навигация и потоковая обработка.
+description.en: Parsing, generation, JSONL, path navigation and streaming processing.
+note.ru: Файловые методы требуют fs.read или fs.write; остальные операции pure.
+note.en: File methods require fs.read or fs.write; all other operations are pure.
+drift_ignore:
+
+method: Json.parse(text, map: Map)
+ru: Преобразует JSON-текст в Amber-значение.
+en: Converts JSON text into an Amber value.
+example:
+user = Json.parse("{\"id\":7,\"name\":\"Iris\"}")
+user[:name]
+# => "Iris"
+.end
+
+method: Json.generate(value)
+ru: Создаёт компактный JSON.
+en: Generates compact JSON.
+example:
+text = Json.generate({ok: true, count: 3})
+# "{\"ok\":true,\"count\":3}"
+.end
+
+method: Json.pretty_generate(value, indent: 2)
+ru: Создаёт форматированный JSON.
+en: Generates formatted JSON.
+example:
+text = Json.pretty_generate(
+  {ok: true, items: [1, 2]},
+  indent: 4
+)
+.end
+
+method: Json.path(value, query)
+ru: Возвращает первое совпадение или null.
+en: Returns the first match or null.
+example:
+doc = Json.parse("{\"user\":{\"name\":\"Ada\"}}")
+name = Json.path(doc, "$.user.name")
+# "Ada"
+.end
+
+method: Json.paths(value, query[, init]) |item, acc|
+ru: Возвращает все совпадения или сворачивает их блоком.
+en: Returns all matches or folds them with a block.
+example:
+doc = Json.parse("{\"items\":[{\"id\":1},{\"id\":2}]}")
+ids = Json.paths(doc, "$.items[*].id")
+# [1, 2]
+.end
+
+method: Json.stream_parse(text, depth: 1) |value|
+ru: Потоково передаёт значения блоку.
+en: Streams values into a block.
+example:
+sum = 0
+count = Json.stream_parse("[1,2,3]") |value|:
+  sum = sum + value
+# count == 3, sum == 6
+.end
+
+method: Json.stream_parse_file(path, depth:, jsonl:) |value|
+ru: Потоково читает JSON или JSONL-файл.
+en: Streams a JSON or JSONL file.
+example:
+total = 0
+Json.stream_parse_file("events.jsonl", jsonl: true) |row|:
+  total = total + row[:value]
+.end
+
+method: Json.load_from_file(path, jsonl: false)
+ru: Читает JSON-документ или JSONL-список.
+en: Loads a JSON document or JSONL list.
+example:
+config = Json.load_from_file("config.json")
+config[:enabled]
+.end
+
+method: Json.save_to_file(path, value, pretty:, indent:, jsonl:)
+ru: Записывает значение через runtime I/O.
+en: Writes a value through runtime I/O.
+example:
+Json.save_to_file(
+  "config.json",
+  {enabled: true},
+  pretty: true
+)
+.end
+
+method: Json.stop([value])
+ru: Досрочно завершает streaming/path traversal.
+en: Stops streaming or path traversal early.
+example:
+doc = Json.parse("{\"items\":[1,20,30]}")
+first = Json.paths(doc, "$.items[*]", null) |item, acc|:
+  Json.stop(item) if item > 10
+  acc
+# 20
+.end
+
+method: Worked example — parse, match, round-trip
+corpus: json_parse_generate
+ru: Проверяемая программа: parse → name-indifferent-доступ → pattern match → round-trip через generate.
+en: A verified program: parse, name-indifferent access, pattern match and a round-trip through generate.

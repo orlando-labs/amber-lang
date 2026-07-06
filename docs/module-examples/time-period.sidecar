@@ -1,0 +1,134 @@
+id: time-period
+path: time-period.html
+title: TimePeriod
+icon: ±
+source: runtime/stdlib_time.cpp
+description.ru: Календарные и fixed-периоды с months, days и nanoseconds.
+description.en: Calendar and fixed periods with months, days and nanoseconds.
+note.ru: Периоды immutable; total_nanoseconds доступен только для fixed periods.
+note.en: Periods are immutable; total_nanoseconds is available for fixed periods only.
+drift_ignore:
+
+method: period.to_str
+ru: Возвращает читаемую форму периода.
+en: Returns a readable period form.
+example:
+text = (2.days + 3.seconds).to_str
+.end
+
+method: period.inspect
+ru: Inspection-форма периода.
+en: Inspection form of the period.
+example:
+text = 1.months.inspect
+.end
+
+method: period.months
+ru: Calendar month component.
+en: Calendar month component.
+example:
+value = (2.months + 3.days).months
+# 2
+.end
+
+method: period.days
+ru: Day component.
+en: Day component.
+example:
+value = (2.months + 3.days).days
+# 3
+.end
+
+method: period.nanoseconds
+ru: Nanosecond component.
+en: Nanosecond component.
+example:
+value = (2.seconds + 5.nanoseconds).nanoseconds
+.end
+
+method: period.fixed?
+ru: True, если months == 0.
+en: True when months == 0.
+example:
+fixed = 2.days.fixed?
+# true
+.end
+
+method: period.total_nanoseconds
+ru: Полная длина fixed period.
+en: Total length of a fixed period.
+example:
+total = 2.seconds.total_nanoseconds
+# 2000000000
+.end
+
+method: +period
+ru: Унарный плюс возвращает тот же период.
+en: Unary plus returns the same period.
+example:
+same = +2.days
+.end
+
+method: -period
+ru: Безопасно меняет знак периода.
+en: Safely negates the period.
+example:
+before = -2.days
+.end
+
+method: period + other
+ru: Складывает два периода.
+en: Adds two periods.
+example:
+period = 1.days + 2.seconds
+.end
+
+method: period - other
+ru: Вычитает один период из другого.
+en: Subtracts one period from another.
+example:
+period = 2.days - 1.days
+.end
+
+method: period + time
+ru: Применяет period к Time.
+en: Applies the period to a Time.
+example:
+deadline = 7.days + Time.now
+.end
+
+method: period < other
+ru: Сравнивает fixed periods.
+en: Compares fixed periods.
+example:
+shorter = 1.seconds < 2.seconds
+.end
+
+method: period <= other
+ru: Сравнивает fixed periods.
+en: Compares fixed periods.
+example:
+ok = 1.seconds <= 1.seconds
+.end
+
+method: period > other
+ru: Сравнивает fixed periods.
+en: Compares fixed periods.
+example:
+longer = 2.seconds > 1.seconds
+.end
+
+method: period >= other
+ru: Сравнивает fixed periods.
+en: Compares fixed periods.
+example:
+ok = 2.seconds >= 1.seconds
+.end
+
+method: period <=> other
+ru: Возвращает -1, 0 или 1.
+en: Returns -1, 0 or 1.
+example:
+order = 1.seconds <=> 2.seconds
+# -1
+.end

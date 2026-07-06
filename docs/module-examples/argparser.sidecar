@@ -1,0 +1,87 @@
+id: argparser
+path: argparser.html
+title: ArgParser
+icon: ›_
+source: runtime/stdlib_argparser.cpp
+description.ru: Fluent builder для options, flags, positional args, env fallback и help.
+description.en: A fluent builder for options, flags, positional args, env fallback and help.
+note.ru: Явные cmdline/env deterministic; CLI-вывод проходит через runtime I/O.
+note.en: Explicit cmdline/env are deterministic; CLI output uses runtime I/O.
+drift_ignore:
+
+method: ArgParser.new(cmdline:, name:, about:, env:, add_help: true)
+ru: Создаёт parser.
+en: Creates a parser.
+example:
+cli = ArgParser.new(
+  name: "amberfmt",
+  about: "Format Amber source"
+)
+.end
+
+method: parser.name(text)
+ru: Устанавливает имя программы и возвращает parser.
+en: Sets the program name and returns the parser.
+example:
+cli = ArgParser.new().name("amberfmt")
+.end
+
+method: parser.about(text)
+ru: Устанавливает описание и возвращает parser.
+en: Sets the description and returns the parser.
+example:
+cli = ArgParser.new().about("Format source files")
+.end
+
+method: parser.arg(*spellings, ...)
+ru: Добавляет option со значением.
+en: Adds a value option.
+example:
+cli.arg("-o", "--output", default: "out.am")
+.end
+
+method: parser.flag(*spellings, ...)
+ru: Добавляет Bool-флаг.
+en: Adds a Bool flag.
+example:
+cli.flag("-v", "--verbose", negatable: true)
+.end
+
+method: parser.pos(name, ...)
+ru: Добавляет positional argument.
+en: Adds a positional argument.
+example:
+cli.pos("source", required: true)
+.end
+
+method: parser.rest(name, ...)
+ru: Собирает остаток argv в List.
+en: Collects remaining argv values into a List.
+example:
+cli.rest("files", type: Str)
+.end
+
+method: parser.try_parse(cmdline:)
+ru: Возвращает Ok/Err-подобный результат.
+en: Returns an Ok/Err-like result.
+example:
+result = cli.try_parse(cmdline: ["--bad"])
+if result.err?(): result.error
+.end
+
+method: parser.parse_or_raise(cmdline:)
+ru: Возвращает Map или бросает ArgParser error.
+en: Returns a Map or raises an ArgParser error.
+example:
+args = cli.parse_or_raise(
+  cmdline: ["--output", "x.am", "main.am"]
+)
+.end
+
+method: parser.parse(cmdline:)
+ru: CLI-режим с автоматическим help/error output.
+en: CLI mode with automatic help/error output.
+example:
+args = cli.parse()
+format(args[:source])
+.end

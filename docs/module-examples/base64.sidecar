@@ -1,0 +1,26 @@
+id: base64
+path: base64.html
+title: Base64
+icon: 64
+source: runtime/stdlib_codecs.cpp
+description.ru: Стандартный RFC 4648 binary-to-text codec.
+description.en: The standard RFC 4648 binary-to-text codec.
+note.ru: Pure. Encode принимает Bytes, ByteSlice или ByteBuffer.
+note.en: Pure. Encode accepts Bytes, ByteSlice or ByteBuffer.
+drift_ignore:
+
+method: Base64.encode(bytes, padding: true)
+ru: Кодирует байты стандартным alphabet.
+en: Encodes bytes with the standard alphabet.
+example:
+text = Base64.encode(Bytes.new("hello"))
+# => "aGVsbG8="
+.end
+
+method: Base64.decode(text, mode: :strict)
+ru: Декодирует текст в Bytes.
+en: Decodes text into Bytes.
+example:
+value = Base64.decode("aGVsbG8=").to_str()
+# => "hello"
+.end

@@ -1,0 +1,60 @@
+id: url
+path: url.html
+title: Url
+icon: ↗
+source: runtime/stdlib_url.cpp
+description.ru: URL parse/build, percent coding и вложенные query maps.
+description.en: URL parsing/building, percent coding and nested query maps.
+note.ru: Pure: модуль не выполняет сетевые запросы.
+note.en: Pure: this module performs no network requests.
+drift_ignore:
+
+method: Url.parse(text)
+ru: Разбирает URL в Map частей.
+en: Parses a URL into a parts Map.
+example:
+url = Url.parse("https://example.com:8443/api?q=amber")
+url[:host]
+# => "example.com"
+.end
+
+method: Url.build(parts)
+ru: Собирает URL из Map частей.
+en: Builds a URL from a parts Map.
+example:
+text = Url.build({
+  scheme: "https", host: "example.com", path: "/api"
+})
+.end
+
+method: Url.percent_encode(text)
+ru: Кодирует bytes вне unreserved set.
+en: Encodes bytes outside the unreserved set.
+example:
+text = Url.percent_encode("a b/!")
+# => "a%20b%2F%21"
+.end
+
+method: Url.percent_decode(text)
+ru: Декодирует percent escapes.
+en: Decodes percent escapes.
+example:
+text = Url.percent_decode("a%20b%2F%21")
+# => "a b/!"
+.end
+
+method: Url.parse_query(text)
+ru: Разбирает repeated/bracket query keys.
+en: Parses repeated and bracketed query keys.
+example:
+query = Url.parse_query("tag[]=vm&tag[]=lang")
+query["tag"]
+# ["vm", "lang"]
+.end
+
+method: Url.build_query(map)
+ru: Строит query string из nested Map/List.
+en: Builds a query string from nested Map/List values.
+example:
+query = Url.build_query({q: "amber", tag: ["vm", "lang"]})
+.end

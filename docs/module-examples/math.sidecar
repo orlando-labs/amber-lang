@@ -1,0 +1,215 @@
+id: math
+path: math.html
+title: Math
+icon: π
+source: runtime/stdlib_math.cpp
+description.ru: Числовые константы, округление, степени, логарифмы и тригонометрия.
+description.en: Numeric constants, rounding, powers, logarithms and trigonometry.
+note.ru: Pure: effects и capabilities не требуются.
+note.en: Pure: no effects or capabilities required.
+drift_ignore:
+
+method: Math.PI
+ru: Константа π как Float.
+en: The π constant as a Float.
+example:
+circle = Math.PI * 4
+# 12.566…
+.end
+
+method: Math.E
+ru: Константа e как Float.
+en: The e constant as a Float.
+example:
+growth = Math.E
+# 2.718…
+.end
+
+method: Math.abs(x)
+ru: Модуль числа; сохраняет Int/Float.
+en: Absolute value; preserves Int/Float.
+example:
+value = Math.abs(-7)
+# 7
+.end
+
+method: Math.sign(x)
+ru: Знак числа: -1, 0 или 1.
+en: Number sign: -1, 0 or 1.
+example:
+value = Math.sign(-7)
+# -1
+.end
+
+method: Math.min(a, b)
+ru: Возвращает меньший исходный аргумент.
+en: Returns the smaller original argument.
+example:
+low = Math.min(10, 4)
+# 4
+.end
+
+method: Math.max(a, b)
+ru: Возвращает больший исходный аргумент.
+en: Returns the larger original argument.
+example:
+high = Math.max(10, 4)
+# 10
+.end
+
+method: Math.pow(x, y)
+ru: Возводит x в степень y.
+en: Raises x to the power y.
+example:
+size = Math.pow(2, 10)
+# 1024.0
+.end
+
+method: Math.hypot(x, y)
+ru: Вычисляет √(x² + y²).
+en: Computes √(x² + y²).
+example:
+length = Math.hypot(3, 4)
+# 5.0
+.end
+
+method: Math.atan2(y, x)
+ru: Арктангенс с учётом четверти.
+en: Quadrant-aware arc tangent.
+example:
+angle = Math.atan2(1, 1)
+# 0.785…
+.end
+
+method: Math.sqrt(x)
+ru: Квадратный корень.
+en: Square root.
+example:
+value = Math.sqrt(144)
+# 12.0
+.end
+
+method: Math.cbrt(x)
+ru: Кубический корень.
+en: Cube root.
+example:
+value = Math.cbrt(27)
+# 3.0
+.end
+
+method: Math.exp(x)
+ru: Экспонента eˣ.
+en: The exponential eˣ.
+example:
+value = Math.exp(1)
+# 2.718…
+.end
+
+method: Math.log(x)
+ru: Натуральный логарифм.
+en: Natural logarithm.
+example:
+value = Math.log(Math.E)
+# 1.0
+.end
+
+method: Math.log2(x)
+ru: Двоичный логарифм.
+en: Base-2 logarithm.
+example:
+value = Math.log2(8)
+# 3.0
+.end
+
+method: Math.log10(x)
+ru: Десятичный логарифм.
+en: Base-10 logarithm.
+example:
+value = Math.log10(1000)
+# 3.0
+.end
+
+method: Math.sin(x)
+ru: Синус в радианах.
+en: Sine in radians.
+example:
+value = Math.sin(0)
+# 0.0
+.end
+
+method: Math.cos(x)
+ru: Косинус в радианах.
+en: Cosine in radians.
+example:
+value = Math.cos(0)
+# 1.0
+.end
+
+method: Math.tan(x)
+ru: Тангенс в радианах.
+en: Tangent in radians.
+example:
+value = Math.tan(0)
+# 0.0
+.end
+
+method: Math.asin(x)
+ru: Арксинус.
+en: Arc sine.
+example:
+value = Math.asin(1)
+# 1.570…
+.end
+
+method: Math.acos(x)
+ru: Арккосинус.
+en: Arc cosine.
+example:
+value = Math.acos(1)
+# 0.0
+.end
+
+method: Math.atan(x)
+ru: Арктангенс.
+en: Arc tangent.
+example:
+value = Math.atan(1)
+# 0.785…
+.end
+
+method: Math.floor(x)
+ru: Округление вниз.
+en: Rounds down.
+example:
+value = Math.floor(3.9)
+# 3.0
+.end
+
+method: Math.ceil(x)
+ru: Округление вверх.
+en: Rounds up.
+example:
+value = Math.ceil(3.1)
+# 4.0
+.end
+
+method: Math.round(x)
+ru: Округление к ближайшему целому.
+en: Rounds to the nearest integer.
+example:
+value = Math.round(3.5)
+# 4.0
+.end
+
+method: Math.trunc(x)
+ru: Отбрасывает дробную часть.
+en: Drops the fractional part.
+example:
+value = Math.trunc(3.9)
+# 3.0
+.end
+
+method: Worked example — extrema & Math prelude
+corpus: extrema_and_math
+ru: Проверяемая программа: min/max/minmax с key-блоком и Math (sqrt/pow/floor/ceil/abs/hypot).
+en: A verified program: min/max/minmax with a key block and the Math prelude (sqrt/pow/floor/ceil/abs/hypot).

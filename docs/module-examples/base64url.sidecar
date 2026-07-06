@@ -1,0 +1,27 @@
+id: base64url
+path: base64url.html
+title: Base64Url
+icon: −_
+source: runtime/stdlib_codecs.cpp
+description.ru: URL-safe RFC 4648 codec без padding по умолчанию.
+description.en: URL-safe RFC 4648 codec, unpadded by default.
+note.ru: Pure. Alphabet использует `-` и `_` вместо `+` и `/`.
+note.en: Pure. The alphabet uses `-` and `_` instead of `+` and `/`.
+drift_ignore:
+
+method: Base64Url.encode(bytes, padding: false)
+ru: Создаёт URL-safe текст.
+en: Creates URL-safe text.
+example:
+token = Base64Url.encode(Hex.decode("fbff"))
+# => "-_8"
+.end
+
+method: Base64Url.decode(text, mode: :strict)
+ru: Возвращает декодированные Bytes.
+en: Returns decoded Bytes.
+example:
+bytes = Base64Url.decode("-_8")
+bytes.hex()
+# => "fbff"
+.end
