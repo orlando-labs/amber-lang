@@ -1,0 +1,31 @@
+package native.fs_path_core
+
+export main
+
+def main():
+  score = 0
+
+  p = fs.Path("/tmp") / "amber.txt"
+  q = p.parent().join("logs", "run.log").normalize()
+  r = fs.Path(q)
+  rel = fs.Path("a/./b/../c").normalize()
+  nested = fs.Path("dir") / fs.Path("child")
+
+  if p.basename() == "amber.txt":
+    score = score + 1
+  if p.extname() == ".txt":
+    score = score + 1
+  if p.parent().to_str() == "/tmp":
+    score = score + 1
+  if p.absolute?():
+    score = score + 1
+  if q.to_str().ends_with?("/tmp/logs/run.log"):
+    score = score + 1
+  if r.to_str() == q.to_str():
+    score = score + 1
+  if rel.to_str() == "a/c":
+    score = score + 1
+  if nested.to_str() == "dir/child":
+    score = score + 1
+
+  score

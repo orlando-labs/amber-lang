@@ -117,6 +117,87 @@ membership probes with a 2/3 hit rate. On Amber this measures the
 name-indifferent `Map` (Symbol/Str canonicalization on every key operation).
 The runner requires full direct-native coverage for this workload as well.
 
+## Native value-lifetime rerun (2026-07-05)
+
+Darwin arm64, same toolchains as the 2026-07-04 run. The Amber rows include
+the native value-lifetime work from
+`PLAN-native-value-lifetime-2026-07-05.md`: intrusive refcounts replace the
+never-freeing `NativeArena` for data values, dynamic strings are refcounted
+heap values instead of permanent intern-table slots (map keys still
+canonicalize through interned ids; read probes use a no-insert lookup), the
+generated code has a bool scalar lane beside the int/float lanes, hot payload
+types recycle shells through per-type free lists, and `native_benchmark_send`
+delegates `inspect`/`to_str` on non-Benchmark receivers instead of bailing
+out (the Benchmark selector routing had silently pushed the whole uuid run
+onto the VM re-run path, best 0.0547s, before this fix).
+
+Fresh build pass into `/private/tmp/amber_polyglot_m4_20260705_01`, then the
+stable rerun below, one workload per runner invocation:
+
+```sh
+python3 bench/polyglot/run_benchmark.py --workload <workload> --repeats 10 \
+  --no-build --build-dir /private/tmp/amber_polyglot_m4_20260705_01
+```
+
+All rows validated their workload checksum; every workload reports full
+direct-native coverage. Conformance corpus 173/0 and backend-equivalence
+109/0 at this state.
+
+`best_s` (best of 10):
+
+```text
+workload          amber-interpreted amber-built      python        ruby         cpp          go        rust
+-----------------------------------------------------------------------------------------------------------
+arithmetic              0.1551      0.0055      0.1852      0.0681      0.0037      0.0054      0.0036
+calls-collections       0.0146      0.0045      0.0201      0.0093      0.0019      0.0024      0.0020
+sha-digest              0.0444      0.0127      0.0199      0.0398      0.0111      0.0040      0.0104
+json                    0.0315      0.0107      0.0393      0.0174      0.0035      0.0135      0.0047
+codecs                  0.0383      0.0068      0.0226      0.0152      0.0048      0.0032      0.0040
+secure-random           0.0248      0.0084      0.0460      0.0216      0.0053      0.0053      0.0150
+time-flow               0.1169      0.0064      0.2257      0.0597      0.0025      0.0047      0.0026
+uuid                    0.0475      0.0109      0.0861      0.0474      0.0067      0.0108      0.0171
+string-ops              0.0334      0.0053      0.0151      0.0133      0.0036      0.0037      0.0045
+map-words               0.1024      0.0073      0.0197      0.0139      0.0032      0.0043      0.0045
+```
+
+`peak_rss_mb`:
+
+```text
+workload          amber-interpreted amber-built      python        ruby         cpp          go        rust
+-----------------------------------------------------------------------------------------------------------
+arithmetic                 4.4         1.4         8.4        11.9         1.3         3.9         1.5
+calls-collections          5.7         1.5         8.7        12.0         1.3         4.0         1.5
+sha-digest                 5.0         1.8         9.1        21.6         1.6         6.1         1.8
+json                       9.8         1.9         9.8        13.4         1.4         8.9         1.6
+codecs                    11.9         1.6         9.7        12.6         1.4         4.8         1.6
+secure-random              7.2         1.7        10.9        13.1         1.4         4.8         1.6
+time-flow                  5.5         1.7        12.8        13.5         1.4         4.1         1.5
+uuid                       8.6         1.7        10.9        13.5         1.4         9.1         1.6
+string-ops                16.9         1.7         8.4        12.7         1.5         5.0         1.7
+map-words                  6.5         2.1         8.5        12.2         1.4         4.4         1.8
+```
+
+Reading notes:
+
+- Every amber-built row improved against the 2026-07-04 table; the largest
+  moves are time-flow (0.0216 to 0.0064, now 2.6x the C++ best and 1.4x the
+  Go best instead of 7.7x/4.4x), string-ops (0.0110 to 0.0053), codecs
+  (0.0110 to 0.0068), and calls-collections (0.0078 to 0.0045). json keeps
+  beating Go, uuid matches Go and beats Rust, and secure-random beats Rust
+  (same `arc4random_buf` reason as before).
+- The amber-built peak-RSS column is now flat at 1.4-2.1 MB — the same band
+  as C++ and Rust — instead of scaling with workload allocation volume
+  (previously up to 13.9 MB). Memory is proportional to the live set: a
+  100x-iteration time-flow variant peaks at 4.1 MB where the pre-change
+  binary peaked at 1.32 GB, and the ~38% of wall time that binary spent
+  freeing the arena inside `exit()` is gone.
+- Remaining gaps vs the C++ row are concentrated in the ~2 ms fixed process
+  floor (an empty Amber executable runs ~2.7 ms vs ~2.1 ms for an empty C++
+  binary under this measurement, and the zero-iteration workload floors are
+  ~3.0-3.4 ms) plus per-value boxing on the time-flow/json hot paths. Net of
+  each language's floor, amber-built compute is within ~2x of C++ on eight
+  of ten workloads.
+
 ## Optimized full-suite rerun with Rust and the new workloads (2026-07-04)
 
 Darwin arm64, `go version go1.26.4 darwin/arm64`, `rustc 1.96.0` (Homebrew),
@@ -140,6 +221,10 @@ small-map name indexes, native JSON integer parsing, and direct native JSON
 object-entry construction, using a fresh build in
 `/private/tmp/amber_polyglot_json_inlineidx_intparse_directobj_20260704_02` and
 10 repeats with Ruby 4.0.5 from RVM.
+The `time-flow` row was refreshed after generated native Time selector enums
+and a native UTC field cache, using a fresh build in
+`/private/tmp/amber_polyglot_timeflow_selector_enum_20260705_02` followed by a
+warm `--no-build` 10-repeat timing run with Ruby 4.0.5 from RVM.
 
 `best_s` (best of 10):
 
@@ -152,7 +237,7 @@ sha-digest              0.0467      0.0140      0.0226      0.0460      0.0121  
 json                    0.0329      0.0117      0.0425      0.0221      0.0041      0.0143      0.0054
 codecs                  0.0411      0.0110      0.0255      0.0196      0.0055      0.0039      0.0048
 secure-random           0.0259      0.0105      0.0504      0.0267      0.0061      0.0061      0.0167
-time-flow               0.1205      0.0216      0.2423      0.0658      0.0031      0.0052      0.0031
+time-flow               0.1196      0.0106      0.2381      0.0643      0.0030      0.0051      0.0030
 uuid                    0.0479      0.0116      0.0879      0.0514      0.0070      0.0109      0.0175
 string-ops              0.0337      0.0110      0.0156      0.0167      0.0043      0.0041      0.0049
 map-words               0.1027      0.0074      0.0205      0.0171      0.0033      0.0046      0.0047
@@ -169,7 +254,7 @@ sha-digest                 5.0         3.3         9.1        21.6         1.6  
 json                       9.9        10.3         9.8        13.5         1.4         8.9         1.6
 codecs                    11.9         8.4         9.7        12.7         1.4         4.7         1.6
 secure-random              7.2         4.2        10.8        13.1         1.4         4.8         1.7
-time-flow                  5.5        13.9        12.8        13.3         1.4         4.0         1.6
+time-flow                  5.5        13.9        12.7        13.2         1.4         4.0         1.6
 uuid                       8.6         5.5        11.0        13.5         1.4         9.2         1.6
 string-ops                16.9        11.6         8.4        12.7         1.5         5.2         1.7
 map-words                  6.5         2.6         8.5        12.3         1.4         4.4         1.8
@@ -244,22 +329,23 @@ cpp                    3     0.0080     0.0076          1.4            1040000
 go                     3     0.0126     0.0113          9.0            1040000
 ```
 
-Latest local `time-flow` warm rerun on 2026-06-18 (Darwin arm64,
-`go version go1.26.4 darwin/arm64`):
+Latest local `time-flow` warm rerun on 2026-07-05 (Darwin arm64,
+`go version go1.26.4 darwin/arm64`, Ruby 4.0.5 from RVM):
 
 ```sh
-python3 bench/polyglot/run_benchmark.py --workload time-flow --repeats 10 --no-build
+env PATH=/Users/slowpilot/.rvm/wrappers/ruby-4.0.5:/Users/slowpilot/.rvm/gems/ruby-4.0.5/bin:/Users/slowpilot/.rvm/rubies/ruby-4.0.5/bin:$PATH python3 bench/polyglot/run_benchmark.py --workload time-flow --repeats 10 --build-dir /private/tmp/amber_polyglot_timeflow_selector_enum_20260705_02 --no-build
 ```
 
 ```text
 program             runs     mean_s     best_s  peak_rss_mb           checksum
 ----------------------------------------------------------------------------------
-amber-interpreted     10     0.1026     0.1010          5.0          110397732
-amber-built           10     0.0183     0.0181         11.3          110397732
-python                10     0.2758     0.2411         18.8          110397732
-ruby                  10     0.0640     0.0630         13.4          110397732
-cpp                   10     0.0034     0.0031          1.4          110397732
-go                    10     0.0059     0.0051          4.1          110397732
+amber-interpreted     10     0.1220     0.1196          5.5          110397732
+amber-built           10     0.0111     0.0106         13.9          110397732
+python                10     0.2407     0.2381         12.7          110397732
+ruby                  10     0.0651     0.0643         13.2          110397732
+cpp                   10     0.0030     0.0030          1.4          110397732
+go                    10     0.0052     0.0051          4.0          110397732
+rust                  10     0.0031     0.0030          1.6          110397732
 ```
 
 Latest local full-suite warm rerun on 2026-06-17 (Darwin arm64,

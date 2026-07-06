@@ -1410,6 +1410,46 @@ bool native_cpp_time_nullary_selector(const std::string &selector) {
          selector == "total_nanoseconds";
 }
 
+std::string native_cpp_time_selector_enum(const std::string &selector) {
+  if (selector == "nanosecond") return "NativeTimeSelector::Nanosecond";
+  if (selector == "nanoseconds") return "NativeTimeSelector::Nanoseconds";
+  if (selector == "microsecond") return "NativeTimeSelector::Microsecond";
+  if (selector == "microseconds") return "NativeTimeSelector::Microseconds";
+  if (selector == "millisecond") return "NativeTimeSelector::Millisecond";
+  if (selector == "milliseconds") return "NativeTimeSelector::Milliseconds";
+  if (selector == "second") return "NativeTimeSelector::Second";
+  if (selector == "seconds") return "NativeTimeSelector::Seconds";
+  if (selector == "minute") return "NativeTimeSelector::Minute";
+  if (selector == "minutes") return "NativeTimeSelector::Minutes";
+  if (selector == "hour") return "NativeTimeSelector::Hour";
+  if (selector == "hours") return "NativeTimeSelector::Hours";
+  if (selector == "day") return "NativeTimeSelector::Day";
+  if (selector == "days") return "NativeTimeSelector::Days";
+  if (selector == "week") return "NativeTimeSelector::Week";
+  if (selector == "weeks") return "NativeTimeSelector::Weeks";
+  if (selector == "month") return "NativeTimeSelector::Month";
+  if (selector == "months") return "NativeTimeSelector::Months";
+  if (selector == "year") return "NativeTimeSelector::Year";
+  if (selector == "years") return "NativeTimeSelector::Years";
+  if (selector == "iso8601") return "NativeTimeSelector::Iso8601";
+  if (selector == "to_str") return "NativeTimeSelector::ToStr";
+  if (selector == "inspect") return "NativeTimeSelector::Inspect";
+  if (selector == "unix_seconds") return "NativeTimeSelector::UnixSeconds";
+  if (selector == "unix_milliseconds") {
+    return "NativeTimeSelector::UnixMilliseconds";
+  }
+  if (selector == "unix_nanoseconds") {
+    return "NativeTimeSelector::UnixNanoseconds";
+  }
+  if (selector == "weekday") return "NativeTimeSelector::Weekday";
+  if (selector == "yearday") return "NativeTimeSelector::Yearday";
+  if (selector == "fixed?") return "NativeTimeSelector::FixedPredicate";
+  if (selector == "total_nanoseconds") {
+    return "NativeTimeSelector::TotalNanoseconds";
+  }
+  throw std::logic_error("unsupported native Time selector: " + selector);
+}
+
 bool native_cpp_uuid_nullary_selector(const std::string &selector) {
   return selector == "to_str" || selector == "inspect" || selector == "version";
 }
@@ -1441,6 +1481,27 @@ bool native_cpp_benchmark_selector(const std::string &selector,
   if (selector == "format" || selector == "table" || selector == "pretty" ||
       selector == "to_map" || selector == "to_json" || selector == "map") {
     return pos_count <= 1U;
+  }
+  if (selector == "find") {
+    return pos_count == 1U;
+  }
+  if (selector == "label" || selector == "kind" || selector == "data" ||
+      selector == "value" || selector == "elapsed" ||
+      selector == "elapsed_ns" || selector == "iterations" ||
+      selector == "samples" || selector == "per_iteration" ||
+      selector == "per_iteration_ns" || selector == "mean" ||
+      selector == "mean_ns" || selector == "min" || selector == "min_ns" ||
+      selector == "max" || selector == "max_ns" || selector == "p50" ||
+      selector == "p50_ns" || selector == "p90" || selector == "p90_ns" ||
+      selector == "p95" || selector == "p95_ns" || selector == "p99" ||
+      selector == "p99_ns" || selector == "ops_per_second" ||
+      selector == "sample_times" || selector == "sample_ns" ||
+      selector == "cases" || selector == "fastest" ||
+      selector == "slowest" || selector == "relative" ||
+      selector == "total" || selector == "total_ns" ||
+      selector == "spans" || selector == "summary" ||
+      selector == "inspect") {
+    return pos_count == 0U;
   }
   return (selector == "from_map" || selector == "from_json") && pos_count == 1U;
 }
@@ -2369,7 +2430,7 @@ bool native_cpp_code_uses_local_capture_cells(
   return false;
 }
 
-enum class NativeScalarKind { Unknown, Integer, Float };
+enum class NativeScalarKind { Unknown, Integer, Float, Bool };
 
 struct NativeScalarFlow {
   std::vector<std::vector<NativeScalarKind>> at_pc;
@@ -2461,7 +2522,9 @@ NativeScalarKind native_cpp_numeric_binary_result_kind(
     amber::bytecode::Opcode opcode, NativeScalarKind lhs,
     NativeScalarKind rhs) {
   if (native_cpp_opcode_bool_compare(opcode)) {
-    return NativeScalarKind::Unknown;
+    return native_cpp_scalar_numeric(lhs) && native_cpp_scalar_numeric(rhs)
+               ? NativeScalarKind::Bool
+               : NativeScalarKind::Unknown;
   }
   if (native_cpp_opcode_numeric_cmp(opcode)) {
     return native_cpp_scalar_numeric(lhs) && native_cpp_scalar_numeric(rhs)
@@ -2485,7 +2548,8 @@ NativeScalarKind native_cpp_numeric_binary_result_kind(
 NativeScalarKind native_cpp_numeric_k_result_kind(
     amber::bytecode::Opcode opcode, NativeScalarKind lhs) {
   if (native_cpp_opcode_bool_compare(opcode)) {
-    return NativeScalarKind::Unknown;
+    return native_cpp_scalar_numeric(lhs) ? NativeScalarKind::Bool
+                                          : NativeScalarKind::Unknown;
   }
   if (native_cpp_opcode_numeric_cmp(opcode)) {
     return native_cpp_scalar_numeric(lhs) ? NativeScalarKind::Integer
@@ -2645,8 +2709,10 @@ NativeScalarFlow native_cpp_scalar_registers(
       set_dst(native_cpp_numeric_k_result_kind(instruction.opcode,
                                                reg_kind(1)));
       break;
-    case Opcode::LoadNull:
     case Opcode::LoadBool:
+      set_dst(NativeScalarKind::Bool);
+      break;
+    case Opcode::LoadNull:
     case Opcode::GetLast:
     case Opcode::MakeList:
     case Opcode::MakeSet:
@@ -2976,6 +3042,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                : native_cpp_live_registers_at_pc(code);
   std::vector<bool> int_lane_used(code.reg_count, false);
   std::vector<bool> float_lane_used(code.reg_count, false);
+  std::vector<bool> bool_lane_used(code.reg_count, false);
   if (!uses_local_capture_cells) {
     for (const std::vector<NativeScalarKind> &state : scalar_flow.at_pc) {
       for (std::size_t reg = 0; reg < state.size(); ++reg) {
@@ -2983,6 +3050,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
           int_lane_used[reg] = true;
         } else if (state[reg] == NativeScalarKind::Float) {
           float_lane_used[reg] = true;
+        } else if (state[reg] == NativeScalarKind::Bool) {
+          bool_lane_used[reg] = true;
         }
       }
     }
@@ -2992,6 +3061,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
           int_lane_used[reg] = true;
         } else if (state[reg] == NativeScalarKind::Float) {
           float_lane_used[reg] = true;
+        } else if (state[reg] == NativeScalarKind::Bool) {
+          bool_lane_used[reg] = true;
         }
       }
     }
@@ -3007,6 +3078,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
   };
   const auto float_lane_expr = [](std::uint32_t reg) {
     return "freg_" + std::to_string(reg);
+  };
+  const auto bool_lane_expr = [](std::uint32_t reg) {
+    return "breg_" + std::to_string(reg);
   };
   const auto write_reg_stmt = [&](std::uint32_t reg, const std::string &expr) {
     if (uses_local_capture_cells) {
@@ -3033,6 +3107,15 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       write_reg_stmt(reg, "NativeValue::floating(" + expr + ")");
     }
   };
+  const auto write_bool_reg_stmt = [&](std::uint32_t reg,
+                                       const std::string &expr) {
+    if (!uses_local_capture_cells && reg < bool_lane_used.size() &&
+        bool_lane_used[reg]) {
+      out << "  " << bool_lane_expr(reg) << " = " << expr << ";\n";
+    } else {
+      write_reg_stmt(reg, "NativeValue::boolean(" + expr + ")");
+    }
+  };
   const auto scalar_kind = [](std::uint32_t reg,
                               const std::vector<NativeScalarKind> &state) {
     return reg < state.size() ? state[reg] : NativeScalarKind::Unknown;
@@ -3045,6 +3128,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       if (state[reg] == NativeScalarKind::Float) {
         return "NativeValue::floating(" + float_lane_expr(reg) + ")";
+      }
+      if (state[reg] == NativeScalarKind::Bool) {
+        return "NativeValue::boolean(" + bool_lane_expr(reg) + ")";
       }
     }
     return read_frame_reg_expr(reg);
@@ -3069,8 +3155,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     }
     return "as_double_numeric(" + boxed_reg_expr(reg, state) + ")";
   };
-  const auto native_bool_expr = [](const std::string &expr) {
-    return "NativeValue::boolean(" + expr + ")";
+  const auto truthy_reg_expr = [&](std::uint32_t reg,
+                                   const std::vector<NativeScalarKind> &state) {
+    if (!uses_local_capture_cells && reg < state.size() &&
+        state[reg] == NativeScalarKind::Bool) {
+      return bool_lane_expr(reg);
+    }
+    return "truthy(" + boxed_reg_expr(reg, state) + ")";
   };
   out << "static NativeValue " << fn
       << "(std::initializer_list<NativeValue> args, "
@@ -3102,6 +3193,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
       if (float_lane_used[reg]) {
         out << "  double " << float_lane_expr(reg) << " = 0.0;\n";
+      }
+      if (bool_lane_used[reg]) {
+        out << "  bool " << bool_lane_expr(reg) << " = false;\n";
       }
     }
   }
@@ -3135,6 +3229,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             write_reg_stmt(static_cast<std::uint32_t>(reg),
                            "NativeValue::floating(" +
                                float_lane_expr(static_cast<std::uint32_t>(reg)) +
+                               ")");
+          } else if (from[reg] == NativeScalarKind::Bool) {
+            write_reg_stmt(static_cast<std::uint32_t>(reg),
+                           "NativeValue::boolean(" +
+                               bool_lane_expr(static_cast<std::uint32_t>(reg)) +
                                ")");
           }
         }
@@ -3199,8 +3298,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t value = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &value);
-      write_reg_stmt(dst, std::string("NativeValue::boolean(") +
-                              (value != 0U ? "true" : "false") + ")");
+      write_bool_reg_stmt(dst, value != 0U ? "true" : "false");
       emit_next(pc, next_scalar_state);
       break;
     }
@@ -3214,6 +3312,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_int_reg_stmt(dst, int_reg_expr(src, pc_scalar_state));
       } else if (src_kind == NativeScalarKind::Float) {
         write_float_reg_stmt(dst, double_reg_expr(src, pc_scalar_state));
+      } else if (src_kind == NativeScalarKind::Bool &&
+                 !uses_local_capture_cells) {
+        write_bool_reg_stmt(dst, bool_lane_expr(src));
       } else {
         write_reg_stmt(dst, read_reg_expr(src));
       }
@@ -4043,8 +4144,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_type_matches(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "to_json") {
-        write_reg_stmt(dst, "native_json_generate_value(" +
-                                read_reg_expr(recv) + ", false)");
+        write_reg_stmt(dst,
+                       "native_benchmark_send(" + read_reg_expr(recv) +
+                           ", \"to_json\", " + pos_args_expr(0U) + ", " +
+                           kw_args_expr() + ", NativeValue::nullv(), false)");
       } else if (selector == "utc") {
         const auto kw_name = [&](std::uint32_t symbol_id) -> std::string {
           return symbol_id < module.symbols.size() ? module.symbols[symbol_id]
@@ -4272,9 +4375,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_secure_random_int(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (native_cpp_time_nullary_selector(selector)) {
+        const std::string selector_enum = native_cpp_time_selector_enum(selector);
         write_reg_stmt(dst, "native_time_nullary(" + read_reg_expr(recv) +
-                                ", native_hex_to_string(\"" +
-                                string_to_hex_text(selector) + "\"))");
+                                ", " + selector_enum + ")");
       }
       emit_next(pc, next_scalar_state);
       break;
@@ -4390,17 +4493,17 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         const std::string lhs_cmp = proven_int_operands ? lhs_int : lhs_double;
         const std::string rhs_cmp = proven_int_operands ? rhs_int : rhs_double;
         if (instruction.opcode == Opcode::ILe) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " <= " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " <= " + rhs_cmp);
         } else if (instruction.opcode == Opcode::IGe) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " >= " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " >= " + rhs_cmp);
         } else if (instruction.opcode == Opcode::IEq) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " == " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " == " + rhs_cmp);
         } else if (instruction.opcode == Opcode::INe) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " != " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " != " + rhs_cmp);
         } else if (instruction.opcode == Opcode::ILt) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " < " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " < " + rhs_cmp);
         } else {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " > " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " > " + rhs_cmp);
         }
       } else if (instruction.opcode == Opcode::ICmp) {
         if (proven_int_operands) {
@@ -4583,17 +4686,17 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         const std::string lhs_cmp = proven_int_lhs ? lhs_int : lhs_double;
         const std::string rhs_cmp = proven_int_lhs ? rhs_int : rhs_double;
         if (instruction.opcode == Opcode::ILeK) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " <= " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " <= " + rhs_cmp);
         } else if (instruction.opcode == Opcode::IGeK) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " >= " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " >= " + rhs_cmp);
         } else if (instruction.opcode == Opcode::IEqK) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " == " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " == " + rhs_cmp);
         } else if (instruction.opcode == Opcode::INeK) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " != " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " != " + rhs_cmp);
         } else if (instruction.opcode == Opcode::ILtK) {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " < " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " < " + rhs_cmp);
         } else {
-          write_reg_stmt(dst, native_bool_expr(lhs_cmp + " > " + rhs_cmp));
+          write_bool_reg_stmt(dst, lhs_cmp + " > " + rhs_cmp);
         }
       } else if (instruction.opcode == Opcode::ICmpK) {
         if (proven_int_lhs) {
@@ -4697,11 +4800,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       operand_u32_value(instruction, 0, &cond);
       operand_u32_value(instruction, 1, &target);
       if (instruction.opcode == Opcode::JumpIfTrue) {
-        out << "  if (truthy(" << read_reg_expr(cond) << ")) {\n";
+        out << "  if (" << truthy_reg_expr(cond, pc_scalar_state) << ") {\n";
         emit_goto_pc(target, next_scalar_state);
         out << "  }\n";
       } else if (instruction.opcode == Opcode::JumpIfFalse) {
-        out << "  if (!truthy(" << read_reg_expr(cond) << ")) {\n";
+        out << "  if (!" << truthy_reg_expr(cond, pc_scalar_state) << ") {\n";
         emit_goto_pc(target, next_scalar_state);
         out << "  }\n";
       } else {
@@ -4850,6 +4953,22 @@ std::string emit_module_strings_cpp(const amber::bytecode::BcModule &module) {
   out << "  table.push_back(text);\n";
   out << "  index[hash].push_back(id);\n";
   out << "  return id;\n";
+  out << "}\n\n";
+  // No-insert probe used by map read paths so absent lookups neither grow
+  // the table nor pay the insert.
+  out << "static std::optional<std::int64_t> native_intern_string_lookup("
+         "const std::string &text) {\n";
+  out << "  auto &index = native_string_index();\n";
+  out << "  const std::size_t hash = std::hash<std::string>{}(text);\n";
+  out << "  std::vector<std::string> &table = native_strings();\n";
+  out << "  const auto found = index.find(hash);\n";
+  out << "  if (found != index.end()) {\n";
+  out << "    for (const std::int64_t id : found->second) {\n";
+  out << "      if (id >= 0 && static_cast<std::size_t>(id) < table.size() && "
+         "table[static_cast<std::size_t>(id)] == text) return id;\n";
+  out << "    }\n";
+  out << "  }\n";
+  out << "  return std::nullopt;\n";
   out << "}\n\n";
   out << "static const char *kModuleSymbolHex[] = {\n";
   for (const std::string &text : module.symbols) {
@@ -5111,6 +5230,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include <sstream>\n";
   out << "#include <stdexcept>\n";
   out << "#include <string>\n";
+  out << "#include <string_view>\n";
   out << "#include <unordered_map>\n";
   out << "#include <utility>\n";
   out << "#include <vector>\n\n";
@@ -5169,13 +5289,23 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "DigestModule, BenchmarkModule, UrlModule, ArgParserModule, FsModule, SecureRandomModule, UuidModule, "
          "RangeModule, TimeModule, "
          "TimePeriodModule, Bytes, List, Tuple, Set, Map, Range, ArgParser, "
-         "FsPath, Uuid, Time, TimePeriod, Closure };\n";
+         "FsPath, Uuid, Time, TimePeriod, HeapString, Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
   out << "  union { std::int64_t scalar_value; double float_value; "
          "void *heap_value; };\n";
   out << "  NativeValue() : tag(Tag::Null), scalar_value(0) {}\n";
+  // Heap payloads are intrusively refcounted; copies retain, moves steal,
+  // destruction releases. Definitions follow the payload struct definitions.
+  out << "  NativeValue(const NativeValue &other);\n";
+  out << "  NativeValue(NativeValue &&other) noexcept;\n";
+  out << "  NativeValue &operator=(const NativeValue &other);\n";
+  out << "  NativeValue &operator=(NativeValue &&other) noexcept;\n";
+  out << "  ~NativeValue();\n";
+  out << "  void copy_from(const NativeValue &other);\n";
+  out << "  void take_from(NativeValue &other);\n";
+  out << "  void destroy();\n";
   out << "  static NativeValue nullv() { return {}; }\n";
   out << "  static NativeValue boolean(bool value) { NativeValue out; out.tag "
          "= "
@@ -5241,6 +5371,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue time_period_module() { NativeValue out; "
          "out.tag = Tag::TimePeriodModule; out.scalar_value = 0; return "
          "out; }\n";
+  out << "  static NativeValue heap_string(std::string text);\n";
   out << "  static NativeValue bytes(std::string value);\n";
   out << "  static NativeValue list(std::vector<NativeValue> items);\n";
   out << "  static NativeValue tuple(std::vector<NativeValue> items);\n";
@@ -5259,28 +5390,59 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "amber::runtime::RuntimeTimePeriodValue value);\n";
   out << "  static NativeValue closure(NativeClosure *value);\n";
   out << "};\n\n";
-  out << "struct NativeBytes { std::string bytes; };\n";
-  out << "struct NativeList { std::vector<NativeValue> items; };\n";
-  out << "struct NativeTuple { std::vector<NativeValue> items; };\n";
-  out << "struct NativeSet { std::vector<NativeValue> items; };\n";
+  // Every refcounted payload starts with its rc so retain/release can use a
+  // uniform header instead of a per-type switch on the hot path.
+  out << "struct NativeRcHeader { std::uint32_t rc = 1; };\n";
+  // Per-type free list: dead payload shells are recycled instead of paying a
+  // malloc/free round-trip per value. Growth is bounded by the peak live
+  // count of each type. Single-threaded like the rest of the native lane.
+  out << "#define AMBER_NATIVE_POOL_NEW \\\n";
+  out << "  static void *&native_pool_head() { "
+         "static void *head = nullptr; return head; } \\\n";
+  out << "  static void *operator new(std::size_t size) { \\\n";
+  out << "    void *&head = native_pool_head(); \\\n";
+  out << "    if (head != nullptr) { \\\n";
+  out << "      void *taken = head; \\\n";
+  out << "      head = *static_cast<void **>(taken); \\\n";
+  out << "      return taken; \\\n";
+  out << "    } \\\n";
+  out << "    return ::operator new(size); \\\n";
+  out << "  } \\\n";
+  out << "  static void operator delete(void *pointer) noexcept { \\\n";
+  out << "    void *&head = native_pool_head(); \\\n";
+  out << "    *static_cast<void **>(pointer) = head; \\\n";
+  out << "    head = pointer; \\\n";
+  out << "  }\n";
+  out << "struct NativeBytes : NativeRcHeader { std::string bytes; AMBER_NATIVE_POOL_NEW };\n";
+  out << "struct NativeList : NativeRcHeader { "
+         "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
+  out << "struct NativeTuple : NativeRcHeader { "
+         "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
+  out << "struct NativeSet : NativeRcHeader { "
+         "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
   out << "static constexpr std::size_t kNativeMapInlineNameIndexCapacity = 8;\n";
-  out << "struct NativeMap {\n";
+  out << "struct NativeMap : NativeRcHeader {\n";
   out << "  std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
   out << "  std::array<std::pair<std::int64_t, std::size_t>, "
          "kNativeMapInlineNameIndexCapacity> inline_name_index{};\n";
   out << "  std::size_t inline_name_index_size = 0;\n";
   out << "  std::unordered_map<std::int64_t, std::size_t> name_index;\n";
   out << "  bool strict = false;\n";
+  out << "  AMBER_NATIVE_POOL_NEW\n";
   out << "};\n";
-  out << "struct NativeRange {\n";
+  out << "struct NativeRange : NativeRcHeader {\n";
   out << "  std::int64_t start = 0;\n";
   out << "  std::int64_t finish = 0;\n";
   out << "  std::int64_t step = 1;\n";
   out << "  bool inclusive_end = true;\n";
   out << "};\n";
-  out << "struct NativeFsPath { std::string path; };\n";
+  out << "struct NativeFsPath : NativeRcHeader {\n";
+  out << "  std::string path;\n";
+  out << "  NativeFsPath() = default;\n";
+  out << "  explicit NativeFsPath(std::string p) : path(std::move(p)) {}\n";
+  out << "};\n";
   out << "enum class NativeArgValueType { Str, Int, Float, Bool, Symbol };\n";
-  out << "struct NativeArgParser {\n";
+  out << "struct NativeArgParser : NativeRcHeader {\n";
   out << "  enum class SpecKind { Option, Flag, Positional, Rest };\n";
   out << "  struct Spec {\n";
   out << "    SpecKind kind = SpecKind::Option;\n";
@@ -5303,24 +5465,118 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  bool add_help = true;\n";
   out << "  std::vector<Spec> specs;\n";
   out << "};\n";
+  // Time/TimePeriod/Uuid stay plain runtime value types in helper code;
+  // heap-stored instances carry their refcount in an explicit box.
+  out << "struct NativeTimeBox : NativeRcHeader {\n";
+  out << "  NativeTime value;\n";
+  out << "  explicit NativeTimeBox(NativeTime v) : value(std::move(v)) {}\n";
+  out << "  AMBER_NATIVE_POOL_NEW\n";
+  out << "};\n";
+  out << "struct NativeTimePeriodBox : NativeRcHeader {\n";
+  out << "  NativeTimePeriod value;\n";
+  out << "  explicit NativeTimePeriodBox(NativeTimePeriod v) : "
+         "value(std::move(v)) {}\n";
+  out << "  AMBER_NATIVE_POOL_NEW\n";
+  out << "};\n";
+  out << "struct NativeUuidBox : NativeRcHeader {\n";
+  out << "  NativeUuid value;\n";
+  out << "  explicit NativeUuidBox(NativeUuid v) : value(std::move(v)) {}\n";
+  out << "  AMBER_NATIVE_POOL_NEW\n";
+  out << "};\n";
+  // Dynamic string results live here; only module literals, symbols, and
+  // map-key canonicalization use the permanent intern table.
+  out << "struct NativeHeapString : NativeRcHeader {\n";
+  out << "  std::string text;\n";
+  out << "  NativeHeapString() = default;\n";
+  out << "  explicit NativeHeapString(std::string t) : text(std::move(t)) {}\n";
+  out << "  AMBER_NATIVE_POOL_NEW\n";
+  out << "};\n";
   out << "struct NativeCell { NativeValue value; };\n";
   out << "struct NativeClosure {\n";
   out << "  std::uint32_t code_id = 0;\n";
   out << "  std::vector<NativeCell *> captures;\n";
   out << "  NativeValue self = NativeValue::nullv();\n";
   out << "};\n\n";
+  out << R"AMBERCPP(// Refcounted tags are contiguous; the hot paths are a bit copy plus one
+// range test. Payload deletion is the only place that needs the type switch.
+inline bool native_value_tag_refcounted(NativeValue::Tag tag) {
+  return tag >= NativeValue::Tag::Bytes && tag <= NativeValue::Tag::HeapString;
+}
+inline bool native_value_is_string(const NativeValue &value) {
+  return value.tag == NativeValue::Tag::String ||
+         value.tag == NativeValue::Tag::HeapString;
+}
+static void native_value_delete_payload(NativeValue::Tag tag, void *payload);
+AMBER_NATIVE_ALWAYS_INLINE void NativeValue::copy_from(const NativeValue &other) {
+  tag = other.tag;
+  heap_value = other.heap_value;
+  if (native_value_tag_refcounted(tag) && heap_value != nullptr) {
+    ++static_cast<NativeRcHeader *>(heap_value)->rc;
+  }
+}
+AMBER_NATIVE_ALWAYS_INLINE void NativeValue::take_from(NativeValue &other) {
+  tag = other.tag;
+  heap_value = other.heap_value;
+  other.tag = Tag::Null;
+  other.scalar_value = 0;
+}
+AMBER_NATIVE_ALWAYS_INLINE void NativeValue::destroy() {
+  if (native_value_tag_refcounted(tag) && heap_value != nullptr) {
+    auto *header = static_cast<NativeRcHeader *>(heap_value);
+    if (--header->rc == 0) native_value_delete_payload(tag, heap_value);
+  }
+}
+AMBER_NATIVE_ALWAYS_INLINE NativeValue::NativeValue(const NativeValue &other) { copy_from(other); }
+AMBER_NATIVE_ALWAYS_INLINE NativeValue::NativeValue(NativeValue &&other) noexcept {
+  take_from(other);
+}
+AMBER_NATIVE_ALWAYS_INLINE NativeValue &NativeValue::operator=(const NativeValue &other) {
+  if (this == &other) return *this;
+  NativeValue retained(other);
+  destroy();
+  take_from(retained);
+  return *this;
+}
+AMBER_NATIVE_ALWAYS_INLINE NativeValue &NativeValue::operator=(NativeValue &&other) noexcept {
+  if (this == &other) return *this;
+  NativeValue stolen(std::move(other));
+  destroy();
+  take_from(stolen);
+  return *this;
+}
+AMBER_NATIVE_ALWAYS_INLINE NativeValue::~NativeValue() { destroy(); }
+static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
+  switch (tag) {
+    case NativeValue::Tag::Bytes:
+      delete static_cast<NativeBytes *>(payload); return;
+    case NativeValue::Tag::List:
+      delete static_cast<NativeList *>(payload); return;
+    case NativeValue::Tag::Tuple:
+      delete static_cast<NativeTuple *>(payload); return;
+    case NativeValue::Tag::Set:
+      delete static_cast<NativeSet *>(payload); return;
+    case NativeValue::Tag::Map:
+      delete static_cast<NativeMap *>(payload); return;
+    case NativeValue::Tag::Range:
+      delete static_cast<NativeRange *>(payload); return;
+    case NativeValue::Tag::ArgParser:
+      delete static_cast<NativeArgParser *>(payload); return;
+    case NativeValue::Tag::FsPath:
+      delete static_cast<NativeFsPath *>(payload); return;
+    case NativeValue::Tag::Uuid:
+      delete static_cast<NativeUuidBox *>(payload); return;
+    case NativeValue::Tag::Time:
+      delete static_cast<NativeTimeBox *>(payload); return;
+    case NativeValue::Tag::TimePeriod:
+      delete static_cast<NativeTimePeriodBox *>(payload); return;
+    case NativeValue::Tag::HeapString:
+      delete static_cast<NativeHeapString *>(payload); return;
+    default: return;
+  }
+}
+
+)AMBERCPP";
   out << "struct NativeArena {\n";
-  out << "  std::vector<std::unique_ptr<NativeBytes>> bytes;\n";
-  out << "  std::vector<std::unique_ptr<NativeList>> lists;\n";
-  out << "  std::vector<std::unique_ptr<NativeTuple>> tuples;\n";
-  out << "  std::vector<std::unique_ptr<NativeSet>> sets;\n";
-  out << "  std::vector<std::unique_ptr<NativeMap>> maps;\n";
-  out << "  std::vector<std::unique_ptr<NativeRange>> ranges;\n";
-  out << "  std::vector<std::unique_ptr<NativeArgParser>> argparsers;\n";
-  out << "  std::vector<std::unique_ptr<NativeFsPath>> fs_paths;\n";
-  out << "  std::vector<std::unique_ptr<NativeUuid>> uuids;\n";
-  out << "  std::vector<std::unique_ptr<NativeTime>> times;\n";
-  out << "  std::vector<std::unique_ptr<NativeTimePeriod>> periods;\n";
   out << "  std::vector<std::unique_ptr<NativeClosure>> closures;\n";
   out << "  std::vector<std::unique_ptr<NativeCell>> cells;\n";
   out << "};\n";
@@ -5331,8 +5587,23 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "const NativeValue &key, bool strict) {\n";
   out << "  if (strict) return std::nullopt;\n";
   out << "  if (key.tag == NativeValue::Tag::String) return key.scalar_value;\n";
+  out << "  if (key.tag == NativeValue::Tag::HeapString) return "
+         "native_intern_string(native_string_text(key));\n";
   out << "  if (key.tag == NativeValue::Tag::Symbol) return "
          "native_intern_string(native_symbol_text(key.scalar_value));\n";
+  out << "  return std::nullopt;\n";
+  out << "}\n";
+  // Read-side variant: never inserts. A nameable probe whose text is not in
+  // the intern table cannot match any stored nameable key, because stores
+  // intern every nameable key.
+  out << "static std::optional<std::int64_t> native_map_index_key_id_for_read("
+         "const NativeValue &key, bool strict) {\n";
+  out << "  if (strict) return std::nullopt;\n";
+  out << "  if (key.tag == NativeValue::Tag::String) return key.scalar_value;\n";
+  out << "  if (key.tag == NativeValue::Tag::HeapString) return "
+         "native_intern_string_lookup(native_string_text(key));\n";
+  out << "  if (key.tag == NativeValue::Tag::Symbol) return "
+         "native_intern_string_lookup(native_symbol_text(key.scalar_value));\n";
   out << "  return std::nullopt;\n";
   out << "}\n";
   out << "static std::optional<std::size_t> "
@@ -5372,38 +5643,43 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "    if (key_id.has_value()) map.name_index.emplace(*key_id, i);\n";
   out << "  }\n";
   out << "}\n\n";
+  out << "NativeValue NativeValue::heap_string(std::string text) {\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeHeapString(std::move(text));\n";
+  out << "  out.tag = Tag::HeapString; return out;\n";
+  out << "}\n";
   out << "NativeValue NativeValue::bytes(std::string value) {\n";
-  out << "  NativeValue out; out.tag = Tag::Bytes;\n";
-  out << "  auto bytes = std::make_unique<NativeBytes>();\n";
-  out << "  bytes->bytes = std::move(value); out.heap_value = bytes.get();\n";
-  out << "  native_arena.bytes.push_back(std::move(bytes)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  auto *bytes = new NativeBytes();\n";
+  out << "  bytes->bytes = std::move(value);\n";
+  out << "  out.heap_value = bytes; out.tag = Tag::Bytes; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::list(std::vector<NativeValue> items) {\n";
-  out << "  NativeValue out; out.tag = Tag::List;\n";
-  out << "  auto list = std::make_unique<NativeList>();\n";
-  out << "  list->items = std::move(items); out.heap_value = list.get();\n";
-  out << "  native_arena.lists.push_back(std::move(list)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  auto *list = new NativeList();\n";
+  out << "  list->items = std::move(items);\n";
+  out << "  out.heap_value = list; out.tag = Tag::List; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::tuple(std::vector<NativeValue> items) {\n";
-  out << "  NativeValue out; out.tag = Tag::Tuple;\n";
-  out << "  auto tuple = std::make_unique<NativeTuple>();\n";
-  out << "  tuple->items = std::move(items); out.heap_value = tuple.get();\n";
-  out << "  native_arena.tuples.push_back(std::move(tuple)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  auto *tuple = new NativeTuple();\n";
+  out << "  tuple->items = std::move(items);\n";
+  out << "  out.heap_value = tuple; out.tag = Tag::Tuple; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::set(std::vector<NativeValue> items) {\n";
-  out << "  NativeValue out; out.tag = Tag::Set;\n";
-  out << "  auto set = std::make_unique<NativeSet>();\n";
-  out << "  set->items = std::move(items); out.heap_value = set.get();\n";
-  out << "  native_arena.sets.push_back(std::move(set)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  auto *set = new NativeSet();\n";
+  out << "  set->items = std::move(items);\n";
+  out << "  out.heap_value = set; out.tag = Tag::Set; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::map_entries("
          "std::vector<std::pair<NativeValue, NativeValue>> entries, "
          "bool strict) {\n";
-  out << "  NativeValue out; out.tag = Tag::Map;\n";
-  out << "  auto map = std::make_unique<NativeMap>();\n";
+  out << "  NativeValue out;\n";
+  out << "  auto *map = new NativeMap();\n";
   out << "  map->entries = std::move(entries); map->strict = strict; "
-         "native_map_rebuild_index(*map); out.heap_value = map.get();\n";
-  out << "  native_arena.maps.push_back(std::move(map)); return out;\n";
+         "native_map_rebuild_index(*map);\n";
+  out << "  out.heap_value = map; out.tag = Tag::Map; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::map(std::vector<std::pair<std::string, "
          "NativeValue>> entries) {\n";
@@ -5417,43 +5693,37 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return NativeValue::map_entries(std::move(converted), false);\n";
   out << "}\n";
   out << "NativeValue NativeValue::range(NativeRange value) {\n";
-  out << "  NativeValue out; out.tag = Tag::Range;\n";
-  out << "  auto range = std::make_unique<NativeRange>(value);\n";
-  out << "  out.heap_value = range.get();\n";
-  out << "  native_arena.ranges.push_back(std::move(range)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeRange(value);\n";
+  out << "  out.tag = Tag::Range; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::arg_parser(NativeArgParser value) {\n";
-  out << "  NativeValue out; out.tag = Tag::ArgParser;\n";
-  out << "  auto parser = std::make_unique<NativeArgParser>(std::move(value));\n";
-  out << "  out.heap_value = parser.get();\n";
-  out << "  native_arena.argparsers.push_back(std::move(parser)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeArgParser(std::move(value));\n";
+  out << "  out.tag = Tag::ArgParser; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::fs_path(NativeFsPath value) {\n";
-  out << "  NativeValue out; out.tag = Tag::FsPath;\n";
-  out << "  auto path = std::make_unique<NativeFsPath>(std::move(value));\n";
-  out << "  out.heap_value = path.get();\n";
-  out << "  native_arena.fs_paths.push_back(std::move(path)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeFsPath(std::move(value));\n";
+  out << "  out.tag = Tag::FsPath; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::uuid(amber::runtime::RuntimeUuidValue "
          "value) {\n";
-  out << "  NativeValue out; out.tag = Tag::Uuid;\n";
-  out << "  auto uuid = std::make_unique<NativeUuid>(value);\n";
-  out << "  out.heap_value = uuid.get();\n";
-  out << "  native_arena.uuids.push_back(std::move(uuid)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeUuidBox{value};\n";
+  out << "  out.tag = Tag::Uuid; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::time(amber::runtime::RuntimeTimeValue "
          "value) {\n";
-  out << "  NativeValue out; out.tag = Tag::Time;\n";
-  out << "  auto time = std::make_unique<NativeTime>(value);\n";
-  out << "  out.heap_value = time.get();\n";
-  out << "  native_arena.times.push_back(std::move(time)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeTimeBox{value};\n";
+  out << "  out.tag = Tag::Time; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::time_period("
          "amber::runtime::RuntimeTimePeriodValue value) {\n";
-  out << "  NativeValue out; out.tag = Tag::TimePeriod;\n";
-  out << "  auto period = std::make_unique<NativeTimePeriod>(value);\n";
-  out << "  out.heap_value = period.get();\n";
-  out << "  native_arena.periods.push_back(std::move(period)); return out;\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeTimePeriodBox{value};\n";
+  out << "  out.tag = Tag::TimePeriod; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::closure(NativeClosure *value) {\n";
   out << "  NativeValue out; out.tag = Tag::Closure;\n";
@@ -5593,18 +5863,19 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "static const NativeUuid &as_uuid(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Uuid || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
-  out << "  return *static_cast<NativeUuid *>(value.heap_value);\n";
+  out << "  return static_cast<NativeUuidBox *>(value.heap_value)->value;\n";
   out << "}\n";
   out << "static const NativeTime &as_time(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Time || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
-  out << "  return *static_cast<NativeTime *>(value.heap_value);\n";
+  out << "  return static_cast<NativeTimeBox *>(value.heap_value)->value;\n";
   out << "}\n";
   out << "static const NativeTimePeriod &as_time_period("
          "const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::TimePeriod || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
-  out << "  return *static_cast<NativeTimePeriod *>(value.heap_value);\n";
+  out << "  return static_cast<NativeTimePeriodBox *>"
+         "(value.heap_value)->value;\n";
   out << "}\n";
   out << "static NativeClosure *as_closure(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Closure || "
@@ -5664,11 +5935,29 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "native_range_items(value);\n";
   out << "  throw NativeBailout();\n";
   out << "}\n";
+  // Borrowing view for read-only paths with no callbacks between borrow and
+  // use; Range has no backing vector and returns nullptr (callers fall back
+  // to the materializing copy).
+  out << "static const std::vector<NativeValue> *native_sequence_items_view("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::List) return "
+         "&as_list(value).items;\n";
+  out << "  if (value.tag == NativeValue::Tag::Tuple) return "
+         "&as_tuple(value).items;\n";
+  out << "  if (value.tag == NativeValue::Tag::Set) return "
+         "&as_set(value).items;\n";
+  out << "  return nullptr;\n";
+  out << "}\n";
   out << "static NativeValue native_list_at(const NativeValue &value, "
          "const NativeValue &index_value) {\n";
   out << "  const std::int64_t raw_index = as_int(index_value);\n";
   out << "  if (value.tag == NativeValue::Tag::Range && raw_index < 0) "
          "throw NativeBailout();\n";
+  out << "  if (const std::vector<NativeValue> *items = "
+         "native_sequence_items_view(value)) {\n";
+  out << "    return (*items)[native_sequence_index(raw_index, "
+         "items->size())];\n";
+  out << "  }\n";
   out << "  const std::vector<NativeValue> items = "
          "native_sequence_items_copy(value);\n";
   out << "  return items[native_sequence_index(raw_index, items.size())];\n";
@@ -5682,10 +5971,10 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return next_value;\n";
   out << "}\n";
   out << "static NativeValue native_count(const NativeValue &value) {\n";
-  out << "  if (value.tag == NativeValue::Tag::List || "
-         "value.tag == NativeValue::Tag::Tuple || "
-         "value.tag == NativeValue::Tag::Set || "
-         "value.tag == NativeValue::Tag::Range) return "
+  out << "  if (const std::vector<NativeValue> *items = "
+         "native_sequence_items_view(value)) return "
+         "NativeValue::integer(static_cast<std::int64_t>(items->size()));\n";
+  out << "  if (value.tag == NativeValue::Tag::Range) return "
          "NativeValue::integer(static_cast<std::int64_t>("
          "native_sequence_items_copy(value).size()));\n";
   out << "  if (value.tag == NativeValue::Tag::Map) return "
@@ -5698,8 +5987,14 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n";
   out << "static NativeValue native_list_first(const NativeValue &value, "
          "const NativeValue &count_value, bool has_count) {\n";
-  out << "  const std::vector<NativeValue> items = "
-         "native_sequence_items_copy(value);\n";
+  out << "  const std::vector<NativeValue> *view = "
+         "native_sequence_items_view(value);\n";
+  out << "  std::vector<NativeValue> materialized;\n";
+  out << "  if (view == nullptr) {\n";
+  out << "    materialized = native_sequence_items_copy(value);\n";
+  out << "    view = &materialized;\n";
+  out << "  }\n";
+  out << "  const std::vector<NativeValue> &items = *view;\n";
   out << "  if (!has_count) return items.empty() ? NativeValue::nullv() : "
          "items.front();\n";
   out << "  const std::int64_t raw_count = as_int(count_value);\n";
@@ -5759,7 +6054,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  case NativeValue::Tag::Bool: return NativeValue::bool_type();\n";
   out << "  case NativeValue::Tag::Integer: return NativeValue::int_type();\n";
   out << "  case NativeValue::Tag::Float: return NativeValue::float_type();\n";
-  out << "  case NativeValue::Tag::String: return NativeValue::str_type();\n";
+  out << "  case NativeValue::Tag::String:\n";
+  out << "  case NativeValue::Tag::HeapString: return "
+         "NativeValue::str_type();\n";
   out << "  case NativeValue::Tag::Symbol: return NativeValue::symbol_type();\n";
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
@@ -6008,15 +6305,30 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static const std::string &native_string_text(const NativeValue "
          "&value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::HeapString) {\n";
+  out << "    return static_cast<const NativeHeapString *>("
+         "value.heap_value)->text;\n";
+  out << "  }\n";
   out << "  return native_strings()[static_cast<std::size_t>("
          "value.scalar_value)];\n";
   out << "}\n\n";
+  out << "static bool native_string_text_equal(const NativeValue &lhs, "
+         "const NativeValue &rhs) {\n";
+  out << "  if (lhs.tag == NativeValue::Tag::String && "
+         "rhs.tag == NativeValue::Tag::String) {\n";
+  out << "    return lhs.scalar_value == rhs.scalar_value;\n";
+  out << "  }\n";
+  out << "  const std::string &lhs_text = native_string_text(lhs);\n";
+  out << "  const std::string &rhs_text = native_string_text(rhs);\n";
+  out << "  return lhs_text.size() == rhs_text.size() && "
+         "lhs_text == rhs_text;\n";
+  out << "}\n\n";
   out << "static NativeValue native_string_concat(const NativeValue &lhs, "
          "const NativeValue &rhs) {\n";
-  out << "  if (lhs.tag != NativeValue::Tag::String || "
-         "rhs.tag != NativeValue::Tag::String) throw NativeBailout();\n";
-  out << "  return NativeValue::string_ref(native_intern_string("
-         "native_string_text(lhs) + native_string_text(rhs)));\n";
+  out << "  if (!native_value_is_string(lhs) || "
+         "!native_value_is_string(rhs)) throw NativeBailout();\n";
+  out << "  return NativeValue::heap_string("
+         "native_string_text(lhs) + native_string_text(rhs));\n";
   out << "}\n\n";
   out << "static std::int64_t native_string_codepoint_count("
          "const std::string &text) {\n";
@@ -6028,18 +6340,18 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static NativeValue native_string_length(const NativeValue &value) "
          "{\n";
-  out << "  if (value.tag != NativeValue::Tag::String) throw "
+  out << "  if (!native_value_is_string(value)) throw "
          "NativeBailout();\n";
   out << "  return NativeValue::integer(native_string_codepoint_count("
          "native_string_text(value)));\n";
   out << "}\n\n";
   out << "static NativeValue native_length(const NativeValue &value) {\n";
-  out << "  if (value.tag == NativeValue::Tag::String) return "
+  out << "  if (native_value_is_string(value)) return "
          "native_string_length(value);\n";
   out << "  return native_count(value);\n";
   out << "}\n\n";
   out << "static NativeValue native_empty(const NativeValue &value) {\n";
-  out << "  if (value.tag == NativeValue::Tag::String) return "
+  out << "  if (native_value_is_string(value)) return "
          "NativeValue::boolean(native_string_text(value).empty());\n";
   out << "  if (value.tag == NativeValue::Tag::List) return "
          "NativeValue::boolean(as_list(value).items.empty());\n";
@@ -6056,7 +6368,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
   out << "static NativeValue native_bytesize(const NativeValue &value) {\n";
-  out << "  if (value.tag == NativeValue::Tag::String) return "
+  out << "  if (native_value_is_string(value)) return "
          "NativeValue::integer(static_cast<std::int64_t>("
          "native_string_text(value).size()));\n";
   out << "  if (value.tag == NativeValue::Tag::Bytes) return "
@@ -6066,8 +6378,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static NativeValue native_string_contains(const NativeValue &value, "
          "const NativeValue &needle) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String || "
-         "needle.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  if (!native_value_is_string(value) || "
+         "!native_value_is_string(needle)) throw NativeBailout();\n";
   out << "  return NativeValue::boolean(native_string_text(value).find("
          "native_string_text(needle)) != std::string::npos);\n";
   out << "}\n\n";
@@ -6079,7 +6391,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  return j;\n";
   out << "}\n\n";
   out << "static NativeValue native_string_reverse(const NativeValue &value) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  if (!native_value_is_string(value)) throw NativeBailout();\n";
   out << "  const std::string &text = native_string_text(value);\n";
   out << "  std::vector<std::string> cps;\n";
   out << "  for (std::size_t i = 0; i < text.size();) {\n";
@@ -6091,23 +6403,23 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  out_text.reserve(text.size());\n";
   out << "  for (auto it = cps.rbegin(); it != cps.rend(); ++it) "
          "out_text += *it;\n";
-  out << "  return NativeValue::string_ref(native_intern_string(out_text));\n";
+  out << "  return NativeValue::heap_string(out_text);\n";
   out << "}\n\n";
   out << "static NativeValue native_string_chars(const NativeValue &value) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  if (!native_value_is_string(value)) throw NativeBailout();\n";
   out << "  const std::string &text = native_string_text(value);\n";
   out << "  std::vector<NativeValue> cps;\n";
   out << "  for (std::size_t i = 0; i < text.size();) {\n";
   out << "    const std::size_t j = native_utf8_next_cp(text, i);\n";
-  out << "    cps.push_back(NativeValue::string_ref(native_intern_string("
-         "text.substr(i, j - i))));\n";
+  out << "    cps.push_back(NativeValue::heap_string("
+         "text.substr(i, j - i)));\n";
   out << "    i = j;\n";
   out << "  }\n";
   out << "  return NativeValue::list(std::move(cps));\n";
   out << "}\n\n";
   out << "static NativeValue native_string_case(const NativeValue &value, "
          "bool up) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String) throw "
+  out << "  if (!native_value_is_string(value)) throw "
          "NativeBailout();\n";
   out << "  std::string text = native_string_text(value);\n";
   out << "  for (char &c : text) {\n";
@@ -6117,7 +6429,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "    else if (!up && uc >= 'A' && uc <= 'Z') c = "
          "static_cast<char>(uc + 32U);\n";
   out << "  }\n";
-  out << "  return NativeValue::string_ref(native_intern_string(text));\n";
+  out << "  return NativeValue::heap_string(text);\n";
   out << "}\n\n";
   out << "static bool native_ascii_space(unsigned char c) {\n";
   out << "  return c == ' ' || c == '\\t' || c == '\\n' || c == '\\r' || "
@@ -6125,7 +6437,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static NativeValue native_string_trim(const NativeValue &value) "
          "{\n";
-  out << "  if (value.tag != NativeValue::Tag::String) throw "
+  out << "  if (!native_value_is_string(value)) throw "
          "NativeBailout();\n";
   out << "  const std::string &text = native_string_text(value);\n";
   out << "  std::size_t first = 0;\n";
@@ -6134,13 +6446,13 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "static_cast<unsigned char>(text[first]))) ++first;\n";
   out << "  while (last > first && native_ascii_space("
          "static_cast<unsigned char>(text[last - 1U]))) --last;\n";
-  out << "  return NativeValue::string_ref(native_intern_string("
-         "text.substr(first, last - first)));\n";
+  out << "  return NativeValue::heap_string("
+         "text.substr(first, last - first));\n";
   out << "}\n\n";
   out << "static NativeValue native_string_starts_with(const NativeValue "
          "&value, const NativeValue &prefix) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String || "
-         "prefix.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  if (!native_value_is_string(value) || "
+         "!native_value_is_string(prefix)) throw NativeBailout();\n";
   out << "  const std::string &text = native_string_text(value);\n";
   out << "  const std::string &needle = native_string_text(prefix);\n";
   out << "  return NativeValue::boolean(text.size() >= needle.size() && "
@@ -6148,8 +6460,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static NativeValue native_string_ends_with(const NativeValue "
          "&value, const NativeValue &suffix) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String || "
-         "suffix.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  if (!native_value_is_string(value) || "
+         "!native_value_is_string(suffix)) throw NativeBailout();\n";
   out << "  const std::string &text = native_string_text(value);\n";
   out << "  const std::string &needle = native_string_text(suffix);\n";
   out << "  return NativeValue::boolean(text.size() >= needle.size() && "
@@ -6158,16 +6470,16 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static NativeValue native_string_split(const NativeValue &value, "
          "const NativeValue &separator) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String || "
-         "separator.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  if (!native_value_is_string(value) || "
+         "!native_value_is_string(separator)) throw NativeBailout();\n";
   out << "  const std::string &text = native_string_text(value);\n";
   out << "  const std::string &sep = native_string_text(separator);\n";
   out << "  std::vector<NativeValue> parts;\n";
   out << "  if (sep.empty()) {\n";
   out << "    for (std::size_t i = 0; i < text.size();) {\n";
   out << "      const std::size_t j = native_utf8_next_cp(text, i);\n";
-  out << "      parts.push_back(NativeValue::string_ref(native_intern_string("
-         "text.substr(i, j - i))));\n";
+  out << "      parts.push_back(NativeValue::heap_string("
+         "text.substr(i, j - i)));\n";
   out << "      i = j;\n";
   out << "    }\n";
   out << "  } else {\n";
@@ -6179,8 +6491,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "native_intern_string(text.substr(start))));\n";
   out << "        break;\n";
   out << "      }\n";
-  out << "      parts.push_back(NativeValue::string_ref(native_intern_string("
-         "text.substr(start, pos - start))));\n";
+  out << "      parts.push_back(NativeValue::heap_string("
+         "text.substr(start, pos - start)));\n";
   out << "      start = pos + sep.size();\n";
   out << "    }\n";
   out << "  }\n";
@@ -6188,9 +6500,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "}\n\n";
   out << "static NativeValue native_string_replace(const NativeValue &value, "
          "const NativeValue &from_value, const NativeValue &to_value) {\n";
-  out << "  if (value.tag != NativeValue::Tag::String || "
-         "from_value.tag != NativeValue::Tag::String || "
-         "to_value.tag != NativeValue::Tag::String) throw NativeBailout();\n";
+  out << "  if (!native_value_is_string(value) || "
+         "!native_value_is_string(from_value) || "
+         "!native_value_is_string(to_value)) throw NativeBailout();\n";
   out << "  const std::string &text = native_string_text(value);\n";
   out << "  const std::string &from = native_string_text(from_value);\n";
   out << "  const std::string &to = native_string_text(to_value);\n";
@@ -6205,7 +6517,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "    replaced += to;\n";
   out << "    start = pos + from.size();\n";
   out << "  }\n";
-  out << "  return NativeValue::string_ref(native_intern_string(replaced));\n";
+  out << "  return NativeValue::heap_string(replaced);\n";
   out << "}\n\n";
   out << R"AMBERCPP(static bool native_is_sequence(const NativeValue &value) {
   return value.tag == NativeValue::Tag::List ||
@@ -6252,6 +6564,9 @@ static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs) {
   if (numeric_tag(lhs) && numeric_tag(rhs)) {
     return as_double_numeric(lhs) == as_double_numeric(rhs);
   }
+  if (native_value_is_string(lhs) && native_value_is_string(rhs)) {
+    return native_string_text_equal(lhs, rhs);
+  }
   if (lhs.tag != rhs.tag) return false;
   switch (lhs.tag) {
   case NativeValue::Tag::Null:
@@ -6282,12 +6597,12 @@ static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs) {
 }
 
 static bool native_map_key_is_nameable(const NativeValue &value) {
-  return value.tag == NativeValue::Tag::String ||
+  return native_value_is_string(value) ||
          value.tag == NativeValue::Tag::Symbol;
 }
 
 static const std::string &native_name_key_text(const NativeValue &value) {
-  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (native_value_is_string(value)) return native_string_text(value);
   if (value.tag == NativeValue::Tag::Symbol) {
     return native_symbol_text(value.scalar_value);
   }
@@ -6336,8 +6651,10 @@ static const std::pair<NativeValue, NativeValue> *
 native_map_find_entry(const NativeValue &map_value, const NativeValue &key) {
   const NativeMap &map = as_map(map_value);
   const NativeValue normalized = native_normalize_map_key(key);
+  const bool nameable = !map.strict && native_map_key_is_nameable(normalized);
   const std::optional<std::int64_t> key_id =
-      native_map_index_key_id(normalized, map.strict);
+      native_map_index_key_id_for_read(normalized, map.strict);
+  if (nameable && !key_id.has_value()) return nullptr;
   if (key_id.has_value()) {
     if (!map.name_index.empty()) {
       const auto found = map.name_index.find(*key_id);
@@ -6765,8 +7082,8 @@ static int native_compare_for_sort(const NativeValue &lhs,
     const bool right = rhs.scalar_value != 0;
     return left == right ? 0 : (left ? 1 : -1);
   }
-  if (lhs.tag == NativeValue::Tag::String &&
-      rhs.tag == NativeValue::Tag::String) {
+  if (native_value_is_string(lhs) &&
+      native_value_is_string(rhs)) {
     const std::string &left = native_string_text(lhs);
     const std::string &right = native_string_text(rhs);
     return left < right ? -1 : (left > right ? 1 : 0);
@@ -6965,8 +7282,8 @@ static NativeValue native_sequence_extreme(const NativeValue &value,
 
 static NativeValue native_concat(const NativeValue &lhs,
                                  const NativeValue &rhs) {
-  if (lhs.tag == NativeValue::Tag::String &&
-      rhs.tag == NativeValue::Tag::String) {
+  if (native_value_is_string(lhs) &&
+      native_value_is_string(rhs)) {
     return native_string_concat(lhs, rhs);
   }
   if (native_is_sequence(lhs)) {
@@ -7009,7 +7326,7 @@ static NativeValue native_index_set(const NativeValue &value,
 
 static NativeValue native_contains(const NativeValue &value,
                                    const NativeValue &needle) {
-  if (value.tag == NativeValue::Tag::String) {
+  if (native_value_is_string(value)) {
     return native_string_contains(value, needle);
   }
   if (native_is_sequence(value)) {
@@ -7187,7 +7504,7 @@ static NativeValue native_index(const NativeValue &value, const NativeValue &key
 }
 
 static NativeValue native_bytes_new(const NativeValue &value) {
-  if (value.tag == NativeValue::Tag::String) {
+  if (native_value_is_string(value)) {
     return NativeValue::bytes(native_string_text(value));
   }
   if (value.tag == NativeValue::Tag::Bytes) {
@@ -7241,8 +7558,8 @@ static std::string native_hex_encode_bytes(const std::string &bytes) {
 }
 
 static NativeValue native_bytes_hex(const NativeValue &value) {
-  return NativeValue::string_ref(native_intern_string(
-      native_hex_encode_bytes(as_bytes(value).bytes)));
+  return NativeValue::heap_string(
+      native_hex_encode_bytes(as_bytes(value).bytes));
 }
 
 static int native_hex_value(char c) {
@@ -7467,8 +7784,8 @@ static NativeValue native_secure_random_bytes_value(const NativeValue &module,
 static NativeValue native_secure_random_hex(const NativeValue &module,
                                             const NativeValue &count_value) {
   if (module.tag != NativeValue::Tag::SecureRandomModule) throw NativeBailout();
-  return NativeValue::string_ref(native_intern_string(native_hex_encode_bytes(
-      native_secure_random_bytes_raw(native_secure_random_count(count_value)))));
+  return NativeValue::heap_string(native_hex_encode_bytes(
+      native_secure_random_bytes_raw(native_secure_random_count(count_value))));
 }
 
 static NativeValue native_secure_random_base64(const NativeValue &module,
@@ -7482,9 +7799,9 @@ static NativeValue native_secure_random_base64(const NativeValue &module,
     if (padding_value.tag != NativeValue::Tag::Bool) throw NativeBailout();
     padding = padding_value.scalar_value != 0;
   }
-  return NativeValue::string_ref(native_intern_string(native_base64_encode_bytes(
+  return NativeValue::heap_string(native_base64_encode_bytes(
       native_secure_random_bytes_raw(native_secure_random_count(count_value)),
-      url, padding)));
+      url, padding));
 }
 
 static NativeValue native_uuid_v4(const NativeValue &module) {
@@ -7535,7 +7852,7 @@ static NativeValue native_uuid_v7(const NativeValue &module) {
 static NativeValue native_uuid_parse(const NativeValue &module,
                                      const NativeValue &text_value) {
   if (module.tag != NativeValue::Tag::UuidModule ||
-      text_value.tag != NativeValue::Tag::String) {
+      !native_value_is_string(text_value)) {
     throw NativeBailout();
   }
   const std::string &text = native_string_text(text_value);
@@ -7565,11 +7882,11 @@ static NativeValue native_uuid_parse(const NativeValue &module,
 }
 
 static NativeValue native_uuid_nullary(const NativeValue &receiver,
-                                       const std::string &selector) {
+                                       std::string_view selector) {
   const NativeUuid &uuid = as_uuid(receiver);
   if (selector == "to_str" || selector == "inspect") {
-    return NativeValue::string_ref(native_intern_string(
-        amber::runtime::runtime_uuid_to_string(uuid)));
+    return NativeValue::heap_string(
+        amber::runtime::runtime_uuid_to_string(uuid));
   }
   if (selector == "version") {
     return NativeValue::integer((uuid.bytes[6] >> 4U) & 0x0FU);
@@ -7581,7 +7898,7 @@ static NativeValue native_type_matches(const NativeValue &module,
                                        const NativeValue &value) {
   bool matched = false;
   if (module.tag == NativeValue::Tag::StrType) {
-    matched = value.tag == NativeValue::Tag::String;
+    matched = native_value_is_string(value);
   } else if (module.tag == NativeValue::Tag::IntType) {
     matched = value.tag == NativeValue::Tag::Integer;
   } else if (module.tag == NativeValue::Tag::BigIntType) {
@@ -7691,7 +8008,7 @@ static std::string native_base64_decode_text(const std::string &text,
 static bool native_decode_lenient(const NativeValue &mode_value, bool has_mode) {
   if (!has_mode) return false;
   std::string mode;
-  if (mode_value.tag == NativeValue::Tag::String) mode = native_string_text(mode_value);
+  if (native_value_is_string(mode_value)) mode = native_string_text(mode_value);
   else if (mode_value.tag == NativeValue::Tag::Symbol) mode = native_symbol_text(mode_value.scalar_value);
   else throw NativeBailout();
   if (mode == "strict") return false;
@@ -7706,7 +8023,7 @@ static NativeValue native_codec_encode(const NativeValue &module,
   const std::string &bytes = as_bytes(bytes_value).bytes;
   if (module.tag == NativeValue::Tag::HexModule) {
     if (has_padding) throw NativeBailout();
-    return NativeValue::string_ref(native_intern_string(native_hex_encode_bytes(bytes)));
+    return NativeValue::heap_string(native_hex_encode_bytes(bytes));
   }
   bool url = false;
   bool padding = true;
@@ -7723,15 +8040,15 @@ static NativeValue native_codec_encode(const NativeValue &module,
     if (padding_value.tag != NativeValue::Tag::Bool) throw NativeBailout();
     padding = padding_value.scalar_value != 0;
   }
-  return NativeValue::string_ref(native_intern_string(
-      native_base64_encode_bytes(bytes, url, padding)));
+  return NativeValue::heap_string(
+      native_base64_encode_bytes(bytes, url, padding));
 }
 
 static NativeValue native_codec_decode(const NativeValue &module,
                                        const NativeValue &text_value,
                                        const NativeValue &mode_value,
                                        bool has_mode) {
-  if (text_value.tag != NativeValue::Tag::String) throw NativeBailout();
+  if (!native_value_is_string(text_value)) throw NativeBailout();
   const std::string &text = native_string_text(text_value);
   const bool lenient = native_decode_lenient(mode_value, has_mode);
   if (module.tag == NativeValue::Tag::HexModule) {
@@ -7826,6 +8143,7 @@ static void append_json_value(std::string &out, const NativeValue &value,
     return;
   }
   case NativeValue::Tag::String:
+  case NativeValue::Tag::HeapString:
     append_json_escaped(out, native_string_text(value));
     return;
   case NativeValue::Tag::Symbol:
@@ -7926,7 +8244,7 @@ static void append_json_value(std::string &out, const NativeValue &value,
 static NativeValue native_json_generate_value(const NativeValue &value, bool pretty) {
   std::string out;
   append_json_value(out, value, pretty, 0);
-  return NativeValue::string_ref(native_intern_string(out));
+  return NativeValue::heap_string(out);
 }
 
 class NativeJsonParser {
@@ -7969,7 +8287,7 @@ private:
     skip_ws();
     if (pos_ >= text_.size()) throw NativeBailout();
     const char ch = text_[pos_];
-    if (ch == '"') return NativeValue::string_ref(native_intern_string(parse_string()));
+    if (ch == '"') return NativeValue::heap_string(parse_string());
     if (ch == '{') return parse_object();
     if (ch == '[') return parse_array();
     if (ch == 't' && text_.compare(pos_, 4, "true") == 0) {
@@ -8036,7 +8354,7 @@ private:
     while (true) {
       skip_ws();
       NativeValue key =
-          NativeValue::string_ref(native_intern_string(parse_string()));
+          NativeValue::heap_string(parse_string());
       expect(':');
       native_map_store(entries, std::move(key), parse_value(), false);
       skip_ws();
@@ -8105,7 +8423,7 @@ private:
 };
 
 static NativeValue native_json_parse_value(const NativeValue &value) {
-  if (value.tag != NativeValue::Tag::String) throw NativeBailout();
+  if (!native_value_is_string(value)) throw NativeBailout();
   NativeJsonParser parser(native_string_text(value));
   return parser.parse_document();
 }
@@ -8204,6 +8522,14 @@ static NativeTime native_make_time(__int128 seconds, __int128 nanosecond) {
 }
 
 static NativeUtcFields native_utc_fields(const NativeTime &time) {
+  static thread_local bool cached = false;
+  static thread_local std::int64_t cached_epoch_seconds = 0;
+  static thread_local std::uint32_t cached_nanosecond = 0;
+  static thread_local NativeUtcFields cached_fields;
+  if (cached && cached_epoch_seconds == time.epoch_seconds &&
+      cached_nanosecond == time.nanosecond) {
+    return cached_fields;
+  }
   const std::int64_t days =
       native_floor_div_i64(time.epoch_seconds, kNativeSecondsPerDay);
   const int second_of_day =
@@ -8214,6 +8540,10 @@ static NativeUtcFields native_utc_fields(const NativeTime &time) {
   out.minute = (second_of_day / 60) % 60;
   out.second = second_of_day % 60;
   out.nanosecond = static_cast<int>(time.nanosecond);
+  cached = true;
+  cached_epoch_seconds = time.epoch_seconds;
+  cached_nanosecond = time.nanosecond;
+  cached_fields = out;
   return out;
 }
 
@@ -8378,7 +8708,7 @@ static bool native_parse_digits(const std::string &text, std::size_t offset,
 static NativeValue native_time_parse(const NativeValue &module,
                                      const NativeValue &text_value) {
   if (module.tag != NativeValue::Tag::TimeModule ||
-      text_value.tag != NativeValue::Tag::String) {
+      !native_value_is_string(text_value)) {
     throw NativeBailout();
   }
   const std::string &text = native_string_text(text_value);
@@ -8450,7 +8780,7 @@ static NativeValue native_time_parse(const NativeValue &module,
 }
 
 static NativeValue native_url_string(const std::string &text) {
-  return NativeValue::string_ref(native_intern_string(text));
+  return NativeValue::heap_string(text);
 }
 
 static NativeValue native_url_optional_string(bool present,
@@ -8531,7 +8861,7 @@ static bool native_url_optional_string_field(
     out->clear();
     return true;
   }
-  if (value->tag != NativeValue::Tag::String) return false;
+  if (!native_value_is_string(*value)) return false;
   *present = true;
   *out = native_string_text(*value);
   return true;
@@ -8554,7 +8884,7 @@ native_url_query_pairs_from_map(const NativeValue &value) {
 
 static amber::runtime::RuntimeUrlQueryValue
 native_url_query_value_from_native(const NativeValue &value) {
-  if (value.tag == NativeValue::Tag::String) {
+  if (native_value_is_string(value)) {
     return amber::runtime::RuntimeUrlQueryValue::string(native_string_text(value));
   }
   if (value.tag == NativeValue::Tag::List) {
@@ -8611,7 +8941,7 @@ native_url_parts_from_map(const NativeValue &value) {
 static NativeValue native_url_parse(const NativeValue &module,
                                     const NativeValue &text_value) {
   if (module.tag != NativeValue::Tag::UrlModule ||
-      text_value.tag != NativeValue::Tag::String) {
+      !native_value_is_string(text_value)) {
     throw NativeBailout();
   }
   amber::runtime::RuntimeUrlParts parts;
@@ -8632,7 +8962,7 @@ static NativeValue native_url_build(const NativeValue &module,
 static NativeValue native_url_percent_encode(const NativeValue &module,
                                              const NativeValue &text_value) {
   if (module.tag != NativeValue::Tag::UrlModule ||
-      text_value.tag != NativeValue::Tag::String) {
+      !native_value_is_string(text_value)) {
     throw NativeBailout();
   }
   return native_url_string(amber::runtime::runtime_url_percent_encode(
@@ -8642,7 +8972,7 @@ static NativeValue native_url_percent_encode(const NativeValue &module,
 static NativeValue native_url_percent_decode(const NativeValue &module,
                                              const NativeValue &text_value) {
   if (module.tag != NativeValue::Tag::UrlModule ||
-      text_value.tag != NativeValue::Tag::String) {
+      !native_value_is_string(text_value)) {
     throw NativeBailout();
   }
   std::string decoded;
@@ -8657,7 +8987,7 @@ static NativeValue native_url_percent_decode(const NativeValue &module,
 static NativeValue native_url_parse_query(const NativeValue &module,
                                           const NativeValue &text_value) {
   if (module.tag != NativeValue::Tag::UrlModule ||
-      text_value.tag != NativeValue::Tag::String) {
+      !native_value_is_string(text_value)) {
     throw NativeBailout();
   }
   std::vector<std::pair<std::string, amber::runtime::RuntimeUrlQueryValue>> entries;
@@ -8729,7 +9059,7 @@ static std::string native_arg_lower_ascii(std::string text) {
 }
 
 static std::string native_arg_text(const NativeValue &value) {
-  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (native_value_is_string(value)) return native_string_text(value);
   if (value.tag == NativeValue::Tag::Symbol) {
     return native_symbol_text(value.scalar_value);
   }
@@ -8967,7 +9297,7 @@ static NativeValue native_arg_convert(const std::string &text,
                                       NativeArgValueType type) {
   switch (type) {
   case NativeArgValueType::Str:
-    return NativeValue::string_ref(native_intern_string(text));
+    return NativeValue::heap_string(text);
   case NativeArgValueType::Int: {
     char *end = nullptr;
     errno = 0;
@@ -8999,6 +9329,9 @@ static NativeValue native_arg_convert(const std::string &text,
 
 static bool native_arg_simple_equal(const NativeValue &lhs,
                                     const NativeValue &rhs) {
+  if (native_value_is_string(lhs) && native_value_is_string(rhs)) {
+    return native_string_text_equal(lhs, rhs);
+  }
   if (lhs.tag != rhs.tag) return false;
   switch (lhs.tag) {
   case NativeValue::Tag::Null:
@@ -9221,39 +9554,72 @@ static NativeValue native_argparser_parse_or_raise(const NativeValue &receiver,
   return NativeValue::map(std::move(entries));
 }
 
-static NativeValue native_time_period_unit(const NativeValue &receiver,
-                                           const std::string &selector) {
-  std::int64_t months_per = 0;
-  std::int64_t days_per = 0;
-  std::int64_t nanos_per = 0;
-  bool calendar = false;
-  if (selector == "nanosecond" || selector == "nanoseconds") {
-    nanos_per = 1;
-  } else if (selector == "microsecond" || selector == "microseconds") {
-    nanos_per = 1000;
-  } else if (selector == "millisecond" || selector == "milliseconds") {
-    nanos_per = 1000000;
-  } else if (selector == "second" || selector == "seconds") {
-    nanos_per = 1000000000;
-  } else if (selector == "minute" || selector == "minutes") {
-    nanos_per = 60LL * 1000000000LL;
-  } else if (selector == "hour" || selector == "hours") {
-    nanos_per = 60LL * 60LL * 1000000000LL;
-  } else if (selector == "day" || selector == "days") {
-    days_per = 1;
-    calendar = true;
-  } else if (selector == "week" || selector == "weeks") {
-    days_per = 7;
-    calendar = true;
-  } else if (selector == "month" || selector == "months") {
-    months_per = 1;
-    calendar = true;
-  } else if (selector == "year" || selector == "years") {
-    months_per = 12;
-    calendar = true;
-  } else {
-    throw NativeBailout();
+enum class NativeTimeSelector {
+  Nanosecond,
+  Nanoseconds,
+  Microsecond,
+  Microseconds,
+  Millisecond,
+  Milliseconds,
+  Second,
+  Seconds,
+  Minute,
+  Minutes,
+  Hour,
+  Hours,
+  Day,
+  Days,
+  Week,
+  Weeks,
+  Month,
+  Months,
+  Year,
+  Years,
+  Iso8601,
+  ToStr,
+  Inspect,
+  UnixSeconds,
+  UnixMilliseconds,
+  UnixNanoseconds,
+  Weekday,
+  Yearday,
+  FixedPredicate,
+  TotalNanoseconds,
+};
+
+static bool native_time_selector_is_unit(NativeTimeSelector selector) {
+  switch (selector) {
+  case NativeTimeSelector::Nanosecond:
+  case NativeTimeSelector::Nanoseconds:
+  case NativeTimeSelector::Microsecond:
+  case NativeTimeSelector::Microseconds:
+  case NativeTimeSelector::Millisecond:
+  case NativeTimeSelector::Milliseconds:
+  case NativeTimeSelector::Second:
+  case NativeTimeSelector::Seconds:
+  case NativeTimeSelector::Minute:
+  case NativeTimeSelector::Minutes:
+  case NativeTimeSelector::Hour:
+  case NativeTimeSelector::Hours:
+  case NativeTimeSelector::Day:
+  case NativeTimeSelector::Days:
+  case NativeTimeSelector::Week:
+  case NativeTimeSelector::Weeks:
+  case NativeTimeSelector::Month:
+  case NativeTimeSelector::Months:
+  case NativeTimeSelector::Year:
+  case NativeTimeSelector::Years:
+    return true;
+  default:
+    return false;
   }
+}
+
+static NativeValue
+native_time_period_unit_scaled(const NativeValue &receiver,
+                               std::int64_t months_per,
+                               std::int64_t days_per,
+                               std::int64_t nanos_per, bool calendar) {
   if (receiver.tag == NativeValue::Tag::Integer) {
     const std::int64_t scalar = receiver.scalar_value;
     return NativeValue::time_period(NativeTimePeriod{
@@ -9281,81 +9647,164 @@ static NativeValue native_time_period_unit(const NativeValue &receiver,
   throw NativeBailout();
 }
 
+static NativeValue native_time_period_unit(const NativeValue &receiver,
+                                           NativeTimeSelector selector) {
+  std::int64_t months_per = 0;
+  std::int64_t days_per = 0;
+  std::int64_t nanos_per = 0;
+  bool calendar = false;
+  switch (selector) {
+  case NativeTimeSelector::Nanosecond:
+  case NativeTimeSelector::Nanoseconds:
+    nanos_per = 1;
+    break;
+  case NativeTimeSelector::Microsecond:
+  case NativeTimeSelector::Microseconds:
+    nanos_per = 1000;
+    break;
+  case NativeTimeSelector::Millisecond:
+  case NativeTimeSelector::Milliseconds:
+    nanos_per = 1000000;
+    break;
+  case NativeTimeSelector::Second:
+  case NativeTimeSelector::Seconds:
+    nanos_per = 1000000000;
+    break;
+  case NativeTimeSelector::Minute:
+  case NativeTimeSelector::Minutes:
+    nanos_per = 60LL * 1000000000LL;
+    break;
+  case NativeTimeSelector::Hour:
+  case NativeTimeSelector::Hours:
+    nanos_per = 60LL * 60LL * 1000000000LL;
+    break;
+  case NativeTimeSelector::Day:
+  case NativeTimeSelector::Days:
+    days_per = 1;
+    calendar = true;
+    break;
+  case NativeTimeSelector::Week:
+  case NativeTimeSelector::Weeks:
+    days_per = 7;
+    calendar = true;
+    break;
+  case NativeTimeSelector::Month:
+  case NativeTimeSelector::Months:
+    months_per = 1;
+    calendar = true;
+    break;
+  case NativeTimeSelector::Year:
+  case NativeTimeSelector::Years:
+    months_per = 12;
+    calendar = true;
+    break;
+  default:
+    throw NativeBailout();
+  }
+  return native_time_period_unit_scaled(receiver, months_per, days_per,
+                                        nanos_per, calendar);
+}
+
 static NativeValue native_time_nullary(const NativeValue &receiver,
-                                       const std::string &selector) {
+                                       NativeTimeSelector selector) {
   if (receiver.tag == NativeValue::Tag::Uuid) {
-    return native_uuid_nullary(receiver, selector);
+    switch (selector) {
+    case NativeTimeSelector::ToStr:
+      return native_uuid_nullary(receiver, "to_str");
+    case NativeTimeSelector::Inspect:
+      return native_uuid_nullary(receiver, "inspect");
+    default:
+      throw NativeBailout();
+    }
   }
   if ((receiver.tag == NativeValue::Tag::Integer ||
        receiver.tag == NativeValue::Tag::Float) &&
-      (selector == "nanosecond" || selector == "nanoseconds" ||
-       selector == "microsecond" || selector == "microseconds" ||
-       selector == "millisecond" || selector == "milliseconds" ||
-       selector == "second" || selector == "seconds" ||
-       selector == "minute" || selector == "minutes" ||
-       selector == "hour" || selector == "hours" || selector == "day" ||
-       selector == "days" || selector == "week" || selector == "weeks" ||
-       selector == "month" || selector == "months" ||
-       selector == "year" || selector == "years")) {
+      native_time_selector_is_unit(selector)) {
     return native_time_period_unit(receiver, selector);
   }
   if (receiver.tag == NativeValue::Tag::Time) {
     const NativeTime &time = as_time(receiver);
-    if (selector == "iso8601" || selector == "to_str" ||
-        selector == "inspect") {
+    switch (selector) {
+    case NativeTimeSelector::Iso8601:
+    case NativeTimeSelector::ToStr:
+    case NativeTimeSelector::Inspect:
       return NativeValue::string_ref(
           native_intern_string(amber::runtime::runtime_time_to_iso8601(time)));
-    }
-    if (selector == "unix_seconds") {
+    case NativeTimeSelector::UnixSeconds:
       return NativeValue::integer(time.epoch_seconds);
-    }
-    if (selector == "unix_milliseconds") {
+    case NativeTimeSelector::UnixMilliseconds:
       return NativeValue::integer(native_checked_i128(
           static_cast<__int128>(time.epoch_seconds) * 1000 +
           time.nanosecond / 1000000));
-    }
-    if (selector == "unix_nanoseconds") {
+    case NativeTimeSelector::UnixNanoseconds:
       return NativeValue::integer(native_checked_i128(
           static_cast<__int128>(time.epoch_seconds) * kNativeNanosPerSecond +
           time.nanosecond));
-    }
-    const NativeUtcFields fields = native_utc_fields(time);
-    if (selector == "year") return NativeValue::integer(fields.date.year);
-    if (selector == "month") return NativeValue::integer(fields.date.month);
-    if (selector == "day") return NativeValue::integer(fields.date.day);
-    if (selector == "hour") return NativeValue::integer(fields.hour);
-    if (selector == "minute") return NativeValue::integer(fields.minute);
-    if (selector == "second") return NativeValue::integer(fields.second);
-    if (selector == "nanosecond") {
-      return NativeValue::integer(fields.nanosecond);
-    }
-    if (selector == "weekday") {
+    case NativeTimeSelector::Weekday: {
       const std::int64_t days =
           native_floor_div_i64(time.epoch_seconds, kNativeSecondsPerDay);
       return NativeValue::integer(native_floor_mod_i64(days + 3, 7) + 1);
     }
-    if (selector == "yearday") {
-      const std::int64_t jan1 = native_days_from_civil(fields.date.year, 1, 1);
-      const std::int64_t today = native_days_from_civil(
-          fields.date.year, fields.date.month, fields.date.day);
-      return NativeValue::integer(today - jan1 + 1);
+    case NativeTimeSelector::Year:
+    case NativeTimeSelector::Month:
+    case NativeTimeSelector::Day:
+    case NativeTimeSelector::Hour:
+    case NativeTimeSelector::Minute:
+    case NativeTimeSelector::Second:
+    case NativeTimeSelector::Nanosecond:
+    case NativeTimeSelector::Yearday: {
+      const NativeUtcFields fields = native_utc_fields(time);
+      switch (selector) {
+      case NativeTimeSelector::Year:
+        return NativeValue::integer(fields.date.year);
+      case NativeTimeSelector::Month:
+        return NativeValue::integer(fields.date.month);
+      case NativeTimeSelector::Day:
+        return NativeValue::integer(fields.date.day);
+      case NativeTimeSelector::Hour:
+        return NativeValue::integer(fields.hour);
+      case NativeTimeSelector::Minute:
+        return NativeValue::integer(fields.minute);
+      case NativeTimeSelector::Second:
+        return NativeValue::integer(fields.second);
+      case NativeTimeSelector::Nanosecond:
+        return NativeValue::integer(fields.nanosecond);
+      case NativeTimeSelector::Yearday: {
+        const std::int64_t jan1 =
+            native_days_from_civil(fields.date.year, 1, 1);
+        const std::int64_t today = native_days_from_civil(
+            fields.date.year, fields.date.month, fields.date.day);
+        return NativeValue::integer(today - jan1 + 1);
+      }
+      default:
+        break;
+      }
+      break;
+    }
+    default:
+      break;
     }
   }
   if (receiver.tag == NativeValue::Tag::TimePeriod) {
     const NativeTimePeriod &period = as_time_period(receiver);
-    if (selector == "to_str" || selector == "inspect") {
-      return NativeValue::string_ref(native_intern_string(
-          amber::runtime::runtime_time_period_to_string(period)));
-    }
-    if (selector == "months") return NativeValue::integer(period.months);
-    if (selector == "days") return NativeValue::integer(period.days);
-    if (selector == "nanoseconds") {
+    switch (selector) {
+    case NativeTimeSelector::ToStr:
+    case NativeTimeSelector::Inspect:
+      return NativeValue::heap_string(
+          amber::runtime::runtime_time_period_to_string(period));
+    case NativeTimeSelector::Months:
+      return NativeValue::integer(period.months);
+    case NativeTimeSelector::Days:
+      return NativeValue::integer(period.days);
+    case NativeTimeSelector::Nanoseconds:
       return NativeValue::integer(period.nanoseconds);
-    }
-    if (selector == "fixed?") return NativeValue::boolean(period.months == 0);
-    if (selector == "total_nanoseconds") {
+    case NativeTimeSelector::FixedPredicate:
+      return NativeValue::boolean(period.months == 0);
+    case NativeTimeSelector::TotalNanoseconds:
       return NativeValue::integer(
           native_checked_i128(native_fixed_period_nanoseconds(period)));
+    default:
+      break;
     }
   }
   throw NativeBailout();
@@ -9413,7 +9862,7 @@ static NativeValue native_time_compare_value(const NativeValue &lhs,
 }
 
 static std::string native_fs_path_text(const NativeValue &value) {
-  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (native_value_is_string(value)) return native_string_text(value);
   if (value.tag == NativeValue::Tag::FsPath) return as_fs_path(value).path;
   throw NativeBailout();
 }
@@ -9441,10 +9890,10 @@ static NativeValue native_fs_path_nullary(const NativeValue &receiver,
                                           const std::string &selector) {
   const std::filesystem::path path(as_fs_path(receiver).path);
   if (selector == "basename") {
-    return NativeValue::string_ref(native_intern_string(path.filename().string()));
+    return NativeValue::heap_string(path.filename().string());
   }
   if (selector == "extname") {
-    return NativeValue::string_ref(native_intern_string(path.extension().string()));
+    return NativeValue::heap_string(path.extension().string());
   }
   if (selector == "parent") {
     return NativeValue::fs_path(NativeFsPath{path.parent_path().string()});
@@ -9478,7 +9927,7 @@ static bool native_fs_read_allowed(const std::string &path) {
 static NativeValue native_json_stream_parse_file(const NativeValue &path_value,
                                                  const NativeValue &jsonl_value,
                                                  const NativeValue &block_value) {
-  if (path_value.tag != NativeValue::Tag::String ||
+  if (!native_value_is_string(path_value) ||
       jsonl_value.tag != NativeValue::Tag::Bool ||
       jsonl_value.scalar_value == 0) {
     throw NativeBailout();
@@ -9531,11 +9980,11 @@ static std::int64_t native_benchmark_now_ns() {
 }
 
 static NativeValue native_benchmark_string(const std::string &text) {
-  return NativeValue::string_ref(native_intern_string(text));
+  return NativeValue::heap_string(text);
 }
 
 static std::string native_benchmark_text(const NativeValue &value) {
-  if (value.tag == NativeValue::Tag::String) return native_string_text(value);
+  if (native_value_is_string(value)) return native_string_text(value);
   if (value.tag == NativeValue::Tag::Symbol) {
     return native_symbol_text(value.scalar_value);
   }
@@ -9629,7 +10078,7 @@ static const NativeValue *native_benchmark_map_get(const NativeValue &map,
 static bool native_benchmark_has_schema(const NativeValue &value,
                                         const std::string &schema) {
   const NativeValue *raw = native_benchmark_map_get(value, "schema");
-  return raw != nullptr && raw->tag == NativeValue::Tag::String &&
+  return raw != nullptr && native_value_is_string(*raw) &&
          native_string_text(*raw) == schema;
 }
 
@@ -9638,7 +10087,7 @@ static std::string native_benchmark_kind(const NativeValue &result) {
     throw NativeBailout();
   }
   const NativeValue *kind = native_benchmark_map_get(result, "kind");
-  if (kind == nullptr || kind->tag != NativeValue::Tag::String) {
+  if (kind == nullptr || !native_value_is_string(*kind)) {
     throw NativeBailout();
   }
   return native_string_text(*kind);
@@ -9906,7 +10355,7 @@ static NativeValue native_benchmark_compare(const std::vector<NativeValue> &args
     const NativeValue &data = native_benchmark_data(reports[i]);
     std::string label = "case " + std::to_string(i + 1U);
     if (const NativeValue *raw = native_benchmark_map_get(reports[i], "label")) {
-      if (raw->tag == NativeValue::Tag::String) label = native_string_text(*raw);
+      if (native_value_is_string(*raw)) label = native_string_text(*raw);
     }
     const std::int64_t mean = native_benchmark_int_field(data, "mean_ns");
     relative.push_back(native_benchmark_map({
@@ -9929,7 +10378,7 @@ static NativeValue native_benchmark_compare(const std::vector<NativeValue> &args
 static std::string native_benchmark_label(const NativeValue &result,
                                           std::size_t index) {
   const NativeValue *label = native_benchmark_map_get(result, "label");
-  if (label != nullptr && label->tag == NativeValue::Tag::String) {
+  if (label != nullptr && native_value_is_string(*label)) {
     return native_string_text(*label);
   }
   return "case " + std::to_string(index + 1U);
@@ -10022,6 +10471,161 @@ static NativeValue native_benchmark_format(
     throw NativeBailout();
   }
   return native_benchmark_string(out.str());
+}
+
+static NativeValue native_benchmark_top_value_or_null(
+    const NativeValue &result, const std::string &key) {
+  const NativeValue *value = native_benchmark_map_get(result, key);
+  return value == nullptr ? NativeValue::nullv() : *value;
+}
+
+static NativeValue native_benchmark_data_value_or_null(
+    const NativeValue &result, const std::string &key) {
+  const NativeValue *value = native_benchmark_map_get(native_benchmark_data(result), key);
+  return value == nullptr ? NativeValue::nullv() : *value;
+}
+
+static NativeValue native_benchmark_period_field(const NativeValue &result,
+                                                 const std::string &key) {
+  return native_benchmark_time_period(
+      native_benchmark_int_field(native_benchmark_data(result), key));
+}
+
+static NativeValue native_benchmark_sample_times(const NativeValue &result) {
+  const NativeValue *raw = native_benchmark_map_get(native_benchmark_data(result), "sample_ns");
+  if (raw == nullptr || raw->tag != NativeValue::Tag::List) throw NativeBailout();
+  std::vector<NativeValue> periods;
+  for (const NativeValue &sample : as_list(*raw).items) {
+    if (sample.tag != NativeValue::Tag::Integer) throw NativeBailout();
+    periods.push_back(native_benchmark_time_period(sample.scalar_value));
+  }
+  return NativeValue::list(std::move(periods));
+}
+
+static NativeValue native_benchmark_indexed_case(const NativeValue &result,
+                                                 const std::string &index_key) {
+  const NativeValue &data = native_benchmark_data(result);
+  const std::int64_t index = native_benchmark_int_field(data, index_key);
+  const NativeValue *cases_value = native_benchmark_map_get(data, "cases");
+  if (cases_value == nullptr || cases_value->tag != NativeValue::Tag::List ||
+      index < 0) {
+    return NativeValue::nullv();
+  }
+  const auto &cases = as_list(*cases_value).items;
+  if (static_cast<std::size_t>(index) >= cases.size()) return NativeValue::nullv();
+  return cases[static_cast<std::size_t>(index)];
+}
+
+static NativeValue native_benchmark_profile_find(const NativeValue &profile,
+                                                 const NativeValue &label_value) {
+  const std::string label = native_benchmark_text(label_value);
+  const NativeValue *spans_value =
+      native_benchmark_map_get(native_benchmark_data(profile), "spans");
+  if (spans_value == nullptr || spans_value->tag != NativeValue::Tag::List) {
+    throw NativeBailout();
+  }
+  for (const NativeValue &span : as_list(*spans_value).items) {
+    if (span.tag != NativeValue::Tag::Map) continue;
+    const NativeValue *span_label = native_benchmark_map_get(span, "label");
+    if (span_label != nullptr && native_benchmark_text(*span_label) == label) {
+      return span;
+    }
+  }
+  return NativeValue::nullv();
+}
+
+static NativeValue native_benchmark_compact_text(const NativeValue &result,
+                                                 const std::string &kind) {
+  const NativeValue &data = native_benchmark_data(result);
+  std::string text;
+  if (kind == "measurement") {
+    text = "Benchmark.measurement(" + native_benchmark_label(result, 0) +
+           ", elapsed=" +
+           native_benchmark_format_ns(native_benchmark_int_field(data, "elapsed_ns")) +
+           ")";
+  } else if (kind == "report") {
+    text = "Benchmark.report(" + native_benchmark_label(result, 0) +
+           ", iterations=" +
+           std::to_string(native_benchmark_int_field(data, "iterations")) +
+           ", mean=" +
+           native_benchmark_format_ns(native_benchmark_int_field(data, "mean_ns")) +
+           ")";
+  } else if (kind == "compare_report") {
+    const NativeValue *cases_value = native_benchmark_map_get(data, "cases");
+    const std::size_t count =
+        (cases_value != nullptr && cases_value->tag == NativeValue::Tag::List)
+            ? as_list(*cases_value).items.size()
+            : 0U;
+    text = "Benchmark.compare_report(cases=" + std::to_string(count) + ")";
+  } else if (kind == "profile") {
+    text = "Benchmark.profile(" + native_benchmark_label(result, 0) +
+           ", total=" +
+           native_benchmark_format_ns(native_benchmark_int_field(data, "total_ns")) +
+           ")";
+  } else {
+    throw NativeBailout();
+  }
+  return native_benchmark_string(text);
+}
+
+static NativeValue native_benchmark_accessor(
+    const NativeValue &result, const std::string &selector,
+    const std::vector<NativeValue> &args) {
+  const std::string kind = native_benchmark_kind(result);
+  if (selector == "label") return native_benchmark_top_value_or_null(result, "label");
+  if (selector == "kind") return native_benchmark_string(kind);
+  if (selector == "data") return native_benchmark_data(result);
+  if (selector == "value") return native_benchmark_top_value_or_null(result, "value");
+  if (selector == "to_str" || selector == "inspect") {
+    return native_benchmark_compact_text(result, kind);
+  }
+
+  if (kind == "measurement") {
+    if (selector == "elapsed") return native_benchmark_period_field(result, "elapsed_ns");
+    if (selector == "elapsed_ns" || selector == "iterations") {
+      return native_benchmark_data_value_or_null(result, selector);
+    }
+  }
+
+  if (kind == "report") {
+    if (selector == "elapsed") return native_benchmark_period_field(result, "elapsed_ns");
+    if (selector == "per_iteration") return native_benchmark_period_field(result, "per_iteration_ns");
+    if (selector == "mean" || selector == "min" || selector == "max" ||
+        selector == "p50" || selector == "p90" || selector == "p95" ||
+        selector == "p99") {
+      return native_benchmark_period_field(result, selector + "_ns");
+    }
+    if (selector == "sample_times") return native_benchmark_sample_times(result);
+    if (selector == "iterations" || selector == "samples" ||
+        selector == "elapsed_ns" || selector == "per_iteration_ns" ||
+        selector == "mean_ns" || selector == "min_ns" ||
+        selector == "max_ns" || selector == "p50_ns" ||
+        selector == "p90_ns" || selector == "p95_ns" ||
+        selector == "p99_ns" || selector == "ops_per_second" ||
+        selector == "sample_ns") {
+      return native_benchmark_data_value_or_null(result, selector);
+    }
+  }
+
+  if (kind == "compare_report") {
+    if (selector == "cases" || selector == "relative") {
+      return native_benchmark_data_value_or_null(result, selector);
+    }
+    if (selector == "fastest") return native_benchmark_indexed_case(result, "fastest_index");
+    if (selector == "slowest") return native_benchmark_indexed_case(result, "slowest_index");
+  }
+
+  if (kind == "profile") {
+    if (selector == "total") return native_benchmark_period_field(result, "total_ns");
+    if (selector == "total_ns" || selector == "spans" || selector == "summary") {
+      return native_benchmark_data_value_or_null(result, selector);
+    }
+    if (selector == "find") {
+      if (args.size() != 1U) throw NativeBailout();
+      return native_benchmark_profile_find(result, args[0]);
+    }
+  }
+  throw NativeBailout();
 }
 
 static NativeValue native_benchmark_send(
@@ -10136,10 +10740,54 @@ static NativeValue native_benchmark_send(
   }
   if (selector == "from_json") {
     if (!receiver_is_module || args.size() != 1U ||
-        args[0].tag != NativeValue::Tag::String) {
+        !native_value_is_string(args[0])) {
       throw NativeBailout();
     }
     return native_benchmark_sanitize(native_json_parse_value(args[0]));
+  }
+
+  const bool result_accessor =
+      selector == "label" || selector == "kind" || selector == "data" ||
+      selector == "value" || selector == "elapsed" ||
+      selector == "elapsed_ns" || selector == "iterations" ||
+      selector == "samples" || selector == "per_iteration" ||
+      selector == "per_iteration_ns" || selector == "mean" ||
+      selector == "mean_ns" || selector == "min" || selector == "min_ns" ||
+      selector == "max" || selector == "max_ns" || selector == "p50" ||
+      selector == "p50_ns" || selector == "p90" || selector == "p90_ns" ||
+      selector == "p95" || selector == "p95_ns" || selector == "p99" ||
+      selector == "p99_ns" || selector == "ops_per_second" ||
+      selector == "sample_times" || selector == "sample_ns" ||
+      selector == "cases" || selector == "fastest" ||
+      selector == "slowest" || selector == "relative" ||
+      selector == "total" || selector == "total_ns" ||
+      selector == "spans" || selector == "summary" ||
+      selector == "find" || selector == "to_str" || selector == "inspect";
+  if (result_accessor) {
+    if (receiver_is_module) {
+      if (args.empty()) throw NativeBailout();
+      std::vector<NativeValue> accessor_args(args.begin() + 1, args.end());
+      return native_benchmark_accessor(args[0], selector, accessor_args);
+    }
+    if (selector != "find" && !args.empty()) throw NativeBailout();
+    if (!native_benchmark_has_schema(receiver, kNativeBenchmarkSchema)) {
+      // Not a benchmark result: shared selectors keep the generic
+      // tag-dispatch semantics instead of bailing out (inspect/to_str via
+      // the tag-generic Time dispatcher, min/max via the sequence extremum
+      // family). Selectors with no generic native owner (label, value,
+      // kind, find, ...) still bail so the VM reports the send error.
+      if (selector == "inspect") {
+        return native_time_nullary(receiver, NativeTimeSelector::Inspect);
+      }
+      if (selector == "to_str") {
+        return native_time_nullary(receiver, NativeTimeSelector::ToStr);
+      }
+      if (selector == "min" || selector == "max") {
+        return native_sequence_extreme(receiver, selector);
+      }
+      throw NativeBailout();
+    }
+    return native_benchmark_accessor(receiver, selector, args);
   }
 
   NativeValue result = receiver;
@@ -10265,7 +10913,7 @@ static NativeValue native_benchmark_send(
   out << "  if (numeric_tag(lhs) && numeric_tag(rhs)) return "
          "NativeValue::floating(as_double_numeric(lhs) + "
          "as_double_numeric(rhs));\n";
-  out << "  if (lhs.tag == NativeValue::Tag::String) return "
+  out << "  if (native_value_is_string(lhs)) return "
          "native_string_concat(lhs, rhs);\n";
   out << "  if (native_is_sequence(lhs)) return "
          "native_sequence_concat(lhs, rhs);\n";
@@ -10499,6 +11147,9 @@ static NativeValue native_benchmark_send(
          "lhs.scalar_value == rhs.scalar_value;\n";
   out << "  else if (numeric_tag(lhs) && numeric_tag(rhs)) equal = "
          "as_double_numeric(lhs) == as_double_numeric(rhs);\n";
+  out << "  else if (native_value_is_string(lhs) && "
+         "native_value_is_string(rhs)) equal = "
+         "native_string_text_equal(lhs, rhs);\n";
   out << "  else if (lhs.tag != rhs.tag) equal = false;\n";
   out << "  else if (lhs.tag == NativeValue::Tag::Null) equal = true;\n";
   out << "  else equal = lhs.scalar_value == rhs.scalar_value;\n";
@@ -10531,8 +11182,14 @@ static NativeValue native_benchmark_send(
   out << "static std::string native_value_to_debug_string("
          "const NativeValue &value);\n";
   out << "static NativeValue native_to_str(const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::Map && "
+         "native_benchmark_has_schema(value, kNativeBenchmarkSchema)) {\n";
+  out << "    return native_benchmark_compact_text(value, "
+         "native_benchmark_kind(value));\n";
+  out << "  }\n";
   out << "  switch (value.tag) {\n";
-  out << "  case NativeValue::Tag::String: return value;\n";
+  out << "  case NativeValue::Tag::String:\n";
+  out << "  case NativeValue::Tag::HeapString: return value;\n";
   out << "  case NativeValue::Tag::Symbol: return "
          "NativeValue::string_ref(native_intern_string("
          "native_symbol_text(value.scalar_value)));\n";
@@ -10542,8 +11199,8 @@ static NativeValue native_benchmark_send(
          "NativeValue::string_ref(native_intern_string("
          "value.scalar_value != 0 ? \"true\" : \"false\"));\n";
   out << "  case NativeValue::Tag::Integer: return "
-         "NativeValue::string_ref(native_intern_string("
-         "std::to_string(value.scalar_value)));\n";
+         "NativeValue::heap_string("
+         "std::to_string(value.scalar_value));\n";
   // Float to_str uses shortest-round-trip formatting (display_float_text),
   // unlike the precision-6 debug print.
   out << "  case NativeValue::Tag::Float: {\n";
@@ -10551,14 +11208,14 @@ static NativeValue native_benchmark_send(
   out << "    const auto converted = std::to_chars(buffer, "
          "buffer + sizeof(buffer), value.float_value);\n";
   out << "    if (converted.ec != std::errc{}) throw NativeBailout();\n";
-  out << "    return NativeValue::string_ref(native_intern_string("
-         "std::string(buffer, converted.ptr)));\n";
+  out << "    return NativeValue::heap_string("
+         "std::string(buffer, converted.ptr));\n";
   out << "  }\n";
   out << "  case NativeValue::Tag::Bytes: return "
-         "NativeValue::string_ref(native_intern_string(as_bytes(value).bytes));"
+         "NativeValue::heap_string(as_bytes(value).bytes);"
          "\n";
   out << "  case NativeValue::Tag::FsPath: return "
-         "NativeValue::string_ref(native_intern_string(as_fs_path(value).path));"
+         "NativeValue::heap_string(as_fs_path(value).path);"
          "\n";
   out << "  case NativeValue::Tag::List:\n";
   out << "  case NativeValue::Tag::Tuple:\n";
@@ -10566,8 +11223,8 @@ static NativeValue native_benchmark_send(
   out << "  case NativeValue::Tag::Map:\n";
   out << "  case NativeValue::Tag::Range:\n";
   out << "  case NativeValue::Tag::ArgParser:\n";
-  out << "    return NativeValue::string_ref(native_intern_string("
-         "native_value_to_debug_string(value)));\n";
+  out << "    return NativeValue::heap_string("
+         "native_value_to_debug_string(value));\n";
   out << "  case NativeValue::Tag::StrType:\n";
   out << "  case NativeValue::Tag::IntType:\n";
   out << "  case NativeValue::Tag::BigIntType:\n";
@@ -10598,7 +11255,7 @@ static NativeValue native_benchmark_send(
   out << "    return native_uuid_nullary(value, \"to_str\");\n";
   out << "  case NativeValue::Tag::Time:\n";
   out << "  case NativeValue::Tag::TimePeriod:\n";
-  out << "    return native_time_nullary(value, \"to_str\");\n";
+  out << "    return native_time_nullary(value, NativeTimeSelector::ToStr);\n";
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
   out << "}\n\n";
@@ -10618,7 +11275,7 @@ static NativeValue native_benchmark_send(
          "throw NativeBailout();\n";
   out << "    return NativeValue::integer(as_int);\n";
   out << "  }\n";
-  out << "  if (value.tag == NativeValue::Tag::String) {\n";
+  out << "  if (native_value_is_string(value)) {\n";
   out << "    std::int64_t parsed = 0;\n";
   out << "    if (!native_parse_int_text(native_string_text(value), &parsed)) "
          "throw NativeBailout();\n";
@@ -10630,7 +11287,7 @@ static NativeValue native_benchmark_send(
   out << "  if (value.tag == NativeValue::Tag::Float) return value;\n";
   out << "  if (value.tag == NativeValue::Tag::Integer) return "
          "NativeValue::floating(static_cast<double>(value.scalar_value));\n";
-  out << "  if (value.tag == NativeValue::Tag::String) {\n";
+  out << "  if (native_value_is_string(value)) {\n";
   out << "    double parsed = 0.0;\n";
   out << "    if (!native_parse_float_text(native_string_text(value), &parsed)) "
          "throw NativeBailout();\n";
@@ -10640,7 +11297,7 @@ static NativeValue native_benchmark_send(
   out << "}\n\n";
   out << "static NativeValue native_to_bool(const NativeValue &value) {\n";
   out << "  if (value.tag == NativeValue::Tag::Bool) return value;\n";
-  out << "  if (value.tag == NativeValue::Tag::String) {\n";
+  out << "  if (native_value_is_string(value)) {\n";
   out << "    const std::string &text = native_string_text(value);\n";
   out << "    if (text == \"true\") return NativeValue::boolean(true);\n";
   out << "    if (text == \"false\") return NativeValue::boolean(false);\n";
@@ -10649,7 +11306,7 @@ static NativeValue native_benchmark_send(
   out << "}\n\n";
   out << "static NativeValue native_to_symbol(const NativeValue &value) {\n";
   out << "  if (value.tag == NativeValue::Tag::Symbol) return value;\n";
-  out << "  if (value.tag == NativeValue::Tag::String) {\n";
+  out << "  if (native_value_is_string(value)) {\n";
   out << "    const std::string &text = native_string_text(value);\n";
   out << "    if (text.empty()) throw NativeBailout();\n";
   out << "    return NativeValue::symbol_ref(native_intern_symbol(text));\n";
@@ -11282,7 +11939,8 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "    return text.str();\n";
   out << "  }\n";
   // Mirrors value_to_debug_string: quotes around the raw text, no escaping.
-  out << "  case NativeValue::Tag::String: return \"\\\"\" + "
+  out << "  case NativeValue::Tag::String:\n";
+  out << "  case NativeValue::Tag::HeapString: return \"\\\"\" + "
          "native_string_text(value) + \"\\\"\";\n";
   out << "  case NativeValue::Tag::Symbol: return \":\" + "
          "native_symbol_text(value.scalar_value);\n";

@@ -570,7 +570,7 @@ test: build
 	$(BUILD_DIR)/amberc build tests/fixtures/native_benchmark_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-benchmark-core > $(BUILD_DIR)/native-benchmark-core-build.json
 	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-benchmark-core-build.json
 	$(BUILD_DIR)/native-benchmark-core > $(BUILD_DIR)/native-benchmark-core.out
-	grep -q '^3$$' $(BUILD_DIR)/native-benchmark-core.out
+	grep -q '^4$$' $(BUILD_DIR)/native-benchmark-core.out
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_benchmark_core/main.am > $(BUILD_DIR)/native-benchmark-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-benchmark-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-benchmark-core.dump

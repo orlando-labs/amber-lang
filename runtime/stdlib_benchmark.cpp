@@ -536,6 +536,104 @@ bool double_field(NativeStdlibCall &call, const Value &map,
   return true;
 }
 
+bool required_int_field(NativeStdlibCall &call, const Value &map,
+                        const std::string &key, std::int64_t *out,
+                        std::int64_t min = 0) {
+  Value raw = Value::null();
+  bool found = false;
+  if (!map_value_field(call, map, key, &raw, &found)) {
+    return false;
+  }
+  if (!found || !raw.is_integer()) {
+    call.fault("BenchmarkImportError",
+               "benchmark result " + key + " must be an Int");
+    return false;
+  }
+  const std::int64_t value = raw.as_integer();
+  if (value < min) {
+    call.fault("BenchmarkImportError",
+               "benchmark result " + key + " is out of range");
+    return false;
+  }
+  *out = value;
+  return true;
+}
+
+bool required_number_field(NativeStdlibCall &call, const Value &map,
+                           const std::string &key, double *out,
+                           double min = 0.0) {
+  Value raw = Value::null();
+  bool found = false;
+  if (!map_value_field(call, map, key, &raw, &found)) {
+    return false;
+  }
+  if (!found || (!raw.is_integer() && !raw.is_float())) {
+    call.fault("BenchmarkImportError",
+               "benchmark result " + key + " must be numeric");
+    return false;
+  }
+  const double value =
+      raw.is_integer() ? static_cast<double>(raw.as_integer()) : raw.as_float();
+  if (!std::isfinite(value) || value < min) {
+    call.fault("BenchmarkImportError",
+               "benchmark result " + key + " is out of range");
+    return false;
+  }
+  *out = value;
+  return true;
+}
+
+bool optional_text_or_null_field(NativeStdlibCall &call, const Value &map,
+                                 const std::string &key) {
+  Value raw = Value::null();
+  bool found = false;
+  if (!map_value_field(call, map, key, &raw, &found)) {
+    return false;
+  }
+  if (!found || raw.is_null()) {
+    return true;
+  }
+  std::string ignored;
+  return value_to_text(call, raw, key, &ignored);
+}
+
+bool required_text_field(NativeStdlibCall &call, const Value &map,
+                         const std::string &key, std::string *out = nullptr) {
+  Value raw = Value::null();
+  bool found = false;
+  if (!map_value_field(call, map, key, &raw, &found)) {
+    return false;
+  }
+  if (!found || raw.is_null()) {
+    call.fault("BenchmarkImportError",
+               "benchmark result " + key + " must be a Str");
+    return false;
+  }
+  std::string text;
+  if (!value_to_text(call, raw, key, &text)) {
+    return false;
+  }
+  if (out != nullptr) {
+    *out = std::move(text);
+  }
+  return true;
+}
+
+bool required_list_field(NativeStdlibCall &call, const Value &map,
+                         const std::string &key, std::vector<Value> *out) {
+  Value raw = Value::null();
+  bool found = false;
+  if (!map_value_field(call, map, key, &raw, &found)) {
+    return false;
+  }
+  if (!found || !raw.is_list() || !call.list_items(raw, out)) {
+    call.fault("BenchmarkImportError",
+               "benchmark result " + key + " must be a List");
+    return false;
+  }
+  return true;
+}
+
 bool result_kind(NativeStdlibCall &call, const Value &result, std::string *kind) {
   std::string schema;
   if (!map_text_field(call, result, "schema", &schema) || schema != kSchema) {
@@ -565,9 +663,169 @@ Value sanitize_result_map(NativeStdlibCall &call, const Value &result) {
   return obj(call, std::move(clean));
 }
 
-bool validate_importable(NativeStdlibCall &call, const Value &value) {
+bool validate_span_shape(NativeStdlibCall &call, const Value &span) {
+  if (!span.is_map()) {
+    call.fault("BenchmarkImportError", "benchmark profile span must be a Map");
+    return false;
+  }
+  std::int64_t ignored = 0;
+  std::vector<Value> children;
+  if (!required_text_field(call, span, "label") ||
+      !required_int_field(call, span, "elapsed_ns", &ignored) ||
+      !required_int_field(call, span, "self_ns", &ignored) ||
+      !required_int_field(call, span, "depth", &ignored) ||
+      !required_int_field(call, span, "parent_index", &ignored,
+                          std::numeric_limits<std::int64_t>::min()) ||
+      !required_list_field(call, span, "children", &children)) {
+    return false;
+  }
+  for (const Value &child : children) {
+    if (!validate_span_shape(call, child)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validate_summary_shape(NativeStdlibCall &call, const Value &row) {
+  if (!row.is_map()) {
+    call.fault("BenchmarkImportError",
+               "benchmark profile summary row must be a Map");
+    return false;
+  }
+  std::int64_t ignored = 0;
+  return required_text_field(call, row, "label") &&
+         required_int_field(call, row, "count", &ignored) &&
+         required_int_field(call, row, "total_ns", &ignored) &&
+         required_int_field(call, row, "self_ns", &ignored) &&
+         required_int_field(call, row, "mean_ns", &ignored) &&
+         required_int_field(call, row, "min_ns", &ignored) &&
+         required_int_field(call, row, "max_ns", &ignored);
+}
+
+bool validate_result_shape(NativeStdlibCall &call, const Value &value,
+                           const std::string &expected_kind = "");
+
+bool validate_report_shape(NativeStdlibCall &call, const Value &data) {
+  std::int64_t iterations = 0;
+  std::int64_t per_sample = 0;
+  std::int64_t samples = 0;
+  std::int64_t ignored = 0;
+  double ops = 0.0;
+  if (!required_int_field(call, data, "iterations", &iterations) ||
+      !required_int_field(call, data, "iterations_per_sample", &per_sample) ||
+      !required_int_field(call, data, "samples", &samples, 1) ||
+      !required_int_field(call, data, "elapsed_ns", &ignored) ||
+      !required_int_field(call, data, "per_iteration_ns", &ignored) ||
+      !required_int_field(call, data, "mean_ns", &ignored) ||
+      !required_int_field(call, data, "min_ns", &ignored) ||
+      !required_int_field(call, data, "max_ns", &ignored) ||
+      !required_int_field(call, data, "p50_ns", &ignored) ||
+      !required_int_field(call, data, "p90_ns", &ignored) ||
+      !required_int_field(call, data, "p95_ns", &ignored) ||
+      !required_int_field(call, data, "p99_ns", &ignored) ||
+      !required_number_field(call, data, "ops_per_second", &ops)) {
+    return false;
+  }
+  if (per_sample < 1 || iterations < per_sample ||
+      iterations != per_sample * samples) {
+    call.fault("BenchmarkImportError",
+               "benchmark report iteration counts are inconsistent");
+    return false;
+  }
+  std::vector<Value> sample_values;
+  if (!required_list_field(call, data, "sample_ns", &sample_values)) {
+    return false;
+  }
+  if (sample_values.size() != static_cast<std::size_t>(samples)) {
+    call.fault("BenchmarkImportError",
+               "benchmark report sample count is inconsistent");
+    return false;
+  }
+  for (const Value &sample : sample_values) {
+    if (!sample.is_integer() || sample.as_integer() < 0) {
+      call.fault("BenchmarkImportError",
+                 "benchmark report sample_ns entries must be non-negative Int");
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validate_compare_shape(NativeStdlibCall &call, const Value &data) {
+  std::vector<Value> cases;
+  if (!required_list_field(call, data, "cases", &cases)) {
+    return false;
+  }
+  if (cases.empty()) {
+    call.fault("BenchmarkImportError",
+               "benchmark compare report must contain cases");
+    return false;
+  }
+  for (const Value &case_value : cases) {
+    if (!validate_result_shape(call, case_value, "report")) {
+      return false;
+    }
+  }
+  std::int64_t fastest = 0;
+  std::int64_t slowest = 0;
+  if (!required_int_field(call, data, "fastest_index", &fastest) ||
+      !required_int_field(call, data, "slowest_index", &slowest)) {
+    return false;
+  }
+  if (fastest >= static_cast<std::int64_t>(cases.size()) ||
+      slowest >= static_cast<std::int64_t>(cases.size())) {
+    call.fault("BenchmarkImportError",
+               "benchmark compare report indexes are out of range");
+    return false;
+  }
+  std::vector<Value> relative;
+  if (!required_list_field(call, data, "relative", &relative)) {
+    return false;
+  }
+  if (relative.size() != cases.size()) {
+    call.fault("BenchmarkImportError",
+               "benchmark compare relative rows are inconsistent");
+    return false;
+  }
+  return true;
+}
+
+bool validate_profile_shape(NativeStdlibCall &call, const Value &data) {
+  std::int64_t ignored = 0;
+  if (!required_int_field(call, data, "total_ns", &ignored)) {
+    return false;
+  }
+  std::vector<Value> spans;
+  if (!required_list_field(call, data, "spans", &spans)) {
+    return false;
+  }
+  for (const Value &span : spans) {
+    if (!validate_span_shape(call, span)) {
+      return false;
+    }
+  }
+  std::vector<Value> summary;
+  if (!required_list_field(call, data, "summary", &summary)) {
+    return false;
+  }
+  for (const Value &row : summary) {
+    if (!validate_summary_shape(call, row)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validate_result_shape(NativeStdlibCall &call, const Value &value,
+                           const std::string &expected_kind) {
   std::string kind;
   if (!result_kind(call, value, &kind)) {
+    return false;
+  }
+  if (!expected_kind.empty() && kind != expected_kind) {
+    call.fault("BenchmarkImportError",
+               "expected benchmark " + expected_kind + " result");
     return false;
   }
   if (kind != "measurement" && kind != "report" && kind != "compare_report" &&
@@ -575,8 +833,29 @@ bool validate_importable(NativeStdlibCall &call, const Value &value) {
     call.fault("BenchmarkImportError", "unknown benchmark result kind");
     return false;
   }
+  if (!optional_text_or_null_field(call, value, "label")) {
+    return false;
+  }
   Value data = Value::null();
-  return data_map(call, value, &data);
+  if (!data_map(call, value, &data)) {
+    return false;
+  }
+  if (kind == "measurement") {
+    std::int64_t ignored = 0;
+    return required_int_field(call, data, "elapsed_ns", &ignored) &&
+           required_int_field(call, data, "iterations", &ignored);
+  }
+  if (kind == "report") {
+    return validate_report_shape(call, data);
+  }
+  if (kind == "compare_report") {
+    return validate_compare_shape(call, data);
+  }
+  return validate_profile_shape(call, data);
+}
+
+bool validate_importable(NativeStdlibCall &call, const Value &value) {
+  return validate_result_shape(call, value);
 }
 
 bool call_user_block(NativeStdlibCall &call, const Value &block,
@@ -1038,8 +1317,49 @@ std::string measurement_summary(NativeStdlibCall &call, const Value &result,
                       std::nullopt);
 }
 
+std::string profile_tree(NativeStdlibCall &call, const Value &result,
+                         const FormatOptions &options) {
+  Value data = Value::null();
+  if (!data_map(call, result, &data)) {
+    return "";
+  }
+  Value spans_value = Value::null();
+  bool found = false;
+  if (!map_value_field(call, data, "spans", &spans_value, &found) || !found) {
+    return "";
+  }
+  std::vector<Value> spans;
+  if (!call.list_items(spans_value, &spans)) {
+    return "";
+  }
+  std::vector<std::vector<std::string>> rows{{"section", "total", "self"}};
+  for (const Value &span : spans) {
+    if (!span.is_map()) {
+      continue;
+    }
+    std::string label;
+    std::int64_t elapsed = 0;
+    std::int64_t self = 0;
+    std::int64_t depth = 0;
+    (void)map_text_field(call, span, "label", &label);
+    (void)int_field(call, span, "elapsed_ns", &elapsed);
+    (void)int_field(call, span, "self_ns", &self);
+    (void)int_field(call, span, "depth", &depth);
+    rows.push_back(
+        {std::string(static_cast<std::size_t>(std::max<std::int64_t>(0, depth)) *
+                         2U,
+                     ' ') +
+             label,
+         format_ns(elapsed, options.unit), format_ns(self, options.unit)});
+  }
+  return render_table(std::move(rows), std::nullopt);
+}
+
 std::string profile_summary(NativeStdlibCall &call, const Value &result,
                             const FormatOptions &options) {
+  if (options.layout == "tree") {
+    return profile_tree(call, result, options);
+  }
   Value data = Value::null();
   if (!data_map(call, result, &data)) {
     return "";
@@ -1049,31 +1369,63 @@ std::string profile_summary(NativeStdlibCall &call, const Value &result,
   if (map_value_field(call, data, "summary", &summary_value, &found) && found) {
     std::vector<Value> rows_value;
     if (call.list_items(summary_value, &rows_value) && !rows_value.empty()) {
-      std::vector<std::vector<std::string>> rows{
-          {"section", "count", "total", "self", "mean", "max"}};
-      for (const Value &row_value : rows_value) {
-        if (!row_value.is_map()) {
-          continue;
-        }
+      struct Row {
         std::string label;
         std::int64_t count = 0;
         std::int64_t total = 0;
         std::int64_t self = 0;
         std::int64_t mean = 0;
         std::int64_t max = 0;
-        (void)map_text_field(call, row_value, "label", &label);
-        (void)int_field(call, row_value, "count", &count);
-        (void)int_field(call, row_value, "total_ns", &total);
-        (void)int_field(call, row_value, "self_ns", &self);
-        (void)int_field(call, row_value, "mean_ns", &mean);
-        (void)int_field(call, row_value, "max_ns", &max);
-        rows.push_back({label, std::to_string(count),
-                        format_ns(total, options.unit),
-                        format_ns(self, options.unit),
-                        format_ns(mean, options.unit),
-                        format_ns(max, options.unit)});
+        std::size_t source_index = 0;
+      };
+      std::vector<Row> parsed;
+      parsed.reserve(rows_value.size());
+      for (std::size_t i = 0; i < rows_value.size(); ++i) {
+        const Value &row_value = rows_value[i];
+        if (!row_value.is_map()) {
+          continue;
+        }
+        Row row;
+        row.source_index = i;
+        (void)map_text_field(call, row_value, "label", &row.label);
+        (void)int_field(call, row_value, "count", &row.count);
+        (void)int_field(call, row_value, "total_ns", &row.total);
+        (void)int_field(call, row_value, "self_ns", &row.self);
+        (void)int_field(call, row_value, "mean_ns", &row.mean);
+        (void)int_field(call, row_value, "max_ns", &row.max);
+        parsed.push_back(std::move(row));
       }
-      return render_table(std::move(rows), std::nullopt);
+      if (options.sort != "source_order") {
+        const auto metric = [&](const Row &row) -> std::int64_t {
+          if (options.sort == "self") {
+            return row.self;
+          }
+          if (options.sort == "count") {
+            return row.count;
+          }
+          return row.total;
+        };
+        std::stable_sort(parsed.begin(), parsed.end(),
+                         [&](const Row &lhs, const Row &rhs) {
+                           return metric(lhs) > metric(rhs);
+                         });
+      }
+      std::optional<std::size_t> bold;
+      if ((options.style == "ansi" || options.style == "xterm") &&
+          options.highlight == "best" && options.sort != "source_order" &&
+          !parsed.empty()) {
+        bold = 1U;
+      }
+      std::vector<std::vector<std::string>> rows{
+          {"section", "count", "total", "self", "mean", "max"}};
+      for (const Row &row : parsed) {
+        rows.push_back({row.label, std::to_string(row.count),
+                        format_ns(row.total, options.unit),
+                        format_ns(row.self, options.unit),
+                        format_ns(row.mean, options.unit),
+                        format_ns(row.max, options.unit)});
+      }
+      return render_table(std::move(rows), bold);
     }
   }
   std::int64_t total = 0;
@@ -1096,6 +1448,10 @@ SendStatus benchmark_format(NativeStdlibCall &call, std::string layout) {
       options.unit != "ms" && options.unit != "s") {
     return call.fault("ArgumentError", "unknown Benchmark unit");
   }
+  if (options.layout != "summary" && options.layout != "table" &&
+      options.layout != "tree") {
+    return call.fault("ArgumentError", "unknown Benchmark layout");
+  }
   if (options.style != "plain" && options.style != "ansi" &&
       options.style != "xterm") {
     return call.fault("ArgumentError", "unknown Benchmark style");
@@ -1103,9 +1459,23 @@ SendStatus benchmark_format(NativeStdlibCall &call, std::string layout) {
   if (options.highlight != "none" && options.highlight != "best") {
     return call.fault("ArgumentError", "unknown Benchmark highlight");
   }
+  if (options.sort != "total" && options.sort != "self" &&
+      options.sort != "count" && options.sort != "source_order") {
+    return call.fault("ArgumentError", "unknown Benchmark sort");
+  }
+  if (options.metric != "mean" && options.metric != "p95" &&
+      options.metric != "ops_per_second" && options.metric != "total" &&
+      options.metric != "self" && options.metric != "count" &&
+      options.metric != "max" && options.metric != "min") {
+    return call.fault("ArgumentError", "unknown Benchmark metric");
+  }
   std::string kind;
   if (!result_kind(call, call.args[0], &kind)) {
     return SendStatus::Faulted;
+  }
+  if (options.layout == "tree" && kind != "profile") {
+    return call.fault("ArgumentError",
+                      "Benchmark tree layout only supports profiles");
   }
   std::string text;
   if (kind == "report") {
@@ -1559,6 +1929,9 @@ SendStatus benchmark_to_map(NativeStdlibCall &call) {
   if (!text_keyword(call, "value", "safe", &value_mode)) {
     return SendStatus::Faulted;
   }
+  if (value_mode != "safe" && value_mode != "raw") {
+    return call.fault("ArgumentError", "unknown Benchmark value mode");
+  }
   *call.out = value_mode == "raw" ? call.args[0]
                                   : sanitize_result_map(call, call.args[0]);
   return SendStatus::Matched;
@@ -1615,6 +1988,259 @@ SendStatus benchmark_from_json(NativeStdlibCall &call) {
   return SendStatus::Matched;
 }
 
+Value top_value_or_null(NativeStdlibCall &call, const Value &result,
+                        const std::string &key) {
+  Value out = Value::null();
+  bool found = false;
+  if (!map_value_field(call, result, key, &out, &found)) {
+    return Value::null();
+  }
+  return found ? out : Value::null();
+}
+
+Value data_value_or_null(NativeStdlibCall &call, const Value &result,
+                         const std::string &key) {
+  Value data = Value::null();
+  if (!data_map(call, result, &data)) {
+    return Value::null();
+  }
+  return top_value_or_null(call, data, key);
+}
+
+Value period_from_data_ns(NativeStdlibCall &call, const Value &result,
+                          const std::string &key) {
+  Value data = Value::null();
+  if (!data_map(call, result, &data)) {
+    return Value::null();
+  }
+  std::int64_t ns = 0;
+  if (!int_field(call, data, key, &ns)) {
+    return Value::null();
+  }
+  return period_value(ns);
+}
+
+Value time_period_list_from_ns_list(NativeStdlibCall &call,
+                                    const Value &raw_list) {
+  std::vector<Value> values;
+  if (!call.list_items(raw_list, &values)) {
+    return Value::null();
+  }
+  std::vector<Value> periods;
+  periods.reserve(values.size());
+  for (const Value &value : values) {
+    if (!value.is_integer()) {
+      return Value::null();
+    }
+    periods.push_back(period_value(value.as_integer()));
+  }
+  return list(call, std::move(periods));
+}
+
+Value benchmark_indexed_case(NativeStdlibCall &call, const Value &result,
+                             const std::string &index_key) {
+  Value data = Value::null();
+  if (!data_map(call, result, &data)) {
+    return Value::null();
+  }
+  std::int64_t index = -1;
+  if (!int_field(call, data, index_key, &index) || index < 0) {
+    return Value::null();
+  }
+  Value cases_value = Value::null();
+  bool found = false;
+  if (!map_value_field(call, data, "cases", &cases_value, &found) || !found) {
+    return Value::null();
+  }
+  std::vector<Value> cases;
+  if (!call.list_items(cases_value, &cases) ||
+      static_cast<std::size_t>(index) >= cases.size()) {
+    return Value::null();
+  }
+  return cases[static_cast<std::size_t>(index)];
+}
+
+Value benchmark_profile_find(NativeStdlibCall &call, const Value &profile,
+                             const std::string &label) {
+  Value data = Value::null();
+  if (!data_map(call, profile, &data)) {
+    return Value::null();
+  }
+  Value spans_value = Value::null();
+  bool found = false;
+  if (!map_value_field(call, data, "spans", &spans_value, &found) || !found) {
+    return Value::null();
+  }
+  std::vector<Value> spans;
+  if (!call.list_items(spans_value, &spans)) {
+    return Value::null();
+  }
+  for (const Value &span : spans) {
+    std::string span_label;
+    if (span.is_map() && map_text_field(call, span, "label", &span_label) &&
+        span_label == label) {
+      return span;
+    }
+  }
+  return Value::null();
+}
+
+std::string compact_result_text(NativeStdlibCall &call, const Value &result,
+                                const std::string &kind) {
+  std::string label = label_of(call, result, 0);
+  Value data = Value::null();
+  (void)data_map(call, result, &data);
+  if (kind == "measurement") {
+    std::int64_t elapsed = 0;
+    (void)int_field(call, data, "elapsed_ns", &elapsed);
+    return "Benchmark.measurement(" + label + ", elapsed=" +
+           format_ns(elapsed, "auto") + ")";
+  }
+  if (kind == "report") {
+    std::int64_t iterations = 0;
+    std::int64_t mean = 0;
+    (void)int_field(call, data, "iterations", &iterations);
+    (void)int_field(call, data, "mean_ns", &mean);
+    return "Benchmark.report(" + label + ", iterations=" +
+           std::to_string(iterations) + ", mean=" + format_ns(mean, "auto") +
+           ")";
+  }
+  if (kind == "compare_report") {
+    Value cases = data_value_or_null(call, result, "cases");
+    std::vector<Value> items;
+    const std::size_t count =
+        call.list_items(cases, &items) ? items.size() : 0U;
+    return "Benchmark.compare_report(cases=" + std::to_string(count) + ")";
+  }
+  std::int64_t total = 0;
+  (void)int_field(call, data, "total_ns", &total);
+  return "Benchmark.profile(" + label + ", total=" +
+         format_ns(total, "auto") + ")";
+}
+
+SendStatus benchmark_accessor(NativeStdlibCall &call) {
+  if (!call.require_no_block() || !call.reject_unknown_keywords({})) {
+    return SendStatus::Faulted;
+  }
+  const bool is_find = call.selector == "find";
+  if ((!is_find && call.args.size() != 1U) ||
+      (is_find && call.args.size() != 2U)) {
+    return call.fault("TypeError", "Benchmark result accessor arity mismatch");
+  }
+  if (!validate_importable(call, call.args[0])) {
+    return SendStatus::Faulted;
+  }
+  std::string kind;
+  if (!result_kind(call, call.args[0], &kind)) {
+    return SendStatus::Faulted;
+  }
+
+  const Value &result = call.args[0];
+  if (call.selector == "label") {
+    *call.out = top_value_or_null(call, result, "label");
+    return SendStatus::Matched;
+  }
+  if (call.selector == "kind") {
+    *call.out = s(call, kind);
+    return SendStatus::Matched;
+  }
+  if (call.selector == "data") {
+    Value data = Value::null();
+    if (!data_map(call, result, &data)) {
+      return SendStatus::Faulted;
+    }
+    *call.out = data;
+    return SendStatus::Matched;
+  }
+  if (call.selector == "value") {
+    *call.out = top_value_or_null(call, result, "value");
+    return SendStatus::Matched;
+  }
+  if (call.selector == "to_str" || call.selector == "inspect") {
+    *call.out = s(call, compact_result_text(call, result, kind));
+    return SendStatus::Matched;
+  }
+
+  if (kind == "measurement") {
+    if (call.selector == "elapsed") {
+      *call.out = period_from_data_ns(call, result, "elapsed_ns");
+      return SendStatus::Matched;
+    }
+    if (call.selector == "elapsed_ns" || call.selector == "iterations") {
+      *call.out = data_value_or_null(
+          call, result,
+          call.selector == "elapsed_ns" ? "elapsed_ns" : "iterations");
+      return SendStatus::Matched;
+    }
+  }
+
+  if (kind == "report") {
+    if (call.selector == "elapsed" || call.selector == "per_iteration" ||
+        call.selector == "mean" || call.selector == "min" ||
+        call.selector == "max" || call.selector == "p50" ||
+        call.selector == "p90" || call.selector == "p95" ||
+        call.selector == "p99") {
+      const std::string key =
+          call.selector == "elapsed" ? "elapsed_ns"
+          : call.selector == "per_iteration" ? "per_iteration_ns"
+                                               : call.selector + "_ns";
+      *call.out = period_from_data_ns(call, result, key);
+      return SendStatus::Matched;
+    }
+    if (call.selector == "sample_times") {
+      *call.out = time_period_list_from_ns_list(
+          call, data_value_or_null(call, result, "sample_ns"));
+      return SendStatus::Matched;
+    }
+    if (call.selector == "iterations" || call.selector == "samples" ||
+        call.selector == "elapsed_ns" ||
+        call.selector == "per_iteration_ns" || call.selector == "mean_ns" ||
+        call.selector == "min_ns" || call.selector == "max_ns" ||
+        call.selector == "p50_ns" || call.selector == "p90_ns" ||
+        call.selector == "p95_ns" || call.selector == "p99_ns" ||
+        call.selector == "ops_per_second" || call.selector == "sample_ns") {
+      *call.out = data_value_or_null(call, result, call.selector);
+      return SendStatus::Matched;
+    }
+  }
+
+  if (kind == "compare_report") {
+    if (call.selector == "cases" || call.selector == "relative") {
+      *call.out = data_value_or_null(call, result, call.selector);
+      return SendStatus::Matched;
+    }
+    if (call.selector == "fastest" || call.selector == "slowest") {
+      *call.out = benchmark_indexed_case(
+          call, result,
+          call.selector == "fastest" ? "fastest_index" : "slowest_index");
+      return SendStatus::Matched;
+    }
+  }
+
+  if (kind == "profile") {
+    if (call.selector == "total") {
+      *call.out = period_from_data_ns(call, result, "total_ns");
+      return SendStatus::Matched;
+    }
+    if (call.selector == "total_ns" || call.selector == "spans" ||
+        call.selector == "summary") {
+      *call.out = data_value_or_null(call, result, call.selector);
+      return SendStatus::Matched;
+    }
+    if (call.selector == "find") {
+      std::string label;
+      if (!value_to_text(call, call.args[1], "profile section label",
+                         &label)) {
+        return SendStatus::Faulted;
+      }
+      *call.out = benchmark_profile_find(call, result, label);
+      return SendStatus::Matched;
+    }
+  }
+
+  return call.fault("ArgumentError", "unknown Benchmark result accessor");
+}
+
 SendStatus benchmark_dispatch(NativeStdlibCall &call) {
   if (call.kind != RuntimeNativeTypeKind::Benchmark) {
     return SendStatus::NotHandled;
@@ -1657,6 +2283,28 @@ SendStatus benchmark_dispatch(NativeStdlibCall &call) {
   }
   if (call.selector == "from_json") {
     return benchmark_from_json(call);
+  }
+  if (call.selector == "label" || call.selector == "kind" ||
+      call.selector == "data" || call.selector == "value" ||
+      call.selector == "elapsed" || call.selector == "elapsed_ns" ||
+      call.selector == "iterations" || call.selector == "samples" ||
+      call.selector == "per_iteration" ||
+      call.selector == "per_iteration_ns" || call.selector == "mean" ||
+      call.selector == "mean_ns" || call.selector == "min" ||
+      call.selector == "min_ns" || call.selector == "max" ||
+      call.selector == "max_ns" || call.selector == "p50" ||
+      call.selector == "p50_ns" || call.selector == "p90" ||
+      call.selector == "p90_ns" || call.selector == "p95" ||
+      call.selector == "p95_ns" || call.selector == "p99" ||
+      call.selector == "p99_ns" || call.selector == "ops_per_second" ||
+      call.selector == "sample_times" || call.selector == "sample_ns" ||
+      call.selector == "cases" || call.selector == "fastest" ||
+      call.selector == "slowest" || call.selector == "relative" ||
+      call.selector == "total" || call.selector == "total_ns" ||
+      call.selector == "spans" || call.selector == "summary" ||
+      call.selector == "find" || call.selector == "to_str" ||
+      call.selector == "inspect") {
+    return benchmark_accessor(call);
   }
   return SendStatus::NotHandled;
 }

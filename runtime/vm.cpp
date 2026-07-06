@@ -6502,7 +6502,23 @@ private:
     }
     const bool benchmark_selector =
         selector == "map" || selector == "to_map" || selector == "to_json" ||
-        selector == "format" || selector == "table" || selector == "pretty";
+        selector == "format" || selector == "table" || selector == "pretty" ||
+        selector == "label" || selector == "kind" || selector == "data" ||
+        selector == "value" || selector == "elapsed" ||
+        selector == "elapsed_ns" || selector == "iterations" ||
+        selector == "samples" || selector == "per_iteration" ||
+        selector == "per_iteration_ns" || selector == "mean" ||
+        selector == "mean_ns" || selector == "min" || selector == "min_ns" ||
+        selector == "max" || selector == "max_ns" || selector == "p50" ||
+        selector == "p50_ns" || selector == "p90" || selector == "p90_ns" ||
+        selector == "p95" || selector == "p95_ns" || selector == "p99" ||
+        selector == "p99_ns" || selector == "ops_per_second" ||
+        selector == "sample_times" || selector == "sample_ns" ||
+        selector == "cases" || selector == "fastest" ||
+        selector == "slowest" || selector == "relative" ||
+        selector == "total" || selector == "total_ns" ||
+        selector == "spans" || selector == "summary" ||
+        selector == "find" || selector == "to_str" || selector == "inspect";
     if (!benchmark_selector ||
         !map_has_schema(frame, receiver, "amber.benchmark.v1")) {
       return fault_.has_value() ? SendStatus::Faulted : SendStatus::NotHandled;

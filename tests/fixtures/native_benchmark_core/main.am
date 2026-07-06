@@ -10,7 +10,7 @@ def main():
   measured = measurement.map
   measured_json = measurement.to_json(pretty: true)
   measured_copy = Benchmark.from_json(measured_json)
-  if measured["schema"] == "amber.benchmark.v1" and measured["kind"] == "measurement" and measured_copy["data"]["elapsed_ns"] >= 0 and measurement["value"] == 42:
+  if measured["schema"] == "amber.benchmark.v1" and measured["kind"] == "measurement" and measured_copy["data"]["elapsed_ns"] >= 0 and measurement.value == 42 and measurement.label == "calc" and measurement.elapsed_ns >= 0 and measurement.elapsed.total_nanoseconds >= 0 and measurement.iterations == 1 and measurement.to_str.contains?("calc"):
     score = score + 1
 
   a = Benchmark.run("a", iterations: 2, samples: 2) |i|:
@@ -19,7 +19,7 @@ def main():
     i + 2
   cmp = Benchmark.compare(a, b)
   table = cmp.table(style: :ansi, highlight: :best)
-  if a.to_map["kind"] == "report" and a.to_json.contains?("sample_ns") and cmp.map["data"]["cases"].count() == 2 and table.contains?("[1m"):
+  if a.to_map["kind"] == "report" and a.to_json.contains?("sample_ns") and a.iterations == 4 and a.samples == 2 and a.sample_ns.count() == 2 and a.sample_times.count() == 2 and a.mean.total_nanoseconds >= 0 and a.p95_ns >= 0 and cmp.cases.count() == 2 and cmp.fastest["kind"] == "report" and cmp.slowest["kind"] == "report" and cmp.relative.count() == 2 and table.contains?("[1m"):
     score = score + 1
 
   profile = Benchmark.profile("checkout") |p|:
@@ -29,7 +29,13 @@ def main():
       loaded + 40
   profile_map = profile.map
   profile_text = profile.pretty(unit: :ns)
-  if profile["value"] == 42 and profile_map["kind"] == "profile" and profile_map["data"]["summary"].count() == 2 and profile.to_json.contains?("persist") and profile_text.contains?("section"):
+  profile_tree = profile.pretty(layout: :tree, unit: :ns)
+  if profile.value == 42 and profile_map["kind"] == "profile" and profile_map["data"]["summary"].count() == 2 and profile.total_ns >= 0 and profile.total.total_nanoseconds >= 0 and profile.spans.count() == 2 and profile.summary.count() == 2 and profile.find("persist")["label"] == "persist" and profile.to_json.contains?("persist") and profile_text.contains?("section") and profile_tree.contains?("persist"):
+    score = score + 1
+
+  lows = [9, 4, 7]
+  pair = (8, 2, 5)
+  if lows.min() == 4 and lows.max() == 9 and pair.min() == 2 and (1..6).max() == 6 and a.min_ns <= a.max_ns and a.min.total_nanoseconds >= 0:
     score = score + 1
 
   score

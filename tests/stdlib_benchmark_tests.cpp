@@ -144,11 +144,49 @@ void test_profile_sections() {
   expect_ok_integer(result, 42, "profile sections");
 }
 
+void test_result_accessors() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "measurement = Benchmark.measure(\"calc\"):\n"
+      "  21 * 2\n"
+      "report = Benchmark.run(\"loop\", iterations: 2, samples: 2) |i|:\n"
+      "  i + 1\n"
+      "cmp = Benchmark.compare(report)\n"
+      "profile = Benchmark.profile(\"checkout\") |p|:\n"
+      "  p.section(\"load\"):\n"
+      "    7\n"
+      "found = profile.find(\"load\")\n"
+      "tree = profile.pretty(layout: :tree, unit: :ns)\n"
+      "if measurement.label == \"calc\" and measurement.value == 42 and "
+      "measurement.elapsed_ns >= 0 and "
+      "measurement.elapsed.total_nanoseconds >= 0 and "
+      "measurement.iterations == 1 and "
+      "measurement.to_str.contains?(\"calc\") and "
+      "report.iterations == 4 and report.samples == 2 and "
+      "report.sample_ns.count() == 2 and report.sample_times.count() == 2 and "
+      "report.mean.total_nanoseconds >= 0 and report.p95_ns >= 0 and "
+      "cmp.cases.count() == 1 and cmp.fastest[\"kind\"] == \"report\" and "
+      "cmp.slowest[\"kind\"] == \"report\" and cmp.relative.count() == 1 and "
+      "profile.value == 7 and profile.total_ns >= 0 and "
+      "profile.total.total_nanoseconds >= 0 and profile.spans.count() == 1 and "
+      "profile.summary.count() == 1 and found[\"label\"] == \"load\" and "
+      "tree.contains?(\"load\"):\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect_ok_integer(result, 42, "result accessors");
+}
+
 void test_faults() {
   expect_fault("Benchmark.run(iterations: 0) |i|:\n  i\n", "ArgumentError",
                "zero iterations without min_time");
   expect_fault("Benchmark.from_json(\"{}\")\n", "BenchmarkImportError",
                "invalid import");
+  expect_fault(
+      "Benchmark.from_map({\"schema\": \"amber.benchmark.v1\", "
+      "\"kind\": \"report\", \"label\": null, \"data\": {}})\n",
+      "BenchmarkImportError", "invalid report import");
+  expect_fault("r = Benchmark.measure(\"x\"):\n  1\nr.pretty(sort: :bogus)\n",
+               "ArgumentError", "invalid formatter sort");
 }
 
 } // namespace
@@ -157,6 +195,7 @@ int main() {
   test_measure_chain_exports();
   test_run_compare_and_ansi_table();
   test_profile_sections();
+  test_result_accessors();
   test_faults();
 
   std::cout << "stdlib_benchmark_tests: ok\n";
