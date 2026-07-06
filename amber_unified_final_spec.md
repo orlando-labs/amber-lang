@@ -2862,7 +2862,17 @@ Detached / orphan task в v1 не вводятся.
 - `all?`
 - `none?`
 - `first`
+- `last`
 - `count`
+- `join`
+- `sum`
+- `product`
+- `flattened`
+- `compact`
+- `zip`
+- `partition`
+- `tally`
+- `each_with_index`
 - `contains?`
 - `include?`
 - `union`
@@ -2909,7 +2919,30 @@ Detached / orphan task в v1 не вводятся.
 - open-ended `Range` и `LazySeq` не материализуют eager операции без явной
  конечной границы;
 - `.lazy` переводит дальнейшую цепочку в lazy-profile;
-- `to_a` материализует `LazySeq`.
+- `to_a` материализует `LazySeq`;
+- `last` зеркалит `first`: без аргумента возвращает последний элемент (или
+ `null`), `last(n)` — закрывающий срез из n элементов;
+- `count(value)` считает элементы, равные `value`; `count |x|:` считает
+ truthy-совпадения предиката; обе формы взаимно исключающие;
+- `join([sep])` строит `Str` через display-стрингификацию элементов
+ (разделитель по умолчанию — пустая строка);
+- `sum([init])` и `product` — числовые свёртки: пустая коллекция даёт `0` и
+ `1` соответственно, `Int`-аккумулятор проверяется на переполнение
+ (`OverflowError`), первый `Float` переводит свёртку во float-режим,
+ нечисловой элемент — `TypeError`;
+- `flattened([depth])` рекурсивно разворачивает вложенные `Array` (глубина
+ не ограничена без аргумента); самоссылающийся список — `ArgumentError`;
+ мутирующая пара — `Array#flatten!([depth])`;
+- `compact` отбрасывает `null`-элементы (для `Set` сохраняет `Set`);
+ мутирующая пара — `Array#compact!` (зеркалит `Map#compact` /
+ `Map#compact!`);
+- `zip(seq, …)` строит массив рядов `[self[i], seq1[i], …]`, усечённый по
+ кратчайшей последовательности (null-паддинга нет);
+- `partition |x|:` возвращает `[matching, rest]`;
+- `tally` возвращает `Map` element→count (ключи нормализуются как ключи
+ `Map`);
+- `each_with_index` с блоком yields `|value, index|` и возвращает receiver;
+ без блока возвращает `Array` пар `[value, index]`.
 
 `reduce` поддерживает две формы:
 
@@ -2937,12 +2970,20 @@ xs.reduce |acc, x|:...
 - `keys`
 - `values`
 - `entries`
+- `dig(key, …)`
+- `fetch(key[, default])`
 - `contains?`
 - `include?`
 
 Нормативно:
 
 - `Map#map` возвращает `Array`;
+- `Map#dig(key, …)` выполняет вложенный lookup через `Map` / `Array` /
+ `Tuple` (целочисленный индекс для последовательностей) и возвращает `null`
+ при первом промахе;
+- `Map#fetch` — **discouraged алиас**: каноничны `m[key]` (строгий,
+ `KeyError`) и `m[?key]` (`null` при промахе); `fetch(key)` эквивалентен
+ `m[key]`, `fetch(key, default)` возвращает `default` при отсутствии ключа;
 - `Map#filter_map` возвращает `Array` truthy-результатов block;
 - `Map#select` и `Map#reject` возвращают `Map`;
 - `Map#transform` возвращает `Map` и может менять ключи;
@@ -2968,6 +3009,57 @@ set elements и схлопывает дубликаты. `Tuple`, `Range` и `La
 mutators.
 
 `StrictMap` / `StrictHashMap` предоставляют тот же operation surface, но используют exact-key semantics и экспортируют фактический stored key value. `Map#merge` с ordinary maps схлопывает name-key duplicates, а strict merge схлопывает только exact-key duplicates.
+
+### 13.12. Обязательный stdlib contract v1: строковые и числовые методы
+
+Для `Str` обязательны следующие **чистые** методы (возвращают новую строку;
+receiver — интернированная неизменяемая строка, поэтому мутирующие `!`-пары
+отложены до появления изменяемого строкового представления):
+
+- семейство регистров: `upcased`, `downcased`, `capitalized`, `titlecased`,
+ `swapcased`, `humanized`, `underscored`, `camelized`, `dasherized`.
+ `-ed`-формы каноничны; `upcase` / `downcase` / `reverse` / `replace` /
+ `trim` / `strip` сохраняются как алиасы соответствующих чистых форм.
+ Регистровые преобразования используют **Unicode simple case mapping** по
+ curated-набору скриптов v1 (ASCII, Latin-1 Supplement, Latin Extended-A,
+ греческий, кириллица); неохваченные кодпоинты проходят без изменений;
+- `trimmed` (каноничная форма `trim` / `strip`), односторонние `ltrimmed` /
+ `rtrimmed` (принимаются алиасы `lstripped` / `rstripped`) — обрезка
+ ASCII-whitespace;
+- `reversed`, `replaced(from, to)` — codepoint-reverse и подстановка всех
+ неперекрывающихся вхождений;
+- `*` (повтор): `"ab" * 3` → `"ababab"`; отрицательный счётчик —
+ `ArgumentError`;
+- `ljust(n[, pad])` / `rjust(n[, pad])` — паддинг до codepoint-ширины,
+ pad-строка циклически повторяется; пустой pad — `ArgumentError`;
+- `index(sub[, from])` / `rindex(sub)` — codepoint-смещение первого/последнего
+ вхождения или `null`;
+- `lines` — разбиение по `\n` с отбрасыванием терминатора (и хвостового
+ `\r`); завершающая новая строка не добавляет пустого элемента;
+- `count(sub)` — число неперекрывающихся вхождений подстроки;
+- `[]` / `slice` — codepoint-индексация: `Int` (отрицательный — с конца)
+ возвращает односимвольную `Str` либо `IndexError`, `IntRange` — подстроку
+ со list-slice семантикой.
+
+Для `Int` обязательны receiver-методы: `abs`, `even?`, `odd?`,
+`divmod(n)`, `gcd(n)`, `lcm(n)`, `clamp(lo, hi)`, `upto(n)`, `downto(n)`;
+для `Float` — `abs`, `divmod(n)`, `clamp(lo, hi)`.
+
+Нормативно:
+
+- `divmod` возвращает `[quotient, remainder]` c floor-семантикой,
+ согласованной с `//` и `%`; деление на ноль — `ZeroDivisionError`;
+ переполнение `Int` — `OverflowError`;
+- `gcd` / `lcm` определены на полных магнитудах (включая `INT64_MIN`);
+ результат вне диапазона `Int` — `OverflowError`; `lcm` с нулевым
+ аргументом или receiver — `0`;
+- `clamp(lo, hi)` возвращает receiver либо соответствующую границу
+ (сохраняя её тип); `lo > hi` — `ArgumentError`; нечисловые границы —
+ `TypeError`;
+- `upto(n)` / `downto(n)` — инклюзивная итерация с шагом 1: с блоком yields
+ каждое значение и возвращает receiver, без блока возвращает `Array`
+ значений (пустой, если направление не совпадает);
+- `abs` типосохраняющий; `Int#abs` на `INT64_MIN` — `OverflowError`.
 
 ## 14. Что входит в язык по намерению, но ещё не нормализовано до ядра
 

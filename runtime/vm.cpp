@@ -89,6 +89,149 @@ bool decode_keyword_utf8_codepoint(const std::string &source,
   return true;
 }
 
+void append_utf8_codepoint(std::uint32_t codepoint, std::string *out) {
+  if (codepoint < 0x80U) {
+    out->push_back(static_cast<char>(codepoint));
+    return;
+  }
+  if (codepoint < 0x800U) {
+    out->push_back(static_cast<char>(0xC0U | (codepoint >> 6U)));
+    out->push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+    return;
+  }
+  if (codepoint < 0x10000U) {
+    out->push_back(static_cast<char>(0xE0U | (codepoint >> 12U)));
+    out->push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+    out->push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+    return;
+  }
+  out->push_back(static_cast<char>(0xF0U | (codepoint >> 18U)));
+  out->push_back(static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3FU)));
+  out->push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+  out->push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+}
+
+// Unicode simple case mapping, curated v1 coverage: ASCII, Latin-1
+// Supplement, Latin Extended-A, Greek, and Cyrillic — the same scripts the
+// keyword lexer accepts. Unmapped codepoints map to themselves; multi-char
+// full mappings (ß → SS) are out of scope for the simple mapping.
+std::uint32_t simple_uppercase_codepoint(std::uint32_t cp) {
+  if (cp >= 'a' && cp <= 'z') {
+    return cp - 32U;
+  }
+  if (cp >= 0x00E0U && cp <= 0x00FEU && cp != 0x00F7U) {
+    return cp - 32U; // à–þ minus ÷ (ß keeps itself in the simple mapping)
+  }
+  if (cp == 0x00FFU) {
+    return 0x0178U; // ÿ → Ÿ
+  }
+  if (cp == 0x0131U) {
+    return 'I'; // ı → I
+  }
+  if (cp == 0x017FU) {
+    return 'S'; // ſ → S
+  }
+  if ((cp >= 0x0100U && cp <= 0x0137U) || (cp >= 0x014AU && cp <= 0x0177U)) {
+    return (cp % 2U == 1U) ? cp - 1U : cp; // Latin Extended-A even/odd pairs
+  }
+  if (cp >= 0x0139U && cp <= 0x0148U) {
+    return (cp % 2U == 0U) ? cp - 1U : cp; // Ĺ–ň odd/even pairs
+  }
+  if (cp == 0x017AU || cp == 0x017CU || cp == 0x017EU) {
+    return cp - 1U; // ź ż ž
+  }
+  if (cp == 0x03ACU) {
+    return 0x0386U; // ά → Ά
+  }
+  if (cp >= 0x03ADU && cp <= 0x03AFU) {
+    return cp - 0x25U; // έ ή ί
+  }
+  if (cp >= 0x03B1U && cp <= 0x03C1U) {
+    return cp - 32U; // α–ρ
+  }
+  if (cp == 0x03C2U) {
+    return 0x03A3U; // final sigma ς → Σ
+  }
+  if (cp >= 0x03C3U && cp <= 0x03C9U) {
+    return cp - 32U; // σ–ω
+  }
+  if (cp == 0x03CCU) {
+    return 0x038CU; // ό → Ό
+  }
+  if (cp == 0x03CDU) {
+    return 0x038EU; // ύ → Ύ
+  }
+  if (cp == 0x03CEU) {
+    return 0x038FU; // ώ → Ώ
+  }
+  if (cp >= 0x0430U && cp <= 0x044FU) {
+    return cp - 32U; // а–я
+  }
+  if (cp >= 0x0450U && cp <= 0x045FU) {
+    return cp - 80U; // ѐ–џ
+  }
+  if ((cp >= 0x0460U && cp <= 0x0481U) || (cp >= 0x048AU && cp <= 0x04BFU) ||
+      (cp >= 0x04D0U && cp <= 0x04FFU)) {
+    return (cp % 2U == 1U) ? cp - 1U : cp; // Cyrillic extension pairs
+  }
+  return cp;
+}
+
+std::uint32_t simple_lowercase_codepoint(std::uint32_t cp) {
+  if (cp >= 'A' && cp <= 'Z') {
+    return cp + 32U;
+  }
+  if (cp >= 0x00C0U && cp <= 0x00DEU && cp != 0x00D7U) {
+    return cp + 32U; // À–Þ minus ×
+  }
+  if (cp == 0x0178U) {
+    return 0x00FFU; // Ÿ → ÿ
+  }
+  if ((cp >= 0x0100U && cp <= 0x0137U) || (cp >= 0x014AU && cp <= 0x0177U)) {
+    return (cp % 2U == 0U) ? cp + 1U : cp;
+  }
+  if (cp >= 0x0139U && cp <= 0x0148U) {
+    return (cp % 2U == 1U) ? cp + 1U : cp;
+  }
+  if (cp == 0x0179U || cp == 0x017BU || cp == 0x017DU) {
+    return cp + 1U; // Ź Ż Ž
+  }
+  if (cp == 0x0386U) {
+    return 0x03ACU;
+  }
+  if (cp >= 0x0388U && cp <= 0x038AU) {
+    return cp + 0x25U;
+  }
+  if (cp == 0x038CU) {
+    return 0x03CCU;
+  }
+  if (cp == 0x038EU) {
+    return 0x03CDU;
+  }
+  if (cp == 0x038FU) {
+    return 0x03CEU;
+  }
+  if (cp >= 0x0391U && cp <= 0x03A9U && cp != 0x03A2U) {
+    return cp + 32U; // Α–Ω (U+03A2 is unassigned)
+  }
+  if (cp >= 0x0400U && cp <= 0x040FU) {
+    return cp + 80U; // Ѐ–Џ
+  }
+  if (cp >= 0x0410U && cp <= 0x042FU) {
+    return cp + 32U; // А–Я
+  }
+  if ((cp >= 0x0460U && cp <= 0x0481U) || (cp >= 0x048AU && cp <= 0x04BFU) ||
+      (cp >= 0x04D0U && cp <= 0x04FFU)) {
+    return (cp % 2U == 0U) ? cp + 1U : cp;
+  }
+  return cp;
+}
+
+bool codepoint_has_case(std::uint32_t cp) {
+  return simple_uppercase_codepoint(cp) != cp ||
+         simple_lowercase_codepoint(cp) != cp;
+}
+
 bool host_secure_random_bytes(std::size_t count, std::string *out,
                               std::string *error) {
   if (out == nullptr) {
@@ -7253,6 +7396,39 @@ private:
     return sorted;
   }
 
+  // Shared by the pure `flattened` and mutating `flatten!` forms: appends
+  // `items` into `out`, recursing into nested lists up to `depth` levels
+  // (negative depth = unlimited). Self-referential lists fault instead of
+  // recursing forever.
+  bool flatten_sequence_items(const Frame &frame,
+                              const std::vector<Value> &items,
+                              std::int64_t depth,
+                              std::vector<const void *> *visiting,
+                              std::vector<Value> *out) {
+    for (const Value &item : items) {
+      const IntrusivePtr<ListValue> nested =
+          item.is_list() ? item.as_list() : nullptr;
+      if (nested != nullptr && depth != 0) {
+        if (std::find(visiting->begin(), visiting->end(),
+                      static_cast<const void *>(nested.get())) !=
+            visiting->end()) {
+          set_fault(frame, "ArgumentError", "cannot flatten a recursive list");
+          return false;
+        }
+        visiting->push_back(nested.get());
+        if (!flatten_sequence_items(frame, nested->items,
+                                    depth > 0 ? depth - 1 : depth, visiting,
+                                    out)) {
+          return false;
+        }
+        visiting->pop_back();
+        continue;
+      }
+      out->push_back(item);
+    }
+    return true;
+  }
+
   std::optional<Value> apply_sequence_set_operation(
       const Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &items, const std::vector<Value> &args,
@@ -7263,7 +7439,8 @@ private:
         selector == "find_index" || selector == "sorted" || selector == "min" ||
         selector == "max" || selector == "minmax" || selector == "uniq" ||
         selector == "each_pair" || selector == "each_cons" ||
-        selector == "each";
+        selector == "each" || selector == "partition" ||
+        selector == "each_with_index" || selector == "count";
     if (!block.is_null() && !block_allowed) {
       set_fault(frame, "TypeError",
                 "collection operation does not accept block arguments");
@@ -7601,6 +7778,310 @@ private:
         }
       }
       return materialize_set_like_result(receiver, std::move(unique));
+    }
+
+    if (selector == "join") {
+      if (args.size() > 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::string separator;
+      if (args.size() == 1U) {
+        if (!args[0].is_string()) {
+          set_fault(frame, "TypeError", "join expects a Str separator");
+          return std::nullopt;
+        }
+        const std::optional<std::string> text =
+            string_text_from_id(args[0].as_string().string_id);
+        if (!text.has_value()) {
+          set_fault(frame, "VMError", "string ref is invalid");
+          return std::nullopt;
+        }
+        separator = *text;
+      }
+      std::string joined;
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i != 0U) {
+          joined += separator;
+        }
+        joined += runtime_stringify_value(items[i],
+                                          RuntimeStringifyMode::Display,
+                                          &module_, nullptr, nullptr,
+                                          RuntimePrettyPrintOptions{});
+      }
+      return string_value_from_text(joined);
+    }
+
+    if (selector == "sum" || selector == "product") {
+      // Numeric fold: Int accumulator with checked overflow, switching to
+      // Float on the first Float element or initial value. Empty sum is 0,
+      // empty product is 1.
+      const bool is_product = selector == "product";
+      if (args.size() > 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      bool float_mode = false;
+      std::int64_t int_acc = is_product ? 1 : 0;
+      double float_acc = is_product ? 1.0 : 0.0;
+      if (args.size() == 1U) {
+        if (args[0].is_integer()) {
+          int_acc = args[0].as_integer();
+        } else if (args[0].is_float()) {
+          float_mode = true;
+          float_acc = args[0].as_float();
+        } else {
+          set_fault(frame, "TypeError",
+                    selector + " expects a numeric initial value");
+          return std::nullopt;
+        }
+      }
+      for (const Value &item : items) {
+        if (item.is_float()) {
+          if (!float_mode) {
+            float_mode = true;
+            float_acc = static_cast<double>(int_acc);
+          }
+        } else if (!item.is_integer()) {
+          set_fault(frame, "TypeError",
+                    selector + " expects numeric elements");
+          return std::nullopt;
+        }
+        if (float_mode) {
+          const double operand = item.is_float()
+                                     ? item.as_float()
+                                     : static_cast<double>(item.as_integer());
+          float_acc = is_product ? float_acc * operand : float_acc + operand;
+          continue;
+        }
+        std::int64_t next = 0;
+        const bool ok =
+            is_product ? numeric_mul_int64(int_acc, item.as_integer(),
+                                           numeric_policy_, &next)
+                       : numeric_add_int64(int_acc, item.as_integer(),
+                                           numeric_policy_, &next);
+        if (!ok) {
+          raise_runtime_error(frame, "OverflowError",
+                              "Int overflow in `" + selector + "`");
+          return std::nullopt;
+        }
+        int_acc = next;
+      }
+      return float_mode ? Value::floating(float_acc) : Value::integer(int_acc);
+    }
+
+    if (selector == "flattened") {
+      if (args.size() > 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::int64_t depth = -1;
+      if (args.size() == 1U) {
+        if (!args[0].is_integer()) {
+          set_fault(frame, "TypeError", "flattened expects an integer depth");
+          return std::nullopt;
+        }
+        depth = args[0].as_integer();
+      }
+      std::vector<Value> flattened;
+      flattened.reserve(items.size());
+      std::vector<const void *> visiting;
+      if (!flatten_sequence_items(frame, items, depth, &visiting,
+                                  &flattened)) {
+        return std::nullopt;
+      }
+      return make_list_value(std::move(flattened));
+    }
+
+    if (selector == "compact") {
+      // Pure/mutating pair with Array#compact! (mirrors Map#compact).
+      if (!args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::vector<Value> kept;
+      kept.reserve(items.size());
+      for (const Value &item : items) {
+        if (!item.is_null()) {
+          kept.push_back(item);
+        }
+      }
+      return materialize_set_like_result(receiver, std::move(kept));
+    }
+
+    if (selector == "zip") {
+      // Rows truncate to the shortest input; no null padding.
+      if (args.empty()) {
+        set_fault(frame, "TypeError", "zip expects at least one sequence");
+        return std::nullopt;
+      }
+      std::vector<std::vector<Value>> columns;
+      columns.reserve(args.size());
+      std::size_t rows = items.size();
+      for (const Value &arg : args) {
+        const std::optional<std::vector<Value>> column =
+            sequence_argument_items(frame, arg, selector);
+        if (!column.has_value()) {
+          return std::nullopt;
+        }
+        rows = std::min(rows, column->size());
+        columns.push_back(*column);
+      }
+      std::vector<Value> zipped;
+      zipped.reserve(rows);
+      for (std::size_t i = 0; i < rows; ++i) {
+        std::vector<Value> row;
+        row.reserve(columns.size() + 1U);
+        row.push_back(items[i]);
+        for (const std::vector<Value> &column : columns) {
+          row.push_back(column[i]);
+        }
+        zipped.push_back(make_list_value(std::move(row)));
+      }
+      return make_list_value(std::move(zipped));
+    }
+
+    if (selector == "partition") {
+      if (!args.empty() || block.is_null()) {
+        set_fault(frame, "TypeError", "partition requires block");
+        return std::nullopt;
+      }
+      std::vector<Value> matching;
+      std::vector<Value> rest;
+      for (const Value &item : items) {
+        const std::optional<Value> predicate =
+            call_block_to_value(frame, block, {item});
+        if (!predicate.has_value()) {
+          return std::nullopt;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return std::nullopt;
+        }
+        if (is_truthy(*predicate)) {
+          matching.push_back(item);
+        } else {
+          rest.push_back(item);
+        }
+      }
+      return make_list_value(
+          std::vector<Value>{make_list_value(std::move(matching)),
+                             make_list_value(std::move(rest))});
+    }
+
+    if (selector == "tally") {
+      if (!args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::vector<std::pair<Value, std::int64_t>> counts;
+      for (const Value &item : items) {
+        CollectionKeyError error;
+        const std::optional<Value> key = normalize_map_key(item, &error);
+        if (!key.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return std::nullopt;
+        }
+        auto found = std::find_if(
+            counts.begin(), counts.end(), [&](const auto &entry) {
+              return collection_keys_equal(entry.first, *key);
+            });
+        if (found == counts.end()) {
+          counts.push_back({*key, 1});
+        } else {
+          ++found->second;
+        }
+      }
+      std::vector<MapEntry> entries;
+      entries.reserve(counts.size());
+      for (const auto &entry : counts) {
+        entries.push_back({entry.first, Value::integer(entry.second)});
+      }
+      return make_symbol_map_value(std::move(entries));
+    }
+
+    if (selector == "each_with_index") {
+      if (!args.empty()) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      if (block.is_null()) {
+        std::vector<Value> pairs;
+        pairs.reserve(items.size());
+        for (std::size_t i = 0; i < items.size(); ++i) {
+          pairs.push_back(make_list_value(std::vector<Value>{
+              items[i], Value::integer(static_cast<std::int64_t>(i))}));
+        }
+        return make_list_value(std::move(pairs));
+      }
+      for (std::size_t i = 0; i < items.size(); ++i) {
+        const std::optional<Value> result = call_block_to_value(
+            frame, block,
+            {items[i], Value::integer(static_cast<std::int64_t>(i))});
+        if (!result.has_value()) {
+          return std::nullopt;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return std::nullopt;
+        }
+      }
+      return receiver;
+    }
+
+    if (selector == "last") {
+      // Counterpart of `first`: bare `last` yields the element (or null),
+      // `last(n)` the closing n-element slice.
+      if (args.empty()) {
+        return items.empty() ? Value::null() : items.back();
+      }
+      if (args.size() != 1U || !args[0].is_integer()) {
+        set_fault(frame, "TypeError", "last expects an integer count");
+        return std::nullopt;
+      }
+      const std::int64_t n = args[0].as_integer();
+      if (n < 0) {
+        set_fault(frame, "ArgumentError", "last count must be non-negative");
+        return std::nullopt;
+      }
+      const std::size_t k = std::min(static_cast<std::size_t>(n), items.size());
+      return make_list_value(std::vector<Value>(
+          items.end() - static_cast<std::ptrdiff_t>(k), items.end()));
+    }
+
+    if (selector == "count") {
+      // Routed here only for the value/block forms; bare `count` stays on the
+      // fast size path.
+      if (!args.empty() && !block.is_null()) {
+        set_fault(frame, "TypeError",
+                  "count accepts either a value or a block");
+        return std::nullopt;
+      }
+      if (args.size() > 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return std::nullopt;
+      }
+      std::int64_t matched = 0;
+      if (!args.empty()) {
+        for (const Value &item : items) {
+          if (value_equals(item, args[0])) {
+            ++matched;
+          }
+        }
+        return Value::integer(matched);
+      }
+      for (const Value &item : items) {
+        const std::optional<Value> predicate =
+            call_block_to_value(frame, block, {item});
+        if (!predicate.has_value()) {
+          return std::nullopt;
+        }
+        if (!ensure_lifecycle_access(frame, receiver)) {
+          return std::nullopt;
+        }
+        if (is_truthy(*predicate)) {
+          ++matched;
+        }
+      }
+      return Value::integer(matched);
     }
 
     if (selector == "each" || selector == "each_pair" ||
@@ -19960,6 +20441,50 @@ private:
       *out = receiver;
       return SendStatus::Matched;
     }
+    if (selector == "flatten!") {
+      if (!reject_block() || !reject_keywords()) {
+        return SendStatus::Faulted;
+      }
+      if (args.size() > 1U) {
+        set_fault(frame, "TypeError", "wrong builtin SEND arity");
+        return SendStatus::Faulted;
+      }
+      std::int64_t depth = -1;
+      if (args.size() == 1U) {
+        if (!args[0].is_integer()) {
+          set_fault(frame, "TypeError", "flatten! expects an integer depth");
+          return SendStatus::Faulted;
+        }
+        depth = args[0].as_integer();
+      }
+      const std::vector<Value> snapshot = list->items;
+      std::vector<Value> flattened;
+      flattened.reserve(snapshot.size());
+      std::vector<const void *> visiting;
+      visiting.push_back(list.get());
+      if (!flatten_sequence_items(frame, snapshot, depth, &visiting,
+                                  &flattened)) {
+        return SendStatus::Faulted;
+      }
+      list->items = std::move(flattened);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
+    if (selector == "compact!") {
+      if (!reject_block() || !reject_keywords() || !require_args(0)) {
+        return SendStatus::Faulted;
+      }
+      std::vector<Value> kept;
+      kept.reserve(list->items.size());
+      for (const Value &item : list->items) {
+        if (!item.is_null()) {
+          kept.push_back(item);
+        }
+      }
+      list->items = std::move(kept);
+      *out = receiver;
+      return SendStatus::Matched;
+    }
     if (selector == "select!" || selector == "keep_if!" ||
         selector == "reject!" || selector == "delete_if!") {
       if (!reject_keywords() || !require_args(0) || !require_block()) {
@@ -21193,10 +21718,12 @@ private:
           string_text_from_id(receiver.as_string().string_id);
       if (self_opt.has_value()) {
         const std::string &self = *self_opt;
-        // length/size/chars/reverse are codepoint-correct (UTF-8); split,
-        // replace, contains?/starts_with?/ends_with? operate on byte sequences
-        // (UTF-8-safe for valid-UTF-8 needles); upcase/downcase are ASCII-only
-        // in v1; trim strips ASCII whitespace.
+        // length/size/chars/reversed/[]/index are codepoint-correct (UTF-8);
+        // split, replaced, contains?/starts_with?/ends_with?/count operate on
+        // byte sequences (UTF-8-safe for valid-UTF-8 needles); the case family
+        // (upcased/downcased/capitalized/titlecased/swapcased/humanized/
+        // underscored/camelized) uses the Unicode simple-case mapping over the
+        // curated v1 scripts; trim family strips ASCII whitespace.
         const auto next_cp = [&](std::size_t i) -> std::size_t {
           std::size_t j = i + 1;
           while (j < self.size() &&
@@ -21258,24 +21785,173 @@ private:
           *out = Value::boolean(self.empty());
           return SendStatus::Matched;
         }
-        if (selector == "upcase" || selector == "downcase") {
+        // Decodes `text` into codepoints; bytes that are not valid UTF-8 come
+        // through as their Latin-1 codepoint so transforms never fault.
+        const auto decode_codepoints =
+            [](const std::string &text) -> std::vector<std::uint32_t> {
+          std::vector<std::uint32_t> cps;
+          cps.reserve(text.size());
+          std::size_t i = 0;
+          while (i < text.size()) {
+            std::uint32_t cp = 0;
+            std::size_t n = 0;
+            if (decode_keyword_utf8_codepoint(text, i, &cp, &n)) {
+              cps.push_back(cp);
+              i += n;
+            } else {
+              cps.push_back(static_cast<unsigned char>(text[i]));
+              ++i;
+            }
+          }
+          return cps;
+        };
+        const auto is_ws_cp = [](std::uint32_t cp) {
+          return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' ||
+                 cp == '\f' || cp == '\v';
+        };
+        if (selector == "upcased" || selector == "upcase" ||
+            selector == "downcased" || selector == "downcase" ||
+            selector == "swapcased") {
+          // `-ed` forms are the canonical pure names; the verb forms are
+          // aliases. Case mapping is Unicode simple-case over the curated v1
+          // scripts (ASCII, Latin-1/Extended-A, Greek, Cyrillic).
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
-          const bool up = selector == "upcase";
+          const bool up = selector == "upcased" || selector == "upcase";
+          const bool swap = selector == "swapcased";
+          std::string r;
+          r.reserve(self.size());
+          for (const std::uint32_t cp : decode_codepoints(self)) {
+            std::uint32_t mapped = 0;
+            if (swap) {
+              const std::uint32_t lowered = simple_lowercase_codepoint(cp);
+              mapped =
+                  lowered != cp ? lowered : simple_uppercase_codepoint(cp);
+            } else {
+              mapped = up ? simple_uppercase_codepoint(cp)
+                          : simple_lowercase_codepoint(cp);
+            }
+            append_utf8_codepoint(mapped, &r);
+          }
+          *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        if (selector == "capitalized" || selector == "titlecased" ||
+            selector == "humanized") {
+          // capitalized: first cased letter upper, the rest lower.
+          // titlecased: first cased letter of each whitespace word upper.
+          // humanized: underscores become spaces, then capitalized.
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const bool title = selector == "titlecased";
+          std::string source = self;
+          if (selector == "humanized") {
+            for (char &c : source) {
+              if (c == '_') {
+                c = ' ';
+              }
+            }
+          }
+          std::string r;
+          r.reserve(source.size());
+          bool at_word_start = true;
+          bool saw_cased = false;
+          for (const std::uint32_t cp : decode_codepoints(source)) {
+            std::uint32_t mapped = cp;
+            if (codepoint_has_case(cp)) {
+              const bool upper_here = title ? at_word_start : !saw_cased;
+              mapped = upper_here ? simple_uppercase_codepoint(cp)
+                                  : simple_lowercase_codepoint(cp);
+              saw_cased = true;
+              at_word_start = false;
+            } else if (is_ws_cp(cp)) {
+              at_word_start = true;
+            }
+            append_utf8_codepoint(mapped, &r);
+          }
+          *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        if (selector == "underscored") {
+          // CamelCase → snake_case; dashes fold to underscores; acronym runs
+          // split before their last letter ("HTTPServer" → "http_server").
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          const std::vector<std::uint32_t> cps = decode_codepoints(self);
+          const auto upper_cp = [](std::uint32_t cp) {
+            return simple_lowercase_codepoint(cp) != cp;
+          };
+          const auto lower_cp = [](std::uint32_t cp) {
+            return simple_uppercase_codepoint(cp) != cp;
+          };
+          std::string r;
+          r.reserve(self.size() + 4U);
+          for (std::size_t k = 0; k < cps.size(); ++k) {
+            const std::uint32_t cp = cps[k];
+            if (cp == '-') {
+              r.push_back('_');
+              continue;
+            }
+            if (upper_cp(cp)) {
+              const bool prev_sep =
+                  k == 0U || cps[k - 1] == '_' || cps[k - 1] == '-';
+              const bool after_lower =
+                  k > 0U && (lower_cp(cps[k - 1]) ||
+                             (cps[k - 1] >= '0' && cps[k - 1] <= '9'));
+              const bool acronym_end = k > 0U && upper_cp(cps[k - 1]) &&
+                                       k + 1U < cps.size() &&
+                                       lower_cp(cps[k + 1]);
+              if (!prev_sep && (after_lower || acronym_end)) {
+                r.push_back('_');
+              }
+              append_utf8_codepoint(simple_lowercase_codepoint(cp), &r);
+              continue;
+            }
+            append_utf8_codepoint(cp, &r);
+          }
+          *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        if (selector == "camelized") {
+          // snake_case → CamelCase ("user_id" → "UserId").
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::string r;
+          r.reserve(self.size());
+          bool upper_next = true;
+          for (const std::uint32_t cp : decode_codepoints(self)) {
+            if (cp == '_') {
+              upper_next = true;
+              continue;
+            }
+            if (upper_next && codepoint_has_case(cp)) {
+              append_utf8_codepoint(simple_uppercase_codepoint(cp), &r);
+            } else {
+              append_utf8_codepoint(cp, &r);
+            }
+            upper_next = false;
+          }
+          *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        if (selector == "dasherized") {
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
           std::string r = self;
           for (char &c : r) {
-            const unsigned char uc = static_cast<unsigned char>(c);
-            if (up && uc >= 'a' && uc <= 'z') {
-              c = static_cast<char>(uc - 32U);
-            } else if (!up && uc >= 'A' && uc <= 'Z') {
-              c = static_cast<char>(uc + 32U);
+            if (c == '_') {
+              c = '-';
             }
           }
           *out = Value::string(intern_runtime_string(r));
           return SendStatus::Matched;
         }
-        if (selector == "reverse") {
+        if (selector == "reverse" || selector == "reversed") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -21307,21 +21983,35 @@ private:
           *out = make_list_value(std::move(cps));
           return SendStatus::Matched;
         }
-        if (selector == "trim" || selector == "strip") {
+        if (selector == "trim" || selector == "strip" ||
+            selector == "trimmed" || selector == "ltrimmed" ||
+            selector == "rtrimmed" || selector == "lstripped" ||
+            selector == "rstripped") {
+          // `trimmed` is the canonical pure name (`trim`/`strip` are
+          // aliases); the one-sided forms are `ltrimmed`/`rtrimmed` with
+          // `lstripped`/`rstripped` accepted.
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
+          const bool left_only =
+              selector == "ltrimmed" || selector == "lstripped";
+          const bool right_only =
+              selector == "rtrimmed" || selector == "rstripped";
           const auto is_ws = [](unsigned char c) {
             return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
                    c == '\f' || c == '\v';
           };
           std::size_t a = 0;
           std::size_t b = self.size();
-          while (a < b && is_ws(static_cast<unsigned char>(self[a]))) {
-            ++a;
+          if (!right_only) {
+            while (a < b && is_ws(static_cast<unsigned char>(self[a]))) {
+              ++a;
+            }
           }
-          while (b > a && is_ws(static_cast<unsigned char>(self[b - 1]))) {
-            --b;
+          if (!left_only) {
+            while (b > a && is_ws(static_cast<unsigned char>(self[b - 1]))) {
+              --b;
+            }
           }
           *out = Value::string(intern_runtime_string(self.substr(a, b - a)));
           return SendStatus::Matched;
@@ -21395,7 +22085,7 @@ private:
           *out = make_list_value(std::move(parts));
           return SendStatus::Matched;
         }
-        if (selector == "replace") {
+        if (selector == "replace" || selector == "replaced") {
           if (!require_arity(2) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -21421,6 +22111,216 @@ private:
             start = pos + from.size();
           }
           *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        if (selector == "*") {
+          // Repeat: `"ab" * 3` → "ababab".
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          if (!args[0].is_integer()) {
+            set_fault(frame, "TypeError", "repeat expects integer count");
+            return SendStatus::Faulted;
+          }
+          const std::int64_t count = args[0].as_integer();
+          if (count < 0) {
+            set_fault(frame, "ArgumentError",
+                      "repeat count must be non-negative");
+            return SendStatus::Faulted;
+          }
+          std::string r;
+          r.reserve(self.size() * static_cast<std::size_t>(count));
+          for (std::int64_t i = 0; i < count; ++i) {
+            r += self;
+          }
+          *out = Value::string(intern_runtime_string(r));
+          return SendStatus::Matched;
+        }
+        if (selector == "ljust" || selector == "rjust") {
+          // Pad to codepoint width with the pad string cycled as needed.
+          if (args.empty() || args.size() > 2U || !require_no_block()) {
+            if (block.is_null()) {
+              set_fault(frame, "TypeError", "wrong builtin SEND arity");
+            }
+            return SendStatus::Faulted;
+          }
+          if (!args[0].is_integer()) {
+            set_fault(frame, "TypeError",
+                      "String#" + selector + " expects an integer width");
+            return SendStatus::Faulted;
+          }
+          std::string pad = " ";
+          if (args.size() == 2U && !arg_str(1, &pad)) {
+            return SendStatus::Faulted;
+          }
+          if (pad.empty()) {
+            set_fault(frame, "ArgumentError", "pad string must not be empty");
+            return SendStatus::Faulted;
+          }
+          const std::int64_t width = args[0].as_integer();
+          std::int64_t self_width = 0;
+          for (const char c : self) {
+            if ((static_cast<unsigned char>(c) & 0xC0U) != 0x80U) {
+              ++self_width;
+            }
+          }
+          if (width <= self_width) {
+            *out = receiver;
+            return SendStatus::Matched;
+          }
+          std::vector<std::string> pad_cps;
+          for (std::size_t i = 0; i < pad.size();) {
+            const std::size_t j = next_cp(i);
+            pad_cps.push_back(pad.substr(i, j - i));
+            i = j;
+          }
+          std::string padding;
+          for (std::int64_t i = 0; i < width - self_width; ++i) {
+            padding += pad_cps[static_cast<std::size_t>(i) % pad_cps.size()];
+          }
+          *out = Value::string(intern_runtime_string(
+              selector == "ljust" ? self + padding : padding + self));
+          return SendStatus::Matched;
+        }
+        if (selector == "index" || selector == "rindex") {
+          // Codepoint offset of a substring, or null. `index(sub, from)`
+          // starts the search at codepoint offset `from`.
+          if (args.empty() || args.size() > 2U ||
+              (selector == "rindex" && args.size() != 1U) ||
+              !require_no_block()) {
+            if (block.is_null()) {
+              set_fault(frame, "TypeError", "wrong builtin SEND arity");
+            }
+            return SendStatus::Faulted;
+          }
+          std::string needle;
+          if (!arg_str(0, &needle)) {
+            return SendStatus::Faulted;
+          }
+          std::size_t start_byte = 0;
+          if (args.size() == 2U) {
+            if (!args[1].is_integer() || args[1].as_integer() < 0) {
+              set_fault(frame, "TypeError",
+                        "index expects a non-negative integer offset");
+              return SendStatus::Faulted;
+            }
+            std::int64_t remaining = args[1].as_integer();
+            while (remaining > 0 && start_byte < self.size()) {
+              start_byte = next_cp(start_byte);
+              --remaining;
+            }
+          }
+          const std::size_t pos = selector == "index"
+                                      ? self.find(needle, start_byte)
+                                      : self.rfind(needle);
+          if (pos == std::string::npos) {
+            *out = Value::null();
+            return SendStatus::Matched;
+          }
+          std::int64_t cp_offset = 0;
+          for (std::size_t i = 0; i < pos; ++i) {
+            if ((static_cast<unsigned char>(self[i]) & 0xC0U) != 0x80U) {
+              ++cp_offset;
+            }
+          }
+          *out = Value::integer(cp_offset);
+          return SendStatus::Matched;
+        }
+        if (selector == "lines") {
+          // Splits on `\n`, dropping the terminator (and a trailing `\r`);
+          // a final unterminated line is kept, a trailing newline adds none.
+          if (!require_arity(0) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> lines;
+          std::size_t start = 0;
+          while (start <= self.size()) {
+            const std::size_t pos = self.find('\n', start);
+            if (pos == std::string::npos) {
+              if (start < self.size()) {
+                lines.push_back(Value::string(
+                    intern_runtime_string(self.substr(start))));
+              }
+              break;
+            }
+            std::size_t end = pos;
+            if (end > start && self[end - 1] == '\r') {
+              --end;
+            }
+            lines.push_back(Value::string(
+                intern_runtime_string(self.substr(start, end - start))));
+            start = pos + 1;
+          }
+          *out = make_list_value(std::move(lines));
+          return SendStatus::Matched;
+        }
+        if (selector == "count" && args.size() == 1U) {
+          // Non-overlapping substring occurrences.
+          if (!require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::string needle;
+          if (!arg_str(0, &needle)) {
+            return SendStatus::Faulted;
+          }
+          std::int64_t occurrences = 0;
+          if (!needle.empty()) {
+            std::size_t start = 0;
+            while (true) {
+              const std::size_t pos = self.find(needle, start);
+              if (pos == std::string::npos) {
+                break;
+              }
+              ++occurrences;
+              start = pos + needle.size();
+            }
+          }
+          *out = Value::integer(occurrences);
+          return SendStatus::Matched;
+        }
+        if (selector == "[]" || selector == "slice") {
+          // Codepoint-indexed: an Int yields a one-character Str (negative
+          // counts from the end), an IntRange a substring with list-slice
+          // semantics.
+          if (!require_arity(1) || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          std::vector<Value> cps;
+          for (std::size_t i = 0; i < self.size();) {
+            const std::size_t j = next_cp(i);
+            cps.push_back(
+                Value::string(intern_runtime_string(self.substr(i, j - i))));
+            i = j;
+          }
+          if (value_is_range_instance(args[0])) {
+            const std::optional<std::vector<Value>> sliced =
+                slice_sequence_items_by_range(frame, cps, args[0]);
+            if (!sliced.has_value()) {
+              return SendStatus::Faulted;
+            }
+            std::string r;
+            for (const Value &piece : *sliced) {
+              const std::optional<std::string> text =
+                  string_text_from_id(piece.as_string().string_id);
+              if (text.has_value()) {
+                r += *text;
+              }
+            }
+            *out = Value::string(intern_runtime_string(r));
+            return SendStatus::Matched;
+          }
+          if (!args[0].is_integer()) {
+            set_fault(frame, "TypeError",
+                      "String#" + selector + " expects an Int or IntRange");
+            return SendStatus::Faulted;
+          }
+          const std::optional<std::size_t> normalized =
+              normalize_sequence_index(frame, args[0].as_integer(),
+                                       cps.size(), "string");
+          if (!normalized.has_value()) {
+            return SendStatus::Faulted;
+          }
+          *out = cps[*normalized];
           return SendStatus::Matched;
         }
         // Note: `to_int` / `to_str` are handled by the scalar-conversion path
@@ -21468,7 +22368,14 @@ private:
              "sorted",   "uniq",    "each_pair",  "each_cons",  "appended",
              "inserted", "deleted", "added",      "init",       "tail",
              "take",     "drop",    "find_index", "drop_while", "min",
-             "max",      "minmax"});
+             "max",      "minmax",  "join",       "sum",        "product",
+             "flattened", "compact", "zip",       "partition",  "tally",
+             "each_with_index",     "last"});
+    // `count` with a value argument or predicate block routes through the
+    // materialized sequence path; bare `count` keeps the fast size handlers.
+    const bool counted_match_selector =
+        receiver_is_sequence_like && selector == "count" &&
+        (!args.empty() || !block.is_null());
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
          collection_selector_in(
@@ -21494,7 +22401,8 @@ private:
             {"push!",    "append!", "unshift!",   "prepend!", "insert!",
              "pop!",     "shift!",  "delete_at!", "delete!",  "delete_if!",
              "keep_if!", "select!", "reject!",    "map!",     "filter_map!",
-             "sort!",    "uniq!",   "reverse!",   "clear!",   "replace!"});
+             "sort!",    "uniq!",   "reverse!",   "clear!",   "replace!",
+             "flatten!", "compact!"});
     const bool map_mutation_selector =
         receiver.is_map() &&
         collection_selector_in({"store!", "delete!", "delete_if!", "keep_if!",
@@ -21546,6 +22454,8 @@ private:
                                                       "slice",
                                                       "compact",
                                                       "transform_keys",
+                                                      "dig",
+                                                      "fetch",
                                                       "+",
                                                       "|"})) ||
         ((receiver.is_integer() || receiver.is_float()) && numeric_selector) ||
@@ -21887,9 +22797,8 @@ private:
         return SendStatus::Matched;
       }
 
-      if (collection_selector == "count") {
-        if (!require_arity(0) ||
-            (!count_alias_accepts_block && !require_no_block()) ||
+      if (collection_selector == "count" && args.empty()) {
+        if ((!count_alias_accepts_block && !require_no_block()) ||
             !require_lazy_seq_finite_source(frame, *state, "count all items")) {
           return SendStatus::Faulted;
         }
@@ -22128,7 +23037,7 @@ private:
       }
 
       if (sequence_set_operation_selector ||
-          sequence_extra_operation_selector ||
+          sequence_extra_operation_selector || counted_match_selector ||
           (collection_selector == "each" &&
            (!args.empty() || !kw_args.empty()))) {
         const std::optional<std::vector<Value>> items =
@@ -22364,10 +23273,8 @@ private:
                 std::vector<Value>(items.begin(), items.begin() + take));
             return SendStatus::Matched;
           }
-          if (collection_selector == "count" && block.is_null()) {
-            if (!require_arity(0)) {
-              return SendStatus::Faulted;
-            }
+          if (collection_selector == "count" && block.is_null() &&
+              args.empty()) {
             *out = Value::integer(static_cast<std::int64_t>(items.size()));
             return SendStatus::Matched;
           }
@@ -22464,7 +23371,7 @@ private:
           return SendStatus::Matched;
         }
         if (sequence_set_operation_selector ||
-            sequence_extra_operation_selector ||
+            sequence_extra_operation_selector || counted_match_selector ||
             (collection_selector == "each" &&
              (!args.empty() || !kw_args.empty()))) {
           const std::optional<Value> value =
@@ -22855,6 +23762,98 @@ private:
           return SendStatus::Faulted;
         }
         *out = found->value;
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "fetch") {
+        // Discouraged alias kept for familiarity: prefer `m[key]` (strict
+        // KeyError) or `m[?key]` (null on miss) over `fetch`; the two-argument
+        // form is `m[?key]` with a fallback.
+        if (args.empty() || args.size() > 2U) {
+          set_fault(frame, "TypeError", "wrong builtin SEND arity");
+          return SendStatus::Faulted;
+        }
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        CollectionKeyError error;
+        const std::optional<Value> key = normalize_map_key(args[0], &error);
+        if (!key.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return SendStatus::Faulted;
+        }
+        const MapEntry *found =
+            map_value_find_entry(*map, *key, map_lookup_key_id(*key));
+        if (found == nullptr) {
+          if (args.size() == 2U) {
+            *out = args[1];
+            return SendStatus::Matched;
+          }
+          set_fault(frame, "KeyError", "map key is absent");
+          return SendStatus::Faulted;
+        }
+        *out = found->value;
+        return SendStatus::Matched;
+      }
+      if (collection_selector == "dig") {
+        // Nested lookup through Maps and Lists/Tuples: null on any miss.
+        if (args.empty()) {
+          set_fault(frame, "TypeError", "dig expects at least one key");
+          return SendStatus::Faulted;
+        }
+        if (!require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        Value current = receiver;
+        for (const Value &step : args) {
+          if (current.is_map()) {
+            const IntrusivePtr<MapValue> current_map = current.as_map();
+            if (current_map == nullptr) {
+              set_fault(frame, "TypeError", "map value is null");
+              return SendStatus::Faulted;
+            }
+            CollectionKeyError error;
+            const std::optional<Value> key = normalize_map_key(step, &error);
+            if (!key.has_value()) {
+              set_fault(frame, error.error_name, error.message);
+              return SendStatus::Faulted;
+            }
+            const MapEntry *entry = map_value_find_entry(
+                *current_map, *key, map_lookup_key_id(*key));
+            if (entry == nullptr) {
+              *out = Value::null();
+              return SendStatus::Matched;
+            }
+            current = entry->value;
+            continue;
+          }
+          if (current.is_list() || current.is_tuple()) {
+            if (!step.is_integer()) {
+              *out = Value::null();
+              return SendStatus::Matched;
+            }
+            const std::vector<Value> *step_items =
+                sequence_items_view(frame, current);
+            if (fault_.has_value()) {
+              return SendStatus::Faulted;
+            }
+            if (step_items == nullptr) {
+              *out = Value::null();
+              return SendStatus::Matched;
+            }
+            const std::optional<std::size_t> normalized =
+                optional_sequence_index(step.as_integer(),
+                                        step_items->size());
+            if (!normalized.has_value()) {
+              *out = Value::null();
+              return SendStatus::Matched;
+            }
+            current = (*step_items)[*normalized];
+            continue;
+          }
+          *out = Value::null();
+          return SendStatus::Matched;
+        }
+        *out = current;
         return SendStatus::Matched;
       }
       const std::vector<MapEntry> &entries_view = map->entries;
@@ -23533,6 +24532,189 @@ private:
         *out = Value::null();
         return SendStatus::Matched;
       }
+      if (selector == "upto" || selector == "downto") {
+        // Inclusive iteration counterpart of `times`: without a block the
+        // values are returned as a list, with a block the receiver returns.
+        if (!require_arity(1) || !kw_args.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "Int#" + selector + " does not accept keywords");
+          }
+          return SendStatus::Faulted;
+        }
+        if (!require_integer_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        const bool ascending = selector == "upto";
+        std::vector<Value> steps;
+        const bool in_order = ascending ? lhs <= rhs : lhs >= rhs;
+        if (in_order) {
+          // Two's-complement magnitude keeps the count exact at the Int
+          // extremes (e.g. `INT64_MAX.downto(0)` must not wrap the cursor).
+          const std::uint64_t span =
+              ascending ? static_cast<std::uint64_t>(rhs) -
+                              static_cast<std::uint64_t>(lhs)
+                        : static_cast<std::uint64_t>(lhs) -
+                              static_cast<std::uint64_t>(rhs);
+          steps.reserve(static_cast<std::size_t>(span) + 1U);
+          std::int64_t current = lhs;
+          for (std::uint64_t i = 0; i <= span; ++i) {
+            steps.push_back(Value::integer(current));
+            current = ascending ? current + 1 : current - 1;
+          }
+        }
+        if (block.is_null()) {
+          *out = make_list_value(std::move(steps));
+          return SendStatus::Matched;
+        }
+        for (const Value &step : steps) {
+          if (!call_block_to_value(frame, block, {step}).has_value()) {
+            return SendStatus::Faulted;
+          }
+        }
+        *out = receiver;
+        return SendStatus::Matched;
+      }
+      if (selector == "abs") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (lhs < 0) {
+          std::int64_t negated = 0;
+          if (!numeric_neg_int64(lhs, numeric_policy_, &negated)) {
+            raise_runtime_error(frame, "OverflowError",
+                                "Int overflow in `abs`");
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(negated);
+          return SendStatus::Matched;
+        }
+        *out = receiver;
+        return SendStatus::Matched;
+      }
+      if (selector == "even?" || selector == "odd?") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        const bool even = (lhs % 2) == 0;
+        *out = Value::boolean(selector == "even?" ? even : !even);
+        return SendStatus::Matched;
+      }
+      if (selector == "divmod") {
+        // [quotient, remainder] with floor semantics matching `//` and `%`.
+        if (!require_arity(1) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        if (args[0].is_float()) {
+          const double float_rhs = args[0].as_float();
+          if (float_rhs == 0.0) {
+            raise_runtime_error(frame, "ZeroDivisionError",
+                                "division by zero");
+            return SendStatus::Faulted;
+          }
+          const double self_d = static_cast<double>(lhs);
+          *out = make_list_value(std::vector<Value>{
+              Value::floating(std::floor(self_d / float_rhs)),
+              Value::floating(floor_mod_double(self_d, float_rhs))});
+          return SendStatus::Matched;
+        }
+        if (!require_integer_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if (rhs == 0) {
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
+          return SendStatus::Faulted;
+        }
+        std::int64_t quotient = 0;
+        if (!numeric_floor_div_int64(lhs, rhs, numeric_policy_, &quotient)) {
+          raise_runtime_error(frame, "OverflowError",
+                              "Int overflow in `divmod`");
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(
+            std::vector<Value>{Value::integer(quotient),
+                               Value::integer(floor_mod_int64(lhs, rhs))});
+        return SendStatus::Matched;
+      }
+      if (selector == "gcd" || selector == "lcm") {
+        if (!require_arity(1) || !require_no_block() ||
+            !require_integer_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        // Unsigned magnitudes keep the Euclid loop exact at INT64_MIN.
+        const auto magnitude = [](std::int64_t value) -> std::uint64_t {
+          return value < 0 ? 0ULL - static_cast<std::uint64_t>(value)
+                           : static_cast<std::uint64_t>(value);
+        };
+        const std::uint64_t left = magnitude(lhs);
+        const std::uint64_t right = magnitude(rhs);
+        std::uint64_t a = left;
+        std::uint64_t b = right;
+        while (b != 0U) {
+          const std::uint64_t t = a % b;
+          a = b;
+          b = t;
+        }
+        const std::uint64_t int_max =
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+        if (selector == "gcd") {
+          if (a > int_max) {
+            raise_runtime_error(frame, "OverflowError",
+                                "Int overflow in `gcd`");
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(static_cast<std::int64_t>(a));
+          return SendStatus::Matched;
+        }
+        if (left == 0U || right == 0U) {
+          *out = Value::integer(0);
+          return SendStatus::Matched;
+        }
+        const std::uint64_t scaled = left / a;
+        if (right > std::numeric_limits<std::uint64_t>::max() / scaled ||
+            scaled * right > int_max) {
+          raise_runtime_error(frame, "OverflowError", "Int overflow in `lcm`");
+          return SendStatus::Faulted;
+        }
+        *out = Value::integer(static_cast<std::int64_t>(scaled * right));
+        return SendStatus::Matched;
+      }
+      if (selector == "clamp") {
+        if (!require_arity(2) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        for (std::size_t i = 0; i < 2U; ++i) {
+          if (!args[i].is_integer() && !args[i].is_float()) {
+            set_fault(frame, "TypeError", "clamp expects numeric bounds");
+            return SendStatus::Faulted;
+          }
+        }
+        if (args[0].is_integer() && args[1].is_integer()) {
+          const std::int64_t lo = args[0].as_integer();
+          const std::int64_t hi = args[1].as_integer();
+          if (lo > hi) {
+            set_fault(frame, "ArgumentError",
+                      "clamp lower bound must not exceed upper bound");
+            return SendStatus::Faulted;
+          }
+          *out = lhs < lo ? args[0] : (lhs > hi ? args[1] : receiver);
+          return SendStatus::Matched;
+        }
+        const auto as_double = [](const Value &value) -> double {
+          return value.is_float() ? value.as_float()
+                                  : static_cast<double>(value.as_integer());
+        };
+        const double lo = as_double(args[0]);
+        const double hi = as_double(args[1]);
+        if (lo > hi) {
+          set_fault(frame, "ArgumentError",
+                    "clamp lower bound must not exceed upper bound");
+          return SendStatus::Faulted;
+        }
+        const double self_d = static_cast<double>(lhs);
+        *out = self_d < lo ? args[0] : (self_d > hi ? args[1] : receiver);
+        return SendStatus::Matched;
+      }
       if (selector == "u+") {
         if (!require_arity(0) || !require_no_block()) {
           return SendStatus::Faulted;
@@ -23809,6 +24991,52 @@ private:
           return SendStatus::Faulted;
         }
         *out = Value::floating(-lhs);
+        return SendStatus::Matched;
+      }
+      if (selector == "abs") {
+        if (!require_arity(0) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        *out = Value::floating(std::fabs(lhs));
+        return SendStatus::Matched;
+      }
+      if (selector == "divmod") {
+        // [quotient, remainder] with floor semantics matching `//` and `%`.
+        if (!require_arity(1) || !require_no_block() ||
+            !require_numeric_arg(0, &rhs)) {
+          return SendStatus::Faulted;
+        }
+        if (rhs == 0.0) {
+          raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
+          return SendStatus::Faulted;
+        }
+        *out = make_list_value(
+            std::vector<Value>{Value::floating(std::floor(lhs / rhs)),
+                               Value::floating(floor_mod_double(lhs, rhs))});
+        return SendStatus::Matched;
+      }
+      if (selector == "clamp") {
+        if (!require_arity(2) || !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        for (std::size_t i = 0; i < 2U; ++i) {
+          if (!args[i].is_integer() && !args[i].is_float()) {
+            set_fault(frame, "TypeError", "clamp expects numeric bounds");
+            return SendStatus::Faulted;
+          }
+        }
+        const auto as_double = [](const Value &value) -> double {
+          return value.is_float() ? value.as_float()
+                                  : static_cast<double>(value.as_integer());
+        };
+        const double lo = as_double(args[0]);
+        const double hi = as_double(args[1]);
+        if (lo > hi) {
+          set_fault(frame, "ArgumentError",
+                    "clamp lower bound must not exceed upper bound");
+          return SendStatus::Faulted;
+        }
+        *out = lhs < lo ? args[0] : (lhs > hi ? args[1] : receiver);
         return SendStatus::Matched;
       }
       if (selector == "+") {
@@ -24982,7 +26210,8 @@ private:
           return true;
         }
       }
-      if (value_is_range_instance(receiver)) {
+      if (value_is_range_instance(receiver) ||
+          value_is_lazy_seq_instance(receiver)) {
         Value result = Value::null();
         const SendStatus scalar_status = try_apply_scalar_send(
             frame, receiver, *selector, args, block, kw_args, &result);
@@ -25207,7 +26436,8 @@ private:
         set_fault(frame, "TypeError", "instance receiver is null");
         return false;
       }
-      if (instance_is_native_range(instance)) {
+      if (instance_is_native_range(instance) ||
+          value_is_lazy_seq_instance(receiver)) {
         return raise_missing_selector();
       }
       class_index = instance->class_index;
@@ -25251,6 +26481,7 @@ private:
             {"prepend", "prepend!/unshift! to mutate, or prepended for a copy"},
             {"insert", "insert! to mutate, or inserted for a copy"},
             {"delete", "delete! to mutate, or deleted for a copy"},
+            {"flatten", "flatten! to mutate, or flattened for a copy"},
             {"delete_at", "delete_at! to mutate"},
             {"delete_if", "delete_if! to mutate"},
             {"keep_if", "keep_if! to mutate"},
