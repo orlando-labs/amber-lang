@@ -136,8 +136,142 @@ bool is_kernel_style_body(const std::vector<std::unique_ptr<ast::Expr>> &body) {
   return last != nullptr && last->kind == "AstQuote";
 }
 
+// The template accumulator local for `%`-control bodies. Reserved: a macro
+// body binding this name on a `%`-line shadows the accumulator (documented).
+constexpr const char *kEmitAccumulator = "__macro_emitted";
+
+bool is_macro_control(const ast::Expr &expr) {
+  for (const ast::BoolField &field : expr.bool_fields) {
+    if (field.name == "macro_control") {
+      return field.value;
+    }
+  }
+  return false;
+}
+
+void strip_control_marker(ast::Expr &expr) {
+  expr.bool_fields.erase(
+      std::remove_if(expr.bool_fields.begin(), expr.bool_fields.end(),
+                     [](const ast::BoolField &field) {
+                       return field.name == "macro_control";
+                     }),
+      expr.bool_fields.end());
+}
+
+bool body_has_control_lines(
+    const std::vector<std::unique_ptr<ast::Expr>> &body) {
+  for (const std::unique_ptr<ast::Expr> &stmt : body) {
+    if (stmt && is_macro_control(*stmt)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// `__macro_emitted.push!(quote: <stmt>)` — one emitted node per template
+// line, so repetition inside `%`-loops accumulates sibling statements.
+std::unique_ptr<ast::Expr> make_emit_push(std::unique_ptr<ast::Expr> stmt) {
+  const lexer::Span span = stmt->span;
+  auto quote = ast::make_expr("AstQuote", span);
+  std::vector<std::unique_ptr<ast::Expr>> quoted;
+  quoted.push_back(std::move(stmt));
+  quote->list_field("body", std::move(quoted));
+
+  auto base = ast::make_expr("AstName", span);
+  base->string_field("name", kEmitAccumulator);
+  auto member = ast::make_expr("AstTailDotMember", span);
+  member->string_field("name", "push!");
+  member->bool_field("chain_boundary", false);
+  auto call = ast::make_expr("AstTailCall", span);
+  call->string_field("call_style", "paren");
+  std::vector<std::unique_ptr<ast::Expr>> args;
+  args.push_back(std::move(quote));
+  call->list_field("args", std::move(args));
+  std::vector<std::unique_ptr<ast::Expr>> tails;
+  tails.push_back(std::move(member));
+  tails.push_back(std::move(call));
+  auto chain = ast::make_expr("AstPostfixChain", span);
+  chain->node_field("base", std::move(base));
+  chain->list_field("tails", std::move(tails));
+  auto wrapper = ast::make_expr("AstExprStmt", span);
+  wrapper->node_field("expr", std::move(chain));
+  return wrapper;
+}
+
+void lower_control_statements(std::vector<std::unique_ptr<ast::Expr>> &stmts);
+
+// Statement lists inside a `%`-control statement that may mix further
+// template and control lines: control-flow bodies (`%if`/`%while`/…) and the
+// trailing block suffix of the control line itself (`%exprs.each |e|:`).
+// Anything else on a control line — lambda bodies, nested defs — is ordinary
+// compile-time code and is left untouched.
+void lower_control_bodies(ast::Expr &stmt) {
+  const ast::Expr *inner_view =
+      stmt.kind == "AstExprStmt" ? node_field(stmt, "expr") : &stmt;
+  if (inner_view == nullptr) {
+    return;
+  }
+  ast::Expr &inner = const_cast<ast::Expr &>(*inner_view);
+  if (inner.kind == "AstIf" || inner.kind == "AstUnless") {
+    for (ast::ListField &field : inner.list_fields) {
+      if (field.name == "then_body" || field.name == "else_body") {
+        lower_control_statements(field.values);
+      }
+    }
+    return;
+  }
+  if (inner.kind == "AstWhile" || inner.kind == "AstUntil" ||
+      inner.kind == "AstDoWhile" || inner.kind == "AstLoop") {
+    for (ast::ListField &field : inner.list_fields) {
+      if (field.name == "body") {
+        lower_control_statements(field.values);
+      }
+    }
+    return;
+  }
+  if (inner.kind == "AstPostfixChain") {
+    ast::ListField *tails = mutable_list_field(inner, "tails");
+    if (tails == nullptr || tails->values.empty() || !tails->values.back() ||
+        tails->values.back()->kind != "AstTailBlockSuffix") {
+      return;
+    }
+    for (ast::NodeField &field : tails->values.back()->node_fields) {
+      if (field.name == "block" && field.value) {
+        for (ast::ListField &block_field : field.value->list_fields) {
+          if (block_field.name == "body") {
+            lower_control_statements(block_field.values);
+          }
+        }
+      }
+    }
+  }
+}
+
+// §6 `%`-control lowering: control lines run as written at expansion time;
+// template lines become per-line `push!(quote: …)` emissions into the
+// accumulator, so a control loop emits one node per iteration.
+void lower_control_statements(std::vector<std::unique_ptr<ast::Expr>> &stmts) {
+  for (std::unique_ptr<ast::Expr> &stmt : stmts) {
+    if (!stmt) {
+      continue;
+    }
+    if (is_macro_control(*stmt)) {
+      strip_control_marker(*stmt);
+      lower_control_bodies(*stmt);
+      continue;
+    }
+    stmt = make_emit_push(std::move(stmt));
+  }
+}
+
 // Wrap a template-default macro body in the implicit quote it desugars to:
-// `body...` becomes `quote: body...` as the single (returned) expression.
+// `body...` becomes `quote: body...` as the single (returned) expression. A
+// body with `%`-control lines instead lowers to the accumulator kernel:
+//   __macro_emitted = []
+//   <control lines as written; template lines push per-line quotes>
+//   return __macro_emitted
+// The macro then returns List[Ast] — statement-position callers splice the
+// nodes as siblings; expression-position callers accept a single element.
 void wrap_template_body(ast::Expr &def) {
   ast::ListField *body = mutable_list_field(def, "body");
   if (body == nullptr || is_kernel_style_body(body->values)) {
@@ -147,6 +281,37 @@ void wrap_template_body(ast::Expr &def) {
   if (!body->values.empty() && body->values.front() && body->values.back()) {
     span = ast::join_spans(body->values.front()->span,
                            body->values.back()->span);
+  }
+  if (body_has_control_lines(body->values)) {
+    lower_control_statements(body->values);
+
+    auto init_name = ast::make_expr("AstName", span);
+    init_name->string_field("name", kEmitAccumulator);
+    auto init_list = ast::make_expr("AstListLiteral", span);
+    init_list->list_field("elements", {});
+    auto init_assign = ast::make_expr("AstAssign", span);
+    init_assign->string_field("op", "=");
+    init_assign->node_field("left", std::move(init_name));
+    init_assign->node_field("right", std::move(init_list));
+    auto init_stmt = ast::make_expr("AstExprStmt", span);
+    init_stmt->node_field("expr", std::move(init_assign));
+
+    auto return_name = ast::make_expr("AstName", span);
+    return_name->string_field("name", kEmitAccumulator);
+    auto return_expr = ast::make_expr("AstReturn", span);
+    return_expr->node_field("value", std::move(return_name));
+    auto return_stmt = ast::make_expr("AstExprStmt", span);
+    return_stmt->node_field("expr", std::move(return_expr));
+
+    std::vector<std::unique_ptr<ast::Expr>> lowered;
+    lowered.reserve(body->values.size() + 2U);
+    lowered.push_back(std::move(init_stmt));
+    for (std::unique_ptr<ast::Expr> &stmt : body->values) {
+      lowered.push_back(std::move(stmt));
+    }
+    lowered.push_back(std::move(return_stmt));
+    body->values = std::move(lowered);
+    return;
   }
   auto quote = ast::make_expr("AstQuote", span);
   quote->list_field("body", std::move(body->values));
@@ -705,13 +870,28 @@ private:
                                 const std::string &name,
                                 const lexer::Span &span,
                                 const runtime::Value &value, int depth) {
-    if (!value.is_ast_node()) {
+    // A `%`-template returns List[Ast]; in expression position it is usable
+    // only when it emitted exactly one node.
+    runtime::Value unwrapped = value;
+    if (value.is_list()) {
+      const auto list = value.as_list();
+      if (list == nullptr || list->items.size() != 1U) {
+        fail("macro `" + name + "` emitted " +
+             std::to_string(list == nullptr ? 0 : list->items.size()) +
+             " nodes; expression position needs exactly one" +
+             at_location(span));
+        return;
+      }
+      unwrapped = list->items[0];
+    }
+    if (!unwrapped.is_ast_node()) {
       fail("macro `" + name +
            "` must return exactly one expression Ast in expression position" +
            at_location(span));
       return;
     }
-    const std::shared_ptr<runtime::RuntimeAstNode> node = value.as_ast_node();
+    const std::shared_ptr<runtime::RuntimeAstNode> node =
+        unwrapped.as_ast_node();
     if (node == nullptr || node->node == nullptr) {
       fail("macro `" + name + "` returned a null Ast value");
       return;

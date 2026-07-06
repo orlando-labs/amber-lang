@@ -223,6 +223,9 @@ private:
   // `unquote(...)` / `unquote_splice(...)` call is a splice hole; at depth 0 it
   // is an ordinary call. Used by parse_prefix.
   int quote_depth_ = 0;
+  // Non-zero while parsing a `macro def` body: a line-leading `%` there marks
+  // a compile-time control statement (DESIGN-macro-system §6 `%`-lines).
+  int macro_body_depth_ = 0;
   lexer::Token synthetic_error_token_;
 };
 

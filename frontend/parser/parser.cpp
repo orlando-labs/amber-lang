@@ -871,6 +871,20 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     return nullptr;
   }
 
+  // `%`-control line (DESIGN-macro-system §6): inside a `macro def` body a
+  // line-leading `%` marks a compile-time statement — it runs during
+  // expansion and is not emitted. Only recognized at statement-leading
+  // position in a macro body; mid-expression `%` stays modulo (a statement
+  // can never begin with the binary operator).
+  if (macro_body_depth_ > 0 && current().kind == lexer::TokenKind::Percent) {
+    advance();
+    std::unique_ptr<ast::Expr> stmt = parse_statement(context);
+    if (stmt) {
+      stmt->bool_field("macro_control", true);
+    }
+    return stmt;
+  }
+
   if (context == BodyContext::Module &&
       current().kind == lexer::TokenKind::Identifier &&
       current().lexeme == "numeric" &&
@@ -1379,13 +1393,16 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
 
   // A `macro def` body is a template by default (implicit quote, M4), so the
   // splice vocabulary (`unquote` / `unquote_splice` / `unhygienic`) is live in
-  // it exactly as inside an explicit `quote:` block.
+  // it exactly as inside an explicit `quote:` block; `%`-control lines (§6)
+  // are likewise recognized only in this region.
   if (is_macro) {
     ++quote_depth_;
+    ++macro_body_depth_;
   }
   std::vector<std::unique_ptr<ast::Expr>> body = parse_body(BodyContext::Def);
   if (is_macro) {
     --quote_depth_;
+    --macro_body_depth_;
   }
   const lexer::Span body_end_span =
       body.empty() ? previous().span : body.back()->span;

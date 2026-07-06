@@ -1524,6 +1524,36 @@ void test_string_tag_surface() {
   }
 }
 
+void test_percent_control_lines() {
+  // §6 `%`-control lines: inside a macro body a line-leading `%` marks a
+  // compile-time statement (macro_control); mid-expression `%` stays modulo.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "macro def m(x):\n"
+        "  %n = 7 % 4\n"
+        "  #{x} + 1\n");
+    expect(module.ok(), "%-control line parses inside a macro body");
+    const Expr &def = *module.items[0];
+    const auto &body = list_field(def, "body").values;
+    expect(body.size() == 2, "macro body keeps both lines");
+    expect(bool_field(*body[0], "macro_control"),
+           "%-line statement carries macro_control");
+    expect(!has_bool_field(*body[1], "macro_control"),
+           "template line carries no macro_control marker");
+  }
+
+  // Outside a macro body a line-leading `%` keeps its pre-existing meaning
+  // (it is not a statement form; the pattern-assignment path rejects it at
+  // pattern compile, not here).
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "def f():\n"
+        "  y = 7 % 4\n"
+        "  y\n");
+    expect(module.ok(), "modulo in ordinary code is untouched");
+  }
+}
+
 void test_quote_surface() {
   // `quote:` (block form) yields an AstQuote whose body is unevaluated AST.
   {
@@ -1804,6 +1834,7 @@ int main() {
   test_native_packages();
   test_macro_def_surface();
   test_string_tag_surface();
+  test_percent_control_lines();
   test_quote_surface();
   test_template_splice_surface();
   test_export_macro_marker();

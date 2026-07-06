@@ -643,9 +643,17 @@ build profile**, parallel to how Q4 makes the typed profile opt-in:
   Procedural macros expand to a fixpoint.
 - **M3 — hygiene.** *(done)* Binder `(name, syntax_context)` key +
   `unhygienic`. Closes the M2 hole. This is the deep milestone.
-- **M4 — `#{}` + `%`-control template surface.** *(template-default bodies +
-  `#{expr}` / `#{expr.source}` / `#{expr.to_source}` / `#{*list}` splices
-  done; `%`-control lines pending)* All lowering to the §5 kernel.
+- **M4 — `#{}` + `%`-control template surface.** *(COMPLETE 2026-07-06:
+  `%`-lines landed — a line-leading `%` in a macro body is parsed as a
+  compile-time statement (`macro_control`), and a mixed body lowers to the
+  accumulator kernel `__macro_emitted = []; …; return __macro_emitted` where
+  control lines run as written and each template line pushes a per-line
+  quote; control-flow bodies (`%if`/`%while`) and the trailing block of a
+  `%`-loop are template-capable, lambda bodies on `%`-lines stay compile-time
+  code; the macro returns List[Ast] — statement position splices siblings,
+  expression position accepts exactly one emitted node. Template-default
+  bodies and the `#{expr}` / `#{expr.source}` / `#{expr.to_source}` /
+  `#{*list}` splices landed earlier)* All lowering to the §5 kernel.
 - **M5 — trigger surfaces.** *(done except `use`, which moves to M6 with the
   staging it depends on)* Plain-call and explicit-dot-call macros,
   block-suffix macros (incl. the paren-less `name:` statement form),
