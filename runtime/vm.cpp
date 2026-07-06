@@ -2282,6 +2282,9 @@ private:
       set_fault(frame, "VMError", "closure code id is unknown");
       return std::nullopt;
     }
+    if (!ensure_closure_arity(frame, *code, args.size())) {
+      return std::nullopt;
+    }
 
     BlockVmLease lease = acquire_block_vm();
     Vm &nested = *lease.vm;
@@ -2342,6 +2345,9 @@ private:
     const BcCode *code = find_code(module_, closure->code_id);
     if (code == nullptr) {
       set_fault(frame, "VMError", "closure code id is unknown");
+      return result;
+    }
+    if (!ensure_closure_arity(frame, *code, args.size())) {
       return result;
     }
 
@@ -2531,7 +2537,7 @@ private:
         *out = entry->value;
         return FastCallStatus::Matched;
       }
-      set_fault(caller, "KeyError", "map key is absent");
+      raise_runtime_error(caller, "KeyError", "map key is absent");
       return FastCallStatus::Faulted;
     };
 
@@ -4674,6 +4680,47 @@ private:
                                 frame.regs[*kw_rest_index]);
   }
 
+  // Declared positional parameter count of a block/lambda body: the leading
+  // contiguous local slots with role "param" (pattern params occupy a
+  // synthetic `__argN` param slot, so patterns count as one parameter).
+  std::uint32_t declared_closure_param_count(const BcCode &code) const {
+    std::uint32_t count = 0;
+    for (const bytecode::SlotLayoutEntry &entry : code.local_layout) {
+      if (entry.slot != count || entry.role_str_id >= module_.strings.size() ||
+          module_.strings[entry.role_str_id] != "param") {
+        break;
+      }
+      ++count;
+    }
+    return count;
+  }
+
+  // RFC block-parameters §9.6: entering a block/lambda frame with fewer
+  // positional arguments than its declared parameters is a rescuable
+  // ArgumentError at block entry (previously the missing params stayed
+  // uninitialized and surfaced later as NameError). Extra arguments continue
+  // to be dropped: iteration protocols fan out more values (key/value,
+  // value/index) than simple blocks consume.
+  bool ensure_closure_arity(const Frame &caller, const BcCode &code,
+                            std::size_t arg_count) {
+    // Only block/lambda bodies (CodeKind::Block) use bare positional slots;
+    // method codes reached through closure calls (module functions, `&blk`
+    // references) carry defaults/block/keyword params that the method-call
+    // machinery — not this check — is responsible for.
+    if (code.kind != bytecode::CodeKind::Block) {
+      return true;
+    }
+    const std::uint32_t required = declared_closure_param_count(code);
+    if (arg_count < required) {
+      raise_runtime_error(caller, "ArgumentError",
+                          "block expects " + std::to_string(required) +
+                              " positional arguments, got " +
+                              std::to_string(arg_count));
+      return false;
+    }
+    return true;
+  }
+
   void push_frame_from_args(const BcCode &code, const Value *args,
                             std::size_t arg_count,
                             const std::vector<Value> &captures, Value self,
@@ -5147,6 +5194,9 @@ private:
       return FastCallStatus::Matched;
     }
 
+    if (!ensure_closure_arity(frame, *code, pos_count)) {
+      return FastCallStatus::Faulted;
+    }
     const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
     ++frame.pc;
     frame.active_call_pc = call_pc;
@@ -6864,7 +6914,7 @@ private:
     const std::int64_t size_i64 = static_cast<std::int64_t>(size);
     const std::int64_t normalized = index < 0 ? size_i64 + index : index;
     if (normalized < 0 || static_cast<std::uint64_t>(normalized) >= size) {
-      set_fault(frame, "IndexError", context + " index is out of bounds");
+      raise_runtime_error(frame, "IndexError", context + " index is out of bounds");
       return std::nullopt;
     }
     return static_cast<std::size_t>(normalized);
@@ -6892,7 +6942,7 @@ private:
       return std::nullopt;
     }
     if (!bounds->start.has_value()) {
-      set_fault(frame, "IndexError", "array slice index is out of bounds");
+      raise_runtime_error(frame, "IndexError", "array slice index is out of bounds");
       return std::nullopt;
     }
 
@@ -7522,7 +7572,7 @@ private:
       const std::int64_t size_i64 = static_cast<std::int64_t>(items.size());
       const std::int64_t normalized = raw < 0 ? size_i64 + raw + 1 : raw;
       if (normalized < 0 || normalized > size_i64) {
-        set_fault(frame, "IndexError", "inserted index is out of bounds");
+        raise_runtime_error(frame, "IndexError", "inserted index is out of bounds");
         return std::nullopt;
       }
       std::vector<Value> result = items;
@@ -11251,6 +11301,9 @@ private:
           return false;
         }
         return apply_auto_assigns(callee_frame, *method, *code);
+      }
+      if (!ensure_closure_arity(frame, *code, pos_args.size())) {
+        return false;
       }
       const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
       ++frame.pc;
@@ -20244,7 +20297,7 @@ private:
           static_cast<std::int64_t>(list->items.size());
       const std::int64_t normalized = raw < 0 ? size_i64 + raw + 1 : raw;
       if (normalized < 0 || normalized > size_i64) {
-        set_fault(frame, "IndexError", "insert! index is out of bounds");
+        raise_runtime_error(frame, "IndexError", "insert! index is out of bounds");
         return SendStatus::Faulted;
       }
       list->items.insert(list->items.begin() + normalized, args.begin() + 1,
@@ -22653,7 +22706,7 @@ private:
             *out = Value::null();
             return SendStatus::Matched;
           }
-          set_fault(frame, "IndexError", "LazySeq index is out of bounds");
+          raise_runtime_error(frame, "IndexError", "LazySeq index is out of bounds");
           return SendStatus::Faulted;
         }
         std::int64_t seen = 0;
@@ -22678,7 +22731,7 @@ private:
             *out = Value::null();
             return SendStatus::Matched;
           }
-          set_fault(frame, "IndexError", "LazySeq index is out of bounds");
+          raise_runtime_error(frame, "IndexError", "LazySeq index is out of bounds");
           return SendStatus::Faulted;
         }
         *out = found;
@@ -23146,7 +23199,7 @@ private:
               return SendStatus::Faulted;
             }
             if (index < 0) {
-              set_fault(frame, "IndexError", "Range index is out of bounds");
+              raise_runtime_error(frame, "IndexError", "Range index is out of bounds");
               return SendStatus::Faulted;
             }
             if (bounds->float_range) {
@@ -23331,7 +23384,7 @@ private:
               *out = Value::null();
               return SendStatus::Matched;
             }
-            set_fault(frame, "IndexError", "Range index is out of bounds");
+            raise_runtime_error(frame, "IndexError", "Range index is out of bounds");
             return SendStatus::Faulted;
           }
           if (collection_selector == "[]?") {
@@ -23758,7 +23811,7 @@ private:
             *out = Value::null();
             return SendStatus::Matched;
           }
-          set_fault(frame, "KeyError", "map key is absent");
+          raise_runtime_error(frame, "KeyError", "map key is absent");
           return SendStatus::Faulted;
         }
         *out = found->value;
@@ -23788,7 +23841,7 @@ private:
             *out = args[1];
             return SendStatus::Matched;
           }
-          set_fault(frame, "KeyError", "map key is absent");
+          raise_runtime_error(frame, "KeyError", "map key is absent");
           return SendStatus::Faulted;
         }
         *out = found->value;
@@ -24147,7 +24200,7 @@ private:
               *out = Value::null();
               return SendStatus::Matched;
             }
-            set_fault(frame, "KeyError", "map key is absent");
+            raise_runtime_error(frame, "KeyError", "map key is absent");
             return SendStatus::Faulted;
           }
           *out = found;
@@ -25777,7 +25830,7 @@ private:
                    ? FastSendStatus::Matched
                    : FastSendStatus::Faulted;
       }
-      set_fault(frame, "KeyError", "map key is absent");
+      raise_runtime_error(frame, "KeyError", "map key is absent");
       return FastSendStatus::Faulted;
     }
 
@@ -26093,6 +26146,25 @@ private:
         return false;
       }
       if (!write_reg(frame, dst, Value::boolean(changed))) {
+        return false;
+      }
+      ++frame.pc;
+      return true;
+    }
+    // `not` is the language's truthiness negation (spec §3.3): `not A` and the
+    // `unless` lowering both arrive here as a send with selector "not". It
+    // applies uniformly to every value and, like `and`/`or`, is not
+    // overridable, so it is resolved before any per-kind dispatch (foreign
+    // handles, native types, instances, builtins).
+    if (*selector == "not" && !property_assignment) {
+      if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+        set_fault(frame, "TypeError", "`not` does not accept arguments");
+        return false;
+      }
+      if (!ensure_lifecycle_access(frame, receiver)) {
+        return false;
+      }
+      if (!write_reg(frame, dst, Value::boolean(!is_truthy(receiver)))) {
         return false;
       }
       ++frame.pc;

@@ -1945,10 +1945,15 @@ void CodeEmitter::compile_param_pattern_prologues() {
   }
 
   if (!fail_patches.empty()) {
+    // The successful match falls through here; it must skip the shared fail
+    // handler, which is reachable only via the patched fail jumps.
+    const std::size_t skip_fail =
+        emit_instruction(Opcode::Jump, {{-1, true}}, procedure_->span);
     const std::uint32_t fail_pc = current_pc();
     patch_fail_patches(fail_patches, fail_pc);
     emit_instruction(Opcode::PFail, {{kPatternFailModeMatchError, false}},
                      procedure_->span);
+    patch_operand(skip_fail, 0, current_pc(), false);
   }
 }
 
