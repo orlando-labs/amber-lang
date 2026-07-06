@@ -62,6 +62,20 @@ bool is_macro_def(const ast::Expr &expr) {
   return false;
 }
 
+// A `string_tag macro def` (§8.5): a macro whose only invocation surface is
+// the tag trigger `name"""…"""`.
+bool is_string_tag_def(const ast::Expr &expr) {
+  if (!is_macro_def(expr)) {
+    return false;
+  }
+  for (const ast::BoolField &field : expr.bool_fields) {
+    if (field.name == "is_string_tag") {
+      return field.value;
+    }
+  }
+  return false;
+}
+
 const ast::Expr *node_field(const ast::Expr &expr, const std::string &name) {
   for (const ast::NodeField &field : expr.node_fields) {
     if (field.name == name) {
@@ -257,6 +271,57 @@ match_use_trigger(const ast::Expr &expr,
   return UseTrigger{*macro, expr.span};
 }
 
+// `name"""…"""` — the string-tag trigger (§8.5): a bare call whose single
+// argument is a block string literal ADJACENT to the tag head. The parser
+// already produces this shape (an identifier juxtaposed with a text block is
+// a bare call); adjacency — no whitespace between the identifier and the
+// `"""` opener — is what makes it a tag invocation, so `sql """…"""` with a
+// space stays an ordinary (non-tag) call. The macro receives the literal
+// re-kinded as `Ast.StringTemplate`: the same parts model (post-dedent static
+// chunks plus unevaluated interpolant ASTs), a distinct kind because a
+// template handed to a macro is data, not a Str expression.
+struct StringTagCall {
+  std::string name;
+  const ast::Expr *literal = nullptr;
+  lexer::Span span;
+};
+
+std::optional<StringTagCall>
+match_string_tag(const ast::Expr &expr,
+                 const std::set<std::string> &string_tag_names) {
+  if (string_tag_names.empty() || expr.kind != "AstPostfixChain") {
+    return std::nullopt;
+  }
+  const ast::Expr *base = node_field(expr, "base");
+  const ast::ListField *tails = list_field(expr, "tails");
+  if (base == nullptr || base->kind != "AstName" || tails == nullptr ||
+      tails->values.size() != 1 || !tails->values[0] ||
+      tails->values[0]->kind != "AstTailCall") {
+    return std::nullopt;
+  }
+  const std::string *name = string_field(*base, "name");
+  if (name == nullptr ||
+      string_tag_names.find(*name) == string_tag_names.end()) {
+    return std::nullopt;
+  }
+  const std::string *style = string_field(*tails->values[0], "call_style");
+  const ast::ListField *args = list_field(*tails->values[0], "args");
+  if (style == nullptr || *style != "bare" || args == nullptr ||
+      args->values.size() != 1 || !args->values[0] ||
+      args->values[0]->kind != "AstStringLiteral") {
+    return std::nullopt;
+  }
+  const ast::Expr &literal = *args->values[0];
+  const std::string *quote_kind = string_field(literal, "quote_kind");
+  if (quote_kind == nullptr || *quote_kind != "block") {
+    return std::nullopt;
+  }
+  if (literal.span.start.offset != base->span.end.offset) {
+    return std::nullopt; // whitespace before the opener: not a tag
+  }
+  return StringTagCall{*name, &literal, expr.span};
+}
+
 // Wrap an AST subtree as an `Ast` value, carrying the module source so the
 // macro body can recover the argument's verbatim text via `.source`.
 runtime::Value make_ast_value(const ast::Expr &node,
@@ -310,10 +375,12 @@ public:
   Expander(bytecode::BcModule macro_module,
            std::set<std::string> macro_names,
            std::map<std::string, int> annotation_arity,
+           std::set<std::string> string_tag_names,
            std::shared_ptr<const std::string> source)
       : macro_module_(std::move(macro_module)),
         macro_names_(std::move(macro_names)),
         annotation_arity_(std::move(annotation_arity)),
+        string_tag_names_(std::move(string_tag_names)),
         source_(std::move(source)) {}
 
   ExpandResult result() const { return result_; }
@@ -325,33 +392,32 @@ public:
     if (!result_.ok || !slot) {
       return;
     }
+    if (std::optional<StringTagCall> tag =
+            match_string_tag(*slot, string_tag_names_)) {
+      // Hand-off (§8.5 / multiline design §7): the literal re-kinded as
+      // Ast.StringTemplate becomes the tag macro's single argument; the
+      // macro must return exactly one expression Ast.
+      std::unique_ptr<ast::Expr> template_node = ast::clone_expr(*tag->literal);
+      template_node->kind = "AstStringTemplate";
+      std::vector<runtime::Value> args;
+      args.push_back(make_ast_value(*template_node, source_));
+      const std::optional<runtime::Value> value =
+          execute_macro(tag->name, tag->span, std::move(args), depth);
+      if (!value.has_value()) {
+        return;
+      }
+      splice_expression_result(slot, tag->name, tag->span, *value, depth);
+      return;
+    }
     if (std::optional<MacroCall> call = match_macro_call(*slot, macro_names_)) {
+      if (!check_call_surface(*call)) {
+        return;
+      }
       const std::optional<runtime::Value> value = run_macro(*call, depth);
       if (!value.has_value()) {
         return;
       }
-      if (!value->is_ast_node()) {
-        fail("macro `" + call->name +
-             "` must return exactly one expression Ast in expression position" +
-             at_location(call->span));
-        return;
-      }
-      const std::shared_ptr<runtime::RuntimeAstNode> node =
-          value->as_ast_node();
-      if (node == nullptr || node->node == nullptr) {
-        fail("macro `" + call->name + "` returned a null Ast value");
-        return;
-      }
-      if (node->node->kind == "AstBlock") {
-        fail("macro `" + call->name +
-             "` expanded to a statement block in expression position; a "
-             "multi-statement macro can only be used as a statement" +
-             at_location(call->span));
-        return;
-      }
-      slot = ast::clone_expr(*node->node);
-      apply_hygiene(*slot, fresh_mark());
-      expand(slot, depth + 1);
+      splice_expression_result(slot, call->name, call->span, *value, depth);
       return;
     }
     for (ast::NodeField &field : slot->node_fields) {
@@ -412,6 +478,12 @@ public:
       if (const ast::Expr *call_expr = statement_call_expr(elem.get())) {
         if (std::optional<UseTrigger> trigger =
                 match_use_trigger(*call_expr, macro_names_)) {
+          if (string_tag_names_.count(trigger->name) != 0) {
+            fail("macro `" + trigger->name +
+                 "` is a string_tag macro and cannot be used with `use`" +
+                 at_location(trigger->span));
+            return;
+          }
           if (enclosing == nullptr ||
               (enclosing->kind != "AstClassDef" &&
                enclosing->kind != "AstMixinDef")) {
@@ -439,8 +511,17 @@ public:
         }
       }
       if (const ast::Expr *call_expr = statement_call_expr(elem.get())) {
-        if (std::optional<MacroCall> call =
-                match_macro_call(*call_expr, macro_names_)) {
+        // A statement-position tag invocation is handled by the expression
+        // walk below (it expands to one expression); it must not be
+        // classified as an ordinary macro call here.
+        std::optional<MacroCall> call =
+            match_string_tag(*call_expr, string_tag_names_).has_value()
+                ? std::optional<MacroCall>{}
+                : match_macro_call(*call_expr, macro_names_);
+        if (call.has_value()) {
+          if (!check_call_surface(*call)) {
+            return;
+          }
           // An annotation-shaped call (declared arity = args + 1) that did not
           // form a run has no declaration under it.
           if (annotation_shape_arity(*call)) {
@@ -604,13 +685,51 @@ private:
 
   // Run one macro at expansion time. `extra_decl` is the annotated
   // declaration appended as the trailing argument for attribute macros.
+  // A string_tag macro is only invocable through its tag surface; reaching it
+  // via an ordinary call channel (spaced literal, paren call, block suffix)
+  // is a located diagnostic rather than a silent wrong-channel expansion.
+  bool check_call_surface(const MacroCall &call) {
+    if (string_tag_names_.find(call.name) == string_tag_names_.end()) {
+      return true;
+    }
+    fail("macro `" + call.name + "` is a string_tag macro; invoke it as `" +
+         call.name +
+         "\"\"\"…\"\"\"` with the text-block opener adjacent to the tag" +
+         at_location(call.span));
+    return false;
+  }
+
+  // Expression-position result splice (§8 cardinality): exactly one
+  // expression Ast, hygiene-marked, then re-expanded for the fixpoint.
+  void splice_expression_result(std::unique_ptr<ast::Expr> &slot,
+                                const std::string &name,
+                                const lexer::Span &span,
+                                const runtime::Value &value, int depth) {
+    if (!value.is_ast_node()) {
+      fail("macro `" + name +
+           "` must return exactly one expression Ast in expression position" +
+           at_location(span));
+      return;
+    }
+    const std::shared_ptr<runtime::RuntimeAstNode> node = value.as_ast_node();
+    if (node == nullptr || node->node == nullptr) {
+      fail("macro `" + name + "` returned a null Ast value");
+      return;
+    }
+    if (node->node->kind == "AstBlock") {
+      fail("macro `" + name +
+           "` expanded to a statement block in expression position; a "
+           "multi-statement macro can only be used as a statement" +
+           at_location(span));
+      return;
+    }
+    slot = ast::clone_expr(*node->node);
+    apply_hygiene(*slot, fresh_mark());
+    expand(slot, depth + 1);
+  }
+
   std::optional<runtime::Value> run_macro(const MacroCall &call, int depth,
                                           const ast::Expr *extra_decl = nullptr) {
-    if (depth >= kExpansionDepthLimit) {
-      fail("AMB_MACRO_EXPANSION_LIMIT: macro expansion exceeded depth limit at `" +
-           call.name + "`" + at_location(call.span));
-      return std::nullopt;
-    }
     std::vector<runtime::Value> arg_values;
     if (call.call_tail != nullptr) {
       if (const ast::ListField *args = list_field(*call.call_tail, "args")) {
@@ -638,6 +757,20 @@ private:
     if (extra_decl != nullptr) {
       arg_values.push_back(make_ast_value(*extra_decl, source_));
     }
+    return execute_macro(call.name, call.span, std::move(arg_values), depth);
+  }
+
+  // Shared execution path for every trigger surface: depth check, method
+  // lookup, sandboxed run, fault mapping.
+  std::optional<runtime::Value>
+  execute_macro(const std::string &name, const lexer::Span &span,
+                std::vector<runtime::Value> arg_values, int depth) {
+    if (depth >= kExpansionDepthLimit) {
+      fail("AMB_MACRO_EXPANSION_LIMIT: macro expansion exceeded depth limit at `" +
+           name + "`" + at_location(span));
+      return std::nullopt;
+    }
+    const MacroCall call{name, nullptr, nullptr, span};
 
     const bytecode::BcMethod *method = method_by_name(macro_module_, call.name);
     if (method == nullptr) {
@@ -792,6 +925,8 @@ private:
   // Declared fixed arity per macro (annotation eligibility); -1 when the
   // macro has rest/keyword/defaulted params and cannot be an annotation (v1).
   std::map<std::string, int> annotation_arity_;
+  // Macros declared `string_tag` — invocable only via `name"""…"""`.
+  std::set<std::string> string_tag_names_;
   std::shared_ptr<const std::string> source_;
   ExpandResult result_;
   int hygiene_counter_ = 0;
@@ -837,7 +972,8 @@ bool compile_macro_module(const std::vector<const ast::Expr *> &macro_defs,
     copy->bool_fields.erase(
         std::remove_if(copy->bool_fields.begin(), copy->bool_fields.end(),
                        [](const ast::BoolField &field) {
-                         return field.name == "is_macro";
+                         return field.name == "is_macro" ||
+                                field.name == "is_string_tag";
                        }),
         copy->bool_fields.end());
     wrap_template_body(*copy);
@@ -979,12 +1115,19 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
   std::vector<const ast::Expr *> macro_defs;
   std::set<std::string> macro_names;
   std::map<std::string, int> annotation_arity;
+  // string_tag macros are invocable only via `name"""…"""` and never
+  // annotation-shaped, whatever their declared arity.
+  std::set<std::string> string_tag_names;
   for (const std::unique_ptr<ast::Expr> &item : items) {
     if (item && is_macro_def(*item)) {
       macro_defs.push_back(item.get());
       if (const std::string *name = string_field(*item, "name")) {
         macro_names.insert(*name);
-        annotation_arity[*name] = annotation_arity_of(*item);
+        annotation_arity[*name] =
+            is_string_tag_def(*item) ? -1 : annotation_arity_of(*item);
+        if (is_string_tag_def(*item)) {
+          string_tag_names.insert(*name);
+        }
       }
     }
   }
@@ -1005,7 +1148,11 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
     }
     macro_defs.push_back(def.get());
     macro_names.insert(*name);
-    annotation_arity[*name] = annotation_arity_of(*def);
+    annotation_arity[*name] =
+        is_string_tag_def(*def) ? -1 : annotation_arity_of(*def);
+    if (is_string_tag_def(*def)) {
+      string_tag_names.insert(*name);
+    }
   }
   if (macro_defs.empty()) {
     return ExpandResult{};
@@ -1019,7 +1166,7 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
   }
 
   Expander expander(std::move(macro_module), std::move(macro_names),
-                    std::move(annotation_arity),
+                    std::move(annotation_arity), std::move(string_tag_names),
                     std::make_shared<const std::string>(source));
   // The module item list is itself a statement/declaration context, so
   // annotation runs and multi-node expansions apply at top level.

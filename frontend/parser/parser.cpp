@@ -939,6 +939,29 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     }
   }
 
+  // `string_tag` is the declared-surface modifier for tag macros
+  // (DESIGN-macro-system §8.5): `string_tag macro def sql(t)` declares a
+  // macro invocable only as `sql"""…"""` (tag head adjacent to the text-block
+  // opener). Contextual like `native`/`macro`: it only leads a definition
+  // when immediately followed by `macro def`; anywhere else `string_tag`
+  // stays an ordinary identifier.
+  if (current().kind == lexer::TokenKind::Identifier &&
+      current().lexeme == "string_tag" &&
+      peek(1).kind == lexer::TokenKind::Identifier &&
+      peek(1).lexeme == "macro" &&
+      peek(2).kind == lexer::TokenKind::KeywordDef) {
+    const lexer::Token start = advance();
+    advance();
+    consume(lexer::TokenKind::KeywordDef,
+            "expected 'def' after string_tag macro");
+    std::unique_ptr<ast::Expr> def = parse_def_stmt(
+        false, &start, /*is_native=*/false, /*is_macro=*/true);
+    if (def) {
+      def->bool_field("is_string_tag", true);
+    }
+    return def;
+  }
+
   // Paren-less block-suffix statement `name:` + INDENT — the block-macro DSL
   // entry (DESIGN-macro-system §8.2, e.g. `routes:`). Statement position only
   // and newline-gated (same gate as `quote:`), so control headers (`if x:`),

@@ -1493,6 +1493,37 @@ void test_macro_def_surface() {
   }
 }
 
+void test_string_tag_surface() {
+  // `string_tag macro def` (§8.5): the declared-surface modifier for tag
+  // macros. The def is tagged both is_macro and is_string_tag.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "string_tag macro def sql(t as Ast.StringTemplate):\n"
+        "  return t\n");
+    expect(module.ok(), "string_tag macro def parses");
+    expect(module.items.size() == 1, "string_tag macro def yields one item");
+    const Expr &def = *module.items[0];
+    expect(def.kind == "AstDefStmt", "string_tag macro def is AstDefStmt");
+    expect(string_field(def, "name") == "sql", "string_tag macro def name");
+    expect(bool_field(def, "is_macro"), "string_tag macro def is_macro");
+    expect(bool_field(def, "is_string_tag"),
+           "string_tag macro def is_string_tag");
+  }
+
+  // `string_tag` stays an ordinary identifier everywhere except immediately
+  // before `macro def`.
+  {
+    amber::parser::ParseModuleResult assign =
+        parse_module_raw("string_tag = 1\n");
+    expect(assign.ok(), "string_tag is an ordinary identifier in assignment");
+    amber::parser::ParseModuleResult plain =
+        parse_module_raw("macro def sql(t):\n  return t\n");
+    expect(plain.ok(), "plain macro def named sql parses");
+    expect(!has_bool_field(*plain.items[0], "is_string_tag"),
+           "a plain macro def carries no is_string_tag marker");
+  }
+}
+
 void test_quote_surface() {
   // `quote:` (block form) yields an AstQuote whose body is unevaluated AST.
   {
@@ -1772,6 +1803,7 @@ int main() {
   test_typed_signature_surface();
   test_native_packages();
   test_macro_def_surface();
+  test_string_tag_surface();
   test_quote_surface();
   test_template_splice_surface();
   test_export_macro_marker();

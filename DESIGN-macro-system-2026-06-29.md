@@ -655,14 +655,18 @@ build profile**, parallel to how Q4 makes the typed profile opt-in:
   splicing).
 - **M6 — sandbox + staging + cross-module macros.** *(sandbox + budgets,
   Ast introspection accessors, call-site diagnostic spans, the export/import
-  surface (parse-only pre-pass staging in manifest builds), and `use` are
-  done; pending: persisted artifact macro section, module-alias macro calls,
-  string-tag riding the multiline text-block implementation, full macrotrace
-  backtraces)* Expander capability lockdown and budgets (gates everything
-  below); build-graph ordering + cycle detection (`AMB_MACRO_CYCLE`); the §11
-  export/import surface (`export macro`, unified imports, artifact macro
-  section); `use Module`; the string-tag trigger riding the multiline
-  text-block implementation; expansion backtraces.
+  surface (parse-only pre-pass staging in manifest builds), `use`, and the
+  string-tag trigger (2026-07-06: `string_tag macro def` modifier; the tag
+  invocation is classified in F1.5 — an identifier bare-called with an
+  ADJACENT block string literal, `sql """…"""` with a space stays an ordinary
+  call; the literal is re-kinded `Ast.StringTemplate` at hand-off, same parts
+  model; misuse through any ordinary call channel, `use`, or annotation
+  position is a located diagnostic; exports/imports carry the surface kind)
+  are done; pending: persisted artifact macro section, module-alias macro
+  calls, full macrotrace backtraces)* Expander capability lockdown and budgets
+  (gates everything below); build-graph ordering + cycle detection
+  (`AMB_MACRO_CYCLE`); the §11 export/import surface (`export macro`, unified
+  imports, artifact macro section); `use Module`; expansion backtraces.
 
 ## 17. Open questions
 

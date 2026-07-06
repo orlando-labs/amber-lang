@@ -240,7 +240,9 @@ rows = conn.execute(sql"""
   cost** beyond the bind itself (macro doc §1 table) — no reflective slow path.
 
 So the layering is: plain `"""` (sugar, ships first, no macro dependency) →
-tagged `name"""…"""` (safety + DSLs, ships with / after macros). The tag surface
+tagged `name"""…"""` (safety + DSLs, ships with / after macros; **implemented
+2026-07-06** — `string_tag macro def` + F1.5 adjacency classification, the
+literal re-kinded `Ast.StringTemplate` at hand-off). The tag surface
 is the fifth macro trigger added to macro-doc §8 ("string-tag": `tag`
 immediately followed by the block opener, no whitespace). The hand-off is a
 dedicated **`Ast.StringTemplate`** node (see §9 Q4): the same parts *model* the

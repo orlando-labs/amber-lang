@@ -9288,12 +9288,108 @@ void test_cross_module_macro_staging() {
          "import/local macro name collision is a diagnostic");
 }
 
+void test_string_tag_macro_staging() {
+  // Provider exports a string_tag macro (§8.5); the importer invokes it under
+  // an alias through the tag surface — the sql""" dialect-selection pattern
+  // from the multiline text-block design §7.
+  const std::string provider_source =
+      "package db.mock\n"
+      "export macro sql\n"
+      "\n"
+      "string_tag macro def sql(t as Ast.StringTemplate):\n"
+      "  query = \"\"\n"
+      "  holes = []\n"
+      "  t.parts.each |part|:\n"
+      "    if part.kind == \"AstStringText\":\n"
+      "      query = query + part.value\n"
+      "    else:\n"
+      "      query = query + \"?\"\n"
+      "      holes.push!(part.expr)\n"
+      "  return Ast.node(\"AstTupleLiteral\", {\n"
+      "    elements: [\n"
+      "      Ast.lift(query),\n"
+      "      Ast.node(\"AstListLiteral\", {elements: holes})\n"
+      "    ]\n"
+      "  })\n";
+  amber::lexer::Lexer provider_lexer(provider_source, "<tag-provider>");
+  amber::lexer::LexResult provider_lex = provider_lexer.lex();
+  expect(provider_lex.ok(), "tag staging: provider lex ok");
+  amber::parser::Parser provider_parser(provider_lex.tokens);
+  amber::parser::ParseModuleResult provider_mod =
+      provider_parser.parse_module_unit();
+  expect(provider_mod.ok(), "tag staging: provider parse ok");
+  amber::macros::MacroProviderMap providers;
+  providers["db.mock"] =
+      amber::macros::collect_macro_exports(provider_mod.items);
+  expect(providers["db.mock"].size() == 1,
+         "tag staging: string_tag export harvested");
+
+  const std::string importer_source = "package app.q\n"
+                                      "from db.mock import sql as q\n"
+                                      "\n"
+                                      "def probe():\n"
+                                      "  pair = q\"\"\"\n"
+                                      "    A #{40 + 2} B\n"
+                                      "    \"\"\"\n"
+                                      "  pair[1][0]\n";
+  amber::lexer::Lexer importer_lexer(importer_source, "<tag-importer>");
+  amber::lexer::LexResult importer_lex = importer_lexer.lex();
+  expect(importer_lex.ok(), "tag staging: importer lex ok");
+  amber::parser::Parser importer_parser(importer_lex.tokens);
+  amber::parser::ParseModuleResult importer_mod =
+      importer_parser.parse_module_unit();
+  expect(importer_mod.ok(), "tag staging: importer parse ok");
+  const amber::macros::ExpandResult expanded = amber::macros::expand_macros(
+      importer_mod.items, importer_mod.module_name, importer_source,
+      providers);
+  expect(expanded.ok,
+         "imported string_tag expansion succeeds, got: " + expanded.error);
+  amber::ast::expand_quotes(importer_mod.items);
+  amber::binder::BindResult bind =
+      amber::binder::bind_module(importer_mod.items, importer_mod.module_name);
+  expect(bind.ok(), "tag staging: expanded importer binds");
+  amber::hir::Program program = amber::hir::lower_module(
+      importer_mod.items, importer_mod.module_name, bind.graph);
+  amber::bytecode::EmitResult emit =
+      amber::bytecode::emit_program(program, importer_mod.module_name);
+  expect(emit.ok(), "tag staging: expanded importer emits");
+  const amber::bytecode::BcMethod *probe =
+      method_by_name(emit.module, "probe");
+  expect(probe != nullptr, "tag staging: probe method exists");
+  const amber::runtime::ExecutionResult exec =
+      amber::runtime::execute_code(emit.module, probe->entry_code_id);
+  expect(exec.ok(), "tag staging: probe executes");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "imported tag bound the interpolant as a parameter (probe == 42)");
+
+  // Misusing a string_tag macro through an ordinary call channel is a
+  // located diagnostic, not a wrong-channel expansion.
+  const std::string misuse_source = "package app.misuse\n"
+                                    "from db.mock import sql as q\n"
+                                    "\n"
+                                    "def probe():\n"
+                                    "  q(1)\n";
+  amber::lexer::Lexer misuse_lexer(misuse_source, "<tag-misuse>");
+  amber::lexer::LexResult misuse_lex = misuse_lexer.lex();
+  amber::parser::Parser misuse_parser(misuse_lex.tokens);
+  amber::parser::ParseModuleResult misuse_mod =
+      misuse_parser.parse_module_unit();
+  expect(misuse_mod.ok(), "tag staging: misuse module parses");
+  const amber::macros::ExpandResult misused = amber::macros::expand_macros(
+      misuse_mod.items, misuse_mod.module_name, misuse_source, providers);
+  expect(!misused.ok &&
+             misused.error.find("string_tag") != std::string::npos,
+         "ordinary call of a string_tag macro is a diagnostic, got: " +
+             misused.error);
+}
+
 } // namespace
 
 int main() {
   test_ast_value_model();
   test_macro_expander_sandbox();
   test_cross_module_macro_staging();
+  test_string_tag_macro_staging();
   test_execute_emitted_method();
   test_direct_entry_materializes_sibling_captures();
   test_execute_return_keyword();
