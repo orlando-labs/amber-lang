@@ -153,7 +153,7 @@ HTTP_CODEC_TEST_SRCS := tests/http_codec_tests.cpp runtime/http_codec.cpp
 NET_HTTP_TEST_SRCS := tests/net_http_tests.cpp runtime/net_http.cpp runtime/http_codec.cpp
 NET_HTTP_TCP_TEST_SRCS := tests/net_http_tcp_tests.cpp runtime/net_http_transport.cpp runtime/net_http.cpp runtime/http_codec.cpp runtime/context.cpp runtime/text.cpp $(IO_SRCS)
 VM_NET_HTTP_TEST_SRCS := tests/vm_net_http_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
-MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(PROFILE_SRCS) $(BUILD_SRCS) $(BYTECODE_SRCS) $(NATIVE_SRCS) $(LEXER_SRCS) $(AST_SRCS) $(RUNTIME_SRCS)
+MODULE_LOADER_TEST_SRCS := tests/module_loader_tests.cpp $(CORE_SRCS) $(RUNTIME_SRCS)
 PACKAGE_TEST_SRCS := tests/package_tests.cpp $(PROFILE_SRCS) $(PACKAGE_SRCS) $(LEXER_SRCS)
 
 FORMAT_FILES := \

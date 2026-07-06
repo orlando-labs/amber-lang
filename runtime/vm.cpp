@@ -24982,6 +24982,21 @@ private:
           return true;
         }
       }
+      if (value_is_range_instance(receiver)) {
+        Value result = Value::null();
+        const SendStatus scalar_status = try_apply_scalar_send(
+            frame, receiver, *selector, args, block, kw_args, &result);
+        if (scalar_status == SendStatus::Faulted) {
+          return false;
+        }
+        if (scalar_status == SendStatus::Matched) {
+          if (!write_reg(frame, dst, std::move(result))) {
+            return false;
+          }
+          ++frame.pc;
+          return true;
+        }
+      }
       if (receiver.is_uuid() || receiver.is_time() ||
           receiver.is_time_period() ||
           ((receiver.is_integer() || receiver.is_float()) &&
@@ -25175,6 +25190,14 @@ private:
       return true;
     };
 
+    auto raise_missing_selector = [&]() -> bool {
+      raise_runtime_error(
+          frame, "NoMethodError",
+          "selector `" + *selector +
+              "` is not implemented in current runtime baseline");
+      return false;
+    };
+
     std::uint32_t class_index = 0;
     std::uint32_t dispatch_flags = 0;
     if (receiver.is_instance_object()) {
@@ -25183,6 +25206,9 @@ private:
       if (instance == nullptr) {
         set_fault(frame, "TypeError", "instance receiver is null");
         return false;
+      }
+      if (instance_is_native_range(instance)) {
+        return raise_missing_selector();
       }
       class_index = instance->class_index;
       dispatch_flags = kMethodFlagInstance;
