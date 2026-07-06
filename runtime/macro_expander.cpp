@@ -664,7 +664,8 @@ public:
             return;
           }
           std::vector<std::unique_ptr<ast::Expr>> results;
-          if (!splice_statement_result(*value, call.name, &results)) {
+          if (!splice_statement_result(*value, call.name, call.span,
+                                       &results)) {
             return;
           }
           expand_statements(results, depth + 1, enclosing);
@@ -702,7 +703,8 @@ public:
             return;
           }
           std::vector<std::unique_ptr<ast::Expr>> results;
-          if (!splice_statement_result(*value, call->name, &results)) {
+          if (!splice_statement_result(*value, call->name, call->span,
+                                       &results)) {
             return;
           }
           expand_statements(results, depth + 1, enclosing);
@@ -825,7 +827,7 @@ private:
         }
         if (node->node->kind != "AstBlock") {
           current = ast::clone_expr(*node->node);
-          apply_hygiene(*current, fresh_mark());
+          apply_hygiene(*current, fresh_mark(), call->span);
           continue;
         }
       }
@@ -837,7 +839,8 @@ private:
              "annotation on its declaration" + at_location(call->span));
         return {};
       }
-      if (!splice_statement_result(*value, call->name, &results)) {
+      if (!splice_statement_result(*value, call->name, call->span,
+                                   &results)) {
         return {};
       }
       current.reset();
@@ -904,7 +907,7 @@ private:
       return;
     }
     slot = ast::clone_expr(*node->node);
-    apply_hygiene(*slot, fresh_mark());
+    apply_hygiene(*slot, fresh_mark(), span);
     expand(slot, depth + 1);
   }
 
@@ -996,6 +999,7 @@ private:
   // one hygiene mark (a `tmp` in two emitted statements is the same `tmp`).
   bool splice_statement_result(const runtime::Value &value,
                                const std::string &name,
+                               const lexer::Span &call_span,
                                std::vector<std::unique_ptr<ast::Expr>> *out) {
     const std::string mark = fresh_mark();
     if (value.is_ast_node()) {
@@ -1004,7 +1008,7 @@ private:
         fail("macro `" + name + "` returned a null Ast value");
         return false;
       }
-      flatten_statement(*node->node, mark, out);
+      flatten_statement(*node->node, mark, call_span, out);
       return result_.ok;
     }
     if (value.is_list()) {
@@ -1021,7 +1025,7 @@ private:
           fail("macro `" + name + "` returned a null Ast value");
           return false;
         }
-        flatten_statement(*node->node, mark, out);
+        flatten_statement(*node->node, mark, call_span, out);
         if (!result_.ok) {
           return false;
         }
@@ -1038,12 +1042,13 @@ private:
   // statements (recursively, so an unquoted block inside an emitted block
   // flattens too); expressions get an AstExprStmt wrapper.
   void flatten_statement(const ast::Expr &node, const std::string &mark,
+                         const lexer::Span &call_span,
                          std::vector<std::unique_ptr<ast::Expr>> *out) {
     if (node.kind == "AstBlock") {
       if (const ast::ListField *body = list_field(node, "body")) {
         for (const std::unique_ptr<ast::Expr> &stmt : body->values) {
           if (stmt) {
-            flatten_statement(*stmt, mark, out);
+            flatten_statement(*stmt, mark, call_span, out);
           }
         }
       }
@@ -1052,12 +1057,12 @@ private:
     if (node.kind == "AstExprStmt") {
       const ast::Expr *inner = node_field(node, "expr");
       if (inner != nullptr && inner->kind == "AstBlock") {
-        flatten_statement(*inner, mark, out);
+        flatten_statement(*inner, mark, call_span, out);
         return;
       }
     }
     std::unique_ptr<ast::Expr> copy = ast::clone_expr(node);
-    apply_hygiene(*copy, mark);
+    apply_hygiene(*copy, mark, call_span);
     if (!is_statement_kind(copy->kind)) {
       auto stmt = ast::make_expr("AstExprStmt", copy->span);
       stmt->node_field("expr", std::move(copy));
@@ -1069,7 +1074,15 @@ private:
   // Rewrite quote-introduced (hygienic-marked) identifiers to carry `mark` as
   // their syntax context, and drop the transient marker. Spliced/unquoted
   // subtrees carry no marker and are left untouched.
-  void apply_hygiene(ast::Expr &node, const std::string &mark) {
+  void apply_hygiene(ast::Expr &node, const std::string &mark,
+                     const lexer::Span &call_span) {
+    // Macrotrace v1: macro-built nodes carry no source span (empty file);
+    // retarget them to the invocation site so binder/runtime diagnostics in
+    // generated code point at the macro call, not "(line 1)". Spliced caller
+    // subtrees keep their own spans.
+    if (node.span.file.empty()) {
+      node.span = call_span;
+    }
     if (node.kind == "AstName") {
       bool hygienic = false;
       node.bool_fields.erase(
@@ -1088,13 +1101,13 @@ private:
     }
     for (ast::NodeField &field : node.node_fields) {
       if (field.value) {
-        apply_hygiene(*field.value, mark);
+        apply_hygiene(*field.value, mark, call_span);
       }
     }
     for (ast::ListField &field : node.list_fields) {
       for (std::unique_ptr<ast::Expr> &child : field.values) {
         if (child) {
-          apply_hygiene(*child, mark);
+          apply_hygiene(*child, mark, call_span);
         }
       }
     }

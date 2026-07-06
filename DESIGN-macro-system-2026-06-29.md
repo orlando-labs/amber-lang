@@ -670,8 +670,12 @@ build profile**, parallel to how Q4 makes the typed profile opt-in:
   call; the literal is re-kinded `Ast.StringTemplate` at hand-off, same parts
   model; misuse through any ordinary call channel, `use`, or annotation
   position is a located diagnostic; exports/imports carry the surface kind)
-  are done; pending: persisted artifact macro section, module-alias macro
-  calls, full macrotrace backtraces)* Expander capability lockdown and budgets
+  are done; macrotrace v1 landed 2026-07-06 — macro-built nodes (empty
+  synthesized spans) are retargeted to the invocation span during the hygiene
+  walk, so binder/runtime diagnostics in generated code point at the macro
+  call site while spliced caller subtrees keep their own spans; pending:
+  persisted artifact macro section, module-alias macro calls, full nested
+  expansion backtrace chains)* Expander capability lockdown and budgets
   (gates everything below); build-graph ordering + cycle detection
   (`AMB_MACRO_CYCLE`); the §11 export/import surface (`export macro`, unified
   imports, artifact macro section); `use Module`; expansion backtraces.

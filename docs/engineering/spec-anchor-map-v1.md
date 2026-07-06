@@ -257,5 +257,5 @@ Check with `make spec-sync-check`.
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 75 | 2 | [`w14-buildbootstrapconformance-closure`](../../spec/changelog/v20.1.md#w14-buildbootstrapconformance-closure) | W14 Build/Bootstrap/Conformance Closure |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 91 | 2 | [`w15-native-readiness-metadata-closure`](../../spec/changelog/v20.1.md#w15-native-readiness-metadata-closure) | W15 Native-Readiness Metadata Closure |
 | [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 102 | 2 | [`post-w15-artifact-cli-surface`](../../spec/changelog/v20.1.md#post-w15-artifact-cli-surface) | Post-W15 Artifact CLI Surface |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 177 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
-| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 190 | 2 | [`closure-work-status`](../../spec/changelog/v20.1.md#closure-work-status) | Closure Work Status |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 181 | 2 | [`earlier-baseline-summary`](../../spec/changelog/v20.1.md#earlier-baseline-summary) | Earlier Baseline Summary |
+| [`spec/changelog/v20.1.md`](../../spec/changelog/v20.1.md) | 194 | 2 | [`closure-work-status`](../../spec/changelog/v20.1.md#closure-work-status) | Closure Work Status |
