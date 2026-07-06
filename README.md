@@ -16,6 +16,7 @@ Useful commands:
 ```sh
 make build
 make test
+make build/vm_net_http_tests
 make conformance
 make spec-sync-check
 make fmt
@@ -84,6 +85,7 @@ Current matrix status:
 | `W8.3` | done | runtime collections contract for sequence `each/map/filter_map/flat_map/select/reject/reduce/find/any?/all?/none?/first/count/group_by/to_a/lazy`, `Array` / `Set` `filter_map!`, `EmptyCollectionError` reduce guard, and deterministic `Map` keys/values/entries/map/filter_map/select/reject/transform_values/each |
 | `W8.4` | done | deterministic full conformance runner for `parse/lower/check/compile/disasm/run/load`, M1-M5 gate bundles, failure rendering, and CI one-command `make conformance` |
 | `W8.5` | done | Amber v20.6 value-keyed `Map` / `Set` update with expression map keys, structural key normalization, `Map{}` / `Set{}` explicit constructors, `MAKE_MAP_DYN`, and symbol-key pattern matching compatibility |
+| `net.http Phase 7` | done (basic) | low-level `net.http.Server` / `ServerRequest` / `ServerResponse` hook server over plaintext HTTP/1.1 and `net.tcp`; one request per accepted connection with explicit close, `net.listen` capability check, and focused loopback coverage in `build/vm_net_http_tests` |
 | `W9.1` | done | optional Amber/Typed checker lane with `TypeTerm` parsing/canonicalization, exported callable annotation boundaries, parameter/default/return diagnostics, basic truthiness flow for `and`/`or`, strict `case!` exhaustiveness checks, runtime type-hook metadata, `amberc typed`, and M6 typed corpus |
 | `W9.2` | done | open-world runtime transactions for class/mixin reopen, instance/class method replacement, direct `include` / class-side `extend`, pre-commit kind/superclass/include-cycle validation, `open -> frozen` world state with `WorldFrozenError`, atomic rollback, and dispatch invalidation via `world_epoch` / owner versions |
 | `W9.3` | done | read-only runtime reflection mirrors for package/world/class/mixin/method state, deterministic method/export/dependency ordering, source-location exposure from bytecode debug spans, and stable snapshot semantics without mutation backdoors |

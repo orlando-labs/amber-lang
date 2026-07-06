@@ -1,10 +1,21 @@
-# DESIGN — `io` foundation and `net.http` HTTP/1.1 client semantics for Amber
+# DESIGN — `io` foundation and `net.http` HTTP/1.1 semantics for Amber
 
 **Status:** proposed normative design  
 **Date:** 2026-06-20  
 **Target:** Amber standard library and runtime-facing API  
-**Scope:** `io`, `net`, `net.http` client-only HTTP/1.1 over plaintext TCP  
-**Out of scope for v1:** TLS/HTTPS, HTTP/2, HTTP/3, proxy/CONNECT, server framework, cookie jar, cache, automatic compression decoding, multipart helpers, WebSocket/Upgrade, `Expect: 100-continue`, request trailers
+**Scope:** `io`, `net`, `net.http` HTTP/1.1 client plus the Phase 7 basic
+server hook over plaintext TCP  
+**Out of scope for v1:** TLS/HTTPS, HTTP/2, HTTP/3, proxy/CONNECT, web
+framework/routing layer, cookie jar, cache, automatic compression decoding,
+multipart helpers, WebSocket/Upgrade, `Expect: 100-continue`, request trailers
+
+**Implementation note (2026-07-01):** the repository now contains the Phase 7
+basic server slice: `net.http.Server`, `net.http.ServerRequest`, and
+`net.http.ServerResponse` are exported native stdlib types backed by
+`runtime/vm.cpp` and `runtime/stdlib_net_http.cpp`. The focused
+`build/vm_net_http_tests` loopback suite covers Amber-source `Server#serve`
+hooks and cooperative request concurrency. This is a low-level hook server, not
+the future web-framework/routing layer.
 
 ---
 
@@ -24,7 +35,10 @@ This document replaces that sketch with a layered design:
    TCP streams implement the `io` protocols. DNS/connect/read/write operations are cancellation-aware and timeout-aware.
 
 4. **`net.http` owns HTTP semantics.**  
-   `Client`, `Request`, `Response`, `Headers`, `RequestBody`, `ResponseBody`, redirects, pooling, protocol parsing, HTTP errors, and request/response lifecycle are HTTP-specific.
+   `Client`, `Request`, `Response`, `Headers`, `RequestBody`, `ResponseBody`,
+   redirects, pooling, protocol parsing, HTTP errors, the Phase 7
+   `Server`/`ServerRequest`/`ServerResponse` hook surface, and
+   request/response lifecycle are HTTP-specific.
 
 The crucial API decision is:
 
@@ -88,7 +102,9 @@ ensure:
 - No TLS/HTTPS in `net.http` core.
 - No HTTP/2 or HTTP/3.
 - No proxy, CONNECT, or Upgrade support.
-- No server API.
+- No web framework, routing DSL, templating, sessions, CSRF, cookies, or
+  browser-style security policy layer in core. The Phase 7 `Server` API is only
+  the low-level request-hook adapter over `net.tcp`.
 - No automatic cookies.
 - No automatic cache.
 - No automatic gzip/br/deflate decoding.
@@ -297,10 +313,12 @@ Rules:
 
 ```text
 HTTP/1.1 client over plaintext TCP
+basic HTTP/1.1 server hook over plaintext TCP
 scheme: http://
 default port: 80
 request target: origin-form
 persistent connections: yes
+server keep-alive/pipelining: no; one request per accepted connection
 pipelining: no
 ```
 
@@ -320,6 +338,7 @@ TLS support belongs to a future `net.https` or transport injection layer.
 
 ```amber
 from net.http import Client, Request, RequestBody, Response, ResponseBody, Headers, Url
+from net.http import Server, ServerRequest, ServerResponse
 
 client = Client(
  timeout: null,
@@ -1650,10 +1669,12 @@ The final design decision is:
 
 ## 30. Implementation plan
 
-**Status (2026-06-24).** The runtime substrate this client assumes is built and
-committed (`native-packages` `d937394`): the spec's S5 *"requires async
-readiness"* gate is satisfied, so `net.http` is now unblocked. `net.http` itself
-is not started — the phases below build it on that substrate.
+**Status (2026-07-01).** The runtime substrate this design assumes is built, and
+the `net.http` implementation has advanced through the Phase 7 basic server
+slice. The current repository includes the client phases, convenience helpers,
+and the low-level `net.http.Server` request-hook surface. Remaining work is
+above or beyond this slice: TLS/HTTPS, HTTP/2/3, richer server protocol features,
+and web-framework routing/templating.
 
 ### 30.1. Substrate already in place
 
@@ -1749,9 +1770,10 @@ Phase 6  convenience + observability (outside core)
   (section 22). Lower into Phase 2-3 primitives only.
 
 Phase 7  basic HTTP server
-  net.http.Server and ServerResponse; plaintext HTTP/1.1 request parsing over
-  net.tcp listener sockets; one request per accepted connection with explicit
-  Connection: close in the first implementation. Server(workers: N,
+  IMPLEMENTED as the current low-level server slice. net.http.Server,
+  ServerRequest, and ServerResponse provide plaintext HTTP/1.1 request parsing
+  over net.tcp listener sockets; one request per accepted connection with
+  explicit Connection: close in the first implementation. Server(workers: N,
   max_concurrent_per_worker: M) owns an N-worker scheduler and caps in-flight
   request hooks at N*M. Server#serve accepts a block hook:
 

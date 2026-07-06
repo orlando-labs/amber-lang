@@ -30,6 +30,15 @@ work-package matrix to concrete repository artifacts. Use it with the generated
 | `W14` build/bootstrap/conformance closure | done | `buildsys/build.*`, `tools/amberc build`, `tests/fixtures/w14_build`, `.amberbc` `PROF`, runtime profile gate, M11 conformance bundle | `make test`, `make conformance`, `make spec-sync-check` |
 | `W15` native-readiness metadata | done | `optimizer/native.*` `slowpath_table`, exception-edge root maps, invalidation fallback metadata, hardened `native-verify`, frozen-image readiness guard checks | `make test`, `make conformance`, `make spec-sync-check` |
 
+`net.http` Phase 7 basic server status: implemented as a low-level hook server,
+not a web framework. The surface consists of `net.http.Server`,
+`net.http.ServerRequest`, and `net.http.ServerResponse` in `runtime/vm.cpp` and
+`runtime/stdlib_net_http.cpp`; it binds through the `net.listen` capability,
+parses plaintext HTTP/1.1 requests over `net.tcp`, runs `Server#serve` block
+hooks on the task scheduler, and closes each accepted connection after one
+response. Focused loopback verification is `build/vm_net_http_tests`, which is
+currently a separate target from the main `make build` / `make test` gate.
+
 ## Release Gates
 
 | Gate | Current state |

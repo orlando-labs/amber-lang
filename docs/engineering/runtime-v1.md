@@ -10,6 +10,11 @@ behavior, `W10.5` frozen image load barriers, and the `W13` runtime UNINIT,
 `CALL`, and structured source-trace closure are covered by VM/native/image
 tests.
 
+The `net.http` Phase 7 basic server slice is also implemented in the runtime:
+`net.http.Server`, `ServerRequest`, and `ServerResponse` are native stdlib
+values backed by `runtime/vm.cpp` plus `runtime/stdlib_net_http.cpp`, with
+focused loopback coverage in `build/vm_net_http_tests`.
+
 The runtime error taxonomy is frozen in `spec/registries/runtime_errors.yaml`.
 
 The first runtime implementation must keep frontend, bytecode container, VM, loader, scheduler, and memory boundaries separately testable. No stdlib helper may silently redefine language semantics that belong in parser, binder, HIR, or VM contracts.
@@ -147,6 +152,15 @@ Current implemented slice:
   `runtime_select` arms, bounded await/poll behavior, cooperative task
   cancellation propagation, and native wait readiness tokens backed by active
   W6.4 pin handles;
+- `net.http` Phase 7 basic server in `runtime/vm.{h,cpp}` and
+  `runtime/stdlib_net_http.cpp`, exposing `Server`, `ServerRequest`, and
+  `ServerResponse` native stdlib values; `Server(...)` performs a `net.listen`
+  capability check and binds a `net.tcp` listener, `Server#serve(max_requests:)`
+  accepts a request block, request parsing supports bounded plaintext HTTP/1.1
+  headers and fixed `Content-Length` bodies, handler results may be
+  `ServerResponse`, `Str`, `Bytes`, or `null`, and the first server
+  implementation writes `Connection: close` after one request per accepted
+  connection;
 - `W10.4` native/JIT runtime bridge in `runtime/native_bridge.{h,cpp}` with
   `amber.native.v1` world-epoch and method-version assumption checks,
   frozen-world rejection, deterministic bytecode-trampoline execution through
