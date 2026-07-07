@@ -34,6 +34,29 @@ using MacroProviderMap = std::map<std::string, std::vector<MacroExport>>;
 std::vector<MacroExport>
 collect_macro_exports(const std::vector<std::unique_ptr<ast::Expr>> &items);
 
+// Persisted artifact macro section (§11): a macro-providing module's build
+// artifact embeds its `export macro` table under this module attribute, so a
+// later build can stage against the artifact without re-parsing provider
+// source. The payload is schema-tagged (`amber.macro.exports.v1`) and
+// carries, per export: public name, surface kind (`call` / `string_tag`),
+// the definition's source line, and the `macro def` source slice itself —
+// the parser is the deserializer, so staging from an artifact is exactly
+// staging from source.
+inline constexpr const char *kMacroExportsAttrKey = "amber.macro.exports";
+
+// Encode `exports` (harvested from a module whose text is `module_source`)
+// as an artifact macro-section payload.
+std::string serialize_macro_exports(const std::vector<MacroExport> &exports,
+                                    const std::string &module_source);
+
+// Decode an artifact macro-section payload back into an export table.
+// `provider_path` names the provider source file for diagnostic spans; the
+// re-parsed definitions carry their original source lines. Returns an empty
+// table with `*error` set when the payload is malformed.
+std::vector<MacroExport> parse_macro_exports(const std::string &payload,
+                                             const std::string &provider_path,
+                                             std::string *error);
+
 // Macro expansion pass (F1.5, DESIGN-macro-system §3). Runs after parsing and
 // before binding. Collects `macro def` declarations, compiles them as ordinary
 // functions on an expander VM, then rewrites each function-like macro call in
@@ -47,14 +70,15 @@ collect_macro_exports(const std::vector<std::unique_ptr<ast::Expr>> &items);
 // limit; overruns and macro faults are reported as `ok == false` diagnostics
 // rather than hangs or crashes.
 //
-// The provider-aware overload additionally resolves `from <module> import
-// name [as alias]` items against `providers` (§11 exports/imports): each
-// matching macro export is cloned under the importer's local alias and joins
-// the module's compile-time macro namespace. Imported names that are not in
-// the provider table stay ordinary runtime imports. v1 limits: only the
-// `from … import` form binds macros (module-alias dotted calls are later),
-// and an imported macro body may only call other macros/builtins — provider
-// runtime helpers are not staged with it.
+// The provider-aware overload additionally resolves imports against
+// `providers` (§11 exports/imports): each `from <module> import name [as
+// alias]` match is cloned under the importer's local alias, and each
+// `import <module> as alias` binds every macro export of the provider under
+// the dotted spelling `alias.name` (usable through the call, string-tag,
+// block-suffix, annotation, and `use` surfaces). Imported names that are not
+// in the provider table stay ordinary runtime imports. v1 limit: an imported
+// macro body may only call other macros/builtins — provider runtime helpers
+// are not staged with it.
 ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
                            const std::string &module_name,
                            const std::string &source);

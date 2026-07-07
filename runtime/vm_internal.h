@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -332,6 +333,13 @@ struct RuntimeState {
   bool has_any_rest_params = false;
   std::unordered_map<std::uint32_t, std::uint32_t> rest_param_index_by_code;
   std::unordered_map<std::uint32_t, std::uint32_t> kw_rest_param_index_by_code;
+  // Method bodies whose parameter list needs the param-aware shaping path on
+  // closure/direct-entry calls: any rest/keyword-rest pack, and any keyword or
+  // defaulted parameter (the raw positional register copy binds neither
+  // keywords nor defaults). Built once in initialize_for_module;
+  // `has_any_shaped_params` keeps the common case to a single bool check.
+  bool has_any_shaped_params = false;
+  std::unordered_set<std::uint32_t> codes_needing_param_shaping;
   bool world_frozen = false;
   std::uint64_t world_epoch = 1;
   std::uint64_t watch_epoch = 0;
@@ -462,6 +470,13 @@ struct RuntimeState {
         } else if ((flags & bytecode::kMethodParamFlagKwRest) != 0U) {
           kw_rest_param_index_by_code[method.entry_code_id] = i;
           has_any_rest_params = true;
+        }
+        if ((flags & (bytecode::kMethodParamFlagRest |
+                      bytecode::kMethodParamFlagKwRest |
+                      bytecode::kMethodParamFlagKeyword |
+                      bytecode::kMethodParamFlagHasDefault)) != 0U) {
+          codes_needing_param_shaping.insert(method.entry_code_id);
+          has_any_shaped_params = true;
         }
       }
     }
@@ -614,5 +629,14 @@ ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,
                                    std::uint32_t code_id,
                                    const std::vector<Value> &args, Value self,
                                    Value block);
+
+// Keyword-argument entry: `kw_args` pairs the keyword's symbol id (in
+// `module`'s symbol table) with its value. Requires a single-signature method
+// entry for the code id; used by the macro expander's keyword call channel.
+ExecutionResult execute_runtime_vm(
+    const bytecode::BcModule &module, RuntimeVmExecutionContext context,
+    std::uint32_t code_id, const std::vector<Value> &args,
+    const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value self,
+    Value block);
 
 } // namespace amber::runtime

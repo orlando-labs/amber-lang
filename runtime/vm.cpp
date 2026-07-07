@@ -1626,6 +1626,15 @@ public:
 
   ExecutionResult execute(std::uint32_t code_id, const std::vector<Value> &args,
                           Value self, Value block) {
+    static const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
+    return execute(code_id, args, no_kw_args, std::move(self),
+                   std::move(block));
+  }
+
+  ExecutionResult
+  execute(std::uint32_t code_id, const std::vector<Value> &args,
+          const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+          Value self, Value block) {
     const std::size_t watch_event_start = state_->watch_events.size();
     if (!numeric_profile_error_.empty()) {
       return with_runtime_names(
@@ -1641,20 +1650,31 @@ public:
       state_->heap.drain_remote_frees();
       return with_runtime_names({Value::null(), fault_});
     }
-    // A rest-parameter body reached directly with positional arguments -- the
-    // native lane's per-function VM bridge calls execute(code_id, args) this
-    // way -- needs the full call-shaping (before/rest/after split, Tuple pack,
-    // frozen keyword-rest Map) that the SEND/closure path applies. push_frame's
-    // raw positional copy only packs a trailing rest, so route single-clause
-    // rest bodies through push_rest_entry_frame; everything else (including the
-    // no-rest common case) keeps push_frame.
-    const bytecode::BcMethod *rest_method =
-        code_has_rest_params(code_id) ? find_method_by_entry_code(code_id)
-                                      : nullptr;
-    if (rest_method != nullptr && rest_method->clause_table.empty()) {
-      if (!push_rest_entry_frame(*entry, *rest_method, args,
-                                 std::move(entry_captures), std::move(self),
-                                 std::move(block))) {
+    // A body reached directly whose parameter list needs full call-shaping --
+    // rest/keyword-rest packs (the native lane's per-function VM bridge calls
+    // execute(code_id, args) this way), keyword arguments, and defaulted
+    // parameters (the macro expander's call channels) -- routes through
+    // push_shaped_entry_frame, which applies the same before/rest/after
+    // positional split, Tuple/frozen-Map packing, keyword binding, and
+    // default materialization as the SEND/closure path. Everything else
+    // (including the no-rest common case) keeps push_frame.
+    const bytecode::BcMethod *shaped_method =
+        (!kw_args.empty() || code_needs_param_shaping(code_id))
+            ? find_method_by_entry_code(code_id)
+            : nullptr;
+    if (shaped_method != nullptr && !shaped_method->clause_table.empty()) {
+      shaped_method = nullptr;
+    }
+    if (shaped_method == nullptr && !kw_args.empty()) {
+      return with_runtime_names(
+          fail("TypeError",
+               "keyword arguments require a single-signature method entry",
+               code_id, 0));
+    }
+    if (shaped_method != nullptr) {
+      if (!push_shaped_entry_frame(*entry, *shaped_method, args, kw_args,
+                                   std::move(entry_captures), std::move(self),
+                                   std::move(block))) {
         state_->heap.drain_remote_frees();
         return with_runtime_names({Value::null(), fault_});
       }
@@ -4663,6 +4683,18 @@ private:
            kw_rest_param_index_for_code(code_id).has_value();
   }
 
+  // True when the method body's parameter list requires the param-aware
+  // shaping path on closure/direct-entry calls: rest/keyword-rest packs plus
+  // keyword and defaulted parameters, none of which the raw positional
+  // register copy can bind.
+  bool code_needs_param_shaping(std::uint32_t code_id) const {
+    if (!state_->has_any_shaped_params) {
+      return false;
+    }
+    return state_->codes_needing_param_shaping.find(code_id) !=
+           state_->codes_needing_param_shaping.end();
+  }
+
   // Binds a `**name` keyword-rest parameter to an empty frozen Map on the
   // positional/no-keyword frame-setup paths. The keyword-bearing path overwrites
   // this via shape_method_call/materialize_defaults.
@@ -4813,29 +4845,29 @@ private:
                          std::move(self), std::move(block), caller_result_reg);
   }
 
-  // Pushes the entry frame for a rest-parameter method body invoked with only
-  // positional arguments -- the shape the native lane's per-function VM bridge
-  // uses (amber_vm_fallback_call -> execute(code_id, args)). The raw
-  // push_frame positional copy packs a trailing rest but leaves the after-rest
-  // parameters of a mid-position rest (`def f(*head, tail)`) unbound, so bind
-  // through the same call-shaping used on the SEND/closure path instead: the
-  // before/rest/after positional split, the immutable Tuple pack, and the
-  // frozen keyword-rest Map. Returns false with fault_ set on a binding fault
-  // (e.g. too few positional arguments), which the bridge turns into a sound
-  // whole-program restart. Clause-based methods keep the raw push_frame path.
-  bool push_rest_entry_frame(const BcCode &entry,
-                             const bytecode::BcMethod &method,
-                             const std::vector<Value> &args,
-                             std::vector<Value> captures, Value self,
-                             Value block) {
+  // Pushes the entry frame for a method body invoked directly through
+  // execute(code_id, args) when its parameter list needs full call-shaping --
+  // rest/keyword-rest packs, keyword arguments, and defaulted parameters.
+  // Callers are the native lane's per-function VM bridge
+  // (amber_vm_fallback_call) and the macro expander (which is what passes
+  // keyword arguments). The raw push_frame positional copy packs a trailing
+  // rest but leaves the after-rest parameters of a mid-position rest
+  // (`def f(*head, tail)`) unbound and binds neither keywords nor defaults,
+  // so bind through the same call-shaping used on the SEND/closure path
+  // instead. Returns false with fault_ set on a binding fault (e.g. too few
+  // positional arguments). Clause-based methods keep the raw push_frame path.
+  bool push_shaped_entry_frame(
+      const BcCode &entry, const bytecode::BcMethod &method,
+      const std::vector<Value> &args,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      std::vector<Value> captures, Value self, Value block) {
     Frame frame = acquire_frame(entry);
     frame.captures = std::move(captures);
     frame.self = std::move(self);
     frame.block = std::move(block);
     std::vector<bytecode::MethodParamEntry> params;
     std::vector<BoundMethodArg> slots;
-    const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
-    if (!shape_method_call(frame, method, args, no_kw_args, &params, &slots)) {
+    if (!shape_method_call(frame, method, args, kw_args, &params, &slots)) {
       return false;
     }
     if (!materialize_defaults(frame, method, params, slots) ||
@@ -5140,9 +5172,10 @@ private:
       return FastCallStatus::Faulted;
     }
 
-    // Rest / keyword-rest parameters need the param-aware shaping path; decline
-    // the fast register-copy path so the call falls through to it.
-    if (code_has_rest_params(closure->code_id)) {
+    // Rest/keyword-rest packs and keyword/defaulted parameters need the
+    // param-aware shaping path; decline the fast register-copy path so the
+    // call falls through to it.
+    if (code_needs_param_shaping(closure->code_id)) {
       return FastCallStatus::NotHandled;
     }
 
@@ -11278,18 +11311,27 @@ private:
         set_fault(frame, "VMError", "closure code id is unknown");
         return false;
       }
-      if (!kw_args.empty() || code_has_rest_params(closure->code_id)) {
-        const bytecode::BcMethod *method =
-            find_method_by_entry_code(closure->code_id);
-        if (method == nullptr || !method->clause_table.empty()) {
-          set_fault(frame, "TypeError",
-                    "closure CALL does not accept keyword arguments");
-          return false;
+      // Keyword arguments, rest packs, and keyword/defaulted parameters all
+      // need the param-aware shaping path (the raw positional register copy
+      // binds none of them); a shaping-eligible body without a single-clause
+      // method entry keeps the raw path unless keywords force the issue.
+      const bytecode::BcMethod *shaped_method = nullptr;
+      if (!kw_args.empty() || code_needs_param_shaping(closure->code_id)) {
+        shaped_method = find_method_by_entry_code(closure->code_id);
+        if (shaped_method == nullptr || !shaped_method->clause_table.empty()) {
+          if (!kw_args.empty()) {
+            set_fault(frame, "TypeError",
+                      "closure CALL does not accept keyword arguments");
+            return false;
+          }
+          shaped_method = nullptr;
         }
+      }
+      if (shaped_method != nullptr) {
         std::vector<bytecode::MethodParamEntry> params;
         std::vector<BoundMethodArg> slots;
-        if (!shape_method_call(frame, *method, pos_args, kw_args, &params,
-                               &slots)) {
+        if (!shape_method_call(frame, *shaped_method, pos_args, kw_args,
+                               &params, &slots)) {
           return false;
         }
         const std::uint32_t call_pc = static_cast<std::uint32_t>(frame.pc);
@@ -11297,10 +11339,11 @@ private:
         frame.active_call_pc = call_pc;
         push_frame(*code, {}, closure->captures, closure->self, block, dst);
         Frame &callee_frame = frames_.back();
-        if (!materialize_defaults(callee_frame, *method, params, slots)) {
+        if (!materialize_defaults(callee_frame, *shaped_method, params,
+                                  slots)) {
           return false;
         }
-        return apply_auto_assigns(callee_frame, *method, *code);
+        return apply_auto_assigns(callee_frame, *shaped_method, *code);
       }
       if (!ensure_closure_arity(frame, *code, pos_args.size())) {
         return false;
@@ -27854,18 +27897,28 @@ private:
           set_fault(frame, "VMError", "closure code id is unknown");
           return;
         }
+        // Keyword arguments, rest packs, and keyword/defaulted parameters all
+        // need the param-aware shaping path (the raw positional register copy
+        // binds none of them); a shaping-eligible body without a single-clause
+        // method entry keeps the raw path unless keywords force the issue.
+        const bytecode::BcMethod *shaped_method = nullptr;
         if (!packet.kw_args.empty() ||
-            code_has_rest_params(closure->code_id)) {
-          const bytecode::BcMethod *method =
-              find_method_by_entry_code(closure->code_id);
-          if (method == nullptr || !method->clause_table.empty()) {
-            set_fault(frame, "TypeError",
-                      "closure CALL does not accept keyword arguments");
-            return;
+            code_needs_param_shaping(closure->code_id)) {
+          shaped_method = find_method_by_entry_code(closure->code_id);
+          if (shaped_method == nullptr ||
+              !shaped_method->clause_table.empty()) {
+            if (!packet.kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "closure CALL does not accept keyword arguments");
+              return;
+            }
+            shaped_method = nullptr;
           }
+        }
+        if (shaped_method != nullptr) {
           std::vector<bytecode::MethodParamEntry> params;
           std::vector<BoundMethodArg> slots;
-          if (!shape_method_call(frame, *method, packet.pos_args,
+          if (!shape_method_call(frame, *shaped_method, packet.pos_args,
                                  packet.kw_args, &params, &slots)) {
             return;
           }
@@ -27875,8 +27928,9 @@ private:
           push_frame(*code, {}, closure->captures, closure->self, packet.block,
                      packet.dst);
           Frame &callee_frame = frames_.back();
-          if (!materialize_defaults(callee_frame, *method, params, slots) ||
-              !apply_auto_assigns(callee_frame, *method, *code)) {
+          if (!materialize_defaults(callee_frame, *shaped_method, params,
+                                    slots) ||
+              !apply_auto_assigns(callee_frame, *shaped_method, *code)) {
             return;
           }
           return;
@@ -28738,6 +28792,16 @@ ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,
                                    std::uint32_t code_id,
                                    const std::vector<Value> &args, Value self,
                                    Value block) {
+  static const std::vector<std::pair<std::uint32_t, Value>> no_kw_args;
+  return execute_runtime_vm(module, std::move(context), code_id, args,
+                            no_kw_args, std::move(self), std::move(block));
+}
+
+ExecutionResult execute_runtime_vm(
+    const bytecode::BcModule &module, RuntimeVmExecutionContext context,
+    std::uint32_t code_id, const std::vector<Value> &args,
+    const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value self,
+    Value block) {
   Vm vm(module, std::move(context.state), std::move(context.module_id),
         context.world_options, context.capabilities, context.effects,
         std::move(context.trace_recorder), context.native_registry,
@@ -28746,7 +28810,8 @@ ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,
   if (context.step_budget > 0) {
     vm.enable_step_budget(context.step_budget);
   }
-  return vm.execute(code_id, args, std::move(self), std::move(block));
+  return vm.execute(code_id, args, kw_args, std::move(self),
+                    std::move(block));
 }
 
 ExecutionResult execute_code(const bytecode::BcModule &module,

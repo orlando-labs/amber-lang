@@ -13325,6 +13325,49 @@ harvest_macro_exports(const std::string &source, const std::string &path) {
   return amber::macros::collect_macro_exports(parse_result.items);
 }
 
+// Stage a provider from its built artifact's persisted macro section (§11)
+// when the artifact is fresh — its recorded source hash matches the current
+// source — skipping the source re-parse. Returns nullopt when the artifact
+// is missing, stale, has no macro section (older artifact or no macros), or
+// the section fails to decode; the caller falls back to the source harvest.
+std::optional<std::vector<amber::macros::MacroExport>>
+macro_exports_from_artifact(const std::filesystem::path &artifact_path,
+                            const std::string &source_hash,
+                            const std::string &module_path) {
+  std::error_code exists_error;
+  if (!std::filesystem::exists(artifact_path, exists_error) ||
+      exists_error) {
+    return std::nullopt;
+  }
+  std::vector<std::uint8_t> bytes;
+  try {
+    bytes = read_bytes(artifact_path.string());
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+  amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(bytes);
+  if (!decoded.ok()) {
+    return std::nullopt;
+  }
+  if (module_attr_text(decoded.module, "amber.build.source_hash") !=
+      source_hash) {
+    return std::nullopt;
+  }
+  const std::string payload =
+      module_attr_text(decoded.module, amber::macros::kMacroExportsAttrKey);
+  if (payload.empty()) {
+    return std::nullopt;
+  }
+  std::string error;
+  std::vector<amber::macros::MacroExport> exports =
+      amber::macros::parse_macro_exports(payload, module_path, &error);
+  if (!error.empty()) {
+    return std::nullopt;
+  }
+  return exports;
+}
+
 amber::build::BuildArtifactRecord build_one_module(
     const amber::build::BuildModule &module,
     const std::filesystem::path &root_dir, const std::filesystem::path &out_dir,
@@ -13377,6 +13420,18 @@ amber::build::BuildArtifactRecord build_one_module(
     add_module_attr(&bc_module, "amber.build.module", module.name);
     add_module_attr(&bc_module, "amber.build.source_hash", source_hash);
     add_module_attr(&bc_module, "amber.build.cache_key", cache_key);
+    // Persisted artifact macro section (§11): a macro-providing module embeds
+    // its `export macro` table in the artifact, so a later build's staging
+    // pre-pass can read the exports from the artifact instead of re-parsing
+    // provider source.
+    if (macro_providers != nullptr) {
+      const auto exports = macro_providers->find(module.name);
+      if (exports != macro_providers->end() && !exports->second.empty()) {
+        add_module_attr(
+            &bc_module, amber::macros::kMacroExportsAttrKey,
+            amber::macros::serialize_macro_exports(exports->second, source));
+      }
+    }
     if (module.stdlib) {
       add_module_attr(&bc_module, "amber.bootstrap.layer",
                       module.bootstrap_layer.empty() ? "B2"
@@ -14556,11 +14611,23 @@ int run_build_command(int argc, char **argv) {
     for (const amber::build::BuildModule &module : parsed.manifest.modules) {
       const std::string module_source =
           read_file((manifest_dir / module.path).string());
-      std::vector<amber::macros::MacroExport> exports =
-          harvest_macro_exports(module_source, module.path);
+      const std::string module_source_hash =
+          amber::lexer::sha256_hex(module_source);
+      // Prefer the persisted artifact macro section of a fresh build output
+      // (§11); fall back to the parse-only source harvest.
+      std::vector<amber::macros::MacroExport> exports;
+      std::optional<std::vector<amber::macros::MacroExport>> from_artifact =
+          macro_exports_from_artifact(
+              out_dir / (safe_artifact_name(module.name) + ".amberbc"),
+              module_source_hash, module.path);
+      if (from_artifact.has_value()) {
+        exports = std::move(*from_artifact);
+      } else {
+        exports = harvest_macro_exports(module_source, module.path);
+      }
       if (!exports.empty()) {
         macro_material += "macro-provider\n" + module.name + "\n" +
-                          amber::lexer::sha256_hex(module_source) + "\n";
+                          module_source_hash + "\n";
         macro_providers[module.name] = std::move(exports);
       }
     }

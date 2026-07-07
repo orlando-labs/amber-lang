@@ -9195,6 +9195,197 @@ void test_macro_expander_sandbox() {
   }
 }
 
+// §8 call channels: keyword / spread / `&block` arguments reach macros; the
+// spreads are compile-time splices, so non-literal operands are diagnostics.
+void test_macro_call_channels() {
+  // Keyword channel: passed keyword binds the Ast; an unknown keyword to a
+  // macro without `**` is an expansion diagnostic (VM keyword binding fault).
+  {
+    const amber::macros::ExpandResult unknown = expand_source(
+        "macro def scaled(x, factor: 2):\n"
+        "  #{x} * #{factor}\n"
+        "\n"
+        "scaled(1, other: 3)\n");
+    expect(!unknown.ok, "unknown macro keyword is a diagnostic");
+    expect(unknown.error.find("macro `scaled` raised") != std::string::npos,
+           "unknown keyword surfaces as a macro fault, got: " + unknown.error);
+  }
+
+  // A `*` spread of a non-literal operand cannot be expanded at compile time.
+  {
+    const amber::macros::ExpandResult spread = expand_source(
+        "macro def sum2(a, b):\n"
+        "  #{a} + #{b}\n"
+        "\n"
+        "def probe(xs):\n"
+        "  sum2(*xs)\n");
+    expect(!spread.ok, "non-literal `*` spread into a macro is a diagnostic");
+    expect(spread.error.find("not a list or tuple literal") !=
+               std::string::npos,
+           "spread diagnostic explains the literal restriction, got: " +
+               spread.error);
+  }
+
+  // A `**` spread of a non-literal operand cannot be expanded either.
+  {
+    const amber::macros::ExpandResult kw_spread = expand_source(
+        "macro def scaled(x, factor: 2):\n"
+        "  #{x} * #{factor}\n"
+        "\n"
+        "def probe(opts):\n"
+        "  scaled(1, **opts)\n");
+    expect(!kw_spread.ok,
+           "non-literal `**` spread into a macro is a diagnostic");
+    expect(kw_spread.error.find("not a map literal") != std::string::npos,
+           "kw-spread diagnostic explains the literal restriction, got: " +
+               kw_spread.error);
+  }
+
+  // The block channel is single-occupancy: a block suffix and a `&name`
+  // block-pass on the same call is a diagnostic.
+  {
+    const amber::macros::ExpandResult both = expand_source(
+        "macro def with_block(x, blk):\n"
+        "  #{x}\n"
+        "\n"
+        "def probe(cb):\n"
+        "  with_block(1, &cb):\n"
+        "    2\n");
+    expect(!both.ok, "block suffix + `&name` block-pass is a diagnostic");
+    expect(both.error.find("both a block suffix and a `&name`") !=
+               std::string::npos,
+           "dual block channel diagnostic, got: " + both.error);
+  }
+
+  // Keyword-rest macros collect extra keywords (`**kwargs` binds a frozen
+  // Map of Ast values; `.size` counts the entries).
+  {
+    const amber::macros::ExpandResult kw_rest = expand_source(
+        "macro def count_opts(**opts):\n"
+        "  return Ast.lift(opts.size)\n"
+        "\n"
+        "count_opts(a: 1, b: 2, c: 3)\n");
+    expect(kw_rest.ok,
+           "`**kwargs` macro accepts extra keywords, got: " + kw_rest.error);
+  }
+}
+
+// §11 persisted artifact macro section: the export table round-trips through
+// the serialized payload (the parser is the deserializer), and a table
+// re-staged from the payload expands importers exactly like a source
+// harvest.
+void test_macro_exports_artifact_section() {
+  const std::string provider_source = "package provider.mod\n"
+                                      "export macro run_twice\n"
+                                      "export macro sql\n"
+                                      "\n"
+                                      "macro def run_twice(blk):\n"
+                                      "  #{blk}\n"
+                                      "  #{blk}\n"
+                                      "\n"
+                                      "string_tag macro def sql(t):\n"
+                                      "  return Ast.lift(t.parts.size)\n";
+  amber::lexer::Lexer provider_lexer(provider_source, "<artifact-provider>");
+  amber::lexer::LexResult provider_lex = provider_lexer.lex();
+  expect(provider_lex.ok(), "artifact section: provider lex ok");
+  amber::parser::Parser provider_parser(provider_lex.tokens);
+  amber::parser::ParseModuleResult provider_mod =
+      provider_parser.parse_module_unit();
+  expect(provider_mod.ok(), "artifact section: provider parse ok");
+  const std::vector<amber::macros::MacroExport> exports =
+      amber::macros::collect_macro_exports(provider_mod.items);
+  expect(exports.size() == 2, "artifact section: both exports harvested");
+
+  const std::string payload =
+      amber::macros::serialize_macro_exports(exports, provider_source);
+  expect(payload.rfind("amber.macro.exports.v1\n", 0) == 0,
+         "payload is schema-tagged");
+  expect(payload.find("string_tag macro def sql") != std::string::npos,
+         "payload persists the definition source slice");
+
+  std::string error;
+  std::vector<amber::macros::MacroExport> reloaded =
+      amber::macros::parse_macro_exports(payload, "provider.am", &error);
+  expect(error.empty(), "payload parses back, got: " + error);
+  expect(reloaded.size() == 2 && reloaded[0].public_name == "run_twice" &&
+             reloaded[1].public_name == "sql",
+         "reloaded table preserves names and order");
+  expect(reloaded[1].def != nullptr &&
+             reloaded[1].def->span.start.line == 9,
+         "reloaded definition reports its original source line");
+
+  // Staging from the reloaded table behaves exactly like a source harvest.
+  amber::macros::MacroProviderMap providers;
+  providers["provider.mod"] = std::move(reloaded);
+  const std::string importer_source = "package app.artifact\n"
+                                      "from provider.mod import run_twice\n"
+                                      "\n"
+                                      "def probe():\n"
+                                      "  y = 0\n"
+                                      "  run_twice:\n"
+                                      "    y = y + 21\n"
+                                      "  y\n";
+  amber::lexer::Lexer importer_lexer(importer_source, "<artifact-importer>");
+  amber::lexer::LexResult importer_lex = importer_lexer.lex();
+  amber::parser::Parser importer_parser(importer_lex.tokens);
+  amber::parser::ParseModuleResult importer_mod =
+      importer_parser.parse_module_unit();
+  expect(importer_mod.ok(), "artifact section: importer parse ok");
+  const amber::macros::ExpandResult expanded = amber::macros::expand_macros(
+      importer_mod.items, importer_mod.module_name, importer_source,
+      providers);
+  expect(expanded.ok,
+         "expansion from a reloaded table succeeds, got: " + expanded.error);
+
+  // A corrupted payload is a decode error, not a crash or a silent table.
+  std::string corrupt_error;
+  const std::vector<amber::macros::MacroExport> corrupt =
+      amber::macros::parse_macro_exports("amber.macro.exports.v9\n0\n",
+                                         "provider.am", &corrupt_error);
+  expect(corrupt.empty() && !corrupt_error.empty(),
+         "unknown schema is a decode error");
+}
+
+// §12 expansion backtraces: a diagnostic raised while re-expanding a macro's
+// spliced output carries the chain of expansions it came through.
+void test_macro_expansion_backtrace() {
+  // `outer` emits a call to `failing`; `failing` raises at expansion time.
+  // The diagnostic must name the failing macro AND the expansion it came
+  // from, innermost first.
+  const amber::macros::ExpandResult chained = expand_source(
+      "macro def failing(x):\n"
+      "  raise ValueError.new(\"boom\")\n"
+      "  return quote:\n"
+      "    1\n"
+      "\n"
+      "macro def outer(x):\n"
+      "  failing(#{x})\n"
+      "\n"
+      "outer(1)\n");
+  expect(!chained.ok, "nested macro failure is a diagnostic");
+  expect(chained.error.find("macro `failing` raised") != std::string::npos,
+         "diagnostic names the failing macro, got: " + chained.error);
+  expect(chained.error.find("expanded from macro `outer`") !=
+             std::string::npos,
+         "diagnostic chains the outer expansion, got: " + chained.error);
+
+  // A self-recursive macro hits the depth limit; the backtrace summarizes
+  // instead of printing all ~128 frames.
+  const amber::macros::ExpandResult runaway = expand_source(
+      "macro def spiral(x):\n"
+      "  spiral(#{x})\n"
+      "\n"
+      "spiral(1)\n");
+  expect(!runaway.ok, "runaway recursive expansion is a diagnostic");
+  expect(runaway.error.find("AMB_MACRO_EXPANSION_LIMIT") != std::string::npos,
+         "runaway expansion reports the depth limit, got: " + runaway.error);
+  expect(runaway.error.find("more expansion frames") != std::string::npos,
+         "deep backtraces are summarized, got: " + runaway.error);
+  expect(count_occurrences(runaway.error, "expanded from macro `spiral`") <=
+             6,
+         "backtrace shows at most the closest frames");
+}
+
 void test_cross_module_macro_staging() {
   // Provider module: exports a macro through the macro-marked export table
   // (DESIGN-macro-system §11 exports/imports).
@@ -9264,6 +9455,99 @@ void test_cross_module_macro_staging() {
   expect(exec.ok(), "staging: probe executes");
   expect(exec.value.is_integer() && exec.value.as_integer() == 42,
          "imported macro expanded at the call site (probe == 42)");
+
+  // Module-alias imports (§11): `import provider.mod as pg` binds the macro
+  // exports under dotted spellings — `pg.run_twice(): …` and `pg.sql"""…"""`.
+  const std::string tag_provider_source =
+      "package provider.mod\n"
+      "export macro run_twice\n"
+      "export macro sql\n"
+      "\n"
+      "macro def run_twice(blk):\n"
+      "  #{blk}\n"
+      "  #{blk}\n"
+      "\n"
+      "string_tag macro def sql(t):\n"
+      "  return Ast.lift(t.parts.size)\n";
+  amber::lexer::Lexer tag_provider_lexer(tag_provider_source, "<provider2>");
+  amber::lexer::LexResult tag_provider_lex = tag_provider_lexer.lex();
+  expect(tag_provider_lex.ok(), "alias staging: provider lex ok");
+  amber::parser::Parser tag_provider_parser(tag_provider_lex.tokens);
+  amber::parser::ParseModuleResult tag_provider_mod =
+      tag_provider_parser.parse_module_unit();
+  expect(tag_provider_mod.ok(), "alias staging: provider parse ok");
+  amber::macros::MacroProviderMap alias_providers;
+  alias_providers["provider.mod"] =
+      amber::macros::collect_macro_exports(tag_provider_mod.items);
+  expect(alias_providers["provider.mod"].size() == 2,
+         "alias staging: both exports harvested");
+
+  const std::string alias_importer_source =
+      "package app.alias\n"
+      "import provider.mod as pg\n"
+      "\n"
+      "def probe():\n"
+      "  y = 0\n"
+      "  pg.run_twice():\n"
+      "    y = y + 20\n"
+      "  q = pg.sql\"\"\"\n"
+      "    SELECT 1\n"
+      "    \"\"\"\n"
+      "  y + q + 1\n";
+  amber::lexer::Lexer alias_lexer(alias_importer_source, "<alias-importer>");
+  amber::lexer::LexResult alias_lex = alias_lexer.lex();
+  expect(alias_lex.ok(), "alias staging: importer lex ok");
+  amber::parser::Parser alias_parser(alias_lex.tokens);
+  amber::parser::ParseModuleResult alias_mod = alias_parser.parse_module_unit();
+  expect(alias_mod.ok(), "alias staging: importer parse ok");
+  const amber::macros::ExpandResult alias_expanded =
+      amber::macros::expand_macros(alias_mod.items, alias_mod.module_name,
+                                   alias_importer_source, alias_providers);
+  expect(alias_expanded.ok,
+         "module-alias expansion succeeds, got: " + alias_expanded.error);
+  {
+    amber::ast::expand_quotes(alias_mod.items);
+    amber::binder::BindResult bind =
+        amber::binder::bind_module(alias_mod.items, alias_mod.module_name);
+    expect(bind.ok(), "alias staging: expanded importer binds");
+    amber::hir::Program program = amber::hir::lower_module(
+        alias_mod.items, alias_mod.module_name, bind.graph);
+    amber::bytecode::EmitResult emit =
+        amber::bytecode::emit_program(program, alias_mod.module_name);
+    expect(emit.ok(), "alias staging: expanded importer emits");
+    const amber::bytecode::BcMethod *probe =
+        method_by_name(emit.module, "probe");
+    expect(probe != nullptr, "alias staging: probe method exists");
+    const amber::runtime::ExecutionResult exec =
+        amber::runtime::execute_code(emit.module, probe->entry_code_id);
+    expect(exec.ok(), "alias staging: probe executes");
+    // run_twice adds 20 twice; the sql""" template has one static part; +1.
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "dotted macro calls expanded at the call site (probe == 42)");
+  }
+
+  // The spaced form `pg.sql """…"""` is not a tag invocation; reaching a
+  // string_tag macro through an ordinary call channel is a diagnostic.
+  const std::string spaced_source = "package app.spaced\n"
+                                    "import provider.mod as pg\n"
+                                    "\n"
+                                    "def probe():\n"
+                                    "  pg.sql \"\"\"\n"
+                                    "    SELECT 1\n"
+                                    "    \"\"\"\n";
+  amber::lexer::Lexer spaced_lexer(spaced_source, "<spaced-importer>");
+  amber::lexer::LexResult spaced_lex = spaced_lexer.lex();
+  amber::parser::Parser spaced_parser(spaced_lex.tokens);
+  amber::parser::ParseModuleResult spaced_mod =
+      spaced_parser.parse_module_unit();
+  expect(spaced_mod.ok(), "alias staging: spaced module parses");
+  const amber::macros::ExpandResult spaced_expanded =
+      amber::macros::expand_macros(spaced_mod.items, spaced_mod.module_name,
+                                   spaced_source, alias_providers);
+  expect(!spaced_expanded.ok &&
+             spaced_expanded.error.find("string_tag") != std::string::npos,
+         "spaced dotted tag reports the string_tag misuse diagnostic, got: " +
+             spaced_expanded.error);
 
   // A local macro def colliding with an imported alias is a diagnostic.
   const std::string collision_source = "package app.other\n"
@@ -9388,6 +9672,9 @@ void test_string_tag_macro_staging() {
 int main() {
   test_ast_value_model();
   test_macro_expander_sandbox();
+  test_macro_call_channels();
+  test_macro_expansion_backtrace();
+  test_macro_exports_artifact_section();
   test_cross_module_macro_staging();
   test_string_tag_macro_staging();
   test_execute_emitted_method();
