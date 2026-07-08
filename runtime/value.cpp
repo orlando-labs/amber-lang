@@ -47,6 +47,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "Math";
   case RuntimeNativeTypeKind::Json:
     return "Json";
+  case RuntimeNativeTypeKind::Yaml:
+    return "Yaml";
   case RuntimeNativeTypeKind::Base64:
     return "Base64";
   case RuntimeNativeTypeKind::Base64Url:

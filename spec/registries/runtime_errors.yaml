@@ -221,3 +221,9 @@ errors:
     parent: ConnectionError
   - name: DnsError
     parent: Exception
+  - name: YamlError
+    parent: Exception
+  - name: YamlParseError
+    parent: YamlError
+  - name: YamlGenerateError
+    parent: YamlError

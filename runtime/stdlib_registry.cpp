@@ -504,6 +504,7 @@ void register_builtin_stdlib(NativeRegistry &registry) {
   register_uuid(registry);
   register_time(registry);
   register_url(registry);
+  register_yaml(registry);
 }
 
 void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
@@ -525,6 +526,7 @@ void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
   register_uuid_runtime_module(modules, dispatch, types, errors);
   register_time_runtime_module(modules, dispatch, types, errors);
   register_url_runtime_module(modules, dispatch, types, errors);
+  register_yaml_runtime_module(modules, dispatch, types, errors);
 }
 
 void register_core_prelude_bindings(RuntimeModuleRegistry &registry) {

@@ -252,7 +252,8 @@ enum class RuntimeNativeTypeKind {
   NetHttpForm,
   NetHttpFormBody,
   Uuid,
-  TimeZone
+  TimeZone,
+  Yaml
 };
 
 struct NativeTypeValue {

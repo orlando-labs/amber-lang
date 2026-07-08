@@ -1049,5 +1049,10 @@ void register_url_runtime_module(RuntimeModuleRegistry &modules,
                                  RuntimeDispatchRegistry &dispatch,
                                  RuntimeTypeRegistry &types,
                                  RuntimeErrorRegistry *errors = nullptr);
+void register_yaml(NativeRegistry &registry);
+void register_yaml_runtime_module(RuntimeModuleRegistry &modules,
+                                  RuntimeDispatchRegistry &dispatch,
+                                  RuntimeTypeRegistry &types,
+                                  RuntimeErrorRegistry *errors = nullptr);
 
 } // namespace amber::runtime

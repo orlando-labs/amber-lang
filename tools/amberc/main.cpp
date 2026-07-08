@@ -3566,6 +3566,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::math_module()";
           } else if (name == "Json") {
             native_module_expr = "NativeValue::json_module()";
+          } else if (name == "Yaml") {
+            native_module_expr = "NativeValue::yaml_module()";
           } else if (name == "Bytes") {
             native_module_expr = "NativeValue::bytes_module()";
           } else if (name == "Base64") {
@@ -4240,11 +4242,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_url_build_query(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "generate" || selector == "pretty_generate") {
-        write_reg_stmt(dst, "native_json_generate_value(" + read_reg_expr(arg) +
-                                ", " +
-                                (selector == "pretty_generate" ? "true"
-                                                               : "false") +
-                                ")");
+        write_reg_stmt(
+            dst, "native_generate_value(" + read_reg_expr(recv) + ", " +
+                     read_reg_expr(arg) + ", " +
+                     (selector == "pretty_generate" ? "true" : "false") + ")");
       } else if (selector == "stream_parse_file") {
         if (!has_block) {
           out << "  throw NativeBailout();\n";
@@ -5215,6 +5216,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include <cctype>\n";
   out << "#include <cmath>\n";
   out << "#include <cstdint>\n";
+  out << "#include <cstdio>\n";
+  out << "#include <cstdlib>\n";
   out << "#include <cstring>\n";
   out << "#include <exception>\n";
   out << "#include <filesystem>\n";
@@ -5284,9 +5287,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeValue {\n";
   out << "  enum class Tag { Null, Bool, Integer, Float, String, Symbol, "
          "StrType, IntType, BigIntType, FloatType, BoolType, SymbolType, "
-         "NullType, ObjectType, MathModule, JsonModule, BytesModule, "
+         "NullType, ObjectType, MathModule, JsonModule, YamlModule, "
+         "BytesModule, "
          "Base64Module, Base64UrlModule, HexModule, "
-         "DigestModule, BenchmarkModule, UrlModule, ArgParserModule, FsModule, SecureRandomModule, UuidModule, "
+         "DigestModule, BenchmarkModule, UrlModule, ArgParserModule, FsModule, "
+         "SecureRandomModule, UuidModule, "
          "RangeModule, TimeModule, "
          "TimePeriodModule, Bytes, List, Tuple, Set, Map, Range, ArgParser, "
          "FsPath, Uuid, Time, TimePeriod, HeapString, Closure };\n";
@@ -5340,6 +5345,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Tag::MathModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue json_module() { NativeValue out; out.tag = "
          "Tag::JsonModule; out.scalar_value = 0; return out; }\n";
+  out << "  static NativeValue yaml_module() { NativeValue out; out.tag = "
+         "Tag::YamlModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue bytes_module() { NativeValue out; out.tag = "
          "Tag::BytesModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue base64_module() { NativeValue out; out.tag = "
@@ -6029,6 +6036,7 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  case NativeValue::Tag::ObjectType: return \"Object\";\n";
   out << "  case NativeValue::Tag::MathModule: return \"Math\";\n";
   out << "  case NativeValue::Tag::JsonModule: return \"Json\";\n";
+  out << "  case NativeValue::Tag::YamlModule: return \"Yaml\";\n";
   out << "  case NativeValue::Tag::BytesModule: return \"Bytes\";\n";
   out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
   out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
@@ -8427,7 +8435,715 @@ static NativeValue native_json_parse_value(const NativeValue &value) {
   NativeJsonParser parser(native_string_text(value));
   return parser.parse_document();
 }
+)AMBERCPP";
+  out << R"AMBERCPP(
+// --- Yaml -----------------------------------------------------------------
+// A native mirror of runtime/stdlib_yaml.cpp. Every parse/generate decision
+// matches the VM lane so both backends emit byte-identical results; anything
+// this subset cannot represent throws NativeBailout so the VM lane produces
+// the real YamlParseError / YamlGenerateError.
 
+static void native_yaml_encode_utf8(std::uint32_t cp, std::string &out) {
+  if (cp <= 0x7F) {
+    out.push_back(static_cast<char>(cp));
+  } else if (cp <= 0x7FF) {
+    out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else if (cp <= 0xFFFF) {
+    out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else {
+    out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  }
+}
+
+static std::string native_yaml_rstrip(const std::string &text) {
+  std::size_t end = text.size();
+  while (end > 0 && (text[end - 1] == ' ' || text[end - 1] == '\t')) --end;
+  return text.substr(0, end);
+}
+
+static std::string native_yaml_strip(const std::string &text) {
+  std::size_t begin = 0;
+  while (begin < text.size() && (text[begin] == ' ' || text[begin] == '\t')) {
+    ++begin;
+  }
+  std::size_t end = text.size();
+  while (end > begin && (text[end - 1] == ' ' || text[end - 1] == '\t')) --end;
+  return text.substr(begin, end - begin);
+}
+
+static bool native_yaml_matches_integer(const std::string &s) {
+  std::size_t i = 0;
+  if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+  if (i >= s.size()) return false;
+  for (; i < s.size(); ++i) {
+    if (s[i] < '0' || s[i] > '9') return false;
+  }
+  return true;
+}
+
+static bool native_yaml_matches_float(const std::string &s) {
+  std::size_t i = 0;
+  if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+  std::size_t digits_before = 0;
+  while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; ++digits_before; }
+  bool has_dot = false;
+  std::size_t digits_after = 0;
+  if (i < s.size() && s[i] == '.') {
+    has_dot = true;
+    ++i;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; ++digits_after; }
+  }
+  bool has_exp = false;
+  if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+    has_exp = true;
+    ++i;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) ++i;
+    std::size_t exp_digits = 0;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') { ++i; ++exp_digits; }
+    if (exp_digits == 0) return false;
+  }
+  if (i != s.size()) return false;
+  if (!has_dot && !has_exp) return false;
+  if (digits_before == 0 && digits_after == 0) return false;
+  return true;
+}
+
+static NativeValue native_yaml_integer_or_float(const std::string &s) {
+  const bool negative = s[0] == '-';
+  const std::size_t digits_begin = (s[0] == '-' || s[0] == '+') ? 1U : 0U;
+  constexpr std::uint64_t kInt64Max =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  const std::uint64_t limit = negative ? kInt64Max + 1U : kInt64Max;
+  std::uint64_t magnitude = 0;
+  bool overflow = false;
+  for (std::size_t i = digits_begin; i < s.size(); ++i) {
+    const std::uint64_t digit = static_cast<std::uint64_t>(s[i] - '0');
+    if (magnitude > (limit - digit) / 10U) { overflow = true; break; }
+    magnitude = magnitude * 10U + digit;
+  }
+  if (!overflow) {
+    if (negative) {
+      if (magnitude == limit) {
+        return NativeValue::integer(std::numeric_limits<std::int64_t>::min());
+      }
+      return NativeValue::integer(-static_cast<std::int64_t>(magnitude));
+    }
+    return NativeValue::integer(static_cast<std::int64_t>(magnitude));
+  }
+  return NativeValue::floating(std::strtod(s.c_str(), nullptr));
+}
+
+static NativeValue native_yaml_classify_plain(const std::string &raw) {
+  const std::string s = native_yaml_strip(raw);
+  if (s.empty() || s == "~" || s == "null" || s == "Null" || s == "NULL") {
+    return NativeValue::nullv();
+  }
+  if (s == "true" || s == "True" || s == "TRUE") return NativeValue::boolean(true);
+  if (s == "false" || s == "False" || s == "FALSE") {
+    return NativeValue::boolean(false);
+  }
+  if (native_yaml_matches_integer(s)) return native_yaml_integer_or_float(s);
+  if (native_yaml_matches_float(s)) {
+    return NativeValue::floating(std::strtod(s.c_str(), nullptr));
+  }
+  return NativeValue::heap_string(s);
+}
+
+struct NativeYamlLine {
+  std::size_t indent = 0;
+  std::string content;
+};
+
+struct NativeYamlParser {
+  explicit NativeYamlParser(const std::string &src_in) : src(src_in) {}
+
+  const std::string &src;
+  std::vector<NativeYamlLine> lines;
+  std::size_t cursor = 0;
+
+  static std::size_t comment_index(const std::string &s) {
+    std::size_t i = 0;
+    while (i < s.size()) {
+      const char c = s[i];
+      if (c == '"') {
+        ++i;
+        while (i < s.size() && s[i] != '"') {
+          if (s[i] == '\\' && i + 1 < s.size()) ++i;
+          ++i;
+        }
+        if (i < s.size()) ++i;
+        continue;
+      }
+      if (c == '\'') {
+        ++i;
+        while (i < s.size()) {
+          if (s[i] == '\'') {
+            if (i + 1 < s.size() && s[i + 1] == '\'') { i += 2; continue; }
+            ++i;
+            break;
+          }
+          ++i;
+        }
+        continue;
+      }
+      if (c == '#' && (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t')) return i;
+      ++i;
+    }
+    return std::string::npos;
+  }
+
+  static std::string without_comment(const std::string &s) {
+    const std::size_t idx = comment_index(s);
+    if (idx == std::string::npos) return s;
+    return s.substr(0, idx);
+  }
+
+  void tokenize() {
+    std::size_t line_start = 0;
+    bool seen_content = false;
+    while (line_start <= src.size()) {
+      std::size_t line_end = src.find('\n', line_start);
+      const bool last = line_end == std::string::npos;
+      if (last) line_end = src.size();
+      std::string raw = src.substr(line_start, line_end - line_start);
+      if (!raw.empty() && raw.back() == '\r') raw.pop_back();
+      std::size_t indent = 0;
+      while (indent < raw.size() && raw[indent] == ' ') ++indent;
+      if (indent < raw.size() && raw[indent] == '\t') throw NativeBailout();
+      std::string content = native_yaml_rstrip(raw.substr(indent));
+      const bool blank = content.empty();
+      const bool comment_only = !content.empty() && content[0] == '#';
+      if (content == "---") {
+        if (seen_content) throw NativeBailout();
+      } else if (content == "...") {
+        break;
+      } else if (!blank && !comment_only) {
+        NativeYamlLine line;
+        line.indent = indent;
+        line.content = content;
+        lines.push_back(std::move(line));
+        seen_content = true;
+      }
+      if (last) break;
+      line_start = line_end + 1;
+    }
+  }
+
+  static bool is_dash(const std::string &c) {
+    return c == "-" || (c.size() >= 2 && c[0] == '-' && c[1] == ' ');
+  }
+
+  static std::size_t key_colon(const std::string &s) {
+    int depth = 0;
+    std::size_t i = 0;
+    while (i < s.size()) {
+      const char c = s[i];
+      if (c == '"') {
+        ++i;
+        while (i < s.size() && s[i] != '"') {
+          if (s[i] == '\\' && i + 1 < s.size()) ++i;
+          ++i;
+        }
+        if (i < s.size()) ++i;
+        continue;
+      }
+      if (c == '\'') {
+        ++i;
+        while (i < s.size()) {
+          if (s[i] == '\'') {
+            if (i + 1 < s.size() && s[i + 1] == '\'') { i += 2; continue; }
+            ++i;
+            break;
+          }
+          ++i;
+        }
+        continue;
+      }
+      if (c == '[' || c == '{') {
+        ++depth;
+      } else if (c == ']' || c == '}') {
+        if (depth > 0) --depth;
+      } else if (c == '#' && depth == 0 &&
+                 (i == 0 || s[i - 1] == ' ' || s[i - 1] == '\t')) {
+        return std::string::npos;
+      } else if (c == ':' && depth == 0 &&
+                 (i + 1 == s.size() || s[i + 1] == ' ' || s[i + 1] == '\t')) {
+        return i;
+      }
+      ++i;
+    }
+    return std::string::npos;
+  }
+
+  NativeValue parse_node(std::size_t indent, int depth) {
+    if (depth > 256) throw NativeBailout();
+    if (cursor >= lines.size()) return NativeValue::nullv();
+    const std::string &c = lines[cursor].content;
+    if (!c.empty() && (c[0] == '[' || c[0] == '{')) {
+      NativeValue value = parse_flow_line(c);
+      ++cursor;
+      return value;
+    }
+    if (is_dash(c)) return parse_sequence(indent, depth);
+    if (key_colon(c) != std::string::npos) return parse_mapping(indent, depth);
+    NativeValue value = parse_scalar(c);
+    ++cursor;
+    return value;
+  }
+
+  NativeValue parse_mapping(std::size_t indent, int depth) {
+    std::vector<std::pair<NativeValue, NativeValue>> entries;
+    while (cursor < lines.size() && lines[cursor].indent == indent) {
+      const std::string content = lines[cursor].content;
+      if (is_dash(content)) break;
+      const std::size_t colon = key_colon(content);
+      if (colon == std::string::npos) throw NativeBailout();
+      const std::string key = parse_key(content.substr(0, colon));
+      const std::string rest =
+          native_yaml_strip(without_comment(content.substr(colon + 1)));
+      ++cursor;
+      NativeValue value;
+      if (rest.empty()) {
+        if (cursor < lines.size() && lines[cursor].indent > indent) {
+          value = parse_node(lines[cursor].indent, depth + 1);
+        } else if (cursor < lines.size() && lines[cursor].indent == indent &&
+                   is_dash(lines[cursor].content)) {
+          value = parse_sequence(indent, depth + 1);
+        } else {
+          value = NativeValue::nullv();
+        }
+      } else {
+        value = parse_scalar(rest);
+      }
+      native_map_store(entries, NativeValue::heap_string(key), value, false);
+    }
+    return NativeValue::map_entries(std::move(entries), false);
+  }
+
+  NativeValue parse_sequence(std::size_t indent, int depth) {
+    std::vector<NativeValue> items;
+    while (cursor < lines.size() && lines[cursor].indent == indent &&
+           is_dash(lines[cursor].content)) {
+      const std::string content = lines[cursor].content;
+      std::size_t pos = 1;
+      while (pos < content.size() && content[pos] == ' ') ++pos;
+      const std::string after = content.substr(pos);
+      const std::size_t after_col = indent + pos;
+      const std::string after_stripped =
+          native_yaml_strip(without_comment(after));
+      if (after_stripped.empty()) {
+        ++cursor;
+        if (cursor < lines.size() && lines[cursor].indent > indent) {
+          items.push_back(parse_node(lines[cursor].indent, depth + 1));
+        } else {
+          items.push_back(NativeValue::nullv());
+        }
+      } else {
+        lines[cursor].indent = after_col;
+        lines[cursor].content = after;
+        items.push_back(parse_node(after_col, depth + 1));
+      }
+    }
+    return NativeValue::list(std::move(items));
+  }
+
+  std::string parse_key(const std::string &raw) {
+    const std::string s = native_yaml_strip(raw);
+    if (!s.empty() && s[0] == '"') {
+      std::size_t consumed = 0;
+      return parse_double_quoted(s, &consumed);
+    }
+    if (!s.empty() && s[0] == '\'') {
+      std::size_t consumed = 0;
+      return parse_single_quoted(s, &consumed);
+    }
+    return s;
+  }
+
+  NativeValue parse_scalar(const std::string &raw) {
+    const std::string s = native_yaml_strip(raw);
+    if (s.empty()) return NativeValue::nullv();
+    if (s[0] == '[' || s[0] == '{') return parse_flow_line(s);
+    if (s[0] == '"') {
+      std::size_t consumed = 0;
+      return NativeValue::heap_string(parse_double_quoted(s, &consumed));
+    }
+    if (s[0] == '\'') {
+      std::size_t consumed = 0;
+      return NativeValue::heap_string(parse_single_quoted(s, &consumed));
+    }
+    return native_yaml_classify_plain(without_comment(s));
+  }
+
+  std::string parse_double_quoted(const std::string &s, std::size_t *consumed) {
+    std::string out;
+    std::size_t i = 1;
+    while (i < s.size()) {
+      const char c = s[i];
+      if (c == '"') { *consumed = i + 1; return out; }
+      if (c == '\\') {
+        ++i;
+        if (i >= s.size()) throw NativeBailout();
+        const char e = s[i];
+        switch (e) {
+        case '"': out.push_back('"'); break;
+        case '\\': out.push_back('\\'); break;
+        case '/': out.push_back('/'); break;
+        case '0': out.push_back('\0'); break;
+        case 'a': out.push_back('\a'); break;
+        case 'b': out.push_back('\b'); break;
+        case 'f': out.push_back('\f'); break;
+        case 'n': out.push_back('\n'); break;
+        case 'r': out.push_back('\r'); break;
+        case 't': out.push_back('\t'); break;
+        case 'v': out.push_back('\v'); break;
+        case 'e': out.push_back('\x1b'); break;
+        case ' ': out.push_back(' '); break;
+        case 'u': { std::uint32_t cp = 0; parse_hex(s, &i, 4, &cp); native_yaml_encode_utf8(cp, out); break; }
+        case 'x': { std::uint32_t cp = 0; parse_hex(s, &i, 2, &cp); native_yaml_encode_utf8(cp, out); break; }
+        default: throw NativeBailout();
+        }
+        ++i;
+        continue;
+      }
+      out.push_back(c);
+      ++i;
+    }
+    throw NativeBailout();
+  }
+
+  void parse_hex(const std::string &s, std::size_t *i, int count,
+                 std::uint32_t *out) {
+    std::uint32_t value = 0;
+    for (int n = 0; n < count; ++n) {
+      ++(*i);
+      if (*i >= s.size()) throw NativeBailout();
+      const char c = s[*i];
+      value <<= 4;
+      if (c >= '0' && c <= '9') value |= static_cast<std::uint32_t>(c - '0');
+      else if (c >= 'a' && c <= 'f') value |= static_cast<std::uint32_t>(c - 'a' + 10);
+      else if (c >= 'A' && c <= 'F') value |= static_cast<std::uint32_t>(c - 'A' + 10);
+      else throw NativeBailout();
+    }
+    *out = value;
+  }
+
+  std::string parse_single_quoted(const std::string &s, std::size_t *consumed) {
+    std::string out;
+    std::size_t i = 1;
+    while (i < s.size()) {
+      const char c = s[i];
+      if (c == '\'') {
+        if (i + 1 < s.size() && s[i + 1] == '\'') { out.push_back('\''); i += 2; continue; }
+        *consumed = i + 1;
+        return out;
+      }
+      out.push_back(c);
+      ++i;
+    }
+    throw NativeBailout();
+  }
+
+  NativeValue parse_flow_line(const std::string &s) {
+    std::size_t pos = 0;
+    NativeValue value = parse_flow_node(s, &pos, 0);
+    skip_spaces(s, &pos);
+    if (pos < s.size() && s[pos] != '#') throw NativeBailout();
+    return value;
+  }
+
+  static void skip_spaces(const std::string &s, std::size_t *pos) {
+    while (*pos < s.size() && (s[*pos] == ' ' || s[*pos] == '\t')) ++(*pos);
+  }
+
+  NativeValue parse_flow_node(const std::string &s, std::size_t *pos, int depth) {
+    if (depth > 256) throw NativeBailout();
+    skip_spaces(s, pos);
+    if (*pos >= s.size()) throw NativeBailout();
+    const char c = s[*pos];
+    if (c == '[') return parse_flow_seq(s, pos, depth);
+    if (c == '{') return parse_flow_map(s, pos, depth);
+    return parse_flow_scalar(s, pos, false);
+  }
+
+  NativeValue parse_flow_seq(const std::string &s, std::size_t *pos, int depth) {
+    ++(*pos);
+    std::vector<NativeValue> items;
+    skip_spaces(s, pos);
+    if (*pos < s.size() && s[*pos] == ']') { ++(*pos); return NativeValue::list(std::move(items)); }
+    while (true) {
+      items.push_back(parse_flow_node(s, pos, depth + 1));
+      skip_spaces(s, pos);
+      if (*pos >= s.size()) throw NativeBailout();
+      if (s[*pos] == ',') {
+        ++(*pos);
+        skip_spaces(s, pos);
+        if (*pos < s.size() && s[*pos] == ']') { ++(*pos); return NativeValue::list(std::move(items)); }
+        continue;
+      }
+      if (s[*pos] == ']') { ++(*pos); return NativeValue::list(std::move(items)); }
+      throw NativeBailout();
+    }
+  }
+
+  NativeValue parse_flow_map(const std::string &s, std::size_t *pos, int depth) {
+    ++(*pos);
+    std::vector<std::pair<NativeValue, NativeValue>> entries;
+    skip_spaces(s, pos);
+    if (*pos < s.size() && s[*pos] == '}') { ++(*pos); return NativeValue::map_entries(std::move(entries), false); }
+    while (true) {
+      skip_spaces(s, pos);
+      NativeValue key_value = parse_flow_scalar(s, pos, true);
+      if (!native_value_is_string(key_value)) throw NativeBailout();
+      skip_spaces(s, pos);
+      if (*pos >= s.size() || s[*pos] != ':') throw NativeBailout();
+      ++(*pos);
+      NativeValue value = parse_flow_node(s, pos, depth + 1);
+      native_map_store(entries, key_value, value, false);
+      skip_spaces(s, pos);
+      if (*pos >= s.size()) throw NativeBailout();
+      if (s[*pos] == ',') {
+        ++(*pos);
+        skip_spaces(s, pos);
+        if (*pos < s.size() && s[*pos] == '}') { ++(*pos); return NativeValue::map_entries(std::move(entries), false); }
+        continue;
+      }
+      if (s[*pos] == '}') { ++(*pos); return NativeValue::map_entries(std::move(entries), false); }
+      throw NativeBailout();
+    }
+  }
+
+  NativeValue parse_flow_scalar(const std::string &s, std::size_t *pos, bool as_key) {
+    skip_spaces(s, pos);
+    if (*pos >= s.size()) throw NativeBailout();
+    if (s[*pos] == '"') {
+      std::size_t consumed = 0;
+      std::string text = parse_double_quoted(s.substr(*pos), &consumed);
+      *pos += consumed;
+      return NativeValue::heap_string(text);
+    }
+    if (s[*pos] == '\'') {
+      std::size_t consumed = 0;
+      std::string text = parse_single_quoted(s.substr(*pos), &consumed);
+      *pos += consumed;
+      return NativeValue::heap_string(text);
+    }
+    const std::size_t begin = *pos;
+    while (*pos < s.size()) {
+      const char c = s[*pos];
+      if (c == ',' || c == ']' || c == '}') break;
+      if (as_key && c == ':') break;
+      ++(*pos);
+    }
+    const std::string token = native_yaml_strip(s.substr(begin, *pos - begin));
+    if (as_key) return NativeValue::heap_string(token);
+    return native_yaml_classify_plain(token);
+  }
+
+  NativeValue parse_document() {
+    tokenize();
+    if (lines.empty()) return NativeValue::nullv();
+    NativeValue value = parse_node(lines.front().indent, 0);
+    if (cursor != lines.size()) throw NativeBailout();
+    return value;
+  }
+};
+
+static NativeValue native_yaml_parse_value(const NativeValue &value) {
+  if (!native_value_is_string(value)) throw NativeBailout();
+  NativeYamlParser parser(native_string_text(value));
+  return parser.parse_document();
+}
+
+static std::string native_yaml_format_double(double d) {
+  if (std::isnan(d) || std::isinf(d)) throw NativeBailout();
+  char buf[40];
+  std::string result;
+  for (int precision = 1; precision <= 17; ++precision) {
+    std::snprintf(buf, sizeof(buf), "%.*g", precision, d);
+    if (std::strtod(buf, nullptr) == d) { result.assign(buf); break; }
+    if (precision == 17) result.assign(buf);
+  }
+  if (result.find_first_of(".eEnN") == std::string::npos) result += ".0";
+  return result;
+}
+
+static bool native_yaml_needs_quote(const std::string &s) {
+  if (s.empty()) return true;
+  if (s == "~" || s == "null" || s == "Null" || s == "NULL" || s == "true" ||
+      s == "True" || s == "TRUE" || s == "false" || s == "False" ||
+      s == "FALSE") {
+    return true;
+  }
+  if (native_yaml_matches_integer(s) || native_yaml_matches_float(s)) return true;
+  if (s.front() == ' ' || s.back() == ' ' || s.front() == '\t' || s.back() == '\t') {
+    return true;
+  }
+  switch (s.front()) {
+  case '!': case '&': case '*': case '[': case ']': case '{': case '}':
+  case ',': case '#': case '|': case '>': case '@': case '`': case '"':
+  case '\'': case '%': case '?': case ':':
+    return true;
+  default:
+    break;
+  }
+  if (s.front() == '-' && (s.size() == 1 || s[1] == ' ')) return true;
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c < 0x20) return true;
+    if (c == ':' && (i + 1 == s.size() || s[i + 1] == ' ')) return true;
+    if (c == '#' && i > 0 && s[i - 1] == ' ') return true;
+  }
+  return false;
+}
+
+static void native_yaml_write_quoted(const std::string &text, std::string &out) {
+  out.push_back('"');
+  for (const unsigned char c : text) {
+    switch (c) {
+    case '"': out += "\\\""; break;
+    case '\\': out += "\\\\"; break;
+    case '\n': out += "\\n"; break;
+    case '\t': out += "\\t"; break;
+    case '\r': out += "\\r"; break;
+    default:
+      if (c < 0x20) {
+        char esc[8];
+        std::snprintf(esc, sizeof(esc), "\\u%04x", c);
+        out += esc;
+      } else {
+        out.push_back(static_cast<char>(c));
+      }
+    }
+  }
+  out.push_back('"');
+}
+
+static bool native_yaml_nonempty_map(const NativeValue &v) {
+  return v.tag == NativeValue::Tag::Map && !as_map(v).entries.empty();
+}
+
+static bool native_yaml_nonempty_list(const NativeValue &v) {
+  return v.tag == NativeValue::Tag::List && !as_list(v).items.empty();
+}
+
+static std::string native_yaml_value_text(const NativeValue &v) {
+  if (v.tag == NativeValue::Tag::String || v.tag == NativeValue::Tag::HeapString) {
+    return native_string_text(v);
+  }
+  if (v.tag == NativeValue::Tag::Symbol) return native_symbol_text(v.scalar_value);
+  throw NativeBailout();
+}
+
+static std::string native_yaml_scalar_text(const NativeValue &v) {
+  switch (v.tag) {
+  case NativeValue::Tag::Null:
+    return "null";
+  case NativeValue::Tag::Bool:
+    return v.scalar_value != 0 ? "true" : "false";
+  case NativeValue::Tag::Integer:
+    return std::to_string(v.scalar_value);
+  case NativeValue::Tag::Float:
+    return native_yaml_format_double(v.float_value);
+  case NativeValue::Tag::String:
+  case NativeValue::Tag::HeapString:
+  case NativeValue::Tag::Symbol: {
+    const std::string s = native_yaml_value_text(v);
+    if (native_yaml_needs_quote(s)) {
+      std::string quoted;
+      native_yaml_write_quoted(s, quoted);
+      return quoted;
+    }
+    return s;
+  }
+  default:
+    throw NativeBailout();
+  }
+}
+
+static void native_yaml_emit_map(const NativeValue &v, int depth, std::string &out);
+static void native_yaml_emit_seq(const NativeValue &v, int depth, std::string &out);
+
+static void native_yaml_emit_inline(const NativeValue &v, std::string &out) {
+  if (v.tag == NativeValue::Tag::Map) { out += "{}"; return; }
+  if (v.tag == NativeValue::Tag::List) { out += "[]"; return; }
+  out += native_yaml_scalar_text(v);
+}
+
+static void native_yaml_emit_key(const NativeValue &key, std::string &out) {
+  if (key.tag != NativeValue::Tag::String &&
+      key.tag != NativeValue::Tag::HeapString &&
+      key.tag != NativeValue::Tag::Symbol) {
+    throw NativeBailout();
+  }
+  const std::string s = native_yaml_value_text(key);
+  if (native_yaml_needs_quote(s)) native_yaml_write_quoted(s, out);
+  else out += s;
+}
+
+static void native_yaml_emit_map(const NativeValue &v, int depth, std::string &out) {
+  const auto &entries = as_map(v).entries;
+  for (const auto &entry : entries) {
+    out.append(static_cast<std::size_t>(depth) * 2, ' ');
+    native_yaml_emit_key(entry.first, out);
+    out.push_back(':');
+    if (native_yaml_nonempty_map(entry.second)) {
+      out.push_back('\n');
+      native_yaml_emit_map(entry.second, depth + 1, out);
+    } else if (native_yaml_nonempty_list(entry.second)) {
+      out.push_back('\n');
+      native_yaml_emit_seq(entry.second, depth + 1, out);
+    } else {
+      out.push_back(' ');
+      native_yaml_emit_inline(entry.second, out);
+      out.push_back('\n');
+    }
+  }
+}
+
+static void native_yaml_emit_seq(const NativeValue &v, int depth, std::string &out) {
+  const auto &items = as_list(v).items;
+  for (const auto &item : items) {
+    out.append(static_cast<std::size_t>(depth) * 2, ' ');
+    out.push_back('-');
+    if (native_yaml_nonempty_map(item)) {
+      out.push_back('\n');
+      native_yaml_emit_map(item, depth + 1, out);
+    } else if (native_yaml_nonempty_list(item)) {
+      out.push_back('\n');
+      native_yaml_emit_seq(item, depth + 1, out);
+    } else {
+      out.push_back(' ');
+      native_yaml_emit_inline(item, out);
+      out.push_back('\n');
+    }
+  }
+}
+
+static NativeValue native_yaml_generate_value(const NativeValue &value) {
+  std::string out;
+  if (native_yaml_nonempty_map(value)) {
+    native_yaml_emit_map(value, 0, out);
+  } else if (native_yaml_nonempty_list(value)) {
+    native_yaml_emit_seq(value, 0, out);
+  } else if (value.tag == NativeValue::Tag::Map) {
+    out += "{}\n";
+  } else if (value.tag == NativeValue::Tag::List) {
+    out += "[]\n";
+  } else {
+    out += native_yaml_scalar_text(value);
+    out.push_back('\n');
+  }
+  return NativeValue::heap_string(out);
+}
+)AMBERCPP";
+  out << R"AMBERCPP(
 struct NativeCivilDate {
   std::int64_t year = 1970;
   int month = 1;
@@ -9017,7 +9733,22 @@ static NativeValue native_parse_value(const NativeValue &module,
   if (module.tag == NativeValue::Tag::UrlModule) {
     return native_url_parse(module, text_value);
   }
+  if (module.tag == NativeValue::Tag::YamlModule) {
+    return native_yaml_parse_value(text_value);
+  }
   return native_json_parse_value(text_value);
+}
+
+// Dispatch `Json.generate` / `Yaml.generate` on the receiver module tag; a
+// YAML receiver only supports the plain (non-pretty) form, so a pretty request
+// bails to the VM (which raises NoMethodError for Yaml.pretty_generate).
+static NativeValue native_generate_value(const NativeValue &module,
+                                         const NativeValue &value, bool pretty) {
+  if (module.tag == NativeValue::Tag::YamlModule) {
+    if (pretty) throw NativeBailout();
+    return native_yaml_generate_value(value);
+  }
+  return native_json_generate_value(value, pretty);
 }
 
 using NativeArgKwArgs =
@@ -11096,6 +11827,7 @@ static NativeValue native_benchmark_send(
          "lhs.tag == NativeValue::Tag::Map || "
          "lhs.tag == NativeValue::Tag::MathModule || "
          "lhs.tag == NativeValue::Tag::JsonModule || "
+         "lhs.tag == NativeValue::Tag::YamlModule || "
          "lhs.tag == NativeValue::Tag::BytesModule || "
          "lhs.tag == NativeValue::Tag::Base64Module || "
          "lhs.tag == NativeValue::Tag::Base64UrlModule || "
@@ -11121,6 +11853,7 @@ static NativeValue native_benchmark_send(
          "rhs.tag == NativeValue::Tag::Map || "
          "rhs.tag == NativeValue::Tag::MathModule || "
          "rhs.tag == NativeValue::Tag::JsonModule || "
+         "rhs.tag == NativeValue::Tag::YamlModule || "
          "rhs.tag == NativeValue::Tag::BytesModule || "
          "rhs.tag == NativeValue::Tag::Base64Module || "
          "rhs.tag == NativeValue::Tag::Base64UrlModule || "
@@ -11235,6 +11968,7 @@ static NativeValue native_benchmark_send(
   out << "  case NativeValue::Tag::ObjectType:\n";
   out << "  case NativeValue::Tag::MathModule:\n";
   out << "  case NativeValue::Tag::JsonModule:\n";
+  out << "  case NativeValue::Tag::YamlModule:\n";
   out << "  case NativeValue::Tag::BytesModule:\n";
   out << "  case NativeValue::Tag::Base64Module:\n";
   out << "  case NativeValue::Tag::Base64UrlModule:\n";
@@ -11956,6 +12690,7 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
          "\">\";\n";
   out << "  case NativeValue::Tag::MathModule: return \"Math\";\n";
   out << "  case NativeValue::Tag::JsonModule: return \"Json\";\n";
+  out << "  case NativeValue::Tag::YamlModule: return \"Yaml\";\n";
   out << "  case NativeValue::Tag::BytesModule: return \"Bytes\";\n";
   out << "  case NativeValue::Tag::Base64Module: return \"Base64\";\n";
   out << "  case NativeValue::Tag::Base64UrlModule: return \"Base64Url\";\n";
@@ -12323,6 +13058,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/stdlib_uuid.cpp",
       "runtime/stdlib_time.cpp",
       "runtime/stdlib_url.cpp",
+      "runtime/stdlib_yaml.cpp",
       "runtime/amber_ext.cpp",
       "runtime/module_loader.cpp",
       "runtime/native_bridge.cpp",
