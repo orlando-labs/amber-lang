@@ -227,3 +227,33 @@ errors:
     parent: YamlError
   - name: YamlGenerateError
     parent: YamlError
+  - name: IOError
+    parent: Exception
+  - name: FileNotFoundError
+    parent: IOError
+  - name: FileExistsError
+    parent: IOError
+  - name: PermissionDeniedError
+    parent: IOError
+  - name: IsDirectoryError
+    parent: IOError
+  - name: NotDirectoryError
+    parent: IOError
+  - name: BrokenPipeError
+    parent: IOError
+  - name: ResourceBusyError
+    parent: IOError
+  - name: AlreadyClosedError
+    parent: IOError
+  - name: UnsupportedOperationError
+    parent: IOError
+  - name: EOFError
+    parent: IOError
+  - name: AddressInUseError
+    parent: IOError
+  - name: AddressNotAvailableError
+    parent: IOError
+  - name: NetworkUnreachableError
+    parent: IOError
+  - name: DatagramTooLargeError
+    parent: IOError

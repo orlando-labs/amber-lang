@@ -256,6 +256,40 @@ void test_provider_file_roundtrip() {
          "provider should receive block-style YAML bytes");
 }
 
+void test_load_from_file_error_is_rescuable() {
+  // A missing file surfaces FileNotFoundError, which is now a rescuable
+  // exception (catchable both directly and as its IOError base) rather than a
+  // terminal fault.
+  amber::bytecode::BcModule module = compile_source_or_die(
+      "fnf = 0\n"
+      "try:\n"
+      "  Yaml.load_from_file(\"missing.yaml\")\n"
+      "rescue FileNotFoundError:\n"
+      "  fnf = 1\n"
+      "io = 0\n"
+      "try:\n"
+      "  Yaml.load_from_file(\"missing.yaml\")\n"
+      "rescue IOError:\n"
+      "  io = 1\n"
+      "fnf * 10 + io\n");
+  module.capabilities.push_back(
+      amber::capability::make_capability("fs.read", "missing.yaml"));
+
+  auto provider = std::make_shared<TestIoProvider>(); // empty => file missing
+  amber::runtime::RuntimeWorldOptions options;
+  options.enforce_replay = true;
+  options.io_provider = provider;
+  options.capability_grants.push_back(
+      amber::capability::make_capability("fs.read", "missing.yaml"));
+
+  amber::runtime::RuntimeWorld world(module, std::move(options));
+  const amber::runtime::ExecutionResult result =
+      world.execute(module.init.entry_code_id);
+  expect_ok_integer(result, 11,
+                    "load_from_file FileNotFoundError is rescuable "
+                    "(directly and as IOError)");
+}
+
 } // namespace
 
 int main() {
@@ -267,6 +301,7 @@ int main() {
   test_generate_quotes_ambiguous_scalars();
   test_parse_faults();
   test_provider_file_roundtrip();
+  test_load_from_file_error_is_rescuable();
 
   std::cout << "stdlib_yaml_tests: ok\n";
   return 0;

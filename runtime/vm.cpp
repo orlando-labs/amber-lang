@@ -13220,8 +13220,15 @@ private:
     if (result.ok || result.would_block) {
       return true;
     }
-    set_fault(frame, result.error_name.empty() ? "IOError" : result.error_name,
-              result.message.empty() ? "IO operation failed" : result.message);
+    // An IO failure (missing file, permission denied, connection reset, ...) is
+    // recoverable, not fatal: raise it rescuably so `rescue IOError` / the
+    // specific subclass can catch it. Degrades to a terminal fault when the
+    // class is unregistered or no handler is active. Callers return immediately.
+    raise_runtime_error(frame,
+                        result.error_name.empty() ? "IOError"
+                                                  : result.error_name,
+                        result.message.empty() ? "IO operation failed"
+                                               : result.message);
     return false;
   }
 
@@ -13293,10 +13300,12 @@ private:
       return false;
     }
     if (!status.ok) {
-      set_fault(frame,
-                status.error_name.empty() ? "IOError" : status.error_name,
-                status.message.empty() ? "recorded IO provider failed"
-                                       : status.message);
+      // Recoverable IO failure from the recorded provider: raise rescuably so
+      // it can be caught, degrading to a terminal fault otherwise.
+      raise_runtime_error(
+          frame, status.error_name.empty() ? "IOError" : status.error_name,
+          status.message.empty() ? "recorded IO provider failed"
+                                 : status.message);
       return false;
     }
     return true;
