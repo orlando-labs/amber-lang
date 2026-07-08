@@ -1211,6 +1211,36 @@ void test_control_header_call_colon_boundary() {
          "comparison and rhs remains comparison");
 }
 
+void test_one_line_control_tails_after_newline() {
+  std::unique_ptr<Expr> split_if = parse_ok(
+      "if true: 1\n"
+      "else: 42\n");
+  expect(split_if->kind == "AstIf", "split one-line if parses");
+  expect(list_field(*split_if, "then_body").values.size() == 1,
+         "split one-line if then body");
+  expect(list_field(*split_if, "else_body").values.size() == 1,
+         "split one-line if else body");
+
+  std::unique_ptr<Expr> split_elif = parse_ok(
+      "if false: 1\n"
+      "elif true: 2\n"
+      "else: 3\n");
+  expect(split_elif->kind == "AstIf", "split one-line elif parses");
+  const amber::ast::ListField &outer_else =
+      list_field(*split_elif, "else_body");
+  expect(outer_else.values.size() == 1 && outer_else.values[0]->kind == "AstIf",
+         "split one-line elif nests as else-if");
+  expect(list_field(*outer_else.values[0], "else_body").values.size() == 1,
+         "split one-line elif else body");
+
+  std::unique_ptr<Expr> split_unless = parse_ok(
+      "unless false: 7\n"
+      "else: 8\n");
+  expect(split_unless->kind == "AstUnless", "split one-line unless parses");
+  expect(list_field(*split_unless, "else_body").values.size() == 1,
+         "split one-line unless else body");
+}
+
 void test_try_rescue_ensure_forms() {
   std::unique_ptr<Expr> expr =
       parse_ok("try:\n"
@@ -1828,6 +1858,7 @@ int main() {
   test_property_keywords_are_contextual_names();
   test_control_flow_forms();
   test_control_header_call_colon_boundary();
+  test_one_line_control_tails_after_newline();
   test_try_rescue_ensure_forms();
   test_throw_catch_forms();
   test_typed_signature_surface();

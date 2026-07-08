@@ -2629,6 +2629,18 @@ std::unique_ptr<ast::Expr> Parser::parse_if_expr(StopMode stop_mode) {
 
 std::vector<std::unique_ptr<ast::Expr>> Parser::parse_if_tail() {
   std::vector<std::unique_ptr<ast::Expr>> else_body;
+  std::size_t tail_index = current_;
+  while (tail_index < tokens_.size() &&
+         tokens_[tail_index].kind == lexer::TokenKind::Newline) {
+    ++tail_index;
+  }
+  if (tail_index < tokens_.size() &&
+      (tokens_[tail_index].kind == lexer::TokenKind::KeywordElse ||
+       tokens_[tail_index].kind == lexer::TokenKind::KeywordElif ||
+       tokens_[tail_index].kind == lexer::TokenKind::KeywordElsif)) {
+    while (match(lexer::TokenKind::Newline)) {
+    }
+  }
   if (match(lexer::TokenKind::KeywordElse)) {
     if (check(lexer::TokenKind::KeywordIf)) {
       else_body.push_back(parse_if_expr(StopMode::Normal));
@@ -2667,6 +2679,16 @@ std::unique_ptr<ast::Expr> Parser::parse_unless_expr() {
   std::vector<std::unique_ptr<ast::Expr>> then_body =
       parse_control_body(BodyContext::Def);
   std::vector<std::unique_ptr<ast::Expr>> else_body;
+  std::size_t tail_index = current_;
+  while (tail_index < tokens_.size() &&
+         tokens_[tail_index].kind == lexer::TokenKind::Newline) {
+    ++tail_index;
+  }
+  if (tail_index < tokens_.size() &&
+      tokens_[tail_index].kind == lexer::TokenKind::KeywordElse) {
+    while (match(lexer::TokenKind::Newline)) {
+    }
+  }
   if (match(lexer::TokenKind::KeywordElse)) {
     consume(lexer::TokenKind::Colon, "expected ':' after else");
     else_body = parse_control_body(BodyContext::Def);
