@@ -120,8 +120,8 @@ RuntimeDispatchRegistry::io_value_handler(const std::string &type_name) const {
   return it->second;
 }
 
-void RuntimeDispatchRegistry::register_native_package_thunk(
-    std::string logical, void *fn) {
+void RuntimeDispatchRegistry::register_native_package_thunk(std::string logical,
+                                                            void *fn) {
   native_package_thunks_[std::move(logical)] = fn;
 }
 
@@ -174,8 +174,8 @@ void RuntimeDispatchRegistry::import_native_package_bindings(
   }
 }
 
-RuntimeNativePackageDescriptor
-runtime_native_package_descriptor_from_module(const bytecode::BcModule &module) {
+RuntimeNativePackageDescriptor runtime_native_package_descriptor_from_module(
+    const bytecode::BcModule &module) {
   static const std::string kBindPrefix = "amber.native.bind:";
   static const std::string kMethodPrefix = "amber.native.method:";
   RuntimeNativePackageDescriptor descriptor;
@@ -203,9 +203,9 @@ runtime_native_package_descriptor_from_module(const bytecode::BcModule &module) 
       if (separator == std::string::npos) {
         continue;
       }
-      descriptor.method_bindings.push_back(
-          {method_key.substr(0, separator),
-           method_key.substr(separator + 1U), logical});
+      descriptor.method_bindings.push_back({method_key.substr(0, separator),
+                                            method_key.substr(separator + 1U),
+                                            logical});
     }
   }
   return descriptor;
@@ -218,19 +218,16 @@ void RuntimeDispatchRegistry::import_native_handlers(
   }
 }
 
-std::optional<std::uint16_t>
-RuntimeErrorRegistry::register_error(std::string name, std::string parent,
-                                     std::string default_message,
-                                     std::int64_t default_exit_code,
-                                     std::uint32_t field_mask) {
+std::optional<std::uint16_t> RuntimeErrorRegistry::register_error(
+    std::string name, std::string parent, std::string default_message,
+    std::int64_t default_exit_code, std::uint32_t field_mask) {
   if (name.empty()) {
     return std::nullopt;
   }
   const auto existing = error_ids_.find(name);
   if (existing != error_ids_.end()) {
     const ErrorRecord &record = errors_[existing->second];
-    if (record.parent != parent ||
-        record.default_message != default_message ||
+    if (record.parent != parent || record.default_message != default_message ||
         record.default_exit_code != default_exit_code ||
         record.field_mask != field_mask) {
       return std::nullopt;
@@ -249,7 +246,7 @@ RuntimeErrorRegistry::RuntimeErrorRegistry(Seed seed) {
   }
 #define AMBER_RUNTIME_ERROR(name, parent, default_message, default_exit_code,  \
                             field_mask)                                        \
-  append_error({name, parent, default_message, default_exit_code, field_mask},  \
+  append_error({name, parent, default_message, default_exit_code, field_mask}, \
                error_ids_.find(name) == error_ids_.end());
 #include "spec/registries/runtime_errors.def"
 #undef AMBER_RUNTIME_ERROR
@@ -274,6 +271,20 @@ RuntimeErrorRegistry::error_id(const std::string &name) const {
   return it->second;
 }
 
+bool RuntimeErrorRegistry::has_error_namespace(const std::string &name) const {
+  if (name.empty()) {
+    return false;
+  }
+  const std::string prefix = name + ".";
+  for (const auto &[error_name, error_id] : error_ids_) {
+    (void)error_id;
+    if (error_name.compare(0, prefix.size(), prefix) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const char *RuntimeErrorRegistry::error_name(std::uint16_t error_id) const {
   if (error_id >= errors_.size()) {
     return "Error";
@@ -283,8 +294,8 @@ const char *RuntimeErrorRegistry::error_name(std::uint16_t error_id) const {
 
 bool RuntimeErrorRegistry::error_is_a(std::uint16_t error_id,
                                       std::uint16_t ancestor_error_id) const {
-  for (std::uint16_t depth = 0; error_id < errors_.size() &&
-                                depth < errors_.size(); ++depth) {
+  for (std::uint16_t depth = 0;
+       error_id < errors_.size() && depth < errors_.size(); ++depth) {
     if (error_id == ancestor_error_id) {
       return true;
     }
@@ -304,8 +315,8 @@ bool RuntimeErrorRegistry::error_is_a(std::uint16_t error_id,
 std::uint32_t
 RuntimeErrorRegistry::error_effective_field_mask(std::uint16_t error_id) const {
   std::uint32_t mask = 0;
-  for (std::uint16_t depth = 0; error_id < errors_.size() &&
-                                depth < errors_.size(); ++depth) {
+  for (std::uint16_t depth = 0;
+       error_id < errors_.size() && depth < errors_.size(); ++depth) {
     const ErrorRecord &record = errors_[error_id];
     mask |= record.field_mask;
     if (record.parent.empty()) {
@@ -323,8 +334,8 @@ RuntimeErrorRegistry::error_effective_field_mask(std::uint16_t error_id) const {
 
 std::optional<std::int64_t>
 RuntimeErrorRegistry::error_default_exit_code(std::uint16_t error_id) const {
-  for (std::uint16_t depth = 0; error_id < errors_.size() &&
-                                depth < errors_.size(); ++depth) {
+  for (std::uint16_t depth = 0;
+       error_id < errors_.size() && depth < errors_.size(); ++depth) {
     const ErrorRecord &record = errors_[error_id];
     if (record.default_exit_code >= 0) {
       return record.default_exit_code;
@@ -344,8 +355,8 @@ RuntimeErrorRegistry::error_default_exit_code(std::uint16_t error_id) const {
 
 const char *
 RuntimeErrorRegistry::error_default_message(std::uint16_t error_id) const {
-  for (std::uint16_t depth = 0; error_id < errors_.size() &&
-                                depth < errors_.size(); ++depth) {
+  for (std::uint16_t depth = 0;
+       error_id < errors_.size() && depth < errors_.size(); ++depth) {
     const ErrorRecord &record = errors_[error_id];
     if (!record.default_message.empty()) {
       return record.default_message.c_str();
@@ -454,8 +465,7 @@ void register_runtime_error_descriptor(
     RuntimeErrorRegistry &errors,
     const RuntimeNativeModuleDescriptor &descriptor) {
   for (const RuntimeNativeModuleErrorDescriptor &error : descriptor.errors) {
-    (void)errors.register_error(error.name, error.parent,
-                                error.default_message,
+    (void)errors.register_error(error.name, error.parent, error.default_message,
                                 error.default_exit_code, error.field_mask);
   }
 }
@@ -469,25 +479,21 @@ void register_runtime_native_package_descriptor(
   }
   for (const RuntimeNativePackageCodeBindingDescriptor &binding :
        descriptor.code_bindings) {
-    dispatch.register_native_package_code_binding(binding.code_id,
-                                                  binding.method,
-                                                  binding.logical);
+    dispatch.register_native_package_code_binding(
+        binding.code_id, binding.method, binding.logical);
   }
   for (const RuntimeNativePackageMethodBindingDescriptor &binding :
        descriptor.method_bindings) {
-    dispatch.register_native_package_method_binding(binding.tag,
-                                                    binding.selector,
-                                                    binding.logical);
+    dispatch.register_native_package_method_binding(
+        binding.tag, binding.selector, binding.logical);
   }
   for (NativeTypeDescriptor type : descriptor.types) {
     types.register_native_package_type(std::move(type));
   }
   for (const RuntimeNativePackageErrorDescriptor &error : descriptor.errors) {
-    (void)errors.register_error(error.name,
-                                error.parent.empty() ? "NativeError"
-                                                     : error.parent,
-                                error.default_message,
-                                error.default_exit_code, error.field_mask);
+    (void)errors.register_error(
+        error.name, error.parent.empty() ? "NativeError" : error.parent,
+        error.default_message, error.default_exit_code, error.field_mask);
   }
 }
 

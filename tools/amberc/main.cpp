@@ -26,8 +26,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <functional>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -37,8 +37,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 
 #include <sys/resource.h>
@@ -85,7 +85,7 @@ void usage(std::ostream &out) {
   out << "  amberc native-verify <file>\n";
   out << "  amberc bc <file>\n";
   out << "  amberc bc-disasm <file>\n";
-  out << "  amberc build <amber.build.json> [--out-dir <dir>] "
+  out << "  amberc build <amber.build.yaml|amber.build.json> [--out-dir <dir>] "
          "[--cache-dir <dir>] [--target both|native|bytecode] [--no-cache]\n";
   out << "  amberc metadata <file.amberbc> --json\n";
   out << "  amberc verify <file.amberbc> --json\n";
@@ -214,8 +214,7 @@ std::vector<amber::pkg::PackageNativeBlob> collect_native_blobs(
   std::vector<amber::pkg::PackageNativeBlob> blobs;
   std::set<std::string> seen;
   const auto add_blob = [&](const amber::pkg::PackageNativeExtension &extension,
-                            const std::string &kind,
-                            const std::string &path) {
+                            const std::string &kind, const std::string &path) {
     const std::string key = extension.name + "\n" + kind + "\n" + path;
     if (!seen.insert(key).second) {
       return;
@@ -1253,8 +1252,8 @@ std::string cpp_native_i64_expr(std::int64_t value) {
   return "static_cast<std::int64_t>(" + std::to_string(value) + "LL)";
 }
 
-std::string native_cpp_numeric_mode_expr(
-    amber::runtime::NumericOverflowMode mode) {
+std::string
+native_cpp_numeric_mode_expr(amber::runtime::NumericOverflowMode mode) {
   switch (mode) {
   case amber::runtime::NumericOverflowMode::Wrapping:
     return "NativeNumericOverflowMode::Wrapping";
@@ -1292,8 +1291,7 @@ native_cpp_numeric_profile(const amber::bytecode::BcModule &module) {
     profile.supported = false;
     profile.reason = "module numeric profile is not supported by native "
                      "backend (int: " +
-                     profile.int_type + ", overflow: " + profile.overflow +
-                     ")";
+                     profile.int_type + ", overflow: " + profile.overflow + ")";
     return profile;
   }
   profile.policy = *policy;
@@ -1309,11 +1307,11 @@ bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
   *selector = module.symbols[symbol_id];
   return *selector == "+" || *selector == "-" || *selector == "*" ||
          *selector == "/" || *selector == "%" || *selector == "//" ||
-         *selector == "**" ||
-         *selector == "<" || *selector == ">" || *selector == "<=" ||
-         *selector == ">=" || *selector == "==" || *selector == "!=" ||
-         *selector == "<=>" || *selector == "&" || *selector == "|" ||
-         *selector == "^" || *selector == "<<" || *selector == ">>";
+         *selector == "**" || *selector == "<" || *selector == ">" ||
+         *selector == "<=" || *selector == ">=" || *selector == "==" ||
+         *selector == "!=" || *selector == "<=>" || *selector == "&" ||
+         *selector == "|" || *selector == "^" || *selector == "<<" ||
+         *selector == ">>";
 }
 
 bool native_cpp_scalar_nullary_selector(const std::string &selector) {
@@ -1329,27 +1327,22 @@ bool native_cpp_scalar_conversion_selector(const std::string &selector) {
 
 bool native_cpp_collection_selector(const std::string &selector,
                                     std::uint32_t pos_count) {
-  return ((selector == "[]" || selector == "[]?" ||
-           selector == "has_index?") &&
+  return ((selector == "[]" || selector == "[]?" || selector == "has_index?") &&
           pos_count == 1U) ||
          (selector == "[]=" && pos_count == 2U) ||
-         ((selector == "each" || selector == "map" ||
-           selector == "select" || selector == "reject" ||
-           selector == "find" || selector == "any?" ||
+         ((selector == "each" || selector == "map" || selector == "select" ||
+           selector == "reject" || selector == "find" || selector == "any?" ||
            selector == "all?" || selector == "none?" ||
-           selector == "transform_keys" ||
-           selector == "transform_values") &&
+           selector == "transform_keys" || selector == "transform_values") &&
           pos_count == 0U) ||
          (selector == "reduce" && (pos_count == 0U || pos_count == 1U)) ||
          ((selector == "count" || selector == "length" || selector == "size" ||
            selector == "empty?" || selector == "bytesize" ||
            selector == "deconstruct" || selector == "to_array" ||
            selector == "keys" || selector == "values" ||
-           selector == "entries" ||
-           selector == "reversed" || selector == "sorted" ||
-           selector == "min" || selector == "max" ||
-           selector == "minmax" || selector == "init" ||
-           selector == "tail") &&
+           selector == "entries" || selector == "reversed" ||
+           selector == "sorted" || selector == "min" || selector == "max" ||
+           selector == "minmax" || selector == "init" || selector == "tail") &&
           pos_count == 0U) ||
          (selector == "first" && (pos_count == 0U || pos_count == 1U)) ||
          (selector == "bytes" && pos_count == 0U) ||
@@ -1366,11 +1359,11 @@ bool native_cpp_collection_selector(const std::string &selector,
           pos_count == 1U) ||
          ((selector == "union" || selector == "intersection" ||
            selector == "difference" || selector == "left_difference" ||
-           selector == "symmetric_difference" ||
-           selector == "subset?" || selector == "proper_subset?" ||
-           selector == "superset?" || selector == "proper_superset?" ||
-           selector == "disjoint?" || selector == "added" ||
-           selector == "add!" || selector == "subtract!") &&
+           selector == "symmetric_difference" || selector == "subset?" ||
+           selector == "proper_subset?" || selector == "superset?" ||
+           selector == "proper_superset?" || selector == "disjoint?" ||
+           selector == "added" || selector == "add!" ||
+           selector == "subtract!") &&
           pos_count == 1U) ||
          (selector == "slice" && (pos_count == 1U || pos_count == 2U)) ||
          (selector == "with" && pos_count == 2U) ||
@@ -1380,8 +1373,8 @@ bool native_cpp_collection_selector(const std::string &selector,
          (selector == "compact" && pos_count == 0U) ||
          (selector == "replace" && pos_count == 2U) ||
          ((selector == "upcase" || selector == "downcase" ||
-           selector == "trim" || selector == "strip" ||
-           selector == "reverse" || selector == "chars") &&
+           selector == "trim" || selector == "strip" || selector == "reverse" ||
+           selector == "chars") &&
           pos_count == 0U) ||
          (selector == "concat" && pos_count == 1U);
 }
@@ -1411,39 +1404,66 @@ bool native_cpp_time_nullary_selector(const std::string &selector) {
 }
 
 std::string native_cpp_time_selector_enum(const std::string &selector) {
-  if (selector == "nanosecond") return "NativeTimeSelector::Nanosecond";
-  if (selector == "nanoseconds") return "NativeTimeSelector::Nanoseconds";
-  if (selector == "microsecond") return "NativeTimeSelector::Microsecond";
-  if (selector == "microseconds") return "NativeTimeSelector::Microseconds";
-  if (selector == "millisecond") return "NativeTimeSelector::Millisecond";
-  if (selector == "milliseconds") return "NativeTimeSelector::Milliseconds";
-  if (selector == "second") return "NativeTimeSelector::Second";
-  if (selector == "seconds") return "NativeTimeSelector::Seconds";
-  if (selector == "minute") return "NativeTimeSelector::Minute";
-  if (selector == "minutes") return "NativeTimeSelector::Minutes";
-  if (selector == "hour") return "NativeTimeSelector::Hour";
-  if (selector == "hours") return "NativeTimeSelector::Hours";
-  if (selector == "day") return "NativeTimeSelector::Day";
-  if (selector == "days") return "NativeTimeSelector::Days";
-  if (selector == "week") return "NativeTimeSelector::Week";
-  if (selector == "weeks") return "NativeTimeSelector::Weeks";
-  if (selector == "month") return "NativeTimeSelector::Month";
-  if (selector == "months") return "NativeTimeSelector::Months";
-  if (selector == "year") return "NativeTimeSelector::Year";
-  if (selector == "years") return "NativeTimeSelector::Years";
-  if (selector == "iso8601") return "NativeTimeSelector::Iso8601";
-  if (selector == "to_str") return "NativeTimeSelector::ToStr";
-  if (selector == "inspect") return "NativeTimeSelector::Inspect";
-  if (selector == "unix_seconds") return "NativeTimeSelector::UnixSeconds";
+  if (selector == "nanosecond")
+    return "NativeTimeSelector::Nanosecond";
+  if (selector == "nanoseconds")
+    return "NativeTimeSelector::Nanoseconds";
+  if (selector == "microsecond")
+    return "NativeTimeSelector::Microsecond";
+  if (selector == "microseconds")
+    return "NativeTimeSelector::Microseconds";
+  if (selector == "millisecond")
+    return "NativeTimeSelector::Millisecond";
+  if (selector == "milliseconds")
+    return "NativeTimeSelector::Milliseconds";
+  if (selector == "second")
+    return "NativeTimeSelector::Second";
+  if (selector == "seconds")
+    return "NativeTimeSelector::Seconds";
+  if (selector == "minute")
+    return "NativeTimeSelector::Minute";
+  if (selector == "minutes")
+    return "NativeTimeSelector::Minutes";
+  if (selector == "hour")
+    return "NativeTimeSelector::Hour";
+  if (selector == "hours")
+    return "NativeTimeSelector::Hours";
+  if (selector == "day")
+    return "NativeTimeSelector::Day";
+  if (selector == "days")
+    return "NativeTimeSelector::Days";
+  if (selector == "week")
+    return "NativeTimeSelector::Week";
+  if (selector == "weeks")
+    return "NativeTimeSelector::Weeks";
+  if (selector == "month")
+    return "NativeTimeSelector::Month";
+  if (selector == "months")
+    return "NativeTimeSelector::Months";
+  if (selector == "year")
+    return "NativeTimeSelector::Year";
+  if (selector == "years")
+    return "NativeTimeSelector::Years";
+  if (selector == "iso8601")
+    return "NativeTimeSelector::Iso8601";
+  if (selector == "to_str")
+    return "NativeTimeSelector::ToStr";
+  if (selector == "inspect")
+    return "NativeTimeSelector::Inspect";
+  if (selector == "unix_seconds")
+    return "NativeTimeSelector::UnixSeconds";
   if (selector == "unix_milliseconds") {
     return "NativeTimeSelector::UnixMilliseconds";
   }
   if (selector == "unix_nanoseconds") {
     return "NativeTimeSelector::UnixNanoseconds";
   }
-  if (selector == "weekday") return "NativeTimeSelector::Weekday";
-  if (selector == "yearday") return "NativeTimeSelector::Yearday";
-  if (selector == "fixed?") return "NativeTimeSelector::FixedPredicate";
+  if (selector == "weekday")
+    return "NativeTimeSelector::Weekday";
+  if (selector == "yearday")
+    return "NativeTimeSelector::Yearday";
+  if (selector == "fixed?")
+    return "NativeTimeSelector::FixedPredicate";
   if (selector == "total_nanoseconds") {
     return "NativeTimeSelector::TotalNanoseconds";
   }
@@ -1464,8 +1484,8 @@ bool native_cpp_url_selector(const std::string &selector,
 
 bool native_cpp_benchmark_selector(const std::string &selector,
                                    std::uint32_t pos_count, bool has_block) {
-  if ((selector == "time" || selector == "measure" ||
-       selector == "profile" || selector == "run") &&
+  if ((selector == "time" || selector == "measure" || selector == "profile" ||
+       selector == "run") &&
       pos_count <= 1U) {
     return has_block;
   }
@@ -1496,11 +1516,9 @@ bool native_cpp_benchmark_selector(const std::string &selector,
       selector == "p95" || selector == "p95_ns" || selector == "p99" ||
       selector == "p99_ns" || selector == "ops_per_second" ||
       selector == "sample_times" || selector == "sample_ns" ||
-      selector == "cases" || selector == "fastest" ||
-      selector == "slowest" || selector == "relative" ||
-      selector == "total" || selector == "total_ns" ||
-      selector == "spans" || selector == "summary" ||
-      selector == "inspect") {
+      selector == "cases" || selector == "fastest" || selector == "slowest" ||
+      selector == "relative" || selector == "total" || selector == "total_ns" ||
+      selector == "spans" || selector == "summary" || selector == "inspect") {
     return pos_count == 0U;
   }
   return (selector == "from_map" || selector == "from_json") && pos_count == 1U;
@@ -1745,12 +1763,10 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       const std::size_t block_index = kw_index + 1U + kw_count * 2U;
       const bool no_block = operand_is_no_block(instruction, block_index);
       const bool collection_block_send =
-          ((selector == "each" || selector == "map" ||
-            selector == "select" || selector == "reject" ||
-            selector == "transform_keys" ||
-            selector == "transform_values" ||
-            selector == "find" || selector == "any?" ||
-            selector == "all?" || selector == "none?") &&
+          ((selector == "each" || selector == "map" || selector == "select" ||
+            selector == "reject" || selector == "transform_keys" ||
+            selector == "transform_values" || selector == "find" ||
+            selector == "any?" || selector == "all?" || selector == "none?") &&
            pos_count == 0U && kw_count == 0U && !no_block) ||
           (selector == "reduce" && (pos_count == 0U || pos_count == 1U) &&
            kw_count == 0U && !no_block);
@@ -1860,8 +1876,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                   selector == "from_unix_ns") &&
                  pos_count == 1U && kw_count == 0U && no_block) {
         time_send = true;
-      } else if (selector == "from_unix" && pos_count == 1U &&
-                 kw_count <= 1U && no_block) {
+      } else if (selector == "from_unix" && pos_count == 1U && kw_count <= 1U &&
+                 no_block) {
         if (kw_count == 1U) {
           std::uint32_t kw_symbol_id = 0;
           if (!operand_u32_value(instruction, kw_index + 1U, &kw_symbol_id) ||
@@ -1920,8 +1936,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                                         "min_time", "gc"};
         } else if (selector == "format" || selector == "table" ||
                    selector == "pretty") {
-          allowed_benchmark_keywords = {"layout", "unit", "style", "highlight",
-                                        "sort", "metric"};
+          allowed_benchmark_keywords = {"layout",    "unit", "style",
+                                        "highlight", "sort", "metric"};
         } else if (selector == "to_map" || selector == "map") {
           allowed_benchmark_keywords = {"value"};
         } else if (selector == "to_json") {
@@ -1966,22 +1982,21 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         }
         return true;
       };
-      if (selector == "new" && pos_count == 0U && kw_count <= 5U &&
-          no_block) {
+      if (selector == "new" && pos_count == 0U && kw_count <= 5U && no_block) {
         argparser_send =
             kw_allowed({"cmdline", "name", "about", "env", "add_help"});
       } else if ((selector == "name" || selector == "about") &&
                  pos_count == 1U && kw_count == 0U && no_block) {
         argparser_send = true;
-      } else if ((selector == "arg" || selector == "flag") &&
-                 pos_count >= 1U && kw_count <= 8U && no_block) {
-        argparser_send = kw_allowed({"name", "type", "default", "required",
-                                     "choices", "multiple", "env",
-                                     "negatable"});
-      } else if ((selector == "pos" || selector == "rest") &&
-                 pos_count == 1U && kw_count <= 6U && no_block) {
-        argparser_send = kw_allowed({"type", "default", "required",
-                                     "choices", "multiple", "env"});
+      } else if ((selector == "arg" || selector == "flag") && pos_count >= 1U &&
+                 kw_count <= 8U && no_block) {
+        argparser_send =
+            kw_allowed({"name", "type", "default", "required", "choices",
+                        "multiple", "env", "negatable"});
+      } else if ((selector == "pos" || selector == "rest") && pos_count == 1U &&
+                 kw_count <= 6U && no_block) {
+        argparser_send = kw_allowed(
+            {"type", "default", "required", "choices", "multiple", "env"});
       } else if (selector == "parse_or_raise" && pos_count == 0U &&
                  kw_count <= 1U && no_block) {
         argparser_send = kw_allowed({"cmdline"});
@@ -1996,14 +2011,14 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
           kw_count == 0U && no_block;
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
           !json_send && !codec_send && !digest_send && !range_send &&
-          !random_send && !time_send && !uuid_send && !url_send &&
-          !math_send && !benchmark_send && !argparser_send && !fs_path_send) {
+          !random_send && !time_send && !uuid_send && !url_send && !math_send &&
+          !benchmark_send && !argparser_send && !fs_path_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
       if (!json_send && !codec_send && !digest_send && !range_send &&
-          !random_send && !time_send && !uuid_send && !url_send &&
-          !math_send && !benchmark_send && !argparser_send && !fs_path_send &&
+          !random_send && !time_send && !uuid_send && !url_send && !math_send &&
+          !benchmark_send && !argparser_send && !fs_path_send &&
           (kw_count != 0U || (!no_block && !collection_block_send))) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
@@ -2518,9 +2533,10 @@ bool native_cpp_opcode_bool_compare(amber::bytecode::Opcode opcode) {
   }
 }
 
-NativeScalarKind native_cpp_numeric_binary_result_kind(
-    amber::bytecode::Opcode opcode, NativeScalarKind lhs,
-    NativeScalarKind rhs) {
+NativeScalarKind
+native_cpp_numeric_binary_result_kind(amber::bytecode::Opcode opcode,
+                                      NativeScalarKind lhs,
+                                      NativeScalarKind rhs) {
   if (native_cpp_opcode_bool_compare(opcode)) {
     return native_cpp_scalar_numeric(lhs) && native_cpp_scalar_numeric(rhs)
                ? NativeScalarKind::Bool
@@ -2545,8 +2561,9 @@ NativeScalarKind native_cpp_numeric_binary_result_kind(
              : NativeScalarKind::Float;
 }
 
-NativeScalarKind native_cpp_numeric_k_result_kind(
-    amber::bytecode::Opcode opcode, NativeScalarKind lhs) {
+NativeScalarKind
+native_cpp_numeric_k_result_kind(amber::bytecode::Opcode opcode,
+                                 NativeScalarKind lhs) {
   if (native_cpp_opcode_bool_compare(opcode)) {
     return native_cpp_scalar_numeric(lhs) ? NativeScalarKind::Bool
                                           : NativeScalarKind::Unknown;
@@ -2567,16 +2584,15 @@ NativeScalarKind native_cpp_numeric_k_result_kind(
                                           : NativeScalarKind::Float;
 }
 
-NativeScalarFlow native_cpp_scalar_registers(
-    const amber::bytecode::BcModule &module,
-    const amber::bytecode::BcCode &code) {
+NativeScalarFlow
+native_cpp_scalar_registers(const amber::bytecode::BcModule &module,
+                            const amber::bytecode::BcCode &code) {
   using amber::bytecode::Opcode;
 
   const std::size_t pc_count = code.instructions.size();
   NativeScalarFlow flow;
-  flow.at_pc.assign(
-      pc_count, std::vector<NativeScalarKind>(
-                    code.reg_count, NativeScalarKind::Unknown));
+  flow.at_pc.assign(pc_count, std::vector<NativeScalarKind>(
+                                  code.reg_count, NativeScalarKind::Unknown));
   flow.after_pc = flow.at_pc;
   std::vector<bool> reached(pc_count, false);
   std::vector<std::size_t> worklist;
@@ -2626,9 +2642,8 @@ NativeScalarFlow native_cpp_scalar_registers(
     const auto set_dst_from_reg = [&](std::uint32_t src) {
       std::uint32_t dst = 0;
       if (operand_u32_value(instruction, 0, &dst) && dst < next.size()) {
-        next[dst] =
-            src < flow.at_pc[pc].size() ? flow.at_pc[pc][src]
-                                        : NativeScalarKind::Unknown;
+        next[dst] = src < flow.at_pc[pc].size() ? flow.at_pc[pc][src]
+                                                : NativeScalarKind::Unknown;
       }
     };
     const auto reg_kind = [&](std::size_t operand_index) {
@@ -2685,8 +2700,8 @@ NativeScalarFlow native_cpp_scalar_registers(
     case Opcode::IBitXor:
     case Opcode::IShl:
     case Opcode::IShr:
-      set_dst(native_cpp_numeric_binary_result_kind(
-          instruction.opcode, reg_kind(1), reg_kind(2)));
+      set_dst(native_cpp_numeric_binary_result_kind(instruction.opcode,
+                                                    reg_kind(1), reg_kind(2)));
       break;
     case Opcode::IAddK:
     case Opcode::ISubK:
@@ -2706,8 +2721,8 @@ NativeScalarFlow native_cpp_scalar_registers(
     case Opcode::IBitXorK:
     case Opcode::IShlK:
     case Opcode::IShrK:
-      set_dst(native_cpp_numeric_k_result_kind(instruction.opcode,
-                                               reg_kind(1)));
+      set_dst(
+          native_cpp_numeric_k_result_kind(instruction.opcode, reg_kind(1)));
       break;
     case Opcode::LoadBool:
       set_dst(NativeScalarKind::Bool);
@@ -3067,12 +3082,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       }
     }
   }
-  const auto read_frame_reg_expr = [uses_local_capture_cells](std::uint32_t reg) {
-    if (uses_local_capture_cells) {
-      return "read_reg(frame, " + std::to_string(reg) + ")";
-    }
-    return "frame.regs[" + std::to_string(reg) + "]";
-  };
+  const auto read_frame_reg_expr =
+      [uses_local_capture_cells](std::uint32_t reg) {
+        if (uses_local_capture_cells) {
+          return "read_reg(frame, " + std::to_string(reg) + ")";
+        }
+        return "frame.regs[" + std::to_string(reg) + "]";
+      };
   const auto int_lane_expr = [](std::uint32_t reg) {
     return "ireg_" + std::to_string(reg);
   };
@@ -3226,10 +3242,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                int_lane_expr(static_cast<std::uint32_t>(reg)) +
                                ")");
           } else if (from[reg] == NativeScalarKind::Float) {
-            write_reg_stmt(static_cast<std::uint32_t>(reg),
-                           "NativeValue::floating(" +
-                               float_lane_expr(static_cast<std::uint32_t>(reg)) +
-                               ")");
+            write_reg_stmt(
+                static_cast<std::uint32_t>(reg),
+                "NativeValue::floating(" +
+                    float_lane_expr(static_cast<std::uint32_t>(reg)) + ")");
           } else if (from[reg] == NativeScalarKind::Bool) {
             write_reg_stmt(static_cast<std::uint32_t>(reg),
                            "NativeValue::boolean(" +
@@ -3262,7 +3278,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     const std::vector<NativeScalarKind> &pc_scalar_state =
         uses_local_capture_cells ? empty_scalar_state : scalar_flow.at_pc[pc];
     const std::vector<NativeScalarKind> &next_scalar_state =
-        uses_local_capture_cells ? empty_scalar_state : scalar_flow.after_pc[pc];
+        uses_local_capture_cells ? empty_scalar_state
+                                 : scalar_flow.after_pc[pc];
     const auto read_reg_expr = [&](std::uint32_t reg) {
       return boxed_reg_expr(reg, pc_scalar_state);
     };
@@ -3420,8 +3437,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t count = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &count);
-      const bool strict =
-          (count & amber::bytecode::kMapStrictCountFlag) != 0U;
+      const bool strict = (count & amber::bytecode::kMapStrictCountFlag) != 0U;
       count &= amber::bytecode::kMapCountMask;
       out << "  {\n";
       out << "    std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
@@ -3455,8 +3471,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t count = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &count);
-      const bool strict =
-          (count & amber::bytecode::kMapStrictCountFlag) != 0U;
+      const bool strict = (count & amber::bytecode::kMapStrictCountFlag) != 0U;
       count &= amber::bytecode::kMapCountMask;
       out << "  {\n";
       out << "    std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
@@ -3490,8 +3505,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       std::uint32_t count = 0;
       operand_u32_value(instruction, 0, &dst);
       operand_u32_value(instruction, 1, &count);
-      const bool strict =
-          (count & amber::bytecode::kMapStrictCountFlag) != 0U;
+      const bool strict = (count & amber::bytecode::kMapStrictCountFlag) != 0U;
       count &= amber::bytecode::kMapCountMask;
       out << "  {\n";
       out << "    std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
@@ -3508,13 +3522,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
               << key_or_symbol << "), " << read_reg_expr(value_reg) << ", "
               << (strict ? "true" : "false") << ");\n";
         } else if (kind == amber::bytecode::kMapSpreadEntryDynamic) {
-          out << "    native_map_store(entries, " << read_reg_expr(key_or_symbol)
-              << ", " << read_reg_expr(value_reg) << ", "
-              << (strict ? "true" : "false") << ");\n";
+          out << "    native_map_store(entries, "
+              << read_reg_expr(key_or_symbol) << ", "
+              << read_reg_expr(value_reg) << ", " << (strict ? "true" : "false")
+              << ");\n";
         } else if (kind == amber::bytecode::kMapSpreadEntrySpread) {
           out << "    native_map_append_entries(entries, "
-              << read_reg_expr(value_reg) << ", "
-              << (strict ? "true" : "false") << ");\n";
+              << read_reg_expr(value_reg) << ", " << (strict ? "true" : "false")
+              << ");\n";
         } else {
           out << "    throw NativeBailout();\n";
         }
@@ -3755,9 +3770,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         operand_u32_value(instruction, kw_index + 4U, &kw_value_reg2);
       }
       const std::size_t block_index = kw_index + 1U + kw_count * 2U;
-      const bool no_block =
-          block_index >= instruction.operands.size() ||
-          operand_is_no_block(instruction, block_index);
+      const bool no_block = block_index >= instruction.operands.size() ||
+                            operand_is_no_block(instruction, block_index);
       if (!no_block) {
         block_reg = instruction.operands[block_index].value;
       }
@@ -3785,18 +3799,16 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
           std::uint32_t kw_value = 0;
           operand_u32_value(instruction, kw_index + 1U + index * 2U,
                             &kw_symbol);
-          operand_u32_value(instruction, kw_index + 2U + index * 2U,
-                            &kw_value);
+          operand_u32_value(instruction, kw_index + 2U + index * 2U, &kw_value);
           if (index != 0U) {
             args_expr << ", ";
           }
-          const std::string kw_name =
-              kw_symbol < module.symbols.size() ? module.symbols[kw_symbol]
-                                                : std::string{};
+          const std::string kw_name = kw_symbol < module.symbols.size()
+                                          ? module.symbols[kw_symbol]
+                                          : std::string{};
           args_expr << "std::pair<std::string, NativeValue>{"
-                    << "native_hex_to_string(\""
-                    << string_to_hex_text(kw_name) << "\"), "
-                    << read_reg_expr(kw_value) << "}";
+                    << "native_hex_to_string(\"" << string_to_hex_text(kw_name)
+                    << "\"), " << read_reg_expr(kw_value) << "}";
         }
         args_expr << "}";
         return args_expr.str();
@@ -3807,55 +3819,45 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 string_to_hex_text(selector) + "\"), " +
                                 pos_args_expr(0U) + ")");
       } else if (selector == "+") {
-        write_reg_stmt(dst, "native_numeric_fast_add(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_add(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "-") {
-        write_reg_stmt(dst, "native_numeric_fast_sub(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_sub(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "*") {
-        write_reg_stmt(dst, "native_numeric_fast_mul(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_mul(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "/") {
-        write_reg_stmt(dst, "native_numeric_fast_div(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_div(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "%") {
-        write_reg_stmt(dst, "native_numeric_fast_mod(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_mod(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "//") {
         write_reg_stmt(dst, "native_numeric_fast_floor_div(" +
                                 read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
       } else if (selector == "<") {
-        write_reg_stmt(dst, "native_numeric_fast_lt(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_lt(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == ">") {
-        write_reg_stmt(dst, "native_numeric_fast_gt(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_gt(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "<=") {
-        write_reg_stmt(dst, "native_numeric_fast_le(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_le(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == ">=") {
-        write_reg_stmt(dst, "native_numeric_fast_ge(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_ge(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "==") {
-        write_reg_stmt(dst, "native_numeric_fast_eq(" + read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ", false)");
+        write_reg_stmt(dst, "native_numeric_fast_eq(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", false)");
       } else if (selector == "!=") {
-        write_reg_stmt(dst, "native_numeric_fast_eq(" + read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ", true)");
+        write_reg_stmt(dst, "native_numeric_fast_eq(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", true)");
       } else if (selector == "<=>") {
-        write_reg_stmt(dst, "native_numeric_fast_cmp(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_cmp(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "&") {
         write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
                                 read_reg_expr(recv) + "), as_int(" +
@@ -3869,9 +3871,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 read_reg_expr(recv) + "), as_int(" +
                                 read_reg_expr(arg) + ")))");
       } else if (selector == "**") {
-        write_reg_stmt(dst, "native_numeric_fast_pow(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_numeric_fast_pow(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "<<") {
         out << "  if (as_int(" << read_reg_expr(arg) << ") < 0 || as_int("
             << read_reg_expr(arg) << ") >= 64) throw NativeBailout();\n";
@@ -3894,21 +3895,19 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_value_class(" + read_reg_expr(recv) + ")");
       } else if (native_cpp_benchmark_selector(selector, pos_count,
                                                has_block)) {
-        write_reg_stmt(dst,
-                       "native_benchmark_send(" + read_reg_expr(recv) +
-                           ", native_hex_to_string(\"" +
-                           string_to_hex_text(selector) + "\"), " +
-                           pos_args_expr(0U) + ", " + kw_args_expr() + ", " +
-                           (has_block
-                                ? read_reg_expr(
-                                      static_cast<std::uint32_t>(block_reg))
-                                : "NativeValue::nullv()") +
-                           ", " + (has_block ? "true" : "false") + ")");
+        write_reg_stmt(
+            dst, "native_benchmark_send(" + read_reg_expr(recv) +
+                     ", native_hex_to_string(\"" +
+                     string_to_hex_text(selector) + "\"), " +
+                     pos_args_expr(0U) + ", " + kw_args_expr() + ", " +
+                     (has_block
+                          ? read_reg_expr(static_cast<std::uint32_t>(block_reg))
+                          : "NativeValue::nullv()") +
+                     ", " + (has_block ? "true" : "false") + ")");
       } else if (selector == "Path") {
-        write_reg_stmt(dst, "native_fs_path_new(" + read_reg_expr(recv) +
-                                ", " +
+        write_reg_stmt(dst, "native_fs_path_new(" + read_reg_expr(recv) + ", " +
                                 (pos_count == 1U ? read_reg_expr(arg)
-                                                  : "NativeValue::nullv()") +
+                                                 : "NativeValue::nullv()") +
                                 ", " + (pos_count == 1U ? "true" : "false") +
                                 ")");
       } else if (selector == "/" || selector == "join") {
@@ -3937,10 +3936,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         if (!has_block) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "native_each(" + read_reg_expr(recv) + ", " +
-                                  read_reg_expr(static_cast<std::uint32_t>(
-                                      block_reg)) +
-                                  ")");
+          write_reg_stmt(
+              dst, "native_each(" + read_reg_expr(recv) + ", " +
+                       read_reg_expr(static_cast<std::uint32_t>(block_reg)) +
+                       ")");
         }
       } else if (selector == "map" || selector == "select" ||
                  selector == "reject" || selector == "find" ||
@@ -3949,38 +3948,34 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         if (!has_block) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "native_sequence_higher_order(" +
-                                  read_reg_expr(recv) + ", " +
-                                  read_reg_expr(static_cast<std::uint32_t>(
-                                      block_reg)) +
-                                  ", native_hex_to_string(\"" +
-                                  string_to_hex_text(selector) + "\"))");
+          write_reg_stmt(
+              dst, "native_sequence_higher_order(" + read_reg_expr(recv) +
+                       ", " +
+                       read_reg_expr(static_cast<std::uint32_t>(block_reg)) +
+                       ", native_hex_to_string(\"" +
+                       string_to_hex_text(selector) + "\"))");
         }
       } else if (selector == "any?" || selector == "all?" ||
                  selector == "none?") {
-        write_reg_stmt(dst, "native_sequence_predicate(" +
-                                read_reg_expr(recv) + ", " +
-                                (has_block ? read_reg_expr(
-                                                 static_cast<std::uint32_t>(
-                                                     block_reg))
-                                           : "NativeValue::nullv()") +
-                                ", " + (has_block ? "true" : "false") +
-                                ", native_hex_to_string(\"" +
-                                string_to_hex_text(selector) + "\"))");
+        write_reg_stmt(
+            dst, "native_sequence_predicate(" + read_reg_expr(recv) + ", " +
+                     (has_block
+                          ? read_reg_expr(static_cast<std::uint32_t>(block_reg))
+                          : "NativeValue::nullv()") +
+                     ", " + (has_block ? "true" : "false") +
+                     ", native_hex_to_string(\"" +
+                     string_to_hex_text(selector) + "\"))");
       } else if (selector == "reduce") {
         if (!has_block) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_reg_stmt(dst, "native_sequence_reduce(" +
-                                  read_reg_expr(recv) + ", " +
-                                  (pos_count == 1U
-                                       ? read_reg_expr(arg)
-                                       : "NativeValue::nullv()") +
-                                  ", " + (pos_count == 1U ? "true" : "false") +
-                                  ", " +
-                                  read_reg_expr(static_cast<std::uint32_t>(
-                                      block_reg)) +
-                                  ")");
+          write_reg_stmt(
+              dst, "native_sequence_reduce(" + read_reg_expr(recv) + ", " +
+                       (pos_count == 1U ? read_reg_expr(arg)
+                                        : "NativeValue::nullv()") +
+                       ", " + (pos_count == 1U ? "true" : "false") + ", " +
+                       read_reg_expr(static_cast<std::uint32_t>(block_reg)) +
+                       ")");
         }
       } else if (selector == "count") {
         write_reg_stmt(dst, "native_count(" + read_reg_expr(recv) + ")");
@@ -3991,12 +3986,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "bytesize") {
         write_reg_stmt(dst, "native_bytesize(" + read_reg_expr(recv) + ")");
       } else if (selector == "first") {
-        write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) +
-                                ", " +
+        write_reg_stmt(dst, "native_list_first(" + read_reg_expr(recv) + ", " +
                                 (pos_count == 1U ? read_reg_expr(arg)
-                                                  : "NativeValue::nullv()") +
-                                ", " +
-                                (pos_count == 1U ? "true" : "false") + ")");
+                                                 : "NativeValue::nullv()") +
+                                ", " + (pos_count == 1U ? "true" : "false") +
+                                ")");
       } else if (selector == "deconstruct") {
         write_reg_stmt(dst, "native_deconstruct(" + read_reg_expr(recv) + ")");
       } else if (selector == "to_array") {
@@ -4013,26 +4007,23 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "contains?" || selector == "includes?" ||
                  selector == "include?" || selector == "member?" ||
                  selector == "has_key?" || selector == "key?") {
-        write_reg_stmt(dst, "native_contains(" + read_reg_expr(recv) +
-                                ", " + read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_contains(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "value?" || selector == "has_value?") {
         write_reg_stmt(dst, "native_map_has_value(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "union" || selector == "intersection" ||
-                 selector == "difference" ||
-                 selector == "left_difference" ||
-                 selector == "symmetric_difference" ||
-                 selector == "subset?" || selector == "proper_subset?" ||
-                 selector == "superset?" || selector == "proper_superset?" ||
-                 selector == "disjoint?") {
+                 selector == "difference" || selector == "left_difference" ||
+                 selector == "symmetric_difference" || selector == "subset?" ||
+                 selector == "proper_subset?" || selector == "superset?" ||
+                 selector == "proper_superset?" || selector == "disjoint?") {
         write_reg_stmt(dst, "native_set_operation(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) +
                                 ", native_hex_to_string(\"" +
                                 string_to_hex_text(selector) + "\"))");
       } else if (selector == "starts_with?") {
-        write_reg_stmt(dst, "native_string_starts_with(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_string_starts_with(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "ends_with?") {
         write_reg_stmt(dst, "native_string_ends_with(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
@@ -4044,22 +4035,21 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 ", " + read_reg_expr(arg) + ", " +
                                 read_reg_expr(arg2) + ")");
       } else if (selector == "slice") {
-        write_reg_stmt(dst, "native_slice(" + read_reg_expr(recv) +
-                                ", " + read_reg_expr(arg) + ", " +
+        write_reg_stmt(dst, "native_slice(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", " +
                                 (pos_count == 2U ? read_reg_expr(arg2)
-                                                  : "NativeValue::nullv()") +
-                                ", " +
-                                (pos_count == 2U ? "true" : "false") + ")");
+                                                 : "NativeValue::nullv()") +
+                                ", " + (pos_count == 2U ? "true" : "false") +
+                                ")");
       } else if (selector == "appended") {
-        write_reg_stmt(dst, "native_sequence_appended(" +
-                                read_reg_expr(recv) + ", " +
-                                pos_args_expr(0U) + ")");
+        write_reg_stmt(dst, "native_sequence_appended(" + read_reg_expr(recv) +
+                                ", " + pos_args_expr(0U) + ")");
       } else if (selector == "added") {
         write_reg_stmt(dst, "native_sequence_added(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "add!") {
-        write_reg_stmt(dst, "native_set_add_mut(" + read_reg_expr(recv) +
-                                ", " + read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_set_add_mut(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "subtract!") {
         write_reg_stmt(dst, "native_set_subtract_mut(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
@@ -4068,25 +4058,23 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 read_reg_expr(arg) + ", " +
                                 read_reg_expr(arg2) + ")");
       } else if (selector == "without" || selector == "except") {
-        write_reg_stmt(dst, "native_map_except(" + read_reg_expr(recv) +
-                                ", " + pos_args_expr(0U) + ")");
+        write_reg_stmt(dst, "native_map_except(" + read_reg_expr(recv) + ", " +
+                                pos_args_expr(0U) + ")");
       } else if (selector == "merge") {
-        write_reg_stmt(dst, "native_map_merge(" + read_reg_expr(recv) +
-                                ", " + read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_map_merge(" + read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ")");
       } else if (selector == "compact") {
         write_reg_stmt(dst, "native_map_compact(" + read_reg_expr(recv) + ")");
       } else if (selector == "inserted") {
-        write_reg_stmt(dst, "native_sequence_inserted(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ", " +
+        write_reg_stmt(dst, "native_sequence_inserted(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", " +
                                 pos_args_expr(1U) + ")");
       } else if (selector == "deleted") {
-        write_reg_stmt(dst, "native_sequence_deleted(" +
-                                read_reg_expr(recv) + ", " +
-                                read_reg_expr(arg) + ")");
+        write_reg_stmt(dst, "native_sequence_deleted(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ")");
       } else if (selector == "reversed") {
-        write_reg_stmt(dst, "native_sequence_reversed(" +
-                                read_reg_expr(recv) + ")");
+        write_reg_stmt(dst,
+                       "native_sequence_reversed(" + read_reg_expr(recv) + ")");
       } else if (selector == "init") {
         write_reg_stmt(dst,
                        "native_sequence_init(" + read_reg_expr(recv) + ")");
@@ -4114,8 +4102,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_string_case(" + read_reg_expr(recv) +
                                 ", false)");
       } else if (selector == "trim" || selector == "strip") {
-        write_reg_stmt(dst,
-                       "native_string_trim(" + read_reg_expr(recv) + ")");
+        write_reg_stmt(dst, "native_string_trim(" + read_reg_expr(recv) + ")");
       } else if (selector == "reverse") {
         write_reg_stmt(dst,
                        "native_string_reverse(" + read_reg_expr(recv) + ")");
@@ -4146,10 +4133,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_type_matches(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (selector == "to_json") {
-        write_reg_stmt(dst,
-                       "native_benchmark_send(" + read_reg_expr(recv) +
-                           ", \"to_json\", " + pos_args_expr(0U) + ", " +
-                           kw_args_expr() + ", NativeValue::nullv(), false)");
+        write_reg_stmt(dst, "native_benchmark_send(" + read_reg_expr(recv) +
+                                ", \"to_json\", " + pos_args_expr(0U) + ", " +
+                                kw_args_expr() +
+                                ", NativeValue::nullv(), false)");
       } else if (selector == "utc") {
         const auto kw_name = [&](std::uint32_t symbol_id) -> std::string {
           return symbol_id < module.symbols.size() ? module.symbols[symbol_id]
@@ -4293,12 +4280,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                 pos_args_expr(0U) + ", " + kw_args_expr() +
                                 ")");
       } else if (selector == "pos" || selector == "rest") {
-        write_reg_stmt(dst, "native_argparser_positional(" +
-                                read_reg_expr(recv) +
-                                ", native_hex_to_string(\"" +
-                                string_to_hex_text(selector) + "\"), " +
-                                read_reg_expr(arg) + ", " + kw_args_expr() +
-                                ")");
+        write_reg_stmt(dst,
+                       "native_argparser_positional(" + read_reg_expr(recv) +
+                           ", native_hex_to_string(\"" +
+                           string_to_hex_text(selector) + "\"), " +
+                           read_reg_expr(arg) + ", " + kw_args_expr() + ")");
       } else if (selector == "parse_or_raise") {
         write_reg_stmt(dst, "native_argparser_parse_or_raise(" +
                                 read_reg_expr(recv) + ", " + kw_args_expr() +
@@ -4376,7 +4362,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_secure_random_int(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
       } else if (native_cpp_time_nullary_selector(selector)) {
-        const std::string selector_enum = native_cpp_time_selector_enum(selector);
+        const std::string selector_enum =
+            native_cpp_time_selector_enum(selector);
         write_reg_stmt(dst, "native_time_nullary(" + read_reg_expr(recv) +
                                 ", " + selector_enum + ")");
       }
@@ -4412,9 +4399,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       const bool proven_numeric_operands =
           native_cpp_scalar_numeric(lhs_kind) &&
           native_cpp_scalar_numeric(rhs_kind);
-      const bool proven_int_operands =
-          lhs_kind == NativeScalarKind::Integer &&
-          rhs_kind == NativeScalarKind::Integer;
+      const bool proven_int_operands = lhs_kind == NativeScalarKind::Integer &&
+                                       rhs_kind == NativeScalarKind::Integer;
       const std::string lhs_value = read_reg_expr(lhs);
       const std::string rhs_value = read_reg_expr(rhs);
       const std::string lhs_int = int_reg_expr(lhs, pc_scalar_state);
@@ -4463,28 +4449,23 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                   rhs_value + ")");
         } else if (instruction.opcode == Opcode::IBitAnd) {
           write_reg_stmt(dst, "NativeValue::integer(bit_and_int64(as_int(" +
-                                  lhs_value + "), as_int(" + rhs_value +
-                                  ")))");
+                                  lhs_value + "), as_int(" + rhs_value + ")))");
         } else if (instruction.opcode == Opcode::IBitOr) {
           write_reg_stmt(dst, "NativeValue::integer(bit_or_int64(as_int(" +
-                                  lhs_value + "), as_int(" + rhs_value +
-                                  ")))");
+                                  lhs_value + "), as_int(" + rhs_value + ")))");
         } else if (instruction.opcode == Opcode::IBitXor) {
           write_reg_stmt(dst, "NativeValue::integer(bit_xor_int64(as_int(" +
-                                  lhs_value + "), as_int(" + rhs_value +
-                                  ")))");
+                                  lhs_value + "), as_int(" + rhs_value + ")))");
         } else if (instruction.opcode == Opcode::IShl) {
-          out << "  if (as_int(" << rhs_value << ") < 0 || as_int("
-              << rhs_value << ") >= 64) throw NativeBailout();\n";
-          write_reg_stmt(dst,
-                         "NativeValue::integer(profile_shl_int64(as_int(" +
-                             lhs_value + "), as_int(" + rhs_value + ")))");
+          out << "  if (as_int(" << rhs_value << ") < 0 || as_int(" << rhs_value
+              << ") >= 64) throw NativeBailout();\n";
+          write_reg_stmt(dst, "NativeValue::integer(profile_shl_int64(as_int(" +
+                                  lhs_value + "), as_int(" + rhs_value + ")))");
         } else {
-          out << "  if (as_int(" << rhs_value << ") < 0 || as_int("
-              << rhs_value << ") >= 64) throw NativeBailout();\n";
+          out << "  if (as_int(" << rhs_value << ") < 0 || as_int(" << rhs_value
+              << ") >= 64) throw NativeBailout();\n";
           write_reg_stmt(dst, "NativeValue::integer(shr_int64(as_int(" +
-                                  lhs_value + "), as_int(" + rhs_value +
-                                  ")))");
+                                  lhs_value + "), as_int(" + rhs_value + ")))");
         }
       };
 
@@ -4508,11 +4489,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         }
       } else if (instruction.opcode == Opcode::ICmp) {
         if (proven_int_operands) {
-          write_int_reg_stmt(dst, "compare_int64(" + lhs_int + ", " +
-                                      rhs_int + ")");
+          write_int_reg_stmt(dst,
+                             "compare_int64(" + lhs_int + ", " + rhs_int + ")");
         } else {
-          write_int_reg_stmt(dst, "compare_double_native(" + lhs_double +
-                                      ", " + rhs_double + ")");
+          write_int_reg_stmt(dst, "compare_double_native(" + lhs_double + ", " +
+                                      rhs_double + ")");
         }
       } else if (!proven_int_operands &&
                  native_cpp_opcode_numeric_arithmetic(instruction.opcode)) {
@@ -4523,20 +4504,16 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         } else if (instruction.opcode == Opcode::IMul) {
           write_float_reg_stmt(dst, lhs_double + " * " + rhs_double);
         } else if (instruction.opcode == Opcode::IDiv) {
-          out << "  if (" << rhs_double
-              << " == 0.0) throw NativeBailout();\n";
+          out << "  if (" << rhs_double << " == 0.0) throw NativeBailout();\n";
           write_float_reg_stmt(dst, lhs_double + " / " + rhs_double);
         } else if (instruction.opcode == Opcode::IMod) {
-          out << "  if (" << rhs_double
-              << " == 0.0) throw NativeBailout();\n";
+          out << "  if (" << rhs_double << " == 0.0) throw NativeBailout();\n";
           write_float_reg_stmt(dst, "floor_mod_double_native(" + lhs_double +
                                         ", " + rhs_double + ")");
         } else {
-          out << "  if (" << rhs_double
-              << " == 0.0) throw NativeBailout();\n";
-          write_float_reg_stmt(dst,
-                               "std::floor(" + lhs_double + " / " +
-                                   rhs_double + ")");
+          out << "  if (" << rhs_double << " == 0.0) throw NativeBailout();\n";
+          write_float_reg_stmt(dst, "std::floor(" + lhs_double + " / " +
+                                        rhs_double + ")");
         }
       } else if (instruction.opcode == Opcode::IAdd) {
         write_int_reg_stmt(dst, "profile_add_int64(" + lhs_int + ", " +
@@ -4552,20 +4529,20 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                                     rhs_int + ")");
       } else if (instruction.opcode == Opcode::IMod) {
         out << "  if (" << rhs_int << " == 0) throw NativeBailout();\n";
-        write_int_reg_stmt(dst, "floor_mod_int64(" + lhs_int + ", " +
-                                    rhs_int + ")");
+        write_int_reg_stmt(dst,
+                           "floor_mod_int64(" + lhs_int + ", " + rhs_int + ")");
       } else if (instruction.opcode == Opcode::IFloorDiv) {
         write_int_reg_stmt(dst, "profile_floor_div_int64(" + lhs_int + ", " +
                                     rhs_int + ")");
       } else if (instruction.opcode == Opcode::IBitAnd) {
-        write_int_reg_stmt(dst, "bit_and_int64(" + lhs_int + ", " + rhs_int +
-                                    ")");
+        write_int_reg_stmt(dst,
+                           "bit_and_int64(" + lhs_int + ", " + rhs_int + ")");
       } else if (instruction.opcode == Opcode::IBitOr) {
-        write_int_reg_stmt(dst, "bit_or_int64(" + lhs_int + ", " + rhs_int +
-                                    ")");
+        write_int_reg_stmt(dst,
+                           "bit_or_int64(" + lhs_int + ", " + rhs_int + ")");
       } else if (instruction.opcode == Opcode::IBitXor) {
-        write_int_reg_stmt(dst, "bit_xor_int64(" + lhs_int + ", " + rhs_int +
-                                    ")");
+        write_int_reg_stmt(dst,
+                           "bit_xor_int64(" + lhs_int + ", " + rhs_int + ")");
       } else if (instruction.opcode == Opcode::IShl) {
         out << "  if (" << rhs_int << " < 0 || " << rhs_int
             << " >= 64) throw NativeBailout();\n";
@@ -4574,8 +4551,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (instruction.opcode == Opcode::IShr) {
         out << "  if (" << rhs_int << " < 0 || " << rhs_int
             << " >= 64) throw NativeBailout();\n";
-        write_int_reg_stmt(dst, "shr_int64(" + lhs_int + ", " + rhs_int +
-                                    ")");
+        write_int_reg_stmt(dst, "shr_int64(" + lhs_int + ", " + rhs_int + ")");
       } else {
         write_fallback();
       }
@@ -4614,8 +4590,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       const std::string lhs_int = int_reg_expr(lhs, pc_scalar_state);
       const std::string lhs_double = double_reg_expr(lhs, pc_scalar_state);
       const std::string rhs_int = cpp_decimal_i64(rhs);
-      const std::string rhs_double =
-          "static_cast<double>(" + rhs_int + ")";
+      const std::string rhs_double = "static_cast<double>(" + rhs_int + ")";
       const auto write_fallback = [&]() {
         if (instruction.opcode == Opcode::IAddK) {
           write_reg_stmt(dst, "native_numeric_fast_add_int_rhs(" + lhs_value +
@@ -4701,11 +4676,11 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         }
       } else if (instruction.opcode == Opcode::ICmpK) {
         if (proven_int_lhs) {
-          write_int_reg_stmt(dst, "compare_int64(" + lhs_int + ", " +
-                                      rhs_int + ")");
+          write_int_reg_stmt(dst,
+                             "compare_int64(" + lhs_int + ", " + rhs_int + ")");
         } else {
-          write_int_reg_stmt(dst, "compare_double_native(" + lhs_double +
-                                      ", " + rhs_double + ")");
+          write_int_reg_stmt(dst, "compare_double_native(" + lhs_double + ", " +
+                                      rhs_double + ")");
         }
       } else if (!proven_int_lhs &&
                  native_cpp_opcode_numeric_arithmetic(instruction.opcode)) {
@@ -4725,16 +4700,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
           if (rhs == 0) {
             out << "  throw NativeBailout();\n";
           } else {
-            write_float_reg_stmt(dst,
-                                 "floor_mod_double_native(" + lhs_double +
-                                     ", " + rhs_double + ")");
+            write_float_reg_stmt(dst, "floor_mod_double_native(" + lhs_double +
+                                          ", " + rhs_double + ")");
           }
         } else if (rhs == 0) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_float_reg_stmt(dst,
-                               "std::floor(" + lhs_double + " / " +
-                                   rhs_double + ")");
+          write_float_reg_stmt(dst, "std::floor(" + lhs_double + " / " +
+                                        rhs_double + ")");
         }
       } else if (instruction.opcode == Opcode::IAddK) {
         write_int_reg_stmt(dst, "profile_add_int64(" + lhs_int + ", " +
@@ -4759,14 +4732,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_int_reg_stmt(dst, "profile_floor_div_int64(" + lhs_int + ", " +
                                     rhs_int + ")");
       } else if (instruction.opcode == Opcode::IBitAndK) {
-        write_int_reg_stmt(dst, "bit_and_int64(" + lhs_int + ", " + rhs_int +
-                                    ")");
+        write_int_reg_stmt(dst,
+                           "bit_and_int64(" + lhs_int + ", " + rhs_int + ")");
       } else if (instruction.opcode == Opcode::IBitOrK) {
-        write_int_reg_stmt(dst, "bit_or_int64(" + lhs_int + ", " + rhs_int +
-                                    ")");
+        write_int_reg_stmt(dst,
+                           "bit_or_int64(" + lhs_int + ", " + rhs_int + ")");
       } else if (instruction.opcode == Opcode::IBitXorK) {
-        write_int_reg_stmt(dst, "bit_xor_int64(" + lhs_int + ", " + rhs_int +
-                                    ")");
+        write_int_reg_stmt(dst,
+                           "bit_xor_int64(" + lhs_int + ", " + rhs_int + ")");
       } else if (instruction.opcode == Opcode::IShlK) {
         if (rhs < 0 || rhs >= 64) {
           out << "  throw NativeBailout();\n";
@@ -4778,8 +4751,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         if (rhs < 0 || rhs >= 64) {
           out << "  throw NativeBailout();\n";
         } else {
-          write_int_reg_stmt(dst, "shr_int64(" + lhs_int + ", " + rhs_int +
-                                      ")");
+          write_int_reg_stmt(dst,
+                             "shr_int64(" + lhs_int + ", " + rhs_int + ")");
         }
       } else {
         write_fallback();
@@ -5029,6 +5002,185 @@ std::string emit_module_strings_cpp(const amber::bytecode::BcModule &module) {
   return out.str();
 }
 
+bool is_c_symbol_name(const std::string &name) {
+  if (name.empty()) {
+    return false;
+  }
+  const unsigned char first = static_cast<unsigned char>(name.front());
+  if (!(std::isalpha(first) || first == '_')) {
+    return false;
+  }
+  for (const char c : name) {
+    const unsigned char ch = static_cast<unsigned char>(c);
+    if (!(std::isalnum(ch) || ch == '_')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<std::string>
+native_binding_logicals(const amber::bytecode::BcModule &module) {
+  const std::string bind_prefix = "amber.native.bind:";
+  const std::string method_prefix = "amber.native.method:";
+  std::vector<std::string> out;
+  std::set<std::string> seen;
+  const auto string_or_empty = [&](std::uint32_t id) {
+    return id < module.strings.size() ? module.strings[id] : std::string();
+  };
+  const auto add = [&](const std::string &logical) {
+    if (!logical.empty() && seen.insert(logical).second) {
+      out.push_back(logical);
+    }
+  };
+  for (const amber::bytecode::AttrEntry &attr : module.attrs) {
+    const std::string key = string_or_empty(attr.key_str_id);
+    const std::string value = string_or_empty(attr.value_str_id);
+    if (key.compare(0, bind_prefix.size(), bind_prefix) == 0) {
+      if (value.size() >= 2U && value[1] == ':') {
+        add(value.substr(2));
+      }
+    } else if (key.compare(0, method_prefix.size(), method_prefix) == 0) {
+      add(value);
+    }
+  }
+  return out;
+}
+
+std::vector<std::string> split_native_attr_fields(const std::string &text) {
+  std::vector<std::string> fields;
+  std::string field;
+  for (const char c : text) {
+    if (c == '\t') {
+      fields.push_back(field);
+      field.clear();
+    } else {
+      field.push_back(c);
+    }
+  }
+  fields.push_back(field);
+  return fields;
+}
+
+std::vector<amber::pkg::PackageNativeType>
+source_declared_native_types(const amber::bytecode::BcModule &module) {
+  static const std::string kTypePrefix = "amber.native.type:";
+  std::vector<amber::pkg::PackageNativeType> out;
+  const auto string_or_empty = [&](std::uint32_t id) {
+    return id < module.strings.size() ? module.strings[id] : std::string();
+  };
+  for (const amber::bytecode::AttrEntry &attr : module.attrs) {
+    const std::string key = string_or_empty(attr.key_str_id);
+    if (key.compare(0, kTypePrefix.size(), kTypePrefix) != 0) {
+      continue;
+    }
+    const std::vector<std::string> fields =
+        split_native_attr_fields(string_or_empty(attr.value_str_id));
+    if (fields.size() < 2U || fields[0].empty() || fields[1].empty()) {
+      continue;
+    }
+    amber::pkg::PackageNativeType type;
+    type.amber = key.substr(kTypePrefix.size());
+    type.tag = fields[0];
+    type.ownership = fields[1];
+    if (fields.size() >= 3U) {
+      type.destructor = fields[2];
+    }
+    out.push_back(std::move(type));
+  }
+  return out;
+}
+
+std::vector<amber::pkg::PackageNativeError>
+source_declared_native_errors(const amber::bytecode::BcModule &module) {
+  static const std::string kErrorPrefix = "amber.native.error:";
+  std::vector<amber::pkg::PackageNativeError> out;
+  const auto string_or_empty = [&](std::uint32_t id) {
+    return id < module.strings.size() ? module.strings[id] : std::string();
+  };
+  for (const amber::bytecode::AttrEntry &attr : module.attrs) {
+    const std::string key = string_or_empty(attr.key_str_id);
+    if (key.compare(0, kErrorPrefix.size(), kErrorPrefix) != 0) {
+      continue;
+    }
+    amber::pkg::PackageNativeError error;
+    error.name = key.substr(kErrorPrefix.size());
+    error.parent = string_or_empty(attr.value_str_id);
+    if (error.parent.empty()) {
+      error.parent = "NativeError";
+    }
+    out.push_back(std::move(error));
+  }
+  return out;
+}
+
+std::vector<amber::pkg::PackageNativeExtension>
+augment_native_extensions_from_source(
+    std::vector<amber::pkg::PackageNativeExtension> extensions,
+    const amber::bytecode::BcModule &module) {
+  std::vector<amber::pkg::PackageNativeType> types =
+      source_declared_native_types(module);
+  std::vector<amber::pkg::PackageNativeError> errors =
+      source_declared_native_errors(module);
+  if (types.empty() && errors.empty()) {
+    return extensions;
+  }
+  if (extensions.empty()) {
+    amber::pkg::PackageNativeExtension extension;
+    extension.name = "source";
+    extensions.push_back(std::move(extension));
+  }
+  amber::pkg::PackageNativeExtension &target = extensions.front();
+  for (amber::pkg::PackageNativeType &type : types) {
+    const bool exists = std::any_of(
+        target.types.begin(), target.types.end(),
+        [&](const amber::pkg::PackageNativeType &registered) {
+          return registered.amber == type.amber || registered.tag == type.tag;
+        });
+    if (!exists) {
+      target.types.push_back(std::move(type));
+    }
+  }
+  for (amber::pkg::PackageNativeError &error : errors) {
+    const bool exists = std::any_of(
+        target.errors.begin(), target.errors.end(),
+        [&](const amber::pkg::PackageNativeError &registered) {
+          return registered.name == error.name;
+        });
+    if (!exists) {
+      target.errors.push_back(std::move(error));
+    }
+  }
+  return extensions;
+}
+
+std::set<std::string> manifest_native_logicals(
+    const std::vector<amber::pkg::PackageNativeExtension> &native_extensions) {
+  std::set<std::string> out;
+  for (const amber::pkg::PackageNativeExtension &extension :
+       native_extensions) {
+    for (const amber::pkg::PackageNativeSymbol &symbol : extension.symbols) {
+      out.insert(symbol.logical);
+    }
+  }
+  return out;
+}
+
+std::vector<std::string> direct_native_symbols(
+    const amber::bytecode::BcModule &module,
+    const std::vector<amber::pkg::PackageNativeExtension> &native_extensions) {
+  const std::set<std::string> manifest_logicals =
+      manifest_native_logicals(native_extensions);
+  std::vector<std::string> out;
+  for (const std::string &logical : native_binding_logicals(module)) {
+    if (manifest_logicals.find(logical) == manifest_logicals.end() &&
+        is_c_symbol_name(logical)) {
+      out.push_back(logical);
+    }
+  }
+  return out;
+}
+
 NativeCppBuildPlan
 build_native_cpp_plan(const RunnableModuleArtifact &artifact,
                       const amber::bytecode::BcModule &module,
@@ -5049,10 +5201,11 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   // prologue; the direct native C++ calling convention has no equivalent
   // packing. Rather than dropping the whole module to the VM, keep only the
   // rest/keyword-rest method BODIES on the per-function VM bridge -- a native
-  // caller invokes them through amber_vm_fallback_call -> execute(code_id, args),
-  // which shapes the Tuple/Map exactly like a normal call -- and let the rest of
-  // the module compile native. A rest body that is not bridge-eligible (its body
-  // is effectful) still forces the whole-module fallback via first_reason below.
+  // caller invokes them through amber_vm_fallback_call -> execute(code_id,
+  // args), which shapes the Tuple/Map exactly like a normal call -- and let the
+  // rest of the module compile native. A rest body that is not bridge-eligible
+  // (its body is effectful) still forces the whole-module fallback via
+  // first_reason below.
   std::set<std::uint32_t> rest_body_code_ids;
   for (const amber::bytecode::BcMethod &method : module.methods) {
     for (const amber::bytecode::MethodParamEntry &param : method.params) {
@@ -5192,9 +5345,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
       record.reason = "per-function VM bridge";
     } else {
       record.mode = "fallback";
-      record.reason =
-          first_reason.empty() ? "not classified for native execution"
-                               : first_reason;
+      record.reason = first_reason.empty()
+                          ? "not classified for native execution"
+                          : first_reason;
     }
     plan.coverage.push_back(std::move(record));
   }
@@ -5420,14 +5573,16 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "    *static_cast<void **>(pointer) = head; \\\n";
   out << "    head = pointer; \\\n";
   out << "  }\n";
-  out << "struct NativeBytes : NativeRcHeader { std::string bytes; AMBER_NATIVE_POOL_NEW };\n";
+  out << "struct NativeBytes : NativeRcHeader { std::string bytes; "
+         "AMBER_NATIVE_POOL_NEW };\n";
   out << "struct NativeList : NativeRcHeader { "
          "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
   out << "struct NativeTuple : NativeRcHeader { "
          "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
   out << "struct NativeSet : NativeRcHeader { "
          "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
-  out << "static constexpr std::size_t kNativeMapInlineNameIndexCapacity = 8;\n";
+  out << "static constexpr std::size_t kNativeMapInlineNameIndexCapacity = "
+         "8;\n";
   out << "struct NativeMap : NativeRcHeader {\n";
   out << "  std::vector<std::pair<NativeValue, NativeValue>> entries;\n";
   out << "  std::array<std::pair<std::int64_t, std::size_t>, "
@@ -5593,7 +5748,8 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "static std::optional<std::int64_t> native_map_index_key_id("
          "const NativeValue &key, bool strict) {\n";
   out << "  if (strict) return std::nullopt;\n";
-  out << "  if (key.tag == NativeValue::Tag::String) return key.scalar_value;\n";
+  out << "  if (key.tag == NativeValue::Tag::String) return "
+         "key.scalar_value;\n";
   out << "  if (key.tag == NativeValue::Tag::HeapString) return "
          "native_intern_string(native_string_text(key));\n";
   out << "  if (key.tag == NativeValue::Tag::Symbol) return "
@@ -5606,7 +5762,8 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "static std::optional<std::int64_t> native_map_index_key_id_for_read("
          "const NativeValue &key, bool strict) {\n";
   out << "  if (strict) return std::nullopt;\n";
-  out << "  if (key.tag == NativeValue::Tag::String) return key.scalar_value;\n";
+  out << "  if (key.tag == NativeValue::Tag::String) return "
+         "key.scalar_value;\n";
   out << "  if (key.tag == NativeValue::Tag::HeapString) return "
          "native_intern_string_lookup(native_string_text(key));\n";
   out << "  if (key.tag == NativeValue::Tag::Symbol) return "
@@ -5972,7 +6129,8 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "static NativeValue native_list_set(const NativeValue &value, "
          "const NativeValue &index_value, const NativeValue &next_value) {\n";
   out << "  auto &items = as_mutable_list(value).items;\n";
-  out << "  const std::size_t index = native_sequence_index(as_int(index_value), "
+  out << "  const std::size_t index = "
+         "native_sequence_index(as_int(index_value), "
          "items.size());\n";
   out << "  items[index] = next_value;\n";
   out << "  return next_value;\n";
@@ -6065,7 +6223,8 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  case NativeValue::Tag::String:\n";
   out << "  case NativeValue::Tag::HeapString: return "
          "NativeValue::str_type();\n";
-  out << "  case NativeValue::Tag::Symbol: return NativeValue::symbol_type();\n";
+  out << "  case NativeValue::Tag::Symbol: return "
+         "NativeValue::symbol_type();\n";
   out << "  default: throw NativeBailout();\n";
   out << "  }\n";
   out << "}\n\n";
@@ -6398,7 +6557,8 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
          "(static_cast<unsigned char>(text[j]) & 0xC0U) == 0x80U) ++j;\n";
   out << "  return j;\n";
   out << "}\n\n";
-  out << "static NativeValue native_string_reverse(const NativeValue &value) {\n";
+  out << "static NativeValue native_string_reverse(const NativeValue &value) "
+         "{\n";
   out << "  if (!native_value_is_string(value)) throw NativeBailout();\n";
   out << "  const std::string &text = native_string_text(value);\n";
   out << "  std::vector<std::string> cps;\n";
@@ -12023,7 +12183,8 @@ static NativeValue native_benchmark_send(
          "NativeValue::floating(static_cast<double>(value.scalar_value));\n";
   out << "  if (native_value_is_string(value)) {\n";
   out << "    double parsed = 0.0;\n";
-  out << "    if (!native_parse_float_text(native_string_text(value), &parsed)) "
+  out << "    if (!native_parse_float_text(native_string_text(value), "
+         "&parsed)) "
          "throw NativeBailout();\n";
   out << "    return NativeValue::floating(parsed);\n";
   out << "  }\n";
@@ -12821,17 +12982,26 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
       out << "extern \"C\" AmberStatus " << symbol
           << "(AmberCtx *, const AmberValue *, std::size_t, AmberValue *);\n";
     };
+    const std::vector<std::string> direct_symbols =
+        direct_native_symbols(module, native_extensions);
     for (const amber::pkg::PackageNativeExtension &extension :
          native_extensions) {
       for (const amber::pkg::PackageNativeSymbol &symbol : extension.symbols) {
         declare_once(symbol.symbol);
       }
     }
+    for (const std::string &symbol : direct_symbols) {
+      declare_once(symbol);
+    }
     out << "\nstatic void amber_register_native_extensions() {\n";
     out << "  amber::runtime::RuntimeNativePackageDescriptor package;\n";
+    for (const std::string &symbol : direct_symbols) {
+      out << "  package.thunks.push_back({\"" << cpp_string(symbol)
+          << "\", reinterpret_cast<void *>(&" << symbol << ")});\n";
+    }
+    std::unordered_map<std::string, std::string> logical_to_symbol;
     for (const amber::pkg::PackageNativeExtension &extension :
          native_extensions) {
-      std::unordered_map<std::string, std::string> logical_to_symbol;
       for (const amber::pkg::PackageNativeSymbol &symbol : extension.symbols) {
         logical_to_symbol[symbol.logical] = symbol.symbol;
         out << "  package.thunks.push_back({\"" << cpp_string(symbol.logical)
@@ -12844,7 +13014,8 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
         const std::string destructor_symbol =
             logical_to_symbol.count(type.destructor) != 0U
                 ? logical_to_symbol[type.destructor]
-                : std::string();
+                : (is_c_symbol_name(type.destructor) ? type.destructor
+                                                     : std::string());
         if (type.ownership == "owned") {
           out << "    descriptor.ownership = amber::runtime::"
                  "RuntimeForeignHandle::Ownership::Owned;\n";
@@ -13324,6 +13495,10 @@ NativeExecutableBuildResult build_native_executable(
   // and the link line below.
   std::vector<std::string> link_libraries;
   std::vector<std::string> declared_symbols;
+  const std::vector<std::string> direct_symbols =
+      direct_native_symbols(artifact.module, native_extensions);
+  declared_symbols.insert(declared_symbols.end(), direct_symbols.begin(),
+                          direct_symbols.end());
   std::vector<std::string> extension_objects;
   std::size_t extension_object_index = 0;
   for (const amber::pkg::PackageNativeExtension &extension :
@@ -13451,9 +13626,9 @@ NativeExecutableBuildResult build_native_executable(
   result.cxx = cxx;
   result.native_code_count = plan.native_code_ids.size();
   result.vm_callable_code_count = plan.vm_callable_code_ids.size();
-  result.fallback_code_count =
-      artifact.module.code_objects.size() - result.native_code_count -
-      result.vm_callable_code_count;
+  result.fallback_code_count = artifact.module.code_objects.size() -
+                               result.native_code_count -
+                               result.vm_callable_code_count;
   result.total_code_count = artifact.module.code_objects.size();
   result.entry_native = plan.entry_native;
   result.full_native_coverage =
@@ -13646,8 +13821,7 @@ std::string executable_build_result_to_json(
       << (native != nullptr && native->entry_native ? "true" : "false")
       << ",\n";
   out << "  \"native_full_coverage\": "
-      << (native != nullptr && native->full_native_coverage ? "true"
-                                                            : "false")
+      << (native != nullptr && native->full_native_coverage ? "true" : "false")
       << ",\n";
   out << "  \"native_code_count\": "
       << (native == nullptr ? 0U : native->native_code_count) << ",\n";
@@ -13840,10 +14014,9 @@ int run_package_command(int argc, char **argv) {
       amber::pkg::PackageModuleBlob blob;
       blob.name = module.name;
       blob.path = module.path;
-      blob.bytes = compile_source_to_bytecode(join_path(root_dir, module.path),
-                                              module.name,
-                                              manifest.manifest.capabilities,
-                                              &macro_providers);
+      blob.bytes = compile_source_to_bytecode(
+          join_path(root_dir, module.path), module.name,
+          manifest.manifest.capabilities, &macro_providers);
       modules.push_back(std::move(blob));
     }
     const amber::pkg::PackageBuildResult built =
@@ -14071,8 +14244,7 @@ macro_exports_from_artifact(const std::filesystem::path &artifact_path,
                             const std::string &source_hash,
                             const std::string &module_path) {
   std::error_code exists_error;
-  if (!std::filesystem::exists(artifact_path, exists_error) ||
-      exists_error) {
+  if (!std::filesystem::exists(artifact_path, exists_error) || exists_error) {
     return std::nullopt;
   }
   std::vector<std::uint8_t> bytes;
@@ -14308,10 +14480,10 @@ public:
     out_.language_version = {1, 0};
   }
 
-  NativeGraphLinkResult build(const std::string &root_module,
-                              EntryExecutionMode entry_mode,
-                              const std::vector<amber::capability::CapabilityRequest>
-                                  &capability_grants) {
+  NativeGraphLinkResult
+  build(const std::string &root_module, EntryExecutionMode entry_mode,
+        const std::vector<amber::capability::CapabilityRequest>
+            &capability_grants) {
     NativeGraphLinkResult result;
     if (order_.empty()) {
       result.diagnostics.push_back(
@@ -14345,21 +14517,20 @@ public:
     normalize_string_vector(&out_.optional_features);
     normalize_string_vector(&out_.forbidden_features);
 
-    amber::bytecode::DecodeResult decoded =
-        amber::bytecode::deserialize_module(amber::bytecode::serialize_module(out_));
+    amber::bytecode::DecodeResult decoded = amber::bytecode::deserialize_module(
+        amber::bytecode::serialize_module(out_));
     if (!decoded.ok()) {
-      result.diagnostics.push_back({"BuildError",
-                                    amber::bytecode::verify_errors_to_json(
-                                        decoded.errors),
-                                    root_module});
+      result.diagnostics.push_back(
+          {"BuildError", amber::bytecode::verify_errors_to_json(decoded.errors),
+           root_module});
       return result;
     }
 
     const auto root_found = states_.find(root_module);
     if (root_found == states_.end()) {
       result.diagnostics.push_back(
-          {"BuildError", "root module is missing from native graph: " +
-                             root_module,
+          {"BuildError",
+           "root module is missing from native graph: " + root_module,
            root_module});
       return result;
     }
@@ -14388,12 +14559,15 @@ public:
     result.artifact.module_name = root_module;
     result.artifact.entry_mode = entry_mode;
     result.artifact.module = std::move(decoded.module);
-    result.artifact.bytes = amber::bytecode::serialize_module(result.artifact.module);
+    result.artifact.bytes =
+        amber::bytecode::serialize_module(result.artifact.module);
     result.artifact.capability_grants = capability_grants;
     result.artifact.whole_graph_native = true;
     result.artifact.graph_module_count = order_.size();
-    result.artifact.has_entry_init_code_id = result.artifact.module.init.has_entry_code_id;
-    result.artifact.entry_init_code_id = result.artifact.module.init.entry_code_id;
+    result.artifact.has_entry_init_code_id =
+        result.artifact.module.init.has_entry_code_id;
+    result.artifact.entry_init_code_id =
+        result.artifact.module.init.entry_code_id;
     result.artifact.has_entry_main_code_id = has_root_main;
     result.artifact.entry_main_code_id = root_main_code;
     result.ok = true;
@@ -14470,7 +14644,8 @@ private:
     return mapped;
   }
 
-  std::uint32_t map_code(NativeGraphModuleState &state, std::uint32_t id) const {
+  std::uint32_t map_code(NativeGraphModuleState &state,
+                         std::uint32_t id) const {
     const auto found = state.code_ids.find(id);
     return found == state.code_ids.end() ? 0U : found->second;
   }
@@ -14537,8 +14712,8 @@ private:
                             amber::bytecode::Instruction &insn,
                             std::size_t index) {
     if (index < insn.operands.size()) {
-      insn.operands[index].value =
-          map_symbol(state, static_cast<std::uint32_t>(insn.operands[index].value));
+      insn.operands[index].value = map_symbol(
+          state, static_cast<std::uint32_t>(insn.operands[index].value));
     }
   }
 
@@ -14575,8 +14750,8 @@ private:
       break;
     case Opcode::MakeClosure:
       if (insn.operands.size() > 1U) {
-        insn.operands[1].value = map_code(
-            state, static_cast<std::uint32_t>(insn.operands[1].value));
+        insn.operands[1].value =
+            map_code(state, static_cast<std::uint32_t>(insn.operands[1].value));
       }
       break;
     case Opcode::LoadIvar:
@@ -14649,8 +14824,7 @@ private:
           const std::uint32_t kw_count =
               static_cast<std::uint32_t>(insn.operands[kw_index].value);
           for (std::uint32_t i = 0; i < kw_count; ++i) {
-            remap_symbol_operand(state, insn,
-                                 kw_index + 1U + i * 3U + 1U);
+            remap_symbol_operand(state, insn, kw_index + 1U + i * 3U + 1U);
           }
         }
       }
@@ -14699,7 +14873,8 @@ private:
   }
 
   std::optional<NativeGraphExportRef>
-  resolve_import(const std::string &dependency, const std::string &source) const {
+  resolve_import(const std::string &dependency,
+                 const std::string &source) const {
     const auto dep_state = states_.find(dependency);
     if (dep_state == states_.end()) {
       return std::nullopt;
@@ -14716,8 +14891,8 @@ private:
     std::vector<amber::bytecode::Instruction> seeds;
     const std::string prefix = "amber.import.alias:";
     for (const amber::bytecode::AttrEntry &attr : state.input->module.attrs) {
-      const std::string key = bc_string_or_empty(state.input->module,
-                                                 attr.key_str_id);
+      const std::string key =
+          bc_string_or_empty(state.input->module, attr.key_str_id);
       const std::string value =
           bc_string_or_empty(state.input->module, attr.value_str_id);
       if (key.rfind(prefix, 0) != 0) {
@@ -14761,11 +14936,16 @@ private:
                                  "` from module `" + fields[1] +
                                  "` is not resolved");
       }
-      if (target->kind == "method" || target->kind == "code") {
-        seeds.push_back(
-            {amber::bytecode::Opcode::MakeClosure,
-             {{slot, false}, {target->code_id, false}, {0, false}}});
-      } else if (target->kind == "class") {
+      // Resolve the import to the exporting module's ALREADY-BUILT binding
+      // (via LookupConst -> module_bindings) rather than rebuilding a closure
+      // here. A rebuilt `MakeClosure(code_id, 0 captures)` dropped the callee's
+      // upvalues, so an imported function that closes over other module-level
+      // bindings ran with no captures ("capture slot out of range"). The
+      // exporting module's init runs first (dependency order) and persists the
+      // real closure (with captures) under `<module>:<name>`, which the
+      // extended lookup_constant recovers. Classes resolve the same way.
+      if (target->kind == "method" || target->kind == "code" ||
+          target->kind == "class") {
         const std::uint32_t const_id =
             intern_path_constant(fields[1] + "." + fields[2]);
         seeds.push_back({amber::bytecode::Opcode::LookupConst,
@@ -14791,8 +14971,7 @@ private:
       const std::uint32_t target =
           static_cast<std::uint32_t>(insn.operands[index].value);
       if (target >= from_pc) {
-        insn.operands[index].value =
-            static_cast<std::int64_t>(target + offset);
+        insn.operands[index].value = static_cast<std::int64_t>(target + offset);
       }
     };
     for (amber::bytecode::Instruction &insn : code->instructions) {
@@ -14811,8 +14990,8 @@ private:
     }
   }
 
-  std::uint32_t import_seed_insert_pc(
-      const amber::bytecode::BcCode &code) const {
+  std::uint32_t
+  import_seed_insert_pc(const amber::bytecode::BcCode &code) const {
     std::set<std::uint32_t> import_slots;
     for (const amber::bytecode::SlotLayoutEntry &entry : code.local_layout) {
       const std::string binding =
@@ -14920,9 +15099,10 @@ private:
     out_.optional_features.insert(out_.optional_features.end(),
                                   state.input->module.optional_features.begin(),
                                   state.input->module.optional_features.end());
-    out_.forbidden_features.insert(out_.forbidden_features.end(),
-                                   state.input->module.forbidden_features.begin(),
-                                   state.input->module.forbidden_features.end());
+    out_.forbidden_features.insert(
+        out_.forbidden_features.end(),
+        state.input->module.forbidden_features.begin(),
+        state.input->module.forbidden_features.end());
     out_.capabilities.insert(out_.capabilities.end(),
                              state.input->module.capabilities.begin(),
                              state.input->module.capabilities.end());
@@ -14983,9 +15163,9 @@ private:
         import_seed_instructions(state);
     for (const amber::bytecode::BcCode &source_code :
          state.input->module.code_objects) {
-      const bool is_init = state.input->module.init.has_entry_code_id &&
-                           source_code.code_id ==
-                               state.input->module.init.entry_code_id;
+      const bool is_init =
+          state.input->module.init.has_entry_code_id &&
+          source_code.code_id == state.input->module.init.entry_code_id;
       state.code_pc_offsets[source_code.code_id] = 0;
       state.code_pc_insert_points[source_code.code_id] = 0;
       amber::bytecode::BcCode code = remap_code(state, source_code, 0);
@@ -15003,18 +15183,21 @@ private:
       out_.code_objects.push_back(std::move(code));
     }
 
-    for (const amber::bytecode::BcMethod &source : state.input->module.methods) {
+    for (const amber::bytecode::BcMethod &source :
+         state.input->module.methods) {
       amber::bytecode::BcMethod method = source;
       method.selector_sym_id = map_symbol(state, method.selector_sym_id);
       if ((method.flags & (amber::bytecode::kMethodFlagInstance |
                            amber::bytecode::kMethodFlagClass |
                            amber::bytecode::kMethodFlagPropertyGetter |
                            amber::bytecode::kMethodFlagPropertySetter)) != 0U) {
-        method.owner_dispatch_ref = class_index(state, method.owner_dispatch_ref);
+        method.owner_dispatch_ref =
+            class_index(state, method.owner_dispatch_ref);
       }
       method.signature_blob_id = map_constant(state, method.signature_blob_id);
       for (amber::bytecode::MethodParamEntry &param : method.params) {
-        param.external_name_sym_id = map_symbol(state, param.external_name_sym_id);
+        param.external_name_sym_id =
+            map_symbol(state, param.external_name_sym_id);
         param.local_name_str_id = map_string(state, param.local_name_str_id);
       }
       for (std::uint32_t &code_id : method.default_thunk_ids) {
@@ -15024,7 +15207,8 @@ private:
         code_id = map_code(state, code_id);
       }
       for (amber::bytecode::ClauseEntry &entry : method.clause_table) {
-        entry.pattern_program_id = pattern_index(state, entry.pattern_program_id);
+        entry.pattern_program_id =
+            pattern_index(state, entry.pattern_program_id);
         entry.pattern_code_id = map_code(state, entry.pattern_code_id);
         entry.guard_code_id = map_code(state, entry.guard_code_id);
         entry.body_code_id = map_code(state, entry.body_code_id);
@@ -15138,9 +15322,11 @@ private:
       std::string key = raw_key;
       if (raw_key.rfind("amber.native.bind:", 0) == 0) {
         std::uint32_t old_code = 0;
-        if (parse_u32_text(raw_key.substr(std::string("amber.native.bind:").size()),
-                           &old_code)) {
-          key = "amber.native.bind:" + std::to_string(map_code(state, old_code));
+        if (parse_u32_text(
+                raw_key.substr(std::string("amber.native.bind:").size()),
+                &old_code)) {
+          key =
+              "amber.native.bind:" + std::to_string(map_code(state, old_code));
         }
       }
       out_.attrs.push_back({intern_string(key), intern_string(raw_value)});
@@ -15174,7 +15360,8 @@ private:
             {0, false},
             {0, false},
             {-1, true},
-            {static_cast<std::int64_t>(wrapper.call_site_table.size()), false}}});
+            {static_cast<std::int64_t>(wrapper.call_site_table.size()),
+             false}}});
       wrapper.call_site_table.push_back(
           {pc + 1U, static_cast<std::uint32_t>(wrapper.call_site_table.size()),
            intern_symbol("<call>"), 0});
@@ -15213,8 +15400,8 @@ decode_native_graph_modules(const amber::build::BuildSummary &summary) {
     amber::bytecode::DecodeResult decoded =
         amber::bytecode::deserialize_module(module.bytes);
     if (!decoded.ok()) {
-      throw std::runtime_error(amber::bytecode::verify_errors_to_json(
-          decoded.errors));
+      throw std::runtime_error(
+          amber::bytecode::verify_errors_to_json(decoded.errors));
     }
     module.module = std::move(decoded.module);
     modules.push_back(std::move(module));
@@ -15222,11 +15409,11 @@ decode_native_graph_modules(const amber::build::BuildSummary &summary) {
   return modules;
 }
 
-NativeGraphLinkResult link_native_graph(
-    const std::vector<NativeGraphModule> &modules,
-    const std::string &root_module, EntryExecutionMode entry_mode,
-    const std::vector<amber::capability::CapabilityRequest>
-        &capability_grants) {
+NativeGraphLinkResult
+link_native_graph(const std::vector<NativeGraphModule> &modules,
+                  const std::string &root_module, EntryExecutionMode entry_mode,
+                  const std::vector<amber::capability::CapabilityRequest>
+                      &capability_grants) {
   NativeGraphLinkResult result;
   std::map<std::string, const NativeGraphModule *> by_name;
   for (const NativeGraphModule &module : modules) {
@@ -15241,37 +15428,39 @@ NativeGraphLinkResult link_native_graph(
   std::set<std::string> visiting;
   std::set<std::string> visited;
   std::vector<NativeGraphModule> order;
-  std::function<bool(const std::string &)> visit = [&](const std::string &name) {
-    if (visited.count(name) != 0U) {
-      return true;
-    }
-    if (!visiting.insert(name).second) {
-      result.diagnostics.push_back(
-          {"BuildError", "module dependency cycle in native graph: " + name,
-           name});
-      return false;
-    }
-    const auto found = by_name.find(name);
-    if (found == by_name.end()) {
-      result.diagnostics.push_back(
-          {"BuildError", "module dependency is missing from native graph: " +
-                             name,
-           name});
-      return false;
-    }
-    const NativeGraphModule &module = *found->second;
-    for (const amber::bytecode::DepEntry &dep : module.module.dependencies) {
-      const std::string dep_name =
-          bc_string_or_empty(module.module, dep.module_name_str_id);
-      if (!dep_name.empty() && !visit(dep_name)) {
-        return false;
-      }
-    }
-    visiting.erase(name);
-    visited.insert(name);
-    order.push_back(module);
-    return true;
-  };
+  std::function<bool(const std::string &)> visit =
+      [&](const std::string &name) {
+        if (visited.count(name) != 0U) {
+          return true;
+        }
+        if (!visiting.insert(name).second) {
+          result.diagnostics.push_back(
+              {"BuildError", "module dependency cycle in native graph: " + name,
+               name});
+          return false;
+        }
+        const auto found = by_name.find(name);
+        if (found == by_name.end()) {
+          result.diagnostics.push_back(
+              {"BuildError",
+               "module dependency is missing from native graph: " + name,
+               name});
+          return false;
+        }
+        const NativeGraphModule &module = *found->second;
+        for (const amber::bytecode::DepEntry &dep :
+             module.module.dependencies) {
+          const std::string dep_name =
+              bc_string_or_empty(module.module, dep.module_name_str_id);
+          if (!dep_name.empty() && !visit(dep_name)) {
+            return false;
+          }
+        }
+        visiting.erase(name);
+        visited.insert(name);
+        order.push_back(module);
+        return true;
+      };
   if (!visit(root_module)) {
     return result;
   }
@@ -15310,8 +15499,8 @@ int run_build_command(int argc, char **argv) {
   summary.cache_dir = cache_dir.string();
 
   const amber::build::BuildManifestResult parsed =
-      amber::build::parse_build_manifest_json(read_file(manifest_path),
-                                              manifest_path);
+      amber::build::parse_build_manifest(read_file(manifest_path),
+                                         manifest_path);
   if (!parsed.ok()) {
     summary.diagnostics = parsed.diagnostics;
     std::cout << amber::build::summary_to_json(summary);
@@ -15362,8 +15551,8 @@ int run_build_command(int argc, char **argv) {
         exports = harvest_macro_exports(module_source, module.path);
       }
       if (!exports.empty()) {
-        macro_material += "macro-provider\n" + module.name + "\n" +
-                          module_source_hash + "\n";
+        macro_material +=
+            "macro-provider\n" + module.name + "\n" + module_source_hash + "\n";
         macro_providers[module.name] = std::move(exports);
       }
     }
@@ -15395,9 +15584,9 @@ int run_build_command(int argc, char **argv) {
       }
       const EntryExecutionMode entry_mode =
           default_entry_mode_for(true, decoded.module);
-      const NativeGraphLinkResult linked_graph = link_native_graph(
-          decode_native_graph_modules(summary), parsed.manifest.root_module,
-          entry_mode, {});
+      const NativeGraphLinkResult linked_graph =
+          link_native_graph(decode_native_graph_modules(summary),
+                            parsed.manifest.root_module, entry_mode, {});
       if (!linked_graph.ok) {
         for (const amber::build::BuildDiagnostic &diagnostic :
              linked_graph.diagnostics) {
@@ -15413,30 +15602,31 @@ int run_build_command(int argc, char **argv) {
       const std::filesystem::path native_source_path =
           out_dir /
           (safe_artifact_name(parsed.manifest.root_module) + ".native.cpp");
+      const std::vector<amber::pkg::PackageNativeExtension>
+          native_extensions = augment_native_extensions_from_source(
+              parsed.manifest.native_extensions, linked_graph.artifact.module);
       const std::vector<amber::pkg::PackageNativeBlob> native_blobs =
-          collect_native_blobs(parsed.manifest.native_extensions,
-                               manifest_dir.string());
+          collect_native_blobs(native_extensions, manifest_dir.string());
       const NativeExecutableBuildResult native_result = build_native_executable(
-          argv[0], linked_graph.artifact, native_output_path, native_source_path,
-          parsed.manifest.native_extensions, manifest_dir);
+          argv[0], linked_graph.artifact, native_output_path,
+          native_source_path, native_extensions, manifest_dir);
       summary.native_output_path = native_result.output_path;
       summary.native_backend = native_result.backend;
       summary.native_hash = native_result.hash;
       summary.native_launcher_source = native_result.source_path;
       summary.native_cxx = native_result.cxx;
       summary.native_bytecode_trampoline = native_result.uses_bytecode_fallback;
-      summary.native_graph_module_count = linked_graph.artifact.graph_module_count;
+      summary.native_graph_module_count =
+          linked_graph.artifact.graph_module_count;
       summary.native_graph_code_count = native_result.total_code_count;
       summary.native_graph_native_code_count = native_result.native_code_count;
       summary.native_graph_vm_fallback_code_count =
           native_result.vm_callable_code_count;
       summary.native_graph_fallback_code_count =
           native_result.fallback_code_count;
-      summary.native_graph_full_coverage =
-          native_result.full_native_coverage;
+      summary.native_graph_full_coverage = native_result.full_native_coverage;
       summary.native_extensions = amber::pkg::native_extension_metadata(
-          parsed.manifest.native_extensions, native_blobs,
-          native_target_triple());
+          native_extensions, native_blobs, native_target_triple());
       root_record->native_output_path = native_result.output_path;
       root_record->native_hash = native_result.hash;
       root_record->native_backend = native_result.backend;

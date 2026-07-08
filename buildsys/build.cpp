@@ -261,6 +261,588 @@ private:
   std::vector<BuildDiagnostic> diagnostics_;
 };
 
+std::string trim(std::string value) {
+  std::size_t begin = 0;
+  while (begin < value.size() &&
+         std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+    ++begin;
+  }
+  std::size_t end = value.size();
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    --end;
+  }
+  return value.substr(begin, end - begin);
+}
+
+bool yaml_key_char(char c) {
+  return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' ||
+         c == '-' || c == '.';
+}
+
+std::size_t yaml_key_colon(const std::string &text) {
+  bool in_single = false;
+  bool in_double = false;
+  bool escaped = false;
+  int flow_depth = 0;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    if (in_double) {
+      if (escaped) {
+        escaped = false;
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        in_double = false;
+      }
+      continue;
+    }
+    if (in_single) {
+      if (c == '\'') {
+        if (i + 1U < text.size() && text[i + 1U] == '\'') {
+          ++i;
+        } else {
+          in_single = false;
+        }
+      }
+      continue;
+    }
+    if (c == '"') {
+      in_double = true;
+      continue;
+    }
+    if (c == '\'') {
+      in_single = true;
+      continue;
+    }
+    if (c == '[' || c == '{') {
+      ++flow_depth;
+      continue;
+    }
+    if (c == ']' || c == '}') {
+      --flow_depth;
+      continue;
+    }
+    if (c != ':' || flow_depth != 0) {
+      continue;
+    }
+    if (i + 1U < text.size()) {
+      const char next = text[i + 1U];
+      if (std::isspace(static_cast<unsigned char>(next)) == 0 &&
+          next != '[' && next != '{' && next != '"' && next != '\'') {
+        continue;
+      }
+    }
+    const std::string key = trim(text.substr(0, i));
+    if (key.empty()) {
+      continue;
+    }
+    if (key.front() == '"' || key.front() == '\'') {
+      return i;
+    }
+    bool plain_key = true;
+    for (const char key_c : key) {
+      plain_key = plain_key && yaml_key_char(key_c);
+    }
+    if (plain_key) {
+      return i;
+    }
+  }
+  return std::string::npos;
+}
+
+std::vector<std::string> split_flow_items(const std::string &text,
+                                          bool *ok) {
+  std::vector<std::string> items;
+  bool in_single = false;
+  bool in_double = false;
+  bool escaped = false;
+  int flow_depth = 0;
+  std::size_t start = 0;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    if (in_double) {
+      if (escaped) {
+        escaped = false;
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        in_double = false;
+      }
+      continue;
+    }
+    if (in_single) {
+      if (c == '\'') {
+        if (i + 1U < text.size() && text[i + 1U] == '\'') {
+          ++i;
+        } else {
+          in_single = false;
+        }
+      }
+      continue;
+    }
+    if (c == '"') {
+      in_double = true;
+      continue;
+    }
+    if (c == '\'') {
+      in_single = true;
+      continue;
+    }
+    if (c == '[' || c == '{') {
+      ++flow_depth;
+      continue;
+    }
+    if (c == ']' || c == '}') {
+      --flow_depth;
+      if (flow_depth < 0) {
+        *ok = false;
+        return {};
+      }
+      continue;
+    }
+    if (c == ',' && flow_depth == 0) {
+      items.push_back(trim(text.substr(start, i - start)));
+      start = i + 1U;
+    }
+  }
+  if (in_single || in_double || flow_depth != 0) {
+    *ok = false;
+    return {};
+  }
+  items.push_back(trim(text.substr(start)));
+  return items;
+}
+
+class YamlParser {
+public:
+  YamlParser(const std::string &source, std::string path)
+      : source_(source), path_(std::move(path)) {}
+
+  JsonValue parse() {
+    preprocess();
+    if (!ok_) {
+      return {};
+    }
+    if (lines_.empty()) {
+      fail(1, "empty YAML build manifest");
+      return {};
+    }
+    if (lines_.front().indent != 0U) {
+      fail(lines_.front().line_no,
+           "YAML build manifest must start at indentation 0");
+      return {};
+    }
+    JsonValue value = parse_node(lines_.front().indent);
+    if (ok_ && pos_ != lines_.size()) {
+      fail(lines_[pos_].line_no, "unexpected trailing YAML input");
+    }
+    return value;
+  }
+
+  bool ok() const { return ok_; }
+  const std::vector<BuildDiagnostic> &diagnostics() const {
+    return diagnostics_;
+  }
+
+private:
+  struct Line {
+    std::size_t indent = 0;
+    std::string text;
+    std::size_t line_no = 0;
+  };
+
+  void fail(std::size_t line_no, const std::string &message) {
+    if (!ok_) {
+      return;
+    }
+    ok_ = false;
+    std::ostringstream out;
+    out << message << " at line " << line_no;
+    diagnostics_.push_back(diagnostic("BuildManifestError", out.str(), path_));
+  }
+
+  std::string strip_comment(const std::string &line) const {
+    bool in_single = false;
+    bool in_double = false;
+    bool escaped = false;
+    for (std::size_t i = 0; i < line.size(); ++i) {
+      const char c = line[i];
+      if (in_double) {
+        if (escaped) {
+          escaped = false;
+        } else if (c == '\\') {
+          escaped = true;
+        } else if (c == '"') {
+          in_double = false;
+        }
+        continue;
+      }
+      if (in_single) {
+        if (c == '\'') {
+          if (i + 1U < line.size() && line[i + 1U] == '\'') {
+            ++i;
+          } else {
+            in_single = false;
+          }
+        }
+        continue;
+      }
+      if (c == '"') {
+        in_double = true;
+        continue;
+      }
+      if (c == '\'') {
+        in_single = true;
+        continue;
+      }
+      if (c == '#' &&
+          (i == 0U ||
+           std::isspace(static_cast<unsigned char>(line[i - 1U])) != 0)) {
+        return line.substr(0, i);
+      }
+    }
+    return line;
+  }
+
+  void preprocess() {
+    std::istringstream input(source_);
+    std::string line;
+    std::size_t line_no = 0;
+    bool skipped_document_start = false;
+    while (std::getline(input, line)) {
+      ++line_no;
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      std::size_t indent = 0;
+      while (indent < line.size() && line[indent] == ' ') {
+        ++indent;
+      }
+      if (indent < line.size() && line[indent] == '\t') {
+        fail(line_no, "tabs are not valid indentation in YAML build manifests");
+        return;
+      }
+      std::string text = trim(strip_comment(line.substr(indent)));
+      if (text.empty()) {
+        continue;
+      }
+      if (text == "---" && !skipped_document_start && lines_.empty()) {
+        skipped_document_start = true;
+        continue;
+      }
+      if (text == "---" || text == "...") {
+        fail(line_no, "multiple YAML documents are not supported");
+        return;
+      }
+      lines_.push_back({indent, std::move(text), line_no});
+    }
+  }
+
+  bool is_sequence_line(const Line &line) const {
+    return line.text == "-" ||
+           (line.text.size() > 1U && line.text[0] == '-' &&
+            std::isspace(static_cast<unsigned char>(line.text[1])) != 0);
+  }
+
+  bool split_mapping(const std::string &text, std::string *key,
+                     std::string *rest, std::size_t line_no) {
+    const std::size_t colon = yaml_key_colon(text);
+    if (colon == std::string::npos) {
+      fail(line_no, "expected YAML mapping entry");
+      return false;
+    }
+    std::string raw_key = trim(text.substr(0, colon));
+    if (!raw_key.empty() &&
+        (raw_key.front() == '"' || raw_key.front() == '\'')) {
+      JsonValue parsed_key = parse_inline_value(raw_key, line_no);
+      if (!ok_) {
+        return false;
+      }
+      if (parsed_key.kind != JsonValue::Kind::String ||
+          parsed_key.string_value.empty()) {
+        fail(line_no, "YAML mapping key must be a non-empty string");
+        return false;
+      }
+      *key = parsed_key.string_value;
+    } else {
+      *key = raw_key;
+    }
+    *rest = trim(text.substr(colon + 1U));
+    return true;
+  }
+
+  JsonValue parse_node(std::size_t indent) {
+    if (pos_ >= lines_.size()) {
+      return {};
+    }
+    if (lines_[pos_].indent != indent) {
+      fail(lines_[pos_].line_no, "unexpected YAML indentation");
+      return {};
+    }
+    if (is_sequence_line(lines_[pos_])) {
+      return parse_sequence(indent);
+    }
+    return parse_mapping(indent);
+  }
+
+  JsonValue parse_mapping(std::size_t indent) {
+    JsonValue value;
+    value.kind = JsonValue::Kind::Object;
+    while (ok_ && pos_ < lines_.size()) {
+      const Line &line = lines_[pos_];
+      if (line.indent < indent) {
+        break;
+      }
+      if (line.indent > indent) {
+        fail(line.line_no, "unexpected YAML indentation");
+        break;
+      }
+      if (is_sequence_line(line)) {
+        break;
+      }
+      std::string key;
+      std::string rest;
+      if (!split_mapping(line.text, &key, &rest, line.line_no)) {
+        break;
+      }
+      ++pos_;
+      if (rest.empty()) {
+        if (pos_ < lines_.size() && lines_[pos_].indent > indent) {
+          value.object_value[key] = parse_node(lines_[pos_].indent);
+        } else {
+          value.object_value[key] = {};
+        }
+      } else {
+        value.object_value[key] = parse_inline_value(rest, line.line_no);
+      }
+    }
+    return value;
+  }
+
+  JsonValue parse_sequence(std::size_t indent) {
+    JsonValue value;
+    value.kind = JsonValue::Kind::Array;
+    while (ok_ && pos_ < lines_.size()) {
+      const Line &line = lines_[pos_];
+      if (line.indent < indent) {
+        break;
+      }
+      if (line.indent > indent) {
+        fail(line.line_no, "unexpected YAML indentation");
+        break;
+      }
+      if (!is_sequence_line(line)) {
+        break;
+      }
+
+      std::string rest =
+          line.text == "-" ? std::string{} : trim(line.text.substr(1U));
+      if (rest.empty()) {
+        ++pos_;
+        if (pos_ < lines_.size() && lines_[pos_].indent > indent) {
+          value.array_value.push_back(parse_node(lines_[pos_].indent));
+        } else {
+          value.array_value.push_back({});
+        }
+        continue;
+      }
+
+      std::string key;
+      std::string entry_rest;
+      if (yaml_key_colon(rest) != std::string::npos &&
+          split_mapping(rest, &key, &entry_rest, line.line_no)) {
+        JsonValue item;
+        item.kind = JsonValue::Kind::Object;
+        ++pos_;
+        if (entry_rest.empty()) {
+          if (pos_ < lines_.size() && lines_[pos_].indent > indent) {
+            item.object_value[key] = parse_node(lines_[pos_].indent);
+          } else {
+            item.object_value[key] = {};
+          }
+        } else {
+          item.object_value[key] = parse_inline_value(entry_rest, line.line_no);
+        }
+        if (pos_ < lines_.size() && lines_[pos_].indent > indent) {
+          JsonValue extra = parse_node(lines_[pos_].indent);
+          if (extra.kind != JsonValue::Kind::Object) {
+            fail(line.line_no, "YAML sequence mapping item expected a mapping");
+            return value;
+          }
+          item.object_value.insert(extra.object_value.begin(),
+                                   extra.object_value.end());
+        }
+        value.array_value.push_back(std::move(item));
+        continue;
+      }
+
+      value.array_value.push_back(parse_inline_value(rest, line.line_no));
+      ++pos_;
+      if (pos_ < lines_.size() && lines_[pos_].indent > indent) {
+        fail(lines_[pos_].line_no,
+             "YAML scalar sequence item cannot have nested content");
+      }
+    }
+    return value;
+  }
+
+  JsonValue parse_inline_value(const std::string &raw, std::size_t line_no) {
+    const std::string text = trim(raw);
+    if (text.empty() || text == "null" || text == "Null" || text == "NULL" ||
+        text == "~") {
+      return {};
+    }
+    if (text == "true" || text == "True" || text == "TRUE") {
+      JsonValue value;
+      value.kind = JsonValue::Kind::Bool;
+      value.bool_value = true;
+      return value;
+    }
+    if (text == "false" || text == "False" || text == "FALSE") {
+      JsonValue value;
+      value.kind = JsonValue::Kind::Bool;
+      value.bool_value = false;
+      return value;
+    }
+    if (text.front() == '[') {
+      return parse_flow_sequence(text, line_no);
+    }
+    if (text.front() == '{') {
+      return parse_flow_mapping(text, line_no);
+    }
+    if (text.front() == '"' || text.front() == '\'') {
+      return parse_quoted_scalar(text, line_no);
+    }
+    JsonValue value;
+    value.kind = JsonValue::Kind::String;
+    value.string_value = text;
+    return value;
+  }
+
+  JsonValue parse_quoted_scalar(const std::string &text, std::size_t line_no) {
+    JsonValue value;
+    value.kind = JsonValue::Kind::String;
+    const char quote = text.front();
+    std::string out;
+    std::size_t i = 1;
+    for (; i < text.size(); ++i) {
+      const char c = text[i];
+      if (quote == '"' && c == '\\') {
+        if (i + 1U >= text.size()) {
+          fail(line_no, "unterminated YAML escape sequence");
+          return value;
+        }
+        const char escaped = text[++i];
+        switch (escaped) {
+        case '"':
+        case '\\':
+        case '/':
+          out.push_back(escaped);
+          break;
+        case 'n':
+          out.push_back('\n');
+          break;
+        case 'r':
+          out.push_back('\r');
+          break;
+        case 't':
+          out.push_back('\t');
+          break;
+        default:
+          fail(line_no, "unsupported YAML escape sequence");
+          return value;
+        }
+        continue;
+      }
+      if (quote == '\'' && c == '\'' && i + 1U < text.size() &&
+          text[i + 1U] == '\'') {
+        out.push_back('\'');
+        ++i;
+        continue;
+      }
+      if (c == quote) {
+        if (!trim(text.substr(i + 1U)).empty()) {
+          fail(line_no, "unexpected characters after YAML quoted scalar");
+        }
+        value.string_value = std::move(out);
+        return value;
+      }
+      out.push_back(c);
+    }
+    fail(line_no, "unterminated YAML quoted scalar");
+    return value;
+  }
+
+  JsonValue parse_flow_sequence(const std::string &text, std::size_t line_no) {
+    JsonValue value;
+    value.kind = JsonValue::Kind::Array;
+    if (text.size() < 2U || text.back() != ']') {
+      fail(line_no, "unterminated YAML flow sequence");
+      return value;
+    }
+    const std::string inner = trim(text.substr(1U, text.size() - 2U));
+    if (inner.empty()) {
+      return value;
+    }
+    bool ok = true;
+    const std::vector<std::string> items = split_flow_items(inner, &ok);
+    if (!ok) {
+      fail(line_no, "invalid YAML flow sequence");
+      return value;
+    }
+    for (const std::string &item : items) {
+      if (item.empty()) {
+        fail(line_no, "empty YAML flow sequence item");
+        return value;
+      }
+      value.array_value.push_back(parse_inline_value(item, line_no));
+      if (!ok_) {
+        return value;
+      }
+    }
+    return value;
+  }
+
+  JsonValue parse_flow_mapping(const std::string &text, std::size_t line_no) {
+    JsonValue value;
+    value.kind = JsonValue::Kind::Object;
+    if (text.size() < 2U || text.back() != '}') {
+      fail(line_no, "unterminated YAML flow mapping");
+      return value;
+    }
+    const std::string inner = trim(text.substr(1U, text.size() - 2U));
+    if (inner.empty()) {
+      return value;
+    }
+    bool ok = true;
+    const std::vector<std::string> entries = split_flow_items(inner, &ok);
+    if (!ok) {
+      fail(line_no, "invalid YAML flow mapping");
+      return value;
+    }
+    for (const std::string &entry : entries) {
+      std::string key;
+      std::string rest;
+      if (!split_mapping(entry, &key, &rest, line_no)) {
+        return value;
+      }
+      value.object_value[key] = parse_inline_value(rest, line_no);
+      if (!ok_) {
+        return value;
+      }
+    }
+    return value;
+  }
+
+  const std::string &source_;
+  std::string path_;
+  std::vector<Line> lines_;
+  std::size_t pos_ = 0;
+  bool ok_ = true;
+  std::vector<BuildDiagnostic> diagnostics_;
+};
+
 const JsonValue *member(const JsonValue &object, const std::string &key) {
   if (object.kind != JsonValue::Kind::Object) {
     return nullptr;
@@ -437,7 +1019,13 @@ bool read_native_extensions(
     read_string_array_member(item, "defines", &extension.defines);
     read_string_array_member(item, "cxxflags", &extension.cxxflags);
     read_string_array_member(item, "link_libraries", &extension.link_libraries);
-    read_string_array_member(item, "capabilities", &extension.capabilities);
+    if (member(item, "capabilities") != nullptr) {
+      diagnostics->push_back(diagnostic(
+          "BuildManifestError",
+          "native extension 'capabilities' is obsolete; require ffi.v1 in the "
+          "build profile instead",
+          path));
+    }
     if (const JsonValue *symbols = member(item, "symbols")) {
       for (const JsonValue &entry : symbols->array_value) {
         amber::pkg::PackageNativeSymbol symbol;
@@ -484,20 +1072,12 @@ bool read_native_extensions(
   return true;
 }
 
-} // namespace
-
-BuildManifestResult parse_build_manifest_json(const std::string &source,
-                                              const std::string &path) {
+BuildManifestResult manifest_from_value(const JsonValue &root,
+                                        const std::string &path) {
   BuildManifestResult result;
-  JsonParser parser(source, path);
-  const JsonValue root = parser.parse();
-  if (!parser.ok()) {
-    result.diagnostics = parser.diagnostics();
-    return result;
-  }
   if (root.kind != JsonValue::Kind::Object) {
     result.diagnostics.push_back(diagnostic(
-        "BuildManifestError", "amber.build.json root must be an object", path));
+        "BuildManifestError", "build manifest root must be an object", path));
     return result;
   }
 
@@ -636,6 +1216,46 @@ BuildManifestResult parse_build_manifest_json(const std::string &source,
     }
   }
   return result;
+}
+
+} // namespace
+
+BuildManifestResult parse_build_manifest_json(const std::string &source,
+                                              const std::string &path) {
+  BuildManifestResult result;
+  JsonParser parser(source, path);
+  const JsonValue root = parser.parse();
+  if (!parser.ok()) {
+    result.diagnostics = parser.diagnostics();
+    return result;
+  }
+  return manifest_from_value(root, path);
+}
+
+BuildManifestResult parse_build_manifest_yaml(const std::string &source,
+                                              const std::string &path) {
+  BuildManifestResult result;
+  YamlParser parser(source, path);
+  const JsonValue root = parser.parse();
+  if (!parser.ok()) {
+    result.diagnostics = parser.diagnostics();
+    return result;
+  }
+  return manifest_from_value(root, path);
+}
+
+BuildManifestResult parse_build_manifest(const std::string &source,
+                                         const std::string &path) {
+  for (const char c : source) {
+    if (std::isspace(static_cast<unsigned char>(c)) != 0) {
+      continue;
+    }
+    if (c == '{' || c == '[') {
+      return parse_build_manifest_json(source, path);
+    }
+    return parse_build_manifest_yaml(source, path);
+  }
+  return parse_build_manifest_yaml(source, path);
 }
 
 BuildProfileSet normalize_profiles(BuildProfileSet profiles) {

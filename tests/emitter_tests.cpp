@@ -175,6 +175,22 @@ bool contains_string(const amber::bytecode::BcModule &module,
   return false;
 }
 
+bool contains_attr(const amber::bytecode::BcModule &module,
+                   const std::string &key, const std::string &value) {
+  for (const amber::bytecode::AttrEntry &entry : module.attrs) {
+    const std::string attr_key = entry.key_str_id < module.strings.size()
+                                     ? module.strings[entry.key_str_id]
+                                     : std::string();
+    const std::string attr_value = entry.value_str_id < module.strings.size()
+                                       ? module.strings[entry.value_str_id]
+                                       : std::string();
+    if (attr_key == key && attr_value == value) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::string path_constant_text(const amber::bytecode::BcModule &module,
                                std::uint32_t ref_id) {
   expect(ref_id < module.const_pool.size(), "path const ref is in range");
@@ -614,6 +630,27 @@ void test_w13_operator_emission() {
   expect(saw_16, "hex integer canonicalized");
 }
 
+void test_native_source_metadata_emission() {
+  const amber::bytecode::EmitResult emit_result = emit_ok(
+      "package sqlite3\n"
+      "error Sqlite3.Error < NativeError\n"
+      "error Sqlite3.StepError < Sqlite3.Error\n"
+      "native class Conn from \"sqlite3.Conn\" owned:\n"
+      "  def init(path as Str) from \"amsq_conn_open\"\n"
+      "  def destroy!() from \"amsq_conn_free\"\n");
+
+  expect(contains_attr(emit_result.module, "amber.native.type:sqlite3.Conn",
+                       "sqlite3.Conn\towned\tamsq_conn_free"),
+         "native class emits source-contained type metadata");
+  expect(contains_attr(emit_result.module, "amber.native.error:Sqlite3.Error",
+                       "NativeError"),
+         "source error emits native error metadata");
+  expect(contains_attr(emit_result.module,
+                       "amber.native.error:Sqlite3.StepError",
+                       "Sqlite3.Error"),
+         "source error parent metadata");
+}
+
 void test_collection_literal_emission() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("[1, 2]\n"
@@ -1044,6 +1081,7 @@ int main() {
   test_dynamic_pattern_emission();
   test_clause_method_emission();
   test_w13_operator_emission();
+  test_native_source_metadata_emission();
   test_collection_literal_emission();
   test_v20_7_spread_emission();
   test_kernel_watch_emission();

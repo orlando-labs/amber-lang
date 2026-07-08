@@ -748,6 +748,16 @@ public:
       module_.attrs.push_back(
           {intern_string(key), intern_string(record.logical)});
     }
+    for (const NativeTypeRecord &record : native_types_) {
+      const std::string key = "amber.native.type:" + record.amber;
+      const std::string value = record.tag + "\t" + record.ownership + "\t" +
+                                record.destructor;
+      module_.attrs.push_back({intern_string(key), intern_string(value)});
+    }
+    for (const NativeErrorRecord &record : native_errors_) {
+      const std::string key = "amber.native.error:" + record.name;
+      module_.attrs.push_back({intern_string(key), intern_string(record.parent)});
+    }
   }
 
   // amber.numeric-profile.v1: resolve the module numeric profile before any
@@ -1214,6 +1224,9 @@ private:
     const std::string native_tag = bool_field(item, "is_native")
                                        ? string_field(item, "native_binding")
                                        : std::string();
+    const std::string native_ownership =
+        !native_tag.empty() ? string_field(item, "ownership") : std::string();
+    std::string native_destructor;
 
     const ast::ListField *body = list_field(item, "body");
     if (body != nullptr) {
@@ -1225,6 +1238,9 @@ private:
             if (!logical.empty() && !selector.empty()) {
               native_method_bindings_.push_back(
                   {native_tag, selector, logical});
+              if (selector == "destroy!") {
+                native_destructor = logical;
+              }
             }
           }
           module_.methods.push_back(build_method(*member, class_index));
@@ -1237,6 +1253,10 @@ private:
                "unsupported class or mixin body item in bytecode emitter");
         }
       }
+    }
+    if (!native_tag.empty()) {
+      native_types_.push_back({module_name_ + "." + class_name, native_tag,
+                               native_ownership, native_destructor});
     }
 
     klass.method_range_count =
@@ -1269,6 +1289,12 @@ private:
 
       if (item->kind == "HMixin") {
         module_.classes.push_back(build_class_like(*item, true));
+        continue;
+      }
+
+      if (item->kind == "HErrorDecl") {
+        native_errors_.push_back(
+            {string_field(*item, "name"), string_field(*item, "parent")});
         continue;
       }
 
@@ -1480,6 +1506,20 @@ private:
     std::string logical;
   };
   std::vector<NativeMethodBinding> native_method_bindings_;
+
+  struct NativeTypeRecord {
+    std::string amber;
+    std::string tag;
+    std::string ownership;
+    std::string destructor;
+  };
+  std::vector<NativeTypeRecord> native_types_;
+
+  struct NativeErrorRecord {
+    std::string name;
+    std::string parent;
+  };
+  std::vector<NativeErrorRecord> native_errors_;
 
   friend class CodeEmitter;
 };
@@ -4370,6 +4410,11 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
     diag(expr.span, "BC2008",
          "Kernel.watch target is not a watchable binding in this profile");
     return alloc_temp();
+  }
+  if (expr.kind == "HSelf") {
+    const std::uint32_t dst = alloc_temp();
+    emit_instruction(Opcode::LoadSelf, {{dst, false}}, expr.span);
+    return dst;
   }
   if (expr.kind == "HLoadName") {
     return compile_lookup_like(expr, string_field(expr, "name"));

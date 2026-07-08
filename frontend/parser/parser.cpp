@@ -728,6 +728,28 @@ bool token_can_precede_assignment_delimiter(lexer::TokenKind kind) {
   }
 }
 
+bool token_starts_control_expression(lexer::TokenKind kind) {
+  switch (kind) {
+  case lexer::TokenKind::KeywordBreak:
+  case lexer::TokenKind::KeywordCase:
+  case lexer::TokenKind::KeywordCaseBang:
+  case lexer::TokenKind::KeywordCatch:
+  case lexer::TokenKind::KeywordDo:
+  case lexer::TokenKind::KeywordIf:
+  case lexer::TokenKind::KeywordLoop:
+  case lexer::TokenKind::KeywordRaise:
+  case lexer::TokenKind::KeywordReturn:
+  case lexer::TokenKind::KeywordThrow:
+  case lexer::TokenKind::KeywordTry:
+  case lexer::TokenKind::KeywordUnless:
+  case lexer::TokenKind::KeywordUntil:
+  case lexer::TokenKind::KeywordWhile:
+    return true;
+  default:
+    return false;
+  }
+}
+
 int chain_comparison_direction(const std::string &op) {
   if (op == "<" || op == "<=") {
     return -1;
@@ -890,6 +912,13 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
       current().lexeme == "numeric" &&
       peek(1).kind == lexer::TokenKind::Colon) {
     return parse_numeric_directive();
+  }
+
+  if (context == BodyContext::Module &&
+      current().kind == lexer::TokenKind::Identifier &&
+      current().lexeme == "error" &&
+      is_identifier_like_token(peek(1).kind)) {
+    return parse_error_decl();
   }
 
   // `next` is a contextual loop/block control keyword. At statement-leading
@@ -1078,13 +1107,42 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
 
   if (std::unique_ptr<ast::Expr> pattern_assign =
           try_parse_pattern_assignment()) {
-    return pattern_assign;
+    return maybe_postfix_conditional(std::move(pattern_assign));
   }
 
   std::unique_ptr<ast::Expr> expr = parse_expression(1, StopMode::Normal);
   auto stmt = ast::make_expr("AstExprStmt", expr->span);
   stmt->node_field("expr", std::move(expr));
-  return stmt;
+  return maybe_postfix_conditional(std::move(stmt));
+}
+
+std::unique_ptr<ast::Expr>
+Parser::maybe_postfix_conditional(std::unique_ptr<ast::Expr> stmt) {
+  // A simple statement may carry a trailing guard: `STMT if COND` runs the
+  // statement only when COND holds; `STMT unless COND` only when it does not.
+  // Prefix control blocks (`if x:`, `while`, `def`, …) never reach here with a
+  // leading `if`/`unless` still pending, so they are unaffected.
+  if (!check(lexer::TokenKind::KeywordIf) &&
+      !check(lexer::TokenKind::KeywordUnless)) {
+    return stmt;
+  }
+  if (stmt->span.end.line != current().span.start.line) {
+    return stmt;
+  }
+  const lexer::Token keyword = advance();
+  const bool is_unless = keyword.kind == lexer::TokenKind::KeywordUnless;
+  std::unique_ptr<ast::Expr> cond = parse_expression(1, StopMode::Normal);
+  if (cond == nullptr) {
+    cond = ast::make_expr("AstError", keyword.span);
+  }
+  const lexer::Span span = ast::join_spans(stmt->span, cond->span);
+  std::vector<std::unique_ptr<ast::Expr>> then_body;
+  then_body.push_back(std::move(stmt));
+  auto node = ast::make_expr(is_unless ? "AstUnless" : "AstIf", span);
+  node->node_field("cond", std::move(cond));
+  node->list_field("then_body", std::move(then_body));
+  node->list_field("else_body", {});
+  return node;
 }
 
 std::unique_ptr<ast::Expr> Parser::parse_numeric_directive() {
@@ -1153,6 +1211,20 @@ std::unique_ptr<ast::Expr> Parser::parse_numeric_directive() {
                              ast::join_spans(start.span, previous().span));
   node->string_field("int_type", int_type.empty() ? "Int64" : int_type);
   node->string_field("overflow", overflow.empty() ? "checked" : overflow);
+  return node;
+}
+
+std::unique_ptr<ast::Expr> Parser::parse_error_decl() {
+  const lexer::Token start = advance();
+  const std::string name = parse_module_path();
+  std::string parent = "NativeError";
+  if (match(lexer::TokenKind::Less)) {
+    parent = parse_module_path();
+  }
+  auto node =
+      ast::make_expr("AstErrorDecl", ast::join_spans(start.span, previous().span));
+  node->string_field("name", name);
+  node->string_field("parent", parent);
   return node;
 }
 
@@ -2952,6 +3024,10 @@ Parser::parse_control_body(BodyContext context) {
 }
 
 std::unique_ptr<ast::Expr> Parser::try_parse_pattern_assignment() {
+  if (token_starts_control_expression(current().kind)) {
+    return nullptr;
+  }
+
   const std::size_t start_index = current_;
   int bracket_depth = 0;
   std::size_t equal_index = tokens_.size();
@@ -3241,6 +3317,10 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
     }
     const int next_min =
         info.assoc == Assoc::Left ? info.precedence + 1 : info.precedence;
+    int right_min = next_min;
+    if (header_mode && op_token.kind == lexer::TokenKind::Equal) {
+      right_min = 4;
+    }
     bool open_ended_range = false;
     std::unique_ptr<ast::Expr> right;
     if (range_op &&
@@ -3252,7 +3332,7 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
       }
       right = make_null_literal(current_zero_width_span());
     } else {
-      right = parse_expression(next_min, stop_mode);
+      right = parse_expression(right_min, stop_mode);
     }
     const bool range_left_is_float =
         range_op && is_literal_float_expr(*left);

@@ -213,7 +213,6 @@ void test_native_extension_manifest() {
       "sources = [\"native/blake3.c\", \"native/amber_blake3.c\"]\n"
       "include_dirs = [\"native/include\"]\n"
       "cxxflags = [\"-O3\"]\n"
-      "capabilities = [\"ffi\"]\n"
       "\n"
       "[native.symbols]\n"
       "\"blake3.hash\" = \"amber_blake3_hash\"\n"
@@ -243,8 +242,6 @@ void test_native_extension_manifest() {
   expect(ext.include_dirs.size() == 1 && ext.cxxflags.size() == 1 &&
              ext.cxxflags[0] == "-O3",
          "native include_dirs/cxxflags arrays");
-  expect(ext.capabilities.size() == 1 && ext.capabilities[0] == "ffi",
-         "native capabilities array");
   expect(ext.symbols.size() == 2 && ext.symbols[0].logical == "blake3.hash" &&
              ext.symbols[0].symbol == "amber_blake3_hash",
          "symbol map unquotes the logical key");
@@ -328,6 +325,11 @@ void test_native_extension_manifest() {
   amber::pkg::PackageManifestResult orphan = amber::pkg::parse_manifest_toml(
       base + "[native.symbols]\n\"a\" = \"b\"\n", "amber.toml");
   expect(!orphan.ok(), "native.symbols before [[native]] is rejected");
+  amber::pkg::PackageManifestResult native_caps =
+      amber::pkg::parse_manifest_toml(
+          base + "[[native]]\nname = \"x\"\ncapabilities = [\"ffi\"]\n",
+          "amber.toml");
+  expect(!native_caps.ok(), "native extension capabilities are rejected");
 }
 
 int main() {

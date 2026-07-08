@@ -77,10 +77,15 @@ private:
                               const std::string &message);
 
   std::unique_ptr<ast::Expr> parse_statement(BodyContext context);
+  // Wrap a simple statement in a trailing `... if COND` / `... unless COND`
+  // guard when one follows it, reusing the ordinary AstIf / AstUnless nodes.
+  std::unique_ptr<ast::Expr>
+  maybe_postfix_conditional(std::unique_ptr<ast::Expr> stmt);
   std::unique_ptr<ast::Expr> parse_package_decl();
   std::unique_ptr<ast::Expr> parse_import_decl();
   std::unique_ptr<ast::Expr> parse_from_import_decl();
   std::unique_ptr<ast::Expr> parse_export_stmt();
+  std::unique_ptr<ast::Expr> parse_error_decl();
   std::unique_ptr<ast::Expr>
   parse_def_stmt(bool class_method,
                  const lexer::Token *start_override = nullptr,

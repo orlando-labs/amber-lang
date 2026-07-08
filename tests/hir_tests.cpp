@@ -209,16 +209,35 @@ void test_module_def_materializes_callable_binding() {
   expect(method != nullptr && method->kind == "HMethod", "method item exists");
   const std::string method_procedure = string_field(*method, "procedure");
 
-  const amber::ast::Expr *store = list_item(*init->body, "items", 0);
+  // Module function slots are pre-declared to null before any closure is built
+  // (so a def can forward-reference a later def without reading an
+  // uninitialized capture), then assigned their real closure. Find the store
+  // that carries the closure, and the final statement, rather than assuming a
+  // fixed index.
+  const amber::ast::Expr *store = nullptr;
+  const amber::ast::Expr *closure = nullptr;
+  const amber::ast::Expr *call_stmt = nullptr;
+  for (int i = 0;; ++i) {
+    const amber::ast::Expr *item = list_item(*init->body, "items", i);
+    if (item == nullptr) {
+      break;
+    }
+    call_stmt = item;
+    if (store == nullptr && item->kind == "HStoreLocal") {
+      const amber::ast::Expr *expr = node_field(*item, "expr");
+      if (expr != nullptr && expr->kind == "HClosure") {
+        store = item;
+        closure = expr;
+      }
+    }
+  }
   expect(store != nullptr && store->kind == "HStoreLocal",
          "module def initializes function binding");
-  const amber::ast::Expr *closure = node_field(*store, "expr");
   expect(closure != nullptr && closure->kind == "HClosure",
          "module def stores callable closure");
   expect(string_field(*closure, "procedure") == method_procedure,
          "module def closure points at method body");
 
-  const amber::ast::Expr *call_stmt = list_item(*init->body, "items", 2);
   expect(call_stmt != nullptr && call_stmt->kind == "HLastSet",
          "module call remains after def initialization");
   const amber::ast::Expr *call_expr = node_field(*call_stmt, "expr");
@@ -243,11 +262,28 @@ void test_module_def_closure_captures_prior_function() {
       procedure_by_name(program, "__module_init__");
   expect(init != nullptr && init->body != nullptr, "module init exists");
 
-  const amber::ast::Expr *describe_store = list_item(*init->body, "items", 2);
+  // Slots are pre-nulled first, then each def's real closure is stored; find
+  // the closure that captures `tap` (`describe`) rather than a fixed index.
+  const amber::ast::Expr *describe_store = nullptr;
+  const amber::ast::Expr *describe_closure = nullptr;
+  for (int i = 0;; ++i) {
+    const amber::ast::Expr *item = list_item(*init->body, "items", i);
+    if (item == nullptr) {
+      break;
+    }
+    if (item->kind != "HStoreLocal") {
+      continue;
+    }
+    const amber::ast::Expr *expr = node_field(*item, "expr");
+    if (expr != nullptr && expr->kind == "HClosure" &&
+        list_item(*expr, "captures", 0) != nullptr) {
+      describe_store = item;
+      describe_closure = expr;
+      break;
+    }
+  }
   expect(describe_store != nullptr && describe_store->kind == "HStoreLocal",
          "second module def initializes function binding");
-  const amber::ast::Expr *describe_closure =
-      node_field(*describe_store, "expr");
   expect(describe_closure != nullptr && describe_closure->kind == "HClosure",
          "second module def stores callable closure");
   const amber::ast::Expr *capture = list_item(*describe_closure, "captures", 0);
@@ -277,9 +313,24 @@ void test_module_def_closure_captures_self() {
       procedure_by_name(program, "__module_init__");
   expect(init != nullptr && init->body != nullptr, "module init exists");
 
-  const amber::ast::Expr *store = list_item(*init->body, "items", 0);
-  const amber::ast::Expr *closure =
-      store == nullptr ? nullptr : node_field(*store, "expr");
+  // Skip the pre-null slot seeds; find the store that carries the closure.
+  const amber::ast::Expr *store = nullptr;
+  const amber::ast::Expr *closure = nullptr;
+  for (int i = 0;; ++i) {
+    const amber::ast::Expr *item = list_item(*init->body, "items", i);
+    if (item == nullptr) {
+      break;
+    }
+    if (item->kind != "HStoreLocal") {
+      continue;
+    }
+    const amber::ast::Expr *expr = node_field(*item, "expr");
+    if (expr != nullptr && expr->kind == "HClosure") {
+      store = item;
+      closure = expr;
+      break;
+    }
+  }
   expect(closure != nullptr && closure->kind == "HClosure",
          "recursive def stores closure");
   const amber::ast::Expr *capture = list_item(*closure, "captures", 0);
@@ -306,10 +357,26 @@ void test_module_clause_def_materializes_callable_binding() {
       procedure_by_name(program, "__module_init__");
   expect(init != nullptr && init->body != nullptr, "module init exists");
 
-  const amber::ast::Expr *store = list_item(*init->body, "items", 0);
+  // Skip the pre-null slot seeds; find the closure store and the last statement.
+  const amber::ast::Expr *store = nullptr;
+  const amber::ast::Expr *closure = nullptr;
+  const amber::ast::Expr *call_stmt = nullptr;
+  for (int i = 0;; ++i) {
+    const amber::ast::Expr *item = list_item(*init->body, "items", i);
+    if (item == nullptr) {
+      break;
+    }
+    call_stmt = item;
+    if (store == nullptr && item->kind == "HStoreLocal") {
+      const amber::ast::Expr *expr = node_field(*item, "expr");
+      if (expr != nullptr && expr->kind == "HClosure") {
+        store = item;
+        closure = expr;
+      }
+    }
+  }
   expect(store != nullptr && store->kind == "HStoreLocal",
          "module clause def initializes function binding");
-  const amber::ast::Expr *closure = node_field(*store, "expr");
   expect(closure != nullptr && closure->kind == "HClosure",
          "module clause def stores callable closure");
   const amber::ast::Expr *capture = list_item(*closure, "captures", 0);
@@ -318,7 +385,6 @@ void test_module_clause_def_materializes_callable_binding() {
   expect(string_field(*capture, "source_slot") == string_field(*store, "slot"),
          "module clause self capture uses function slot");
 
-  const amber::ast::Expr *call_stmt = list_item(*init->body, "items", 2);
   expect(call_stmt != nullptr && call_stmt->kind == "HLastSet",
          "module clause call remains after initialization");
   const amber::hir::Procedure *function =

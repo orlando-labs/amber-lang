@@ -279,6 +279,16 @@ bool value_equals(const Value &lhs, const Value &rhs) {
     return lhs.as_native_error_class().error_id ==
            rhs.as_native_error_class().error_id;
   }
+  if (lhs.is_native_error_namespace()) {
+    const std::shared_ptr<NativeErrorNamespaceValue> left =
+        lhs.as_native_error_namespace();
+    const std::shared_ptr<NativeErrorNamespaceValue> right =
+        rhs.as_native_error_namespace();
+    if (left == right) {
+      return true;
+    }
+    return left != nullptr && right != nullptr && left->path == right->path;
+  }
   if (lhs.is_error_instance()) {
     const std::shared_ptr<ErrorInstanceValue> left = lhs.as_error_instance();
     const std::shared_ptr<ErrorInstanceValue> right = rhs.as_error_instance();
@@ -657,7 +667,8 @@ map_value_find_entry_index(const MapValue &map, const Value &lookup_key,
       const auto found = map.name_index.find(*lookup_id);
       if (found != map.name_index.end() && found->second < map.entries.size()) {
         const MapEntry &entry = map.entries[found->second];
-        if (map_entry_key_equivalent(entry, lookup_key, lookup_id, map.strict)) {
+        if (map_entry_key_equivalent(entry, lookup_key, lookup_id,
+                                     map.strict)) {
           return found->second;
         }
       }
@@ -687,9 +698,9 @@ map_value_find_entry_index(const MapValue &map, const Value &lookup_key,
   return std::nullopt;
 }
 
-const MapEntry *
-map_value_find_entry(const MapValue &map, const Value &lookup_key,
-                     std::optional<std::uint32_t> lookup_id) {
+const MapEntry *map_value_find_entry(const MapValue &map,
+                                     const Value &lookup_key,
+                                     std::optional<std::uint32_t> lookup_id) {
   const std::optional<std::size_t> index =
       map_value_find_entry_index(map, lookup_key, lookup_id);
   if (!index.has_value()) {
@@ -733,8 +744,7 @@ void map_value_upsert_entry(MapValue *map, MapEntry entry) {
     }
   }
   auto existing = std::find_if(
-      map->entries.begin(), map->entries.end(),
-      [&](const MapEntry &candidate) {
+      map->entries.begin(), map->entries.end(), [&](const MapEntry &candidate) {
         return map_entries_same_key(candidate, entry, map->strict);
       });
   if (existing != map->entries.end()) {

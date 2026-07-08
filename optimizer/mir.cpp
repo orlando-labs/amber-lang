@@ -313,6 +313,9 @@ private:
                 {}, expr.span);
       return compiled;
     }
+    if (expr.kind == "HSelf") {
+      return emit_value("self", {}, {}, expr.span);
+    }
     if (expr.kind == "HLoadName") {
       return emit_value("name.lookup", {},
                         {attr("name", string_field(expr, "name"))}, expr.span);

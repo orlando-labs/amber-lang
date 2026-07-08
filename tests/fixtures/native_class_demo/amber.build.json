@@ -15,7 +15,6 @@
       "name": "box",
       "language": "c",
       "sources": ["native/box.c"],
-      "capabilities": ["ffi"],
       "symbols": [
         {"logical": "box.box_new", "symbol": "box_box_new"},
         {"logical": "box.box_bump", "symbol": "box_box_bump"},

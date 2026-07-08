@@ -99,6 +99,10 @@ struct BuildSummary {
 
 BuildManifestResult parse_build_manifest_json(const std::string &source,
                                               const std::string &path = {});
+BuildManifestResult parse_build_manifest_yaml(const std::string &source,
+                                              const std::string &path = {});
+BuildManifestResult parse_build_manifest(const std::string &source,
+                                         const std::string &path = {});
 
 BuildProfileSet normalize_profiles(BuildProfileSet profiles);
 std::uint32_t profile_flags_for(const BuildProfileSet &profiles);

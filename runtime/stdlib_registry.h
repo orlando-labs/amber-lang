@@ -178,8 +178,9 @@ public:
   // Guard against operations that can suspend while evaluating property arms.
   // The VM owns the frame/property-arm state; stdlib handlers only name the
   // operation they are about to perform.
-  virtual bool stdlib_block_suspension_in_property_arm(
-      const void *frame, const std::string &context) = 0;
+  virtual bool
+  stdlib_block_suspension_in_property_arm(const void *frame,
+                                          const std::string &context) = 0;
 
   // Raise the host-owned non-local stop used by Json stream/path APIs.
   virtual void stdlib_throw_json_stop(const void *frame,
@@ -842,8 +843,7 @@ private:
   std::unordered_map<std::string, void *> native_package_thunks_;
   std::unordered_map<std::uint32_t, RuntimeNativePackageCodeBindingDescriptor>
       native_package_code_bindings_;
-  std::unordered_map<std::string, std::string>
-      native_package_method_bindings_;
+  std::unordered_map<std::string, std::string> native_package_method_bindings_;
 };
 
 class RuntimeErrorRegistry {
@@ -859,6 +859,7 @@ public:
                  std::uint32_t field_mask = 0);
 
   std::optional<std::uint16_t> error_id(const std::string &name) const;
+  bool has_error_namespace(const std::string &name) const;
   const char *error_name(std::uint16_t error_id) const;
   bool error_is_a(std::uint16_t error_id,
                   std::uint16_t ancestor_error_id) const;
@@ -1029,11 +1030,9 @@ void register_benchmark_runtime_module(RuntimeModuleRegistry &modules,
                                        RuntimeTypeRegistry &types,
                                        RuntimeErrorRegistry *errors = nullptr);
 void register_secure_random(NativeRegistry &registry);
-void register_secure_random_runtime_module(RuntimeModuleRegistry &modules,
-                                           RuntimeDispatchRegistry &dispatch,
-                                           RuntimeTypeRegistry &types,
-                                           RuntimeErrorRegistry *errors =
-                                               nullptr);
+void register_secure_random_runtime_module(
+    RuntimeModuleRegistry &modules, RuntimeDispatchRegistry &dispatch,
+    RuntimeTypeRegistry &types, RuntimeErrorRegistry *errors = nullptr);
 void register_argparser(NativeRegistry &registry);
 void register_argparser_runtime_module(RuntimeModuleRegistry &modules,
                                        RuntimeDispatchRegistry &dispatch,

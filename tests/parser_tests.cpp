@@ -1477,6 +1477,26 @@ void test_native_packages() {
     expect(!has_bool_field(def, "is_native"),
            "a plain def carries no is_native marker");
   }
+
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "error Sqlite3.Error < NativeError\n"
+        "error Sqlite3.StepError < Sqlite3.Error\n");
+    expect(module.ok(), "error declarations parse");
+    expect(module.items.size() == 2, "error declarations yield items");
+    expect(module.items[0]->kind == "AstErrorDecl", "error decl kind");
+    expect(string_field(*module.items[0], "name") == "Sqlite3.Error",
+           "error decl name");
+    expect(string_field(*module.items[0], "parent") == "NativeError",
+           "error decl parent");
+    expect(string_field(*module.items[1], "parent") == "Sqlite3.Error",
+           "dotted error parent");
+
+    amber::parser::ParseModuleResult error_assign =
+        parse_module_raw("error = 1\n");
+    expect(error_assign.ok() && error_assign.items[0]->kind != "AstErrorDecl",
+           "error remains contextual");
+  }
 }
 
 void test_macro_def_surface() {

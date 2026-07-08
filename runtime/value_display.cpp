@@ -278,6 +278,13 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_native_error_class()) {
     return runtime_error_name(value.as_native_error_class().error_id);
   }
+  if (value.is_native_error_namespace()) {
+    const std::shared_ptr<NativeErrorNamespaceValue> namespace_value =
+        value.as_native_error_namespace();
+    return namespace_value == nullptr
+               ? "<error namespace null>"
+               : "<error namespace " + namespace_value->path + ">";
+  }
   if (value.is_error_instance()) {
     const std::shared_ptr<ErrorInstanceValue> error_instance =
         value.as_error_instance();
@@ -659,6 +666,13 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   }
   if (value.is_native_error_class()) {
     return runtime_error_name(value.as_native_error_class().error_id);
+  }
+  if (value.is_native_error_namespace()) {
+    const std::shared_ptr<NativeErrorNamespaceValue> namespace_value =
+        value.as_native_error_namespace();
+    return namespace_value == nullptr
+               ? "<error namespace null>"
+               : "<error namespace " + namespace_value->path + ">";
   }
   if (value.is_error_instance()) {
     const std::shared_ptr<ErrorInstanceValue> error_instance =

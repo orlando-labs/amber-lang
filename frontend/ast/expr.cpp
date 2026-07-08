@@ -1,7 +1,10 @@
 #include "frontend/ast/expr.h"
 
 #include <iomanip>
+#include <iterator>
+#include <map>
 #include <sstream>
+#include <utility>
 
 namespace amber::ast {
 namespace {
@@ -402,12 +405,208 @@ void expand_quotes_in(std::unique_ptr<Expr> &slot) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Namespace-call desugaring: rewrite `M.member(...)` (where `M` is a
+// module import alias, `import M`) into a reference to `member` imported from
+// `M`. This reuses the existing `from M import member` linkage (the loader
+// populates a module-init local slot for it), so a user module's exported
+// functions/classes are callable through the namespace form the API design
+// prefers (`sqlite3.open(...)`) in addition to `from sqlite3 import open`.
+//
+// Native-prelude namespaces (`task`, `io`, `net`, `net.http*`) are excluded:
+// they resolve to runtime constants and already answer selector sends, so they
+// must not be rewritten into from-imports.
+
+const std::string *find_string_field(const Expr &node,
+                                      const std::string &name) {
+  for (const StringField &field : node.string_fields) {
+    if (field.name == name) {
+      return &field.value;
+    }
+  }
+  return nullptr;
+}
+
+void set_string_field(Expr &node, const std::string &name,
+                      const std::string &value) {
+  for (StringField &field : node.string_fields) {
+    if (field.name == name) {
+      field.value = value;
+      return;
+    }
+  }
+  node.string_field(name, value);
+}
+
+ListField *find_list_field(Expr &node, const std::string &name) {
+  for (ListField &field : node.list_fields) {
+    if (field.name == name) {
+      return &field;
+    }
+  }
+  return nullptr;
+}
+
+Expr *find_node_field(Expr &node, const std::string &name) {
+  for (NodeField &field : node.node_fields) {
+    if (field.name == name) {
+      return field.value.get();
+    }
+  }
+  return nullptr;
+}
+
+std::string last_path_segment_of(const std::string &path) {
+  const std::size_t dot = path.rfind('.');
+  return dot == std::string::npos ? path : path.substr(dot + 1);
+}
+
+bool is_native_prelude_namespace(const std::string &module_path) {
+  return module_path == "task" || module_path == "task.flow" ||
+         module_path == "io" || module_path == "net" ||
+         module_path == "net.http" || module_path == "net.http.json" ||
+         module_path == "net.http.form";
+}
+
+std::string sanitize_ns_ident(const std::string &raw) {
+  std::string out;
+  out.reserve(raw.size());
+  for (char c : raw) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_';
+    out.push_back(ok ? c : '_');
+  }
+  return out;
+}
+
+struct NsDesugarState {
+  // alias name -> module path, for `import M` (user modules only).
+  std::map<std::string, std::string> aliases;
+  // synthetic local name -> (module_path, member) to inject as a from-import.
+  std::map<std::string, std::pair<std::string, std::string>> injects;
+};
+
+void rewrite_namespace_calls_in(std::unique_ptr<Expr> &slot,
+                                NsDesugarState &state) {
+  if (!slot) {
+    return;
+  }
+  if (slot->kind == "AstPostfixChain" && !state.aliases.empty()) {
+    Expr *base = find_node_field(*slot, "base");
+    ListField *tails = find_list_field(*slot, "tails");
+    if (base != nullptr && base->kind == "AstName" && tails != nullptr &&
+        !tails->values.empty() && tails->values.front() != nullptr &&
+        tails->values.front()->kind == "AstTailDotMember") {
+      const std::string *base_name = find_string_field(*base, "name");
+      const auto alias_it =
+          base_name == nullptr ? state.aliases.end()
+                               : state.aliases.find(*base_name);
+      if (alias_it != state.aliases.end()) {
+        const Expr &member_tail = *tails->values.front();
+        const std::string *member = find_string_field(member_tail, "name");
+        if (member != nullptr && !member->empty()) {
+          const std::string synthetic = "__amber_ns__" +
+                                        sanitize_ns_ident(alias_it->first) +
+                                        "__" + sanitize_ns_ident(*member);
+          state.injects[synthetic] = {alias_it->second, *member};
+          set_string_field(*base, "name", synthetic);
+          tails->values.erase(tails->values.begin());
+        }
+      }
+    }
+  }
+  for (NodeField &field : slot->node_fields) {
+    rewrite_namespace_calls_in(field.value, state);
+  }
+  for (ListField &field : slot->list_fields) {
+    for (std::unique_ptr<Expr> &child : field.values) {
+      rewrite_namespace_calls_in(child, state);
+    }
+  }
+}
+
+std::unique_ptr<Expr> make_from_import(const std::string &module_path,
+                                       const std::string &source_name,
+                                       const std::string &local_name,
+                                       const lexer::Span &span) {
+  auto name = make_expr("AstImportName", span);
+  name->string_field("source_name", source_name);
+  name->string_field("local_name", local_name);
+  std::vector<std::unique_ptr<Expr>> names;
+  names.push_back(std::move(name));
+
+  auto node = make_expr("AstImportStmt", span);
+  node->string_field("import_kind", "from");
+  node->string_field("module_path", module_path);
+  node->string_field("alias", "");
+  node->list_field("names", std::move(names));
+  return node;
+}
+
+void desugar_module_namespace_calls(std::vector<std::unique_ptr<Expr>> &items) {
+  NsDesugarState state;
+  for (const std::unique_ptr<Expr> &item : items) {
+    if (!item || item->kind != "AstImportStmt") {
+      continue;
+    }
+    const std::string *import_kind = find_string_field(*item, "import_kind");
+    if (import_kind == nullptr || *import_kind != "module") {
+      continue;
+    }
+    const std::string *module_path = find_string_field(*item, "module_path");
+    if (module_path == nullptr || module_path->empty() ||
+        is_native_prelude_namespace(*module_path)) {
+      continue;
+    }
+    const std::string *alias = find_string_field(*item, "alias");
+    const std::string local = (alias != nullptr && !alias->empty())
+                                  ? *alias
+                                  : last_path_segment_of(*module_path);
+    if (!local.empty()) {
+      state.aliases[local] = *module_path;
+    }
+  }
+  if (state.aliases.empty()) {
+    return;
+  }
+
+  for (std::unique_ptr<Expr> &item : items) {
+    rewrite_namespace_calls_in(item, state);
+  }
+  if (state.injects.empty()) {
+    return;
+  }
+
+  // Insert the synthetic from-imports just after the leading run of package /
+  // import statements so they sit with the other imports.
+  std::size_t insert_at = 0;
+  while (insert_at < items.size() && items[insert_at] != nullptr &&
+         (items[insert_at]->kind == "AstPackageDecl" ||
+          items[insert_at]->kind == "AstImportStmt")) {
+    ++insert_at;
+  }
+  const lexer::Span span =
+      items.empty() || items.front() == nullptr ? lexer::Span{} : items[0]->span;
+  std::vector<std::unique_ptr<Expr>> injected;
+  injected.reserve(state.injects.size());
+  for (const auto &entry : state.injects) {
+    injected.push_back(make_from_import(entry.second.first, entry.second.second,
+                                        entry.first, span));
+  }
+  items.insert(items.begin() + static_cast<std::ptrdiff_t>(insert_at),
+               std::make_move_iterator(injected.begin()),
+               std::make_move_iterator(injected.end()));
+}
+
 } // namespace
 
 void expand_quotes(std::vector<std::unique_ptr<Expr>> &items) {
   for (std::unique_ptr<Expr> &item : items) {
     expand_quotes_in(item);
   }
+  // Runs in the same post-parse / pre-bind phase as quote expansion; harmless
+  // (no-op) for modules that use no `M.member` namespace calls.
+  desugar_module_namespace_calls(items);
 }
 
 std::string ast_module_to_json(const Expr &expr,

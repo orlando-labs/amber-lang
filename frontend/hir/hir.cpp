@@ -171,6 +171,11 @@ bool binding_is_property(const binder::Binding &binding) {
   return binding.role == "property" || binding.role == "class_property";
 }
 
+bool binding_is_member(const binder::Binding &binding) {
+  return binding.role == "method" || binding.role == "class_method" ||
+         binding.role == "property" || binding.role == "class_property";
+}
+
 bool ast_is_property_decl(const ast::Expr &item) {
   return item.kind == "AstPropDef" || item.kind == "AstClassPropDef" ||
          item.kind == "AstAttrDef";
@@ -551,7 +556,8 @@ private:
            item.kind != "AstExportStmt" && item.kind != "AstClassDef" &&
            item.kind != "AstMixinDef" && item.kind != "AstDefStmt" &&
            item.kind != "AstClassMethodDef" && item.kind != "AstClauseDef" &&
-           item.kind != "AstNumericProfile" && !ast_is_property_decl(item);
+           item.kind != "AstErrorDecl" && item.kind != "AstNumericProfile" &&
+           !ast_is_property_decl(item);
   }
 
   bool is_module_callable_decl(const ast::Expr &item) const {
@@ -733,6 +739,30 @@ private:
     std::vector<std::unique_ptr<Node>> lowered_exec_items =
         std::move(items->values);
     std::vector<std::unique_ptr<Node>> reordered;
+
+    // Pre-declare every module function slot (initialized to null) before any
+    // function closure is built below. A module function whose body references
+    // a function defined later captures that later function's slot as an
+    // upvalue when its closure is created; without a prior definite store the
+    // capture would read an uninitialized register (verifier BC1313), which
+    // barred forward references and mutual recursion between module-level
+    // functions. Upvalues are shared cells, so storing the real closure in the
+    // main pass below updates the captured upvalue, and the reference resolves
+    // to the real function at call time.
+    for (const std::unique_ptr<ast::Expr> &item : items_) {
+      if (item == nullptr || !is_module_callable_decl(*item)) {
+        continue;
+      }
+      const std::string slot = module_local_slot_for_decl(*procedure, *item);
+      if (slot.empty()) {
+        continue;
+      }
+      auto store = make_node("HStoreLocal", item->span);
+      store->string_field("slot", slot);
+      store->node_field("expr", make_null_const(item->span));
+      reordered.push_back(std::move(store));
+    }
+
     std::size_t exec_index = 0;
     for (const std::unique_ptr<ast::Expr> &item : items_) {
       if (item == nullptr) {
@@ -826,7 +856,8 @@ private:
     for (const std::unique_ptr<ast::Expr> &item : items_) {
       if (item->kind == "AstClassDef" || item->kind == "AstMixinDef" ||
           item->kind == "AstDefStmt" || item->kind == "AstClassMethodDef" ||
-          item->kind == "AstClauseDef" || ast_is_property_decl(*item)) {
+          item->kind == "AstClauseDef" || item->kind == "AstErrorDecl" ||
+          ast_is_property_decl(*item)) {
         append_lowered_item_decls(&nodes, *item, "module");
       }
     }
@@ -879,6 +910,12 @@ private:
     }
     if (item.kind == "AstMixinDef") {
       return lower_class_like(item, "HMixin");
+    }
+    if (item.kind == "AstErrorDecl") {
+      auto node = make_node("HErrorDecl", item.span);
+      node->string_field("name", string_value(item, "name"));
+      node->string_field("parent", string_value(item, "parent"));
+      return node;
     }
     if (item.kind == "AstDefStmt" || item.kind == "AstClassMethodDef") {
       const std::string method_dispatch_side =
@@ -2064,6 +2101,14 @@ private:
 
   std::unique_ptr<Node> lower_name(const ast::Expr &expr,
                                    const std::string &ref_kind) {
+    // `self` is the current method receiver as a first-class value. It is not an
+    // ordinary binding (a bare name would lower to a name/const lookup that
+    // cannot be resolved), so load it directly from the frame. This makes both
+    // the receiver form (`self.method()`) and the value form (`f(self)`,
+    // `blk(self)`) work; outside a method the frame self is null.
+    if (string_value(expr, "name") == "self") {
+      return make_node("HSelf", expr.span);
+    }
     const binder::Reference *ref =
         find_reference(expr.span, string_value(expr, "name"), ref_kind);
     if (ref == nullptr || !ref->resolved) {
@@ -2092,6 +2137,15 @@ private:
         return node;
       }
     }
+    if (binding_is_object_member(binding)) {
+      auto node = make_node("HSend", expr.span);
+      node->node_field("receiver", make_node("HSelf", expr.span));
+      node->string_field("selector", binding.name);
+      node->bool_field("property_access", true);
+      node->list_field("pos_args", {});
+      node->list_field("kw_args", {});
+      return node;
+    }
     const std::string slot = slot_for_binding(binding.id);
     if (!slot.empty()) {
       auto node = make_node("HLoadLocal", expr.span);
@@ -2109,6 +2163,27 @@ private:
     if (!capture_slot.empty()) {
       auto node = make_node("HLoadCapture", expr.span);
       node->string_field("slot", capture_slot);
+      if (binding_is_property(binding)) {
+        auto call = make_node("HCall", expr.span);
+        call->node_field("callable", std::move(node));
+        call->list_field("pos_args", {});
+        call->list_field("kw_args", {});
+        return call;
+      }
+      return node;
+    }
+    if (binding.role == "function" || binding.role == "property") {
+      // A module-level function/property referenced from a nested scope (e.g. a
+      // method body) has no local slot or capture here. Emit a module-qualified
+      // constant path so the runtime resolves it against the owning module's
+      // persisted binding (module_bindings). A bare name would lower to a
+      // single-segment LOOKUP_CONST that carries no module context and cannot be
+      // resolved once multiple modules are linked in the native whole-graph
+      // merge (it would fault as an unknown class path). Same-module functions
+      // referenced from module scope keep their local-slot/capture lowering
+      // above; only the cross-scope fallback needs qualifying.
+      auto node = make_node("HLoadConst", expr.span);
+      node->string_field("path", module_name_ + "." + binding.name);
       if (binding_is_property(binding)) {
         auto call = make_node("HCall", expr.span);
         call->node_field("callable", std::move(node));
@@ -2345,6 +2420,17 @@ private:
         std::vector<std::unique_ptr<Node>> pos_args;
         std::vector<std::unique_ptr<Node>> kw_args;
         std::unique_ptr<Node> block;
+        if (!safe && tail.kind == "AstTailCall" && i == 0 &&
+            implicit_receiver_member_binding(*base) != nullptr) {
+          if (i + 1 < tail_count &&
+              tails->values[i + 1]->kind == "AstTailBlockSuffix") {
+            block = lower_block_suffix(*tails->values[i + 1]);
+            ++i;
+          }
+          current = lower_implicit_receiver_send(*base, tail, std::move(block));
+          ++i;
+          continue;
+        }
         collect_call_args(tail, &pos_args, &kw_args, &block);
         if (i + 1 < tail_count &&
             tails->values[i + 1]->kind == "AstTailBlockSuffix") {
@@ -2410,6 +2496,55 @@ private:
     }
 
     return current;
+  }
+
+  const binder::Binding *
+  implicit_receiver_member_binding(const ast::Expr &base) const {
+    if (base.kind != "AstName") {
+      return nullptr;
+    }
+    const std::string name = string_value(base, "name");
+    if (name == "self") {
+      return nullptr;
+    }
+    const binder::Reference *ref = find_reference(base.span, name, "name");
+    if (ref == nullptr || !ref->resolved) {
+      return nullptr;
+    }
+    const binder::Binding *binding = binding_for_id(ref->binding_id);
+    return binding != nullptr && binding_is_object_member(*binding) ? binding
+                                                                    : nullptr;
+  }
+
+  bool binding_is_object_member(const binder::Binding &binding) const {
+    if (!binding_is_member(binding) || binding.scope_index < 0 ||
+        static_cast<std::size_t>(binding.scope_index) >=
+            graph_.scopes.size()) {
+      return false;
+    }
+    const std::string &scope_kind = graph_.scopes[binding.scope_index].kind;
+    return scope_kind == "class" || scope_kind == "mixin";
+  }
+
+  std::unique_ptr<Node> lower_implicit_receiver_send(
+      const ast::Expr &base, const ast::Expr &tail,
+      std::unique_ptr<Node> block = nullptr) {
+    const binder::Binding *binding = implicit_receiver_member_binding(base);
+    if (binding == nullptr) {
+      return nullptr;
+    }
+    std::vector<std::unique_ptr<Node>> pos_args;
+    std::vector<std::unique_ptr<Node>> kw_args;
+    collect_call_args(tail, &pos_args, &kw_args, &block);
+    auto node = make_node("HSend", ast::join_spans(base.span, tail.span));
+    node->node_field("receiver", make_node("HSelf", base.span));
+    node->string_field("selector", binding->name);
+    node->list_field("pos_args", std::move(pos_args));
+    node->list_field("kw_args", std::move(kw_args));
+    if (block) {
+      node->node_field("block", std::move(block));
+    }
+    return node;
   }
 
   bool is_builtin_send_base(const ast::Expr &base) const {

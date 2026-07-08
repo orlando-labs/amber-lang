@@ -17,7 +17,6 @@
       "language": "c",
       "sources": ["native/ops.c"],
       "headers": ["native/ops.h"],
-      "capabilities": ["ffi"],
       "symbols": [
         {"logical": "dep.doubled", "symbol": "amber_dep_doubled"}
       ]

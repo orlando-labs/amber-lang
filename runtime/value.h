@@ -283,6 +283,10 @@ struct NativeErrorClassValue {
   std::uint16_t error_id = 0;
 };
 
+struct NativeErrorNamespaceValue {
+  std::string path;
+};
+
 // Arbitrary-precision integer per amber.numeric-profile.v1: explicit BigInt
 // values only; fixed-width Int arithmetic never promotes into this type.
 // Canonical form: little-endian base-2^64 magnitude with no trailing zero
@@ -396,6 +400,9 @@ struct RuntimeForeignHandle {
 #define AMBER_VALUE_TAIL_KINDS(X)                                              \
   X(error_instance, is_error_instance, as_error_instance, ErrorInstanceValue,  \
     ErrorInstance)                                                             \
+  X(native_error_namespace, is_native_error_namespace,                         \
+    as_native_error_namespace, NativeErrorNamespaceValue,                      \
+    NativeErrorNamespace)                                                      \
   X(big_int, is_big_int, as_big_int, BigIntValue, BigInt)                      \
   X(task_module, is_task_module, as_task_module, RuntimeTaskModule,            \
     TaskModule)                                                                \
@@ -436,10 +443,11 @@ struct Value {
       IntrusivePtr<ListValue>, IntrusivePtr<TupleValue>, IntrusivePtr<SetValue>,
       IntrusivePtr<MapValue>, NativeTypeValue, NativeFunctionValue,
       NativeErrorClassValue, std::shared_ptr<ErrorInstanceValue>,
-      std::shared_ptr<BigIntValue>, std::shared_ptr<RuntimeTaskModule>,
-      std::shared_ptr<RuntimeTaskHandle>, std::shared_ptr<RuntimeChannel>,
-      std::shared_ptr<RuntimeMutex>, std::shared_ptr<RuntimeAtomic>,
-      std::shared_ptr<RuntimeBarrier>, std::shared_ptr<RuntimeFlowModule>,
+      std::shared_ptr<NativeErrorNamespaceValue>, std::shared_ptr<BigIntValue>,
+      std::shared_ptr<RuntimeTaskModule>, std::shared_ptr<RuntimeTaskHandle>,
+      std::shared_ptr<RuntimeChannel>, std::shared_ptr<RuntimeMutex>,
+      std::shared_ptr<RuntimeAtomic>, std::shared_ptr<RuntimeBarrier>,
+      std::shared_ptr<RuntimeFlowModule>,
       std::shared_ptr<RuntimeThreadedCollection>,
       std::shared_ptr<RuntimeTextWriter>, std::shared_ptr<RuntimeLogger>,
       std::shared_ptr<RuntimeIoValue>, std::shared_ptr<RuntimeWatchCell>,
@@ -447,8 +455,7 @@ struct Value {
       std::shared_ptr<RuntimeArgParserValue>, std::shared_ptr<RuntimeTimeValue>,
       std::shared_ptr<RuntimeTimePeriodValue>,
       std::shared_ptr<RuntimeUuidValue>, std::shared_ptr<RuntimeForeignHandle>,
-      std::shared_ptr<RuntimeAstNode>,
-      std::shared_ptr<RuntimeTimeZoneValue>>;
+      std::shared_ptr<RuntimeAstNode>, std::shared_ptr<RuntimeTimeZoneValue>>;
 
   Payload payload;
 
@@ -469,6 +476,8 @@ struct Value {
   static Value native_function(RuntimeNativeFunctionKind kind);
   static Value native_error_class(std::uint16_t error_id);
   static Value error_instance(std::shared_ptr<ErrorInstanceValue> value);
+  static Value
+  native_error_namespace(std::shared_ptr<NativeErrorNamespaceValue> value);
   static Value big_int(std::shared_ptr<BigIntValue> value);
   static Value task_module(std::shared_ptr<RuntimeTaskModule> value);
   static Value task_handle(std::shared_ptr<RuntimeTaskHandle> value);
@@ -510,6 +519,7 @@ struct Value {
   bool is_native_function() const;
   bool is_native_error_class() const;
   bool is_error_instance() const;
+  bool is_native_error_namespace() const;
   bool is_big_int() const;
   bool is_task_module() const;
   bool is_task_handle() const;
@@ -549,6 +559,7 @@ struct Value {
   NativeFunctionValue as_native_function() const;
   NativeErrorClassValue as_native_error_class() const;
   std::shared_ptr<ErrorInstanceValue> as_error_instance() const;
+  std::shared_ptr<NativeErrorNamespaceValue> as_native_error_namespace() const;
   std::shared_ptr<BigIntValue> as_big_int() const;
   std::shared_ptr<RuntimeTaskModule> as_task_module() const;
   std::shared_ptr<RuntimeTaskHandle> as_task_handle() const;
@@ -612,6 +623,7 @@ enum class ValueTag : std::uint8_t {
 
 enum class ValueTailKind : std::uint8_t {
   ErrorInstance,
+  NativeErrorNamespace,
   BigInt,
   TaskModule,
   TaskHandle,
@@ -663,6 +675,8 @@ struct Value {
   static Value native_function(RuntimeNativeFunctionKind kind);
   static Value native_error_class(std::uint16_t error_id);
   static Value error_instance(std::shared_ptr<ErrorInstanceValue> value);
+  static Value
+  native_error_namespace(std::shared_ptr<NativeErrorNamespaceValue> value);
   static Value big_int(std::shared_ptr<BigIntValue> value);
   static Value task_module(std::shared_ptr<RuntimeTaskModule> value);
   static Value task_handle(std::shared_ptr<RuntimeTaskHandle> value);
@@ -704,6 +718,7 @@ struct Value {
   bool is_native_function() const;
   bool is_native_error_class() const;
   bool is_error_instance() const;
+  bool is_native_error_namespace() const;
   bool is_big_int() const;
   bool is_task_module() const;
   bool is_task_handle() const;
@@ -743,6 +758,7 @@ struct Value {
   NativeFunctionValue as_native_function() const;
   NativeErrorClassValue as_native_error_class() const;
   std::shared_ptr<ErrorInstanceValue> as_error_instance() const;
+  std::shared_ptr<NativeErrorNamespaceValue> as_native_error_namespace() const;
   std::shared_ptr<BigIntValue> as_big_int() const;
   std::shared_ptr<RuntimeTaskModule> as_task_module() const;
   std::shared_ptr<RuntimeTaskHandle> as_task_handle() const;

@@ -1,19 +1,19 @@
-; amber.bc.v1 sha256=ce86363f954e0a2b22c4a135064e44b872bbf708194b5aa62f62da937629888d
+; amber.bc.v1 sha256=72b5c54834c5629463a910a20747c48cac7a81c529c0e9858c93227dd0526c14
 .header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
 .sections
   STRS offset=368 size=95 align=1 flags=0
   SYMS offset=463 size=119 align=1 flags=0
   KONS offset=582 size=62 align=1 flags=0
-  CODE offset=644 size=686 align=1 flags=0
-  METH offset=1330 size=68 align=1 flags=0
-  CLAS offset=1398 size=4 align=1 flags=0
-  DEPS offset=1402 size=4 align=1 flags=0
-  EXPT offset=1406 size=4 align=1 flags=0
-  INIT offset=1410 size=9 align=1 flags=0
-  PATS offset=1419 size=28 align=1 flags=0
-  SPAN offset=1447 size=2992 align=1 flags=0
-  LINE offset=4439 size=436 align=1 flags=0
-  LOCS offset=4875 size=84 align=1 flags=0
+  CODE offset=644 size=693 align=1 flags=0
+  METH offset=1337 size=68 align=1 flags=0
+  CLAS offset=1405 size=4 align=1 flags=0
+  DEPS offset=1409 size=4 align=1 flags=0
+  EXPT offset=1413 size=4 align=1 flags=0
+  INIT offset=1417 size=9 align=1 flags=0
+  PATS offset=1426 size=28 align=1 flags=0
+  SPAN offset=1454 size=3075 align=1 flags=0
+  LINE offset=4529 size=448 align=1 flags=0
+  LOCS offset=4977 size=84 align=1 flags=0
 .strs
   s0 "classify"
   s1 "function"
@@ -49,14 +49,16 @@
 .code
 code c1 kind=module regs=3 flags=0
   local l0 name=s0(classify) role=s1(function) binding=s2(local)
-  0000 MAKE_CLOSURE 0 2 0
-  0001 LOADNULL 2
-  0002 CLOSE_UPVALUES 0
-  0003 RETURN 2
+  0000 LOADNULL 0
+  0001 MAKE_CLOSURE 0 2 0
+  0002 LOADNULL 2
+  0003 CLOSE_UPVALUES 0
+  0004 RETURN 2
   span 0..1 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 1..2 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 2..3 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 3..4 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
+  span 4..5 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
 code c2 kind=method regs=20 flags=0
   local l0 name=s3(shape) role=s4(param) binding=s2(local)
   local l1 name=s5(limit) role=s4(param) binding=s2(local)
@@ -150,6 +152,7 @@ code c2 kind=method regs=20 flags=0
   c1 pc=1 line=1
   c1 pc=2 line=1
   c1 pc=3 line=1
+  c1 pc=4 line=1
   c2 pc=0 line=1
   c2 pc=1 line=1
   c2 pc=2 line=1
@@ -183,7 +186,7 @@ code c2 kind=method regs=20 flags=0
   c2 pc=30 line=1
   c2 pc=31 line=1
 .locs
-  c1 l0 name=s0(classify) 0..4
+  c1 l0 name=s0(classify) 0..5
   c2 l0 name=s3(shape) 0..32
   c2 l1 name=s5(limit) 0..32
   c2 l2 name=s6(id) 0..32

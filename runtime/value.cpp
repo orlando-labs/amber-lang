@@ -273,6 +273,11 @@ Value Value::error_instance(std::shared_ptr<ErrorInstanceValue> value) {
   return {std::move(value)};
 }
 
+Value Value::native_error_namespace(
+    std::shared_ptr<NativeErrorNamespaceValue> value) {
+  return {std::move(value)};
+}
+
 Value Value::big_int(std::shared_ptr<BigIntValue> value) {
   return {std::move(value)};
 }
@@ -426,6 +431,11 @@ bool Value::is_error_instance() const {
   return std::holds_alternative<std::shared_ptr<ErrorInstanceValue>>(payload);
 }
 
+bool Value::is_native_error_namespace() const {
+  return std::holds_alternative<std::shared_ptr<NativeErrorNamespaceValue>>(
+      payload);
+}
+
 bool Value::is_big_int() const {
   return std::holds_alternative<std::shared_ptr<BigIntValue>>(payload);
 }
@@ -571,6 +581,11 @@ NativeErrorClassValue Value::as_native_error_class() const {
 
 std::shared_ptr<ErrorInstanceValue> Value::as_error_instance() const {
   return std::get<std::shared_ptr<ErrorInstanceValue>>(payload);
+}
+
+std::shared_ptr<NativeErrorNamespaceValue>
+Value::as_native_error_namespace() const {
+  return std::get<std::shared_ptr<NativeErrorNamespaceValue>>(payload);
 }
 
 std::shared_ptr<BigIntValue> Value::as_big_int() const {

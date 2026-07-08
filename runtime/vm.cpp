@@ -1051,10 +1051,9 @@ public:
     }
     if (module_registry_ == &owned_module_registry_ &&
         dispatch_registry_ == &owned_dispatch_registry_) {
-      register_builtin_runtime_modules(owned_module_registry_,
-                                       owned_dispatch_registry_,
-                                       owned_type_registry_,
-                                       &owned_error_registry_);
+      register_builtin_runtime_modules(
+          owned_module_registry_, owned_dispatch_registry_,
+          owned_type_registry_, &owned_error_registry_);
     }
     if (dispatch_registry_ == &owned_dispatch_registry_ &&
         type_registry_ == &owned_type_registry_ && error_registry_ == nullptr) {
@@ -1368,10 +1367,11 @@ public:
     return call_block_to_stdlib_result(*static_cast<const Frame *>(frame),
                                        block, args);
   }
-  bool stdlib_block_suspension_in_property_arm(
-      const void *frame, const std::string &context) override {
-    return block_suspension_in_property_arm(
-        *static_cast<const Frame *>(frame), context.c_str());
+  bool
+  stdlib_block_suspension_in_property_arm(const void *frame,
+                                          const std::string &context) override {
+    return block_suspension_in_property_arm(*static_cast<const Frame *>(frame),
+                                            context.c_str());
   }
   void stdlib_throw_json_stop(const void *frame,
                               std::optional<Value> value) override {
@@ -1853,9 +1853,17 @@ private:
     }
     const std::optional<std::string> merged_module =
         merged_init_module_name(code.code_id);
-    if (!merged_module.has_value() && !is_merged_init_wrapper(code.code_id)) {
-      state_->module_bindings.clear();
-    }
+    // Namespace every module's bindings by their owning module so multiple
+    // modules coexist in this shared map. Cross-module direct-entry calls
+    // recover a callee's captures by code_id from here
+    // (module_closure_for_code), so the map must retain *every* initialized
+    // module's closures, not just the most recent one. Previously a non-merged
+    // module init cleared the whole map, which dropped an imported function's
+    // captures on the next module init and surfaced as "capture slot out of
+    // range" when the imported function ran. Both readers of this map
+    // (module_closure_for_code, GC roots) key off the value, not the map key,
+    // so the added namespace prefix is transparent.
+    const std::string prefix = merged_module.value_or(module_id_);
     for (const SlotLayoutEntry &entry : code.local_layout) {
       if (entry.slot >= regs.size() || entry.slot >= initialized.size() ||
           initialized[entry.slot] == 0U) {
@@ -1866,7 +1874,7 @@ private:
         continue;
       }
       const std::string storage_name =
-          merged_module.has_value() ? (*merged_module + ":" + name) : name;
+          prefix.empty() ? name : (prefix + ":" + name);
       state_->module_bindings[storage_name] = regs[entry.slot];
     }
     state_->module_init_completed = true;
@@ -2099,9 +2107,8 @@ private:
     if (!handle->live) {
       return true; // already torn down: a no-op, matching heap idempotence.
     }
-    AmberCtx *ctx =
-        amber_ext_ctx_open(*this, &frame,
-                           type_registry().native_package_tags());
+    AmberCtx *ctx = amber_ext_ctx_open(*this, &frame,
+                                       type_registry().native_package_tags());
     *changed = handle->destroy(ctx);
     amber_ext_ctx_close(ctx);
     return !fault_.has_value();
@@ -4703,8 +4710,8 @@ private:
   }
 
   // Binds a `**name` keyword-rest parameter to an empty frozen Map on the
-  // positional/no-keyword frame-setup paths. The keyword-bearing path overwrites
-  // this via shape_method_call/materialize_defaults.
+  // positional/no-keyword frame-setup paths. The keyword-bearing path
+  // overwrites this via shape_method_call/materialize_defaults.
   void seed_empty_kw_rest(Frame &frame, std::uint32_t code_id) {
     const std::optional<std::uint32_t> kw_rest_index =
         kw_rest_param_index_for_code(code_id);
@@ -5973,6 +5980,11 @@ private:
             error_registry().error_id(path)) {
       return Value::native_error_class(*error_id);
     }
+    if (error_registry().has_error_namespace(path)) {
+      auto value = std::make_shared<NativeErrorNamespaceValue>();
+      value->path = path;
+      return Value::native_error_namespace(std::move(value));
+    }
     // Registered prelude/module paths resolve through the world-owned module
     // registry. During migration the binding can still point at a legacy
     // RuntimeNativeTypeKind.
@@ -6081,6 +6093,27 @@ private:
     if (std::optional<Value> native_value =
             lookup_native_prelude_constant(segments)) {
       return *native_value;
+    }
+    // A `<module>.<name>` path may also name an exported module-level binding
+    // (a function/closure) rather than a class. The exporting module's init
+    // persists it under `<module>:<name>`; recover the live value (with its
+    // captures) so a cross-module `from M import f` / `M.f` resolves to the
+    // real closure. Only the trailing segment is the binding name; everything
+    // before it is the (possibly dotted) module id. Checked before the faulting
+    // class lookup below (real classes were already matched no-fault above).
+    if (segments.size() >= 2U) {
+      std::string module_name;
+      for (std::size_t i = 0; i + 1U < segments.size(); ++i) {
+        if (i != 0U) {
+          module_name += ".";
+        }
+        module_name += segments[i];
+      }
+      const std::string key = module_name + ":" + segments.back();
+      const auto binding = state_->module_bindings.find(key);
+      if (binding != state_->module_bindings.end()) {
+        return unwrap_watch_value(binding->second);
+      }
     }
     if (find_class_by_path_segments(frame, segments, &class_index)) {
       return Value::class_object(class_index);
@@ -6747,19 +6780,19 @@ private:
         selector == "p95" || selector == "p95_ns" || selector == "p99" ||
         selector == "p99_ns" || selector == "ops_per_second" ||
         selector == "sample_times" || selector == "sample_ns" ||
-        selector == "cases" || selector == "fastest" ||
-        selector == "slowest" || selector == "relative" ||
-        selector == "total" || selector == "total_ns" ||
-        selector == "spans" || selector == "summary" ||
-        selector == "find" || selector == "to_str" || selector == "inspect";
+        selector == "cases" || selector == "fastest" || selector == "slowest" ||
+        selector == "relative" || selector == "total" ||
+        selector == "total_ns" || selector == "spans" ||
+        selector == "summary" || selector == "find" || selector == "to_str" ||
+        selector == "inspect";
     if (!benchmark_selector ||
         !map_has_schema(frame, receiver, "amber.benchmark.v1")) {
       return fault_.has_value() ? SendStatus::Faulted : SendStatus::NotHandled;
     }
     const std::string benchmark_selector_name =
         selector == "map" ? "to_map" : selector;
-    return apply_benchmark_module_method(frame, receiver, args, block, kw_args, out,
-                                         benchmark_selector_name);
+    return apply_benchmark_module_method(frame, receiver, args, block, kw_args,
+                                         out, benchmark_selector_name);
   }
 
   SendStatus apply_benchmark_profiler_method(
@@ -6954,7 +6987,8 @@ private:
     const std::int64_t size_i64 = static_cast<std::int64_t>(size);
     const std::int64_t normalized = index < 0 ? size_i64 + index : index;
     if (normalized < 0 || static_cast<std::uint64_t>(normalized) >= size) {
-      raise_runtime_error(frame, "IndexError", context + " index is out of bounds");
+      raise_runtime_error(frame, "IndexError",
+                          context + " index is out of bounds");
       return std::nullopt;
     }
     return static_cast<std::size_t>(normalized);
@@ -6982,7 +7016,8 @@ private:
       return std::nullopt;
     }
     if (!bounds->start.has_value()) {
-      raise_runtime_error(frame, "IndexError", "array slice index is out of bounds");
+      raise_runtime_error(frame, "IndexError",
+                          "array slice index is out of bounds");
       return std::nullopt;
     }
 
@@ -6995,10 +7030,16 @@ private:
     std::int64_t normalized_finish = 0;
     bool inclusive = bounds->inclusive_end;
     if (bounds->finish.has_value()) {
-      const std::optional<std::size_t> finish = normalize_sequence_index(
-          frame, *bounds->finish, items.size(), "array slice");
-      if (!finish.has_value()) {
-        return std::nullopt;
+      std::optional<std::size_t> finish;
+      if (!bounds->inclusive_end && bounds->step > 0 &&
+          *bounds->finish == static_cast<std::int64_t>(items.size())) {
+        finish = items.size();
+      } else {
+        finish = normalize_sequence_index(frame, *bounds->finish, items.size(),
+                                          "array slice");
+        if (!finish.has_value()) {
+          return std::nullopt;
+        }
       }
       normalized_finish = static_cast<std::int64_t>(*finish);
     } else {
@@ -7612,7 +7653,8 @@ private:
       const std::int64_t size_i64 = static_cast<std::int64_t>(items.size());
       const std::int64_t normalized = raw < 0 ? size_i64 + raw + 1 : raw;
       if (normalized < 0 || normalized > size_i64) {
-        raise_runtime_error(frame, "IndexError", "inserted index is out of bounds");
+        raise_runtime_error(frame, "IndexError",
+                            "inserted index is out of bounds");
         return std::nullopt;
       }
       std::vector<Value> result = items;
@@ -7894,10 +7936,9 @@ private:
         if (i != 0U) {
           joined += separator;
         }
-        joined += runtime_stringify_value(items[i],
-                                          RuntimeStringifyMode::Display,
-                                          &module_, nullptr, nullptr,
-                                          RuntimePrettyPrintOptions{});
+        joined += runtime_stringify_value(
+            items[i], RuntimeStringifyMode::Display, &module_, nullptr, nullptr,
+            RuntimePrettyPrintOptions{});
       }
       return string_value_from_text(joined);
     }
@@ -7933,8 +7974,7 @@ private:
             float_acc = static_cast<double>(int_acc);
           }
         } else if (!item.is_integer()) {
-          set_fault(frame, "TypeError",
-                    selector + " expects numeric elements");
+          set_fault(frame, "TypeError", selector + " expects numeric elements");
           return std::nullopt;
         }
         if (float_mode) {
@@ -7945,11 +7985,11 @@ private:
           continue;
         }
         std::int64_t next = 0;
-        const bool ok =
-            is_product ? numeric_mul_int64(int_acc, item.as_integer(),
-                                           numeric_policy_, &next)
-                       : numeric_add_int64(int_acc, item.as_integer(),
-                                           numeric_policy_, &next);
+        const bool ok = is_product
+                            ? numeric_mul_int64(int_acc, item.as_integer(),
+                                                numeric_policy_, &next)
+                            : numeric_add_int64(int_acc, item.as_integer(),
+                                                numeric_policy_, &next);
         if (!ok) {
           raise_runtime_error(frame, "OverflowError",
                               "Int overflow in `" + selector + "`");
@@ -7976,8 +8016,7 @@ private:
       std::vector<Value> flattened;
       flattened.reserve(items.size());
       std::vector<const void *> visiting;
-      if (!flatten_sequence_items(frame, items, depth, &visiting,
-                                  &flattened)) {
+      if (!flatten_sequence_items(frame, items, depth, &visiting, &flattened)) {
         return std::nullopt;
       }
       return make_list_value(std::move(flattened));
@@ -8071,8 +8110,8 @@ private:
           set_fault(frame, error.error_name, error.message);
           return std::nullopt;
         }
-        auto found = std::find_if(
-            counts.begin(), counts.end(), [&](const auto &entry) {
+        auto found =
+            std::find_if(counts.begin(), counts.end(), [&](const auto &entry) {
               return collection_keys_equal(entry.first, *key);
             });
         if (found == counts.end()) {
@@ -10857,10 +10896,9 @@ private:
       return false; // bytecode build: a native-only ctor falls through and the
                     // synthesized NativeRequiredError body runs.
     }
-    NativeExtCallOutcome outcome =
-        amber_ext_invoke_free(*this, &frame,
-                              type_registry().native_package_tags(),
-                              reinterpret_cast<AmberFreeFn>(fn), pos_args);
+    NativeExtCallOutcome outcome = amber_ext_invoke_free(
+        *this, &frame, type_registry().native_package_tags(),
+        reinterpret_cast<AmberFreeFn>(fn), pos_args);
     if (!outcome.ok || fault_.has_value()) {
       *ok = false;
       return true;
@@ -10919,14 +10957,12 @@ private:
     }
     NativeExtCallOutcome outcome =
         binding->method
-            ? amber_ext_invoke_method(*this, &caller,
-                                      type_registry().native_package_tags(),
-                                      reinterpret_cast<AmberMethodFn>(fn), self,
-                                      pos_args)
-            : amber_ext_invoke_free(*this, &caller,
-                                    type_registry().native_package_tags(),
-                                    reinterpret_cast<AmberFreeFn>(fn),
-                                    pos_args);
+            ? amber_ext_invoke_method(
+                  *this, &caller, type_registry().native_package_tags(),
+                  reinterpret_cast<AmberMethodFn>(fn), self, pos_args)
+            : amber_ext_invoke_free(
+                  *this, &caller, type_registry().native_package_tags(),
+                  reinterpret_cast<AmberFreeFn>(fn), pos_args);
     if (!outcome.ok || fault_.has_value()) {
       *faulted = true;
       return true;
@@ -12985,11 +13021,12 @@ private:
     return Value::string(intern_runtime_string(text));
   }
 
-  // Macro `Ast.node(kind, fields)` builder. Constructs a fresh `ast::Expr` whose
-  // fields are read from `fields`, dispatching each entry by its runtime value
-  // type: Str -> string_field, Bool -> bool_field, Ast -> node_field (child
-  // subtree deep-copied so the new parent owns it), List[Ast] -> list_field.
-  // Returns nullopt (after set_fault) on an unsupported field shape.
+  // Macro `Ast.node(kind, fields)` builder. Constructs a fresh `ast::Expr`
+  // whose fields are read from `fields`, dispatching each entry by its runtime
+  // value type: Str -> string_field, Bool -> bool_field, Ast -> node_field
+  // (child subtree deep-copied so the new parent owns it), List[Ast] ->
+  // list_field. Returns nullopt (after set_fault) on an unsupported field
+  // shape.
   std::optional<Value> build_ast_node_value(const Frame &frame,
                                             const std::string &node_kind,
                                             const MapValue &fields) {
@@ -13002,15 +13039,17 @@ private:
           name = module_.symbols[sid];
         }
       } else if (entry.key.is_string()) {
-        name = string_text_from_id(entry.key.as_string().string_id).value_or("");
+        name =
+            string_text_from_id(entry.key.as_string().string_id).value_or("");
       } else {
-        set_fault(frame, "TypeError", "Ast.node field name must be a Symbol or Str");
+        set_fault(frame, "TypeError",
+                  "Ast.node field name must be a Symbol or Str");
         return std::nullopt;
       }
       const Value &v = entry.value;
       if (v.is_string()) {
-        expr->string_field(name,
-                           string_text_from_id(v.as_string().string_id).value_or(""));
+        expr->string_field(
+            name, string_text_from_id(v.as_string().string_id).value_or(""));
       } else if (v.is_bool()) {
         expr->bool_field(name, v.as_bool());
       } else if (v.is_ast_node()) {
@@ -13023,7 +13062,8 @@ private:
         for (const Value &el : v.as_list()->items) {
           if (!el.is_ast_node()) {
             set_fault(frame, "TypeError",
-                      "Ast.node list field `" + name + "` must contain Ast nodes");
+                      "Ast.node list field `" + name +
+                          "` must contain Ast nodes");
             return std::nullopt;
           }
           const std::shared_ptr<RuntimeAstNode> child = el.as_ast_node();
@@ -13034,7 +13074,8 @@ private:
         expr->list_field(name, std::move(items));
       } else {
         set_fault(frame, "TypeError",
-                  "Ast.node field `" + name + "` has an unsupported value type");
+                  "Ast.node field `" + name +
+                      "` has an unsupported value type");
         return std::nullopt;
       }
     }
@@ -13059,7 +13100,8 @@ private:
   // Ast value passes through unchanged; compile-time Str/Int/Float/Bool values
   // become the corresponding literal nodes (`#{check.source}` splices as a
   // string literal). Anything else is a TypeError fault in the macro body.
-  std::optional<Value> lift_value_to_ast(const Frame &frame, const Value &value) {
+  std::optional<Value> lift_value_to_ast(const Frame &frame,
+                                         const Value &value) {
     if (value.is_ast_node()) {
       return value;
     }
@@ -13078,7 +13120,8 @@ private:
     }
     if (value.is_bool()) {
       auto lit = ast::make_expr("AstLiteral", lexer::Span{});
-      lit->string_field("token", value.as_bool() ? "KEYWORD_TRUE" : "KEYWORD_FALSE");
+      lit->string_field("token",
+                        value.as_bool() ? "KEYWORD_TRUE" : "KEYWORD_FALSE");
       lit->string_field("value", value.as_bool() ? "true" : "false");
       return ast_value_from_expr(std::move(lit));
     }
@@ -19466,10 +19509,9 @@ private:
       if (task_runtime_kind.has_value()) {
         if (const std::optional<NativeStdlibHandler> handler =
                 dispatch_registry().native_handler(*task_runtime_kind)) {
-          NativeStdlibCall call{
-              *this,    &frame, receiver, *task_runtime_kind,
-              selector, args,   block,    kw_args,
-              out};
+          NativeStdlibCall call{*this,    &frame, receiver, *task_runtime_kind,
+                                selector, args,   block,    kw_args,
+                                out};
           const SendStatus status = (*handler)(call);
           if (status != SendStatus::NotHandled) {
             return status;
@@ -20356,7 +20398,8 @@ private:
           static_cast<std::int64_t>(list->items.size());
       const std::int64_t normalized = raw < 0 ? size_i64 + raw + 1 : raw;
       if (normalized < 0 || normalized > size_i64) {
-        raise_runtime_error(frame, "IndexError", "insert! index is out of bounds");
+        raise_runtime_error(frame, "IndexError",
+                            "insert! index is out of bounds");
         return SendStatus::Faulted;
       }
       list->items.insert(list->items.begin() + normalized, args.begin() + 1,
@@ -20838,9 +20881,9 @@ private:
       const Value rebuilt =
           make_symbol_map_value(std::move(result), false, map->strict);
       const IntrusivePtr<MapValue> rebuilt_map = rebuilt.as_map();
-      std::vector<MapEntry> rebuilt_entries =
-          rebuilt_map != nullptr ? rebuilt_map->entries
-                                 : std::vector<MapEntry>{};
+      std::vector<MapEntry> rebuilt_entries = rebuilt_map != nullptr
+                                                  ? rebuilt_map->entries
+                                                  : std::vector<MapEntry>{};
       map_value_assign_entries(map.get(), std::move(rebuilt_entries));
       *out = receiver;
       return SendStatus::Matched;
@@ -21121,7 +21164,8 @@ private:
   bool to_json_filter_matches_key(const MapEntry &entry,
                                   const std::vector<Value> &keys, bool strict) {
     for (const Value &key : keys) {
-      if (map_entry_key_equivalent(entry, key, map_lookup_key_id(key), strict)) {
+      if (map_entry_key_equivalent(entry, key, map_lookup_key_id(key),
+                                   strict)) {
         return true;
       }
     }
@@ -21465,6 +21509,37 @@ private:
       return apply_conversion_result(
           convert_value_to_native_type(frame, receiver, *target),
           selector == "cast?");
+    }
+
+    if (receiver.is_native_error_namespace()) {
+      const std::shared_ptr<NativeErrorNamespaceValue> namespace_value =
+          receiver.as_native_error_namespace();
+      if (namespace_value == nullptr) {
+        set_fault(frame, "TypeError", "native error namespace is null");
+        return SendStatus::Faulted;
+      }
+      const std::string nested_error_path =
+          namespace_value->path + "." + selector;
+      if (const std::optional<std::uint16_t> nested_error_id =
+              error_registry().error_id(nested_error_path)) {
+        if (args.empty() && kw_args.empty() && block.is_null()) {
+          *out = Value::native_error_class(*nested_error_id);
+          return SendStatus::Matched;
+        }
+        return construct_native_error_instance(frame, *nested_error_id, args,
+                                               kw_args, block, out);
+      }
+      if (error_registry().has_error_namespace(nested_error_path)) {
+        if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+          set_fault(frame, "TypeError",
+                    "native error namespace does not accept arguments");
+          return SendStatus::Faulted;
+        }
+        auto nested_namespace = std::make_shared<NativeErrorNamespaceValue>();
+        nested_namespace->path = nested_error_path;
+        *out = Value::native_error_namespace(std::move(nested_namespace));
+        return SendStatus::Matched;
+      }
     }
 
     if (receiver.is_result()) {
@@ -21938,8 +22013,7 @@ private:
             std::uint32_t mapped = 0;
             if (swap) {
               const std::uint32_t lowered = simple_lowercase_codepoint(cp);
-              mapped =
-                  lowered != cp ? lowered : simple_uppercase_codepoint(cp);
+              mapped = lowered != cp ? lowered : simple_uppercase_codepoint(cp);
             } else {
               mapped = up ? simple_uppercase_codepoint(cp)
                           : simple_lowercase_codepoint(cp);
@@ -22350,8 +22424,8 @@ private:
             const std::size_t pos = self.find('\n', start);
             if (pos == std::string::npos) {
               if (start < self.size()) {
-                lines.push_back(Value::string(
-                    intern_runtime_string(self.substr(start))));
+                lines.push_back(
+                    Value::string(intern_runtime_string(self.substr(start))));
               }
               break;
             }
@@ -22427,8 +22501,8 @@ private:
             return SendStatus::Faulted;
           }
           const std::optional<std::size_t> normalized =
-              normalize_sequence_index(frame, args[0].as_integer(),
-                                       cps.size(), "string");
+              normalize_sequence_index(frame, args[0].as_integer(), cps.size(),
+                                       "string");
           if (!normalized.has_value()) {
             return SendStatus::Faulted;
           }
@@ -22474,25 +22548,48 @@ private:
                                 ">=",
                                 ">"});
     const bool sequence_extra_operation_selector =
-        receiver_is_sequence_like &&
-        collection_selector_in(
-            {"+",        "*",       "concat",     "take_while", "reversed",
-             "sorted",   "uniq",    "each_pair",  "each_cons",  "appended",
-             "inserted", "deleted", "added",      "init",       "tail",
-             "take",     "drop",    "find_index", "drop_while", "min",
-             "max",      "minmax",  "join",       "sum",        "product",
-             "flattened", "compact", "zip",       "partition",  "tally",
-             "each_with_index",     "last"});
+        receiver_is_sequence_like && collection_selector_in({"+",
+                                                             "*",
+                                                             "concat",
+                                                             "take_while",
+                                                             "reversed",
+                                                             "sorted",
+                                                             "uniq",
+                                                             "each_pair",
+                                                             "each_cons",
+                                                             "appended",
+                                                             "inserted",
+                                                             "deleted",
+                                                             "added",
+                                                             "init",
+                                                             "tail",
+                                                             "take",
+                                                             "drop",
+                                                             "find_index",
+                                                             "drop_while",
+                                                             "min",
+                                                             "max",
+                                                             "minmax",
+                                                             "join",
+                                                             "sum",
+                                                             "product",
+                                                             "flattened",
+                                                             "compact",
+                                                             "zip",
+                                                             "partition",
+                                                             "tally",
+                                                             "each_with_index",
+                                                             "last"});
     // `count` with a value argument or predicate block routes through the
     // materialized sequence path; bare `count` keeps the fast size handlers.
-    const bool counted_match_selector =
-        receiver_is_sequence_like && selector == "count" &&
-        (!args.empty() || !block.is_null());
+    const bool counted_match_selector = receiver_is_sequence_like &&
+                                        selector == "count" &&
+                                        (!args.empty() || !block.is_null());
     const bool sequence_collection_selector =
         (receiver_is_sequence_like &&
          collection_selector_in(
              {"empty?", "[]",         "[]?",      "has_index?", "deconstruct",
-              "first",  "count",      "to_array",     "lazy",       "each",
+              "first",  "count",      "to_array", "lazy",       "each",
               "map",    "filter_map", "flat_map", "select",     "reject",
               "find",   "group",      "any?",     "all?",       "none?",
               "reduce"})) ||
@@ -22765,7 +22862,8 @@ private:
             *out = Value::null();
             return SendStatus::Matched;
           }
-          raise_runtime_error(frame, "IndexError", "LazySeq index is out of bounds");
+          raise_runtime_error(frame, "IndexError",
+                              "LazySeq index is out of bounds");
           return SendStatus::Faulted;
         }
         std::int64_t seen = 0;
@@ -22790,7 +22888,8 @@ private:
             *out = Value::null();
             return SendStatus::Matched;
           }
-          raise_runtime_error(frame, "IndexError", "LazySeq index is out of bounds");
+          raise_runtime_error(frame, "IndexError",
+                              "LazySeq index is out of bounds");
           return SendStatus::Faulted;
         }
         *out = found;
@@ -23258,7 +23357,8 @@ private:
               return SendStatus::Faulted;
             }
             if (index < 0) {
-              raise_runtime_error(frame, "IndexError", "Range index is out of bounds");
+              raise_runtime_error(frame, "IndexError",
+                                  "Range index is out of bounds");
               return SendStatus::Faulted;
             }
             if (bounds->float_range) {
@@ -23443,7 +23543,8 @@ private:
               *out = Value::null();
               return SendStatus::Matched;
             }
-            raise_runtime_error(frame, "IndexError", "Range index is out of bounds");
+            raise_runtime_error(frame, "IndexError",
+                                "Range index is out of bounds");
             return SendStatus::Faulted;
           }
           if (collection_selector == "[]?") {
@@ -23833,10 +23934,9 @@ private:
           set_fault(frame, error.error_name, error.message);
           return SendStatus::Faulted;
         }
-        const std::optional<std::uint32_t> lookup_id =
-            map_lookup_key_id(*key);
-        *out = Value::boolean(
-            map_value_find_entry(*map, *key, lookup_id) != nullptr);
+        const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(*key);
+        *out = Value::boolean(map_value_find_entry(*map, *key, lookup_id) !=
+                              nullptr);
         return SendStatus::Matched;
       }
       if (collection_selector == "value?" ||
@@ -23862,8 +23962,7 @@ private:
           set_fault(frame, error.error_name, error.message);
           return SendStatus::Faulted;
         }
-        const std::optional<std::uint32_t> lookup_id =
-            map_lookup_key_id(*key);
+        const std::optional<std::uint32_t> lookup_id = map_lookup_key_id(*key);
         const MapEntry *found = map_value_find_entry(*map, *key, lookup_id);
         if (found == nullptr) {
           if (collection_selector == "[]?") {
@@ -23953,8 +24052,7 @@ private:
               return SendStatus::Matched;
             }
             const std::optional<std::size_t> normalized =
-                optional_sequence_index(step.as_integer(),
-                                        step_items->size());
+                optional_sequence_index(step.as_integer(), step_items->size());
             if (!normalized.has_value()) {
               *out = Value::null();
               return SendStatus::Matched;
@@ -24078,8 +24176,7 @@ private:
         *out = make_symbol_map_value(std::move(result), false, source_strict);
         return SendStatus::Matched;
       }
-      if (collection_selector == "without" ||
-          collection_selector == "except") {
+      if (collection_selector == "without" || collection_selector == "except") {
         if (!require_no_block()) {
           return SendStatus::Faulted;
         }
@@ -24320,7 +24417,8 @@ private:
           *out = make_list_value(std::move(values));
           return SendStatus::Matched;
         }
-        if (collection_selector == "entries" || collection_selector == "to_array") {
+        if (collection_selector == "entries" ||
+            collection_selector == "to_array") {
           if (!require_arity(0) || !require_no_block()) {
             return SendStatus::Faulted;
           }
@@ -24663,11 +24761,11 @@ private:
         if (in_order) {
           // Two's-complement magnitude keeps the count exact at the Int
           // extremes (e.g. `INT64_MAX.downto(0)` must not wrap the cursor).
-          const std::uint64_t span =
-              ascending ? static_cast<std::uint64_t>(rhs) -
-                              static_cast<std::uint64_t>(lhs)
-                        : static_cast<std::uint64_t>(lhs) -
-                              static_cast<std::uint64_t>(rhs);
+          const std::uint64_t span = ascending
+                                         ? static_cast<std::uint64_t>(rhs) -
+                                               static_cast<std::uint64_t>(lhs)
+                                         : static_cast<std::uint64_t>(lhs) -
+                                               static_cast<std::uint64_t>(rhs);
           steps.reserve(static_cast<std::size_t>(span) + 1U);
           std::int64_t current = lhs;
           for (std::uint64_t i = 0; i <= span; ++i) {
@@ -24720,8 +24818,7 @@ private:
         if (args[0].is_float()) {
           const double float_rhs = args[0].as_float();
           if (float_rhs == 0.0) {
-            raise_runtime_error(frame, "ZeroDivisionError",
-                                "division by zero");
+            raise_runtime_error(frame, "ZeroDivisionError", "division by zero");
             return SendStatus::Faulted;
           }
           const double self_d = static_cast<double>(lhs);
@@ -24767,8 +24864,8 @@ private:
           a = b;
           b = t;
         }
-        const std::uint64_t int_max =
-            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+        const std::uint64_t int_max = static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max());
         if (selector == "gcd") {
           if (a > int_max) {
             raise_runtime_error(frame, "OverflowError",
@@ -25273,7 +25370,8 @@ private:
     const bool collection_fast_selector =
         collection_selector == "[]" || collection_selector == "count" ||
         collection_selector == "first" || collection_selector == "empty?" ||
-        collection_selector == "deconstruct" || collection_selector == "to_array";
+        collection_selector == "deconstruct" ||
+        collection_selector == "to_array";
     const bool integer_selector =
         selector == "+" || selector == "-" || selector == "*" ||
         selector == "/" || selector == "%" || selector == "//" ||
@@ -25471,7 +25569,8 @@ private:
 
     std::int64_t single_integer_arg = 0;
     if (collection_selector == "empty?" || collection_selector == "count" ||
-        collection_selector == "deconstruct" || collection_selector == "to_array") {
+        collection_selector == "deconstruct" ||
+        collection_selector == "to_array") {
       if (pos_count != 0U) {
         return FastSendStatus::NotHandled;
       }
@@ -25598,8 +25697,7 @@ private:
           text.append(*left);
           text.append(*right);
           return write_reg_fast_plain(
-                     frame, dst,
-                     Value::string(intern_runtime_string(text)))
+                     frame, dst, Value::string(intern_runtime_string(text)))
                      ? FastSendStatus::Matched
                      : FastSendStatus::Faulted;
         }
@@ -25949,8 +26047,8 @@ private:
         return FastSendStatus::Faulted;
       }
       return write_reg_fast_plain(
-                 frame, dst, Value::boolean(sequence_contains_value(*items,
-                                                                    needle)))
+                 frame, dst,
+                 Value::boolean(sequence_contains_value(*items, needle)))
                  ? FastSendStatus::Matched
                  : FastSendStatus::Faulted;
     }
@@ -26267,6 +26365,31 @@ private:
                               "` has no method `" + *selector + "`");
       return false;
     }
+    if (!property_access && !property_assignment &&
+        receiver.is_native_error_namespace()) {
+      const std::shared_ptr<NativeErrorNamespaceValue> namespace_value =
+          receiver.as_native_error_namespace();
+      if (namespace_value == nullptr) {
+        set_fault(frame, "TypeError", "native error namespace is null");
+        return false;
+      }
+      const std::string nested_error_path =
+          namespace_value->path + "." + *selector;
+      if (const std::optional<std::uint16_t> nested_error_id =
+              error_registry().error_id(nested_error_path)) {
+        Value result = Value::null();
+        if (construct_native_error_instance(frame, *nested_error_id, args,
+                                            kw_args, block,
+                                            &result) != SendStatus::Matched) {
+          return false;
+        }
+        if (!write_reg(frame, dst, std::move(result))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
+    }
     if (!property_access && !property_assignment && receiver.is_native_type()) {
       const std::string nested_error_path =
           std::string(native_type_name(receiver.as_native_type().kind)) + "." +
@@ -26446,9 +26569,9 @@ private:
               conversion_target_for_alias(*selector)) {
         if (*selector == "map") {
           Value benchmark_result = Value::null();
-          const SendStatus benchmark_status = apply_benchmark_result_method(
-              frame, receiver, *selector, args, block, kw_args,
-              &benchmark_result);
+          const SendStatus benchmark_status =
+              apply_benchmark_result_method(frame, receiver, *selector, args,
+                                            block, kw_args, &benchmark_result);
           if (benchmark_status == SendStatus::Faulted) {
             return false;
           }
@@ -26579,10 +26702,10 @@ private:
     } else {
       // Bare member access on a builtin receiver: per spec ("dot is a message;
       // identifier is a value", §bare-nullary member access), attempt a general
-      // implicit zero-argument send before failing, so any syntactically-nullary
-      // builtin method works bare (`42.to_int`, `xs.first`), matching
-      // user-defined types and the parenthesised call path. `&receiver.name`
-      // still takes a reference rather than sending.
+      // implicit zero-argument send before failing, so any
+      // syntactically-nullary builtin method works bare (`42.to_int`,
+      // `xs.first`), matching user-defined types and the parenthesised call
+      // path. `&receiver.name` still takes a reference rather than sending.
       if (property_access) {
         Value bare_result = Value::null();
         const SendStatus bare_status = try_apply_scalar_send(
@@ -26732,9 +26855,8 @@ private:
         }
         Value json_result = Value::null();
         const std::vector<std::pair<std::uint32_t, Value>> no_keywords;
-        const SendStatus json_status =
-            apply_json_generate_value_method(frame, receiver, no_keywords,
-                                             &json_result);
+        const SendStatus json_status = apply_json_generate_value_method(
+            frame, receiver, no_keywords, &json_result);
         if (json_status == SendStatus::Faulted) {
           return false;
         }
@@ -28813,11 +28935,12 @@ ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,
                             no_kw_args, std::move(self), std::move(block));
 }
 
-ExecutionResult execute_runtime_vm(
-    const bytecode::BcModule &module, RuntimeVmExecutionContext context,
-    std::uint32_t code_id, const std::vector<Value> &args,
-    const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value self,
-    Value block) {
+ExecutionResult
+execute_runtime_vm(const bytecode::BcModule &module,
+                   RuntimeVmExecutionContext context, std::uint32_t code_id,
+                   const std::vector<Value> &args,
+                   const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+                   Value self, Value block) {
   Vm vm(module, std::move(context.state), std::move(context.module_id),
         context.world_options, context.capabilities, context.effects,
         std::move(context.trace_recorder), context.native_registry,
@@ -28826,8 +28949,7 @@ ExecutionResult execute_runtime_vm(
   if (context.step_budget > 0) {
     vm.enable_step_budget(context.step_budget);
   }
-  return vm.execute(code_id, args, kw_args, std::move(self),
-                    std::move(block));
+  return vm.execute(code_id, args, kw_args, std::move(self), std::move(block));
 }
 
 ExecutionResult execute_code(const bytecode::BcModule &module,

@@ -1,18 +1,18 @@
-; amber.bc.v1 sha256=1fb6d0dcfc19ee28148ac72553c576d08d5de267454e0de1c31fbc122716763b
+; amber.bc.v1 sha256=4622d1c17bcd58dff59816cdf27a31c086e4b9a92c68cd789a00e6c021dbfbae
 .header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
 .sections
   STRS offset=344 size=102 align=1 flags=0
   SYMS offset=446 size=44 align=1 flags=0
   KONS offset=490 size=21 align=1 flags=0
-  CODE offset=511 size=505 align=1 flags=0
-  METH offset=1016 size=68 align=1 flags=0
-  CLAS offset=1084 size=4 align=1 flags=0
-  DEPS offset=1088 size=4 align=1 flags=0
-  EXPT offset=1092 size=4 align=1 flags=0
-  INIT offset=1096 size=9 align=1 flags=0
-  SPAN offset=1105 size=1444 align=1 flags=0
-  LINE offset=2549 size=244 align=1 flags=0
-  LOCS offset=2793 size=84 align=1 flags=0
+  CODE offset=511 size=512 align=1 flags=0
+  METH offset=1023 size=68 align=1 flags=0
+  CLAS offset=1091 size=4 align=1 flags=0
+  DEPS offset=1095 size=4 align=1 flags=0
+  EXPT offset=1099 size=4 align=1 flags=0
+  INIT offset=1103 size=9 align=1 flags=0
+  SPAN offset=1112 size=1516 align=1 flags=0
+  LINE offset=2628 size=256 align=1 flags=0
+  LOCS offset=2884 size=84 align=1 flags=0
 .strs
   s0 "scan"
   s1 "function"
@@ -37,14 +37,16 @@
 .code
 code c1 kind=module regs=3 flags=0
   local l0 name=s0(scan) role=s1(function) binding=s2(local)
-  0000 MAKE_CLOSURE 0 2 0
-  0001 LOADNULL 2
-  0002 CLOSE_UPVALUES 0
-  0003 RETURN 2
+  0000 LOADNULL 0
+  0001 MAKE_CLOSURE 0 2 0
+  0002 LOADNULL 2
+  0003 CLOSE_UPVALUES 0
+  0004 RETURN 2
   span 0..1 corpus/bc/disasm/basic/source.am:1:1-4:21
   span 1..2 corpus/bc/disasm/basic/source.am:1:1-4:21
   span 2..3 corpus/bc/disasm/basic/source.am:1:1-4:21
   span 3..4 corpus/bc/disasm/basic/source.am:1:1-4:21
+  span 4..5 corpus/bc/disasm/basic/source.am:1:1-4:21
 code c2 kind=method regs=8 flags=0
   local l0 name=s3(xs) role=s4(param) binding=s2(local)
   local l1 name=s5(limit) role=s4(param) binding=s2(local)
@@ -102,6 +104,7 @@ code c3 kind=block regs=3 flags=0
   c1 pc=1 line=1
   c1 pc=2 line=1
   c1 pc=3 line=1
+  c1 pc=4 line=1
   c2 pc=0 line=2
   c2 pc=1 line=2
   c2 pc=2 line=2
@@ -119,7 +122,7 @@ code c3 kind=block regs=3 flags=0
   c3 pc=2 line=4
   c3 pc=3 line=4
 .locs
-  c1 l0 name=s0(scan) 0..4
+  c1 l0 name=s0(scan) 0..5
   c2 l0 name=s3(xs) 0..12
   c2 l1 name=s5(limit) 0..12
   c3 l0 name=s6(_1) 0..4

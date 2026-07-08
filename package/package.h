@@ -64,7 +64,6 @@ struct PackageNativeExtension {
   std::vector<std::string> defines;
   std::vector<std::string> cxxflags;
   std::vector<std::string> link_libraries;
-  std::vector<std::string> capabilities;
   std::vector<PackageNativeSymbol> symbols;
   std::vector<PackageNativeType> types;
   std::vector<PackageNativeError> errors;

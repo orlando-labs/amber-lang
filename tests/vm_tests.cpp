@@ -9,6 +9,8 @@
 #include "frontend/parser/parser.h"
 #include "package/package.h"
 #include "runtime/macro_expander.h"
+#include "runtime/stdlib_registry.h"
+#include "runtime/vm_internal.h"
 
 #include <atomic>
 #include <chrono>
@@ -110,6 +112,9 @@ string_value_text_or_die(const amber::runtime::Value &value,
                          const amber::bytecode::BcModule &module,
                          const amber::runtime::ExecutionResult &result);
 amber::runtime::ExecutionResult execute_emitted_init(const std::string &source);
+void expect_integer_list(const amber::runtime::Value &value,
+                         const std::vector<std::int64_t> &expected,
+                         const std::string &message);
 
 amber::runtime::RuntimeIoProviderStatus provider_ok() {
   amber::runtime::RuntimeIoProviderStatus status;
@@ -1931,6 +1936,40 @@ void test_execute_emitted_send_method() {
          "add should return summed integer");
 }
 
+void test_execute_emitted_implicit_receiver_method_call() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "class A:\n"
+      "  def foo(x):\n"
+      "    y = bar(x)\n"
+      "    z = around(x) |v|:\n"
+      "      v * 2\n"
+      "    y + z\n"
+      "  def bar(x):\n"
+      "    x + 1\n"
+      "  def around(x, &blk):\n"
+      "    blk(x)\n"
+      "A().foo(4)\n");
+  expect(exec.ok(), "implicit receiver method call execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 13,
+         "bare method calls inside methods should dispatch on the receiver");
+}
+
+void test_execute_emitted_exclusive_slice_end_boundary() {
+  const amber::runtime::ExecutionResult string_slice = execute_emitted_init(
+      "slot = \":name\"\n"
+      "slot.slice(1...slot.length)\n");
+  expect(string_slice.ok(), "exclusive string slice to length failed");
+  expect(string_value_text_or_die(string_slice.value, amber::bytecode::BcModule{},
+                                  string_slice) == "name",
+         "exclusive string slice should allow end at length");
+
+  const amber::runtime::ExecutionResult list_slice =
+      execute_emitted_init("[1,2,3][1...3]\n");
+  expect(list_slice.ok(), "exclusive list slice to count failed");
+  expect_integer_list(list_slice.value, {2, 3},
+                      "exclusive list slice should allow end at count");
+}
+
 void test_execute_emitted_integer_specialized_ops() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("x = 10\n"
@@ -3631,6 +3670,50 @@ void expect_integer_list(const amber::runtime::Value &value,
   }
 }
 
+void test_execute_emitted_control_condition_assignment() {
+  const amber::runtime::ExecutionResult if_assign = execute_emitted_init(
+      "def value():\n"
+      "  4\n"
+      "if x = value():\n"
+      "  x + 1\n"
+      "else:\n"
+      "  0\n");
+  expect(if_assign.ok(), "if assignment condition execution failed");
+  expect(if_assign.value.is_integer() && if_assign.value.as_integer() == 5,
+         "if assignment condition should return assigned value");
+
+  const amber::runtime::ExecutionResult while_assign = execute_emitted_init(
+      "class Accum:\n"
+      "  def init(@values):\n"
+      "    pass\n"
+      "  def pop():\n"
+      "    @values.pop!()\n"
+      "accum = Accum([0,1,2,3])\n"
+      "seen = []\n"
+      "while x = accum.pop:\n"
+      "  seen.push!(x)\n"
+      "seen\n");
+  expect(while_assign.ok(), "while assignment condition execution failed");
+  expect_integer_list(while_assign.value, {3, 2, 1, 0},
+                      "while assignment condition");
+
+  const amber::runtime::ExecutionResult while_assign_and =
+      execute_emitted_init("class Accum:\n"
+                           "  def init(@values):\n"
+                           "    pass\n"
+                           "  def pop():\n"
+                           "    @values.pop!()\n"
+                           "accum = Accum([0,1,2,3])\n"
+                           "seen = []\n"
+                           "while x = accum.pop and x > 1:\n"
+                           "  seen.push!(x)\n"
+                           "seen\n");
+  expect(while_assign_and.ok(),
+         "while assignment-and condition execution failed");
+  expect_integer_list(while_assign_and.value, {3, 2},
+                      "while assignment-and condition");
+}
+
 amber::runtime::ExecutionResult
 execute_emitted_init(const std::string &source) {
   const amber::bytecode::EmitResult emit_result = emit_ok(source);
@@ -3641,6 +3724,22 @@ execute_emitted_init(const std::string &source) {
   expect(decoded.module.init.has_entry_code_id, "emitted module init exists");
   return amber::runtime::execute_code(decoded.module,
                                       decoded.module.init.entry_code_id);
+}
+
+amber::runtime::ExecutionResult execute_emitted_init_with_errors(
+    const std::string &source,
+    const amber::runtime::RuntimeErrorRegistry &errors) {
+  const amber::bytecode::EmitResult emit_result = emit_ok(source);
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emit_result.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  expect(decoded.module.init.has_entry_code_id, "emitted module init exists");
+  amber::runtime::RuntimeVmExecutionContext context;
+  context.error_registry = &errors;
+  return amber::runtime::execute_runtime_vm(
+      decoded.module, std::move(context), decoded.module.init.entry_code_id, {},
+      amber::runtime::Value::null(), amber::runtime::Value::null());
 }
 
 const amber::runtime::ExecutionLocal *
@@ -4232,9 +4331,10 @@ void test_runtime_sequence_collections_contract() {
   using namespace amber::bytecode;
 
   BcModule module;
-  module.symbols = {"lazy",     "map",   "select", "reduce", "+",     ">",
-                    "flat_map", "group", "count",  "find",   "first", "to_array",
-                    "any?",     "all?",  "none?",  "low",    "high"};
+  module.symbols = {"lazy",  "map",      "select", "reduce", "+",
+                    ">",     "flat_map", "group",  "count",  "find",
+                    "first", "to_array", "any?",   "all?",   "none?",
+                    "low",   "high"};
 
   Constant one;
   one.kind = ConstantKind::Integer;
@@ -8462,6 +8562,23 @@ void test_native_error_inherited_rescue_execution() {
                            "  7\n");
   expect(root.ok() && root.value.is_integer() && root.value.as_integer() == 7,
          "Exception should catch existing native error classes");
+
+  amber::runtime::RuntimeErrorRegistry package_errors;
+  package_errors.register_error("Sqlite3.Error", "NativeError");
+  package_errors.register_error("Sqlite3.StepError", "Sqlite3.Error");
+  package_errors.register_error("Sqlite3.ConstraintError", "Sqlite3.StepError");
+  amber::runtime::ExecutionResult qualified = execute_emitted_init_with_errors(
+      "try:\n"
+      "  raise Sqlite3.ConstraintError(\"constraint\")\n"
+      "rescue Sqlite3.StepError |e|:\n"
+      "  if Sqlite3.Error === e and Sqlite3.ConstraintError === e:\n"
+      "    7\n"
+      "  else:\n"
+      "    0\n",
+      package_errors);
+  expect(qualified.ok() && qualified.value.is_integer() &&
+             qualified.value.as_integer() == 7,
+         "qualified native package error class should resolve and rescue");
 }
 
 void test_source_throw_catch_execution() {
@@ -9123,7 +9240,8 @@ void test_ast_value_model() {
   expect(value.is_ast_node(), "value is an ast_node");
   expect(!value.is_integer() && !value.is_string() && !value.is_list(),
          "ast_node is distinct from scalar/collection kinds");
-  const std::shared_ptr<amber::runtime::RuntimeAstNode> got = value.as_ast_node();
+  const std::shared_ptr<amber::runtime::RuntimeAstNode> got =
+      value.as_ast_node();
   expect(got != nullptr && got->node == expr,
          "as_ast_node round-trips the aliasing node pointer");
   expect(!amber::runtime::runtime_ast_node_kind(*got).empty() &&
@@ -9132,7 +9250,8 @@ void test_ast_value_model() {
   expect(amber::runtime::runtime_ast_node_source(*got) == "x > 5",
          "runtime_ast_node_source returns the verbatim span slice");
 
-  // Copy/move must preserve the payload (exercises both Value reps' refcounting).
+  // Copy/move must preserve the payload (exercises both Value reps'
+  // refcounting).
   amber::runtime::Value copy = value;
   expect(copy.is_ast_node() && copy.as_ast_node()->node == expr,
          "ast_node survives value copy");
@@ -9152,12 +9271,12 @@ amber::macros::ExpandResult expand_source(const std::string &source) {
 void test_macro_expander_sandbox() {
   // Positive control: an ordinary macro expands under the sandbox.
   {
-    const amber::macros::ExpandResult ok = expand_source(
-        "macro def double(x):\n"
-        "  quote:\n"
-        "    unquote(x) + unquote(x)\n"
-        "\n"
-        "double(21)\n");
+    const amber::macros::ExpandResult ok =
+        expand_source("macro def double(x):\n"
+                      "  quote:\n"
+                      "    unquote(x) + unquote(x)\n"
+                      "\n"
+                      "double(21)\n");
     expect(ok.ok, "sandboxed expansion still succeeds for pure macros");
   }
 
@@ -9165,13 +9284,13 @@ void test_macro_expander_sandbox() {
   // expander VM runs with the capability gate armed and nothing granted
   // (DESIGN-macro-system §10).
   {
-    const amber::macros::ExpandResult denied = expand_source(
-        "macro def sneaky(x):\n"
-        "  data = fs.read_text(\"/etc/hosts\")\n"
-        "  return quote:\n"
-        "    1\n"
-        "\n"
-        "sneaky(1)\n");
+    const amber::macros::ExpandResult denied =
+        expand_source("macro def sneaky(x):\n"
+                      "  data = fs.read_text(\"/etc/hosts\")\n"
+                      "  return quote:\n"
+                      "    1\n"
+                      "\n"
+                      "sneaky(1)\n");
     expect(!denied.ok, "macro IO is rejected");
     expect(denied.error.find("AMB_MACRO_CAPABILITY") != std::string::npos,
            "macro IO reports AMB_MACRO_CAPABILITY, got: " + denied.error);
@@ -9180,15 +9299,15 @@ void test_macro_expander_sandbox() {
   // A non-terminating macro exhausts the step budget instead of hanging the
   // build; the budget is shared with nested block VMs via RuntimeState.
   {
-    const amber::macros::ExpandResult spun = expand_source(
-        "macro def spin(x):\n"
-        "  n = 0\n"
-        "  while true:\n"
-        "    n = n + 1\n"
-        "  return quote:\n"
-        "    1\n"
-        "\n"
-        "spin(1)\n");
+    const amber::macros::ExpandResult spun =
+        expand_source("macro def spin(x):\n"
+                      "  n = 0\n"
+                      "  while true:\n"
+                      "    n = n + 1\n"
+                      "  return quote:\n"
+                      "    1\n"
+                      "\n"
+                      "spin(1)\n");
     expect(!spun.ok, "looping macro is rejected");
     expect(spun.error.find("AMB_MACRO_BUDGET") != std::string::npos,
            "looping macro reports AMB_MACRO_BUDGET, got: " + spun.error);
@@ -9201,11 +9320,11 @@ void test_macro_call_channels() {
   // Keyword channel: passed keyword binds the Ast; an unknown keyword to a
   // macro without `**` is an expansion diagnostic (VM keyword binding fault).
   {
-    const amber::macros::ExpandResult unknown = expand_source(
-        "macro def scaled(x, factor: 2):\n"
-        "  #{x} * #{factor}\n"
-        "\n"
-        "scaled(1, other: 3)\n");
+    const amber::macros::ExpandResult unknown =
+        expand_source("macro def scaled(x, factor: 2):\n"
+                      "  #{x} * #{factor}\n"
+                      "\n"
+                      "scaled(1, other: 3)\n");
     expect(!unknown.ok, "unknown macro keyword is a diagnostic");
     expect(unknown.error.find("macro `scaled` raised") != std::string::npos,
            "unknown keyword surfaces as a macro fault, got: " + unknown.error);
@@ -9213,12 +9332,12 @@ void test_macro_call_channels() {
 
   // A `*` spread of a non-literal operand cannot be expanded at compile time.
   {
-    const amber::macros::ExpandResult spread = expand_source(
-        "macro def sum2(a, b):\n"
-        "  #{a} + #{b}\n"
-        "\n"
-        "def probe(xs):\n"
-        "  sum2(*xs)\n");
+    const amber::macros::ExpandResult spread =
+        expand_source("macro def sum2(a, b):\n"
+                      "  #{a} + #{b}\n"
+                      "\n"
+                      "def probe(xs):\n"
+                      "  sum2(*xs)\n");
     expect(!spread.ok, "non-literal `*` spread into a macro is a diagnostic");
     expect(spread.error.find("not a list or tuple literal") !=
                std::string::npos,
@@ -9228,12 +9347,12 @@ void test_macro_call_channels() {
 
   // A `**` spread of a non-literal operand cannot be expanded either.
   {
-    const amber::macros::ExpandResult kw_spread = expand_source(
-        "macro def scaled(x, factor: 2):\n"
-        "  #{x} * #{factor}\n"
-        "\n"
-        "def probe(opts):\n"
-        "  scaled(1, **opts)\n");
+    const amber::macros::ExpandResult kw_spread =
+        expand_source("macro def scaled(x, factor: 2):\n"
+                      "  #{x} * #{factor}\n"
+                      "\n"
+                      "def probe(opts):\n"
+                      "  scaled(1, **opts)\n");
     expect(!kw_spread.ok,
            "non-literal `**` spread into a macro is a diagnostic");
     expect(kw_spread.error.find("not a map literal") != std::string::npos,
@@ -9244,13 +9363,13 @@ void test_macro_call_channels() {
   // The block channel is single-occupancy: a block suffix and a `&name`
   // block-pass on the same call is a diagnostic.
   {
-    const amber::macros::ExpandResult both = expand_source(
-        "macro def with_block(x, blk):\n"
-        "  #{x}\n"
-        "\n"
-        "def probe(cb):\n"
-        "  with_block(1, &cb):\n"
-        "    2\n");
+    const amber::macros::ExpandResult both =
+        expand_source("macro def with_block(x, blk):\n"
+                      "  #{x}\n"
+                      "\n"
+                      "def probe(cb):\n"
+                      "  with_block(1, &cb):\n"
+                      "    2\n");
     expect(!both.ok, "block suffix + `&name` block-pass is a diagnostic");
     expect(both.error.find("both a block suffix and a `&name`") !=
                std::string::npos,
@@ -9260,11 +9379,11 @@ void test_macro_call_channels() {
   // Keyword-rest macros collect extra keywords (`**kwargs` binds a frozen
   // Map of Ast values; `.size` counts the entries).
   {
-    const amber::macros::ExpandResult kw_rest = expand_source(
-        "macro def count_opts(**opts):\n"
-        "  return Ast.lift(opts.size)\n"
-        "\n"
-        "count_opts(a: 1, b: 2, c: 3)\n");
+    const amber::macros::ExpandResult kw_rest =
+        expand_source("macro def count_opts(**opts):\n"
+                      "  return Ast.lift(opts.size)\n"
+                      "\n"
+                      "count_opts(a: 1, b: 2, c: 3)\n");
     expect(kw_rest.ok,
            "`**kwargs` macro accepts extra keywords, got: " + kw_rest.error);
   }
@@ -9310,8 +9429,7 @@ void test_macro_exports_artifact_section() {
   expect(reloaded.size() == 2 && reloaded[0].public_name == "run_twice" &&
              reloaded[1].public_name == "sql",
          "reloaded table preserves names and order");
-  expect(reloaded[1].def != nullptr &&
-             reloaded[1].def->span.start.line == 9,
+  expect(reloaded[1].def != nullptr && reloaded[1].def->span.start.line == 9,
          "reloaded definition reports its original source line");
 
   // Staging from the reloaded table behaves exactly like a source harvest.
@@ -9332,8 +9450,7 @@ void test_macro_exports_artifact_section() {
       importer_parser.parse_module_unit();
   expect(importer_mod.ok(), "artifact section: importer parse ok");
   const amber::macros::ExpandResult expanded = amber::macros::expand_macros(
-      importer_mod.items, importer_mod.module_name, importer_source,
-      providers);
+      importer_mod.items, importer_mod.module_name, importer_source, providers);
   expect(expanded.ok,
          "expansion from a reloaded table succeeds, got: " + expanded.error);
 
@@ -9352,37 +9469,35 @@ void test_macro_expansion_backtrace() {
   // `outer` emits a call to `failing`; `failing` raises at expansion time.
   // The diagnostic must name the failing macro AND the expansion it came
   // from, innermost first.
-  const amber::macros::ExpandResult chained = expand_source(
-      "macro def failing(x):\n"
-      "  raise ValueError.new(\"boom\")\n"
-      "  return quote:\n"
-      "    1\n"
-      "\n"
-      "macro def outer(x):\n"
-      "  failing(#{x})\n"
-      "\n"
-      "outer(1)\n");
+  const amber::macros::ExpandResult chained =
+      expand_source("macro def failing(x):\n"
+                    "  raise ValueError.new(\"boom\")\n"
+                    "  return quote:\n"
+                    "    1\n"
+                    "\n"
+                    "macro def outer(x):\n"
+                    "  failing(#{x})\n"
+                    "\n"
+                    "outer(1)\n");
   expect(!chained.ok, "nested macro failure is a diagnostic");
   expect(chained.error.find("macro `failing` raised") != std::string::npos,
          "diagnostic names the failing macro, got: " + chained.error);
-  expect(chained.error.find("expanded from macro `outer`") !=
-             std::string::npos,
+  expect(chained.error.find("expanded from macro `outer`") != std::string::npos,
          "diagnostic chains the outer expansion, got: " + chained.error);
 
   // A self-recursive macro hits the depth limit; the backtrace summarizes
   // instead of printing all ~128 frames.
-  const amber::macros::ExpandResult runaway = expand_source(
-      "macro def spiral(x):\n"
-      "  spiral(#{x})\n"
-      "\n"
-      "spiral(1)\n");
+  const amber::macros::ExpandResult runaway =
+      expand_source("macro def spiral(x):\n"
+                    "  spiral(#{x})\n"
+                    "\n"
+                    "spiral(1)\n");
   expect(!runaway.ok, "runaway recursive expansion is a diagnostic");
   expect(runaway.error.find("AMB_MACRO_EXPANSION_LIMIT") != std::string::npos,
          "runaway expansion reports the depth limit, got: " + runaway.error);
   expect(runaway.error.find("more expansion frames") != std::string::npos,
          "deep backtraces are summarized, got: " + runaway.error);
-  expect(count_occurrences(runaway.error, "expanded from macro `spiral`") <=
-             6,
+  expect(count_occurrences(runaway.error, "expanded from macro `spiral`") <= 6,
          "backtrace shows at most the closest frames");
 }
 
@@ -9415,14 +9530,15 @@ void test_cross_module_macro_staging() {
 
   // Importer: binds the provider macro under a local alias and invokes it
   // through the paren-less block trigger, which only a macro can consume.
-  const std::string importer_source = "package app.main\n"
-                                      "from provider.mod import run_twice as loop2\n"
-                                      "\n"
-                                      "def probe():\n"
-                                      "  y = 0\n"
-                                      "  loop2:\n"
-                                      "    y = y + 21\n"
-                                      "  y\n";
+  const std::string importer_source =
+      "package app.main\n"
+      "from provider.mod import run_twice as loop2\n"
+      "\n"
+      "def probe():\n"
+      "  y = 0\n"
+      "  loop2:\n"
+      "    y = y + 21\n"
+      "  y\n";
   amber::lexer::Lexer importer_lexer(importer_source, "<importer>");
   amber::lexer::LexResult importer_lex = importer_lexer.lex();
   expect(importer_lex.ok(), "staging: importer lex ok");
@@ -9447,8 +9563,7 @@ void test_cross_module_macro_staging() {
   amber::bytecode::EmitResult emit =
       amber::bytecode::emit_program(program, importer_mod.module_name);
   expect(emit.ok(), "staging: expanded importer emits");
-  const amber::bytecode::BcMethod *probe =
-      method_by_name(emit.module, "probe");
+  const amber::bytecode::BcMethod *probe = method_by_name(emit.module, "probe");
   expect(probe != nullptr, "staging: probe method exists");
   const amber::runtime::ExecutionResult exec =
       amber::runtime::execute_code(emit.module, probe->entry_code_id);
@@ -9458,17 +9573,16 @@ void test_cross_module_macro_staging() {
 
   // Module-alias imports (§11): `import provider.mod as pg` binds the macro
   // exports under dotted spellings — `pg.run_twice(): …` and `pg.sql"""…"""`.
-  const std::string tag_provider_source =
-      "package provider.mod\n"
-      "export macro run_twice\n"
-      "export macro sql\n"
-      "\n"
-      "macro def run_twice(blk):\n"
-      "  #{blk}\n"
-      "  #{blk}\n"
-      "\n"
-      "string_tag macro def sql(t):\n"
-      "  return Ast.lift(t.parts.size)\n";
+  const std::string tag_provider_source = "package provider.mod\n"
+                                          "export macro run_twice\n"
+                                          "export macro sql\n"
+                                          "\n"
+                                          "macro def run_twice(blk):\n"
+                                          "  #{blk}\n"
+                                          "  #{blk}\n"
+                                          "\n"
+                                          "string_tag macro def sql(t):\n"
+                                          "  return Ast.lift(t.parts.size)\n";
   amber::lexer::Lexer tag_provider_lexer(tag_provider_source, "<provider2>");
   amber::lexer::LexResult tag_provider_lex = tag_provider_lexer.lex();
   expect(tag_provider_lex.ok(), "alias staging: provider lex ok");
@@ -9482,18 +9596,17 @@ void test_cross_module_macro_staging() {
   expect(alias_providers["provider.mod"].size() == 2,
          "alias staging: both exports harvested");
 
-  const std::string alias_importer_source =
-      "package app.alias\n"
-      "import provider.mod as pg\n"
-      "\n"
-      "def probe():\n"
-      "  y = 0\n"
-      "  pg.run_twice():\n"
-      "    y = y + 20\n"
-      "  q = pg.sql\"\"\"\n"
-      "    SELECT 1\n"
-      "    \"\"\"\n"
-      "  y + q + 1\n";
+  const std::string alias_importer_source = "package app.alias\n"
+                                            "import provider.mod as pg\n"
+                                            "\n"
+                                            "def probe():\n"
+                                            "  y = 0\n"
+                                            "  pg.run_twice():\n"
+                                            "    y = y + 20\n"
+                                            "  q = pg.sql\"\"\"\n"
+                                            "    SELECT 1\n"
+                                            "    \"\"\"\n"
+                                            "  y + q + 1\n";
   amber::lexer::Lexer alias_lexer(alias_importer_source, "<alias-importer>");
   amber::lexer::LexResult alias_lex = alias_lexer.lex();
   expect(alias_lex.ok(), "alias staging: importer lex ok");
@@ -9567,8 +9680,7 @@ void test_cross_module_macro_staging() {
   const amber::macros::ExpandResult collided = amber::macros::expand_macros(
       collision_mod.items, collision_mod.module_name, collision_source,
       providers);
-  expect(!collided.ok &&
-             collided.error.find("collides") != std::string::npos,
+  expect(!collided.ok && collided.error.find("collides") != std::string::npos,
          "import/local macro name collision is a diagnostic");
 }
 
@@ -9624,8 +9736,7 @@ void test_string_tag_macro_staging() {
       importer_parser.parse_module_unit();
   expect(importer_mod.ok(), "tag staging: importer parse ok");
   const amber::macros::ExpandResult expanded = amber::macros::expand_macros(
-      importer_mod.items, importer_mod.module_name, importer_source,
-      providers);
+      importer_mod.items, importer_mod.module_name, importer_source, providers);
   expect(expanded.ok,
          "imported string_tag expansion succeeds, got: " + expanded.error);
   amber::ast::expand_quotes(importer_mod.items);
@@ -9637,8 +9748,7 @@ void test_string_tag_macro_staging() {
   amber::bytecode::EmitResult emit =
       amber::bytecode::emit_program(program, importer_mod.module_name);
   expect(emit.ok(), "tag staging: expanded importer emits");
-  const amber::bytecode::BcMethod *probe =
-      method_by_name(emit.module, "probe");
+  const amber::bytecode::BcMethod *probe = method_by_name(emit.module, "probe");
   expect(probe != nullptr, "tag staging: probe method exists");
   const amber::runtime::ExecutionResult exec =
       amber::runtime::execute_code(emit.module, probe->entry_code_id);
@@ -9661,8 +9771,7 @@ void test_string_tag_macro_staging() {
   expect(misuse_mod.ok(), "tag staging: misuse module parses");
   const amber::macros::ExpandResult misused = amber::macros::expand_macros(
       misuse_mod.items, misuse_mod.module_name, misuse_source, providers);
-  expect(!misused.ok &&
-             misused.error.find("string_tag") != std::string::npos,
+  expect(!misused.ok && misused.error.find("string_tag") != std::string::npos,
          "ordinary call of a string_tag macro is a diagnostic, got: " +
              misused.error);
 }
@@ -9712,6 +9821,8 @@ int main() {
   test_runtime_uninitialized_register_read_raises_name_error();
   test_manual_call_invokes_object_call_method();
   test_execute_emitted_send_method();
+  test_execute_emitted_implicit_receiver_method_call();
+  test_execute_emitted_exclusive_slice_end_boundary();
   test_execute_emitted_integer_specialized_ops();
   test_execute_emitted_numeric_equality_and_new_ops();
   test_execute_emitted_integer_send_fast_path_new_ops();
@@ -9764,6 +9875,7 @@ int main() {
   test_runtime_wasm_and_accelerator_metadata();
   test_runtime_modern_profile_metadata();
   test_manual_make_map();
+  test_execute_emitted_control_condition_assignment();
   test_execute_emitted_block_map_suffixes();
   test_execute_emitted_v20_5_array_generation_and_optional_access();
   test_runtime_watch_local_storage_replacement();

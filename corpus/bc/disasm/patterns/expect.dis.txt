@@ -1,19 +1,19 @@
-; amber.bc.v1 sha256=c3065fba1f1a527bee145db6e5d438e9953d887a549e350b7508a9c16871d5cf
+; amber.bc.v1 sha256=50b2654431f2272ed300b9ec98dab5c85907b52d5256b3ad0214bf9d35b45bfb
 .header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
 .sections
   STRS offset=368 size=103 align=1 flags=0
   SYMS offset=471 size=39 align=1 flags=0
   KONS offset=510 size=28 align=1 flags=0
-  CODE offset=538 size=424 align=1 flags=0
-  METH offset=962 size=108 align=1 flags=0
-  CLAS offset=1070 size=4 align=1 flags=0
-  DEPS offset=1074 size=4 align=1 flags=0
-  EXPT offset=1078 size=4 align=1 flags=0
-  INIT offset=1082 size=9 align=1 flags=0
-  PATS offset=1091 size=28 align=1 flags=0
-  SPAN offset=1119 size=1729 align=1 flags=0
-  LINE offset=2848 size=280 align=1 flags=0
-  LOCS offset=3128 size=124 align=1 flags=0
+  CODE offset=538 size=438 align=1 flags=0
+  METH offset=976 size=108 align=1 flags=0
+  CLAS offset=1084 size=4 align=1 flags=0
+  DEPS offset=1088 size=4 align=1 flags=0
+  EXPT offset=1092 size=4 align=1 flags=0
+  INIT offset=1096 size=9 align=1 flags=0
+  PATS offset=1105 size=28 align=1 flags=0
+  SPAN offset=1133 size=1879 align=1 flags=0
+  LINE offset=3012 size=304 align=1 flags=0
+  LOCS offset=3316 size=124 align=1 flags=0
 .strs
   s0 "choose"
   s1 "function"
@@ -40,16 +40,20 @@
 code c1 kind=module regs=5 flags=0
   local l0 name=s0(choose) role=s1(function) binding=s2(local)
   local l1 name=s3(unpack) role=s1(function) binding=s2(local)
-  0000 MAKE_CLOSURE 0 2 0
-  0001 MAKE_CLOSURE 1 3 0
-  0002 LOADNULL 4
-  0003 CLOSE_UPVALUES 0
-  0004 RETURN 4
+  0000 LOADNULL 0
+  0001 LOADNULL 1
+  0002 MAKE_CLOSURE 0 2 0
+  0003 MAKE_CLOSURE 1 3 0
+  0004 LOADNULL 4
+  0005 CLOSE_UPVALUES 0
+  0006 RETURN 4
   span 0..1 corpus/bc/disasm/patterns/source.am:1:1-6:8
   span 1..2 corpus/bc/disasm/patterns/source.am:8:1-9:25
-  span 2..3 corpus/bc/disasm/patterns/source.am:8:1-9:25
-  span 3..4 corpus/bc/disasm/patterns/source.am:1:1-9:25
-  span 4..5 corpus/bc/disasm/patterns/source.am:1:1-9:25
+  span 2..3 corpus/bc/disasm/patterns/source.am:1:1-6:8
+  span 3..4 corpus/bc/disasm/patterns/source.am:8:1-9:25
+  span 4..5 corpus/bc/disasm/patterns/source.am:8:1-9:25
+  span 5..6 corpus/bc/disasm/patterns/source.am:1:1-9:25
+  span 6..7 corpus/bc/disasm/patterns/source.am:1:1-9:25
 code c2 kind=method regs=4 flags=0
   local l0 name=s4(x) role=s5(param) binding=s2(local)
   0000 P_CHECK_EQ 0 0 4
@@ -108,9 +112,11 @@ code c3 kind=method regs=5 flags=0
 .line
   c1 pc=0 line=1
   c1 pc=1 line=8
-  c1 pc=2 line=8
-  c1 pc=3 line=1
-  c1 pc=4 line=1
+  c1 pc=2 line=1
+  c1 pc=3 line=8
+  c1 pc=4 line=8
+  c1 pc=5 line=1
+  c1 pc=6 line=1
   c2 pc=0 line=3
   c2 pc=1 line=4
   c2 pc=2 line=4
@@ -130,8 +136,8 @@ code c3 kind=method regs=5 flags=0
   c3 pc=8 line=8
   c3 pc=9 line=8
 .locs
-  c1 l0 name=s0(choose) 0..5
-  c1 l1 name=s3(unpack) 0..5
+  c1 l0 name=s0(choose) 0..7
+  c1 l1 name=s3(unpack) 0..7
   c2 l0 name=s4(x) 0..8
   c3 l0 name=s6(values) 0..10
   c3 l1 name=s7(head) 0..10

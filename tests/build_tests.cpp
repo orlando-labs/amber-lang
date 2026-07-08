@@ -33,7 +33,7 @@ void test_manifest_parses_and_normalizes() {
       "  ]\n"
       "}\n";
   const amber::build::BuildManifestResult parsed =
-      amber::build::parse_build_manifest_json(source, "amber.build.json");
+      amber::build::parse_build_manifest(source, "amber.build.json");
   expect(parsed.ok(), amber::build::diagnostics_to_string(parsed.diagnostics));
   expect(parsed.manifest.profiles.required_features.size() == 2,
          "required features should be unique");
@@ -51,6 +51,77 @@ void test_manifest_parses_and_normalizes() {
   expect((flags & (1U << 0U)) != 0U, "core profile flag should be set");
   expect((flags & (1U << 1U)) != 0U, "typed profile flag should be set");
   expect((flags & (1U << 3U)) != 0U, "effects profile flag should be set");
+}
+
+void test_yaml_manifest_parses_and_normalizes() {
+  const std::string source =
+      "schema: amber.build.v1\n"
+      "name: demo.yaml\n"
+      "root: demo.main\n"
+      "profiles:\n"
+      "  required: [effects.v1, core.v1, core.v1, ffi.v1]\n"
+      "  optional:\n"
+      "    - typed.v1\n"
+      "  forbidden: []\n"
+      "  numeric:\n"
+      "    int: Int64\n"
+      "    overflow: checked\n"
+      "stdlib:\n"
+      "  - name: amber.core\n"
+      "    path: stdlib/core.am\n"
+      "modules:\n"
+      "  - name: demo.util\n"
+      "    path: src/util.am\n"
+      "  - name: demo.main\n"
+      "    path: src/main.am\n"
+      "native_extensions:\n"
+      "  - name: tiny\n"
+      "    language: c\n"
+      "    sources: [native/tiny.c]\n"
+      "    symbols:\n"
+      "      - logical: tiny.answer\n"
+      "        symbol: tiny_answer\n";
+  const amber::build::BuildManifestResult parsed =
+      amber::build::parse_build_manifest(source, "amber.build.yaml");
+  expect(parsed.ok(), amber::build::diagnostics_to_string(parsed.diagnostics));
+  expect(parsed.manifest.profiles.required_features.size() == 3,
+         "YAML required features should be unique");
+  expect(parsed.manifest.profiles.required_features[0] == "core.v1",
+         "YAML required features should be sorted");
+  expect(parsed.manifest.profiles.numeric_int == "Int64" &&
+             parsed.manifest.profiles.numeric_overflow == "checked",
+         "YAML numeric profile should parse");
+  expect(parsed.manifest.modules[0].name == "demo.main",
+         "YAML modules should sort by name");
+  expect(parsed.manifest.native_extensions.size() == 1,
+         "YAML native extension should parse");
+  const amber::pkg::PackageNativeExtension &extension =
+      parsed.manifest.native_extensions[0];
+  expect(extension.sources.size() == 1 &&
+             extension.sources[0] == "native/tiny.c",
+         "YAML native sources should parse");
+  expect(extension.symbols.size() == 1 &&
+             extension.symbols[0].logical == "tiny.answer" &&
+             extension.symbols[0].symbol == "tiny_answer",
+         "YAML native symbols should parse");
+
+  const std::string obsolete =
+      "schema: amber.build.v1\n"
+      "name: obsolete\n"
+      "root: obsolete.main\n"
+      "profiles:\n"
+      "  required: [core.v1, ffi.v1]\n"
+      "modules:\n"
+      "  - name: obsolete.main\n"
+      "    path: main.am\n"
+      "native_extensions:\n"
+      "  - name: tiny\n"
+      "    language: c\n"
+      "    capabilities: [ffi]\n";
+  const amber::build::BuildManifestResult rejected =
+      amber::build::parse_build_manifest_yaml(obsolete, "amber.build.yaml");
+  expect(!rejected.ok(),
+         "YAML native extension capabilities should be rejected");
 }
 
 void test_manifest_rejects_profile_conflict() {
@@ -91,7 +162,6 @@ void test_native_extensions_parse_and_gate() {
       "\"native_extensions\":[{"
       "\"name\":\"blake3\",\"language\":\"c\","
       "\"sources\":[\"native/blake3.c\"],"
-      "\"capabilities\":[\"ffi\"],"
       "\"symbols\":[{\"logical\":\"blake3.hash\","
       "\"symbol\":\"amber_blake3_hash\"}],"
       "\"types\":[{\"amber\":\"crypto.blake3.Hasher\",\"tag\":\"blake3.Hasher\","
@@ -123,6 +193,19 @@ void test_native_extensions_parse_and_gate() {
              extension.errors[0].parent == "NativeError",
          "native extension error descriptor");
 
+  const std::string obsolete_extension_caps =
+      "{\"schema\":\"amber.build.v1\",\"name\":\"crypto\","
+      "\"root\":\"crypto.blake3\","
+      "\"profiles\":{\"required\":[\"core.v1\",\"ffi.v1\"]},"
+      "\"modules\":[{\"name\":\"crypto.blake3\",\"path\":\"src/blake3.am\"}],"
+      "\"native_extensions\":[{\"name\":\"blake3\",\"language\":\"c\","
+      "\"capabilities\":[\"ffi\"]}]}";
+  const amber::build::BuildManifestResult obsolete =
+      amber::build::parse_build_manifest_json(obsolete_extension_caps,
+                                              "amber.build.json");
+  expect(!obsolete.ok(),
+         "native extension capabilities should be rejected as obsolete");
+
   // Without ffi.v1 the same manifest is rejected.
   const std::string ungated =
       "{\"schema\":\"amber.build.v1\",\"name\":\"crypto\","
@@ -145,6 +228,7 @@ void test_native_extensions_parse_and_gate() {
 
 int main() {
   test_manifest_parses_and_normalizes();
+  test_yaml_manifest_parses_and_normalizes();
   test_manifest_rejects_profile_conflict();
   test_runtime_feature_support_surface();
   test_native_extensions_parse_and_gate();
