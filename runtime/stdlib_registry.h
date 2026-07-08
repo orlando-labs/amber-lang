@@ -55,7 +55,12 @@ class StdlibHost {
 public:
   virtual ~StdlibHost() = default;
 
-  // Record a terminal fault on the active frame (the VM's `set_fault`).
+  // Raise `error_class` on the active frame as a *rescuable* runtime error:
+  // it unwinds to the nearest `rescue` handler, degrading to a terminal fault
+  // (the VM's `set_fault`) only when the class is not a registered runtime
+  // error or no handler is active. Stdlib domain errors (parse/decode/type/
+  // arity, ...) are recoverable, not fatal to the whole program. Callers must
+  // return immediately afterwards, as the active frame may have been unwound.
   virtual void stdlib_set_fault(const void *frame,
                                 const std::string &error_class,
                                 const std::string &message) = 0;

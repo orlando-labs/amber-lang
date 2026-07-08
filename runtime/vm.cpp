@@ -1084,7 +1084,14 @@ public:
   // active frame is type-erased through the ABI; cast it back here. ---
   void stdlib_set_fault(const void *frame, const std::string &error_class,
                         const std::string &message) override {
-    set_fault(*static_cast<const Frame *>(frame), error_class, message);
+    // Stdlib domain errors (JsonParseError, YamlParseError, CodecDecodeError,
+    // wrong-arity TypeError, ...) are not fatal to the whole program: raise
+    // them as *rescuable* exceptions that unwind to the nearest `rescue`.
+    // raise_runtime_error degrades to a terminal fault (same shape as the old
+    // set_fault) when the class is not a registered runtime error or no handler
+    // is active, so uncaught errors and internal names (VMError) still abort.
+    raise_runtime_error(*static_cast<const Frame *>(frame), error_class,
+                        message);
   }
   void stdlib_raise_exception(const void *frame, Value exception) override {
     raise_value(*static_cast<const Frame *>(frame), exception);
