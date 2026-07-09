@@ -1596,6 +1596,29 @@ void test_runtime_string_interpolation_and_conversions() {
          "conversion property aliases should not become ordinary methods");
 }
 
+void test_runtime_present_absent_predicates() {
+  amber::bytecode::EmitResult emit_result =
+      emit_ok("null.absent? and "
+              "false.absent? and "
+              "true.present? and "
+              "0.present? and "
+              "\"\".absent? and "
+              "\"amber\".present? and "
+              "[].absent? and "
+              "[1].present? and "
+              "{}.absent? and "
+              "{a: 1}.present? and "
+              "(1..0).absent? and "
+              "(1..2).present?\n");
+  expect(emit_result.module.init.has_entry_code_id,
+         "present?/absent? module init exists");
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "present?/absent? execution failed");
+  expect(exec.value.is_bool() && exec.value.as_bool(),
+         "present?/absent? predicates should follow truthy non-empty semantics");
+}
+
 void test_runtime_text_output_helpers_and_io_sinks() {
   amber::bytecode::EmitResult emit_result = emit_ok("print \"hello\"\n"
                                                     "x = p \"debug\"\n"
@@ -9801,6 +9824,7 @@ int main() {
   test_execute_emitted_v20_7_spread();
   test_execute_emitted_v20_6_value_keyed_maps();
   test_runtime_string_interpolation_and_conversions();
+  test_runtime_present_absent_predicates();
   test_runtime_text_output_helpers_and_io_sinks();
   test_runtime_logger_source_surface_and_annotations();
   test_runtime_logger_parallel_native_threads_and_tasks();

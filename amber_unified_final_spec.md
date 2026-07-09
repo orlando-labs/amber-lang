@@ -81,6 +81,7 @@ active?
 clear!
 empty?
 present?
+absent?
 _tmp
 __cache
 масса
@@ -3373,6 +3374,7 @@ Amber уже использует Ruby-like имена методов с суф�
 ```amber
 empty?
 present?
+absent?
 valid?
 question_method?
 ```

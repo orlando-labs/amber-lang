@@ -25387,6 +25387,85 @@ private:
       }
     }
 
+    if (selector == "present?" || selector == "absent?") {
+      const bool builtin_instance =
+          receiver_is_range || receiver_is_lazy_seq;
+      if (receiver.is_class_object() ||
+          (receiver.is_instance_object() && !builtin_instance)) {
+        return SendStatus::NotHandled;
+      }
+      if (!kw_args.empty()) {
+        set_fault(frame, "TypeError",
+                  "present?/absent? do not accept keyword arguments");
+        return SendStatus::Faulted;
+      }
+      if (!require_arity(0) || !require_no_block()) {
+        return SendStatus::Faulted;
+      }
+
+      bool present = true;
+      if (receiver.is_null()) {
+        present = false;
+      } else if (receiver.is_bool()) {
+        present = receiver.as_bool();
+      } else if (receiver.is_string()) {
+        const std::optional<std::string> text =
+            string_text_from_id(receiver.as_string().string_id);
+        if (!text.has_value()) {
+          set_fault(frame, "VMError", "string ref is invalid");
+          return SendStatus::Faulted;
+        }
+        present = !text->empty();
+      } else if (receiver.is_map()) {
+        const IntrusivePtr<MapValue> map = receiver.as_map();
+        if (map == nullptr) {
+          set_fault(frame, "TypeError", "map value is null");
+          return SendStatus::Faulted;
+        }
+        present = !map->entries.empty();
+      } else if (receiver_is_range) {
+        const std::optional<RangeBounds> bounds =
+            extract_range_bounds(frame, receiver);
+        if (fault_.has_value() || !bounds.has_value()) {
+          return SendStatus::Faulted;
+        }
+        if (!bounds->start_value.has_value() ||
+            !bounds->finish_value.has_value()) {
+          present = true;
+        } else if (bounds->float_range) {
+          present = range_float_value_in_bounds(*bounds, *bounds->float_start);
+        } else {
+          present = range_int_value_in_bounds(*bounds, *bounds->start);
+        }
+      } else if (receiver_is_lazy_seq) {
+        const std::optional<LazySeqState> state =
+            extract_lazy_seq_state(frame, receiver);
+        if (fault_.has_value() || !state.has_value()) {
+          return SendStatus::Faulted;
+        }
+        bool saw_item = false;
+        const LazySeqVisitStatus status =
+            visit_lazy_seq(frame, *state, receiver,
+                           [&](const Value &item) -> LazySeqVisitStatus {
+                             (void)item;
+                             saw_item = true;
+                             return LazySeqVisitStatus::Stop;
+                           });
+        if (status == LazySeqVisitStatus::Faulted) {
+          return SendStatus::Faulted;
+        }
+        present = saw_item;
+      } else if (const std::vector<Value> *items =
+                     sequence_items_view(frame, receiver)) {
+        present = !items->empty();
+      } else if (fault_.has_value()) {
+        return SendStatus::Faulted;
+      }
+
+      *out = Value::boolean(selector == "present?" ? present : !present);
+      return SendStatus::Matched;
+    }
+
     return SendStatus::NotHandled;
   }
 
