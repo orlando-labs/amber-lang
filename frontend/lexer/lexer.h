@@ -46,8 +46,8 @@ private:
   void lex_line_indent();
   void lex_identifier_or_keyword();
   void lex_number();
-  void lex_string(char quote);
-  void lex_text_block();
+  void lex_string(char quote, bool raw = false);
+  void lex_text_block(bool raw = false);
   bool consume_interpolation_in_string(Position interpolation_start);
   bool consume_nested_string_in_interpolation(char quote);
   bool validate_string_escape(Position escape_start, char quote);
@@ -73,6 +73,7 @@ private:
   bool at_line_start_ = true;
   int bracket_depth_ = 0;
   bool one_line_block_active_ = false;
+  bool raw_next_string_literal_ = false;
   std::vector<int> indent_stack_;
   // Macro template-region tracker (DESIGN-macro-system §6/§17 Q2). Inside a
   // `macro def` body `#{` opens a template splice hole instead of a comment;

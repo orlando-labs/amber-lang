@@ -68,11 +68,15 @@ LexResult Lexer::lex() {
       continue;
     }
     if (c == '"' && starts_with("\"\"\"")) {
-      lex_text_block();
+      const bool raw = raw_next_string_literal_;
+      raw_next_string_literal_ = false;
+      lex_text_block(raw);
       continue;
     }
     if (c == '"' || c == '\'') {
-      lex_string(c);
+      const bool raw = raw_next_string_literal_;
+      raw_next_string_literal_ = false;
+      lex_string(c, raw);
       continue;
     }
 
@@ -206,7 +210,10 @@ LexResult Lexer::lex() {
       break;
     case '=':
       advance();
-      if (!at_end() && current() == '=' && peek() == '=') {
+      if (!at_end() && current() == '~') {
+        advance();
+        emit(TokenKind::EqualTilde, start, "=~");
+      } else if (!at_end() && current() == '=' && peek() == '=') {
         advance();
         advance();
         emit(TokenKind::EqualEqualEqual, start, "===");
@@ -219,7 +226,10 @@ LexResult Lexer::lex() {
       break;
     case '!':
       advance();
-      if (!at_end() && current() == '=') {
+      if (!at_end() && current() == '~') {
+        advance();
+        emit(TokenKind::BangTilde, start, "!~");
+      } else if (!at_end() && current() == '=') {
         advance();
         emit(TokenKind::BangEqual, start, "!=");
       } else {
@@ -277,8 +287,8 @@ LexResult Lexer::lex() {
       // every existing newline-terminated statement rule applies unchanged. It
       // exists for ad-hoc one-liners (e.g. `iamber --eval 'a = 1; print(a)'`);
       // it is highly discouraged in normal code, where line breaks are the
-      // idiomatic separator. It carries no indentation effect (Indent/Dedent are
-      // computed only at physical line starts).
+      // idiomatic separator. It carries no indentation effect (Indent/Dedent
+      // are computed only at physical line starts).
       advance();
       emit(TokenKind::Newline, start, ";");
       break;
@@ -577,6 +587,7 @@ void Lexer::lex_identifier_or_keyword() {
   const std::string text =
       source_.substr(start.offset, position().offset - start.offset);
   TokenKind keyword = TokenKind::Identifier;
+  const bool raw_regexp_tag = text == "r" && !at_end() && current() == '"';
   if (is_keyword_text(text, &keyword)) {
     emit(keyword, start, text);
   } else if (is_placeholder_text(text)) {
@@ -584,6 +595,7 @@ void Lexer::lex_identifier_or_keyword() {
   } else {
     emit(TokenKind::Identifier, start, text);
   }
+  raw_next_string_literal_ = raw_regexp_tag;
 }
 
 void Lexer::lex_number() {
@@ -701,7 +713,7 @@ void Lexer::lex_number() {
   emit(is_float ? TokenKind::Float : TokenKind::Integer, start, text);
 }
 
-void Lexer::lex_string(char quote) {
+void Lexer::lex_string(char quote, bool raw) {
   const Position start = position();
   advance();
   bool closed = false;
@@ -710,10 +722,16 @@ void Lexer::lex_string(char quote) {
     if (current() == '\\') {
       const Position escape_start = position();
       advance();
-      validate_string_escape(escape_start, quote);
+      if (raw) {
+        if (!at_end() && !at_line_break()) {
+          advance();
+        }
+      } else {
+        validate_string_escape(escape_start, quote);
+      }
       continue;
     }
-    if (quote == '"' && current() == '#' && peek() == '{') {
+    if (!raw && quote == '"' && current() == '#' && peek() == '{') {
       const Position interpolation_start = position();
       advance();
       advance();
@@ -755,7 +773,7 @@ void Lexer::lex_string(char quote) {
 // token keeps the `"""` delimiters so the parser can tell the block form
 // apart (quote_kind "block"); its content is the dedented text, so the
 // existing parts scanning applies unchanged.
-void Lexer::lex_text_block() {
+void Lexer::lex_text_block(bool raw) {
   const Position start = position();
   advance();
   advance();
@@ -804,7 +822,7 @@ void Lexer::lex_text_block() {
     }
     std::string line(indent, ' ');
     while (!at_end() && !at_line_break()) {
-      if (current() == '#' && peek() == '{') {
+      if (!raw && current() == '#' && peek() == '{') {
         const std::size_t from = index_;
         const Position interpolation_start = position();
         advance();
@@ -819,7 +837,7 @@ void Lexer::lex_text_block() {
         line.push_back(advance());
         if (!at_end() && !at_line_break()) {
           const char escaped = current();
-          if (escaped != 'n' && escaped != 'r' && escaped != 't' &&
+          if (!raw && escaped != 'n' && escaped != 'r' && escaped != 't' &&
               escaped != '\\' && escaped != '"' && escaped != '#' &&
               escaped != '\'' && escaped != 'u') {
             error_code(position(), "AMB_STRING_BAD_ESCAPE",

@@ -254,8 +254,9 @@ bool is_ownership_marker_text(const std::string &text) {
 
 // A native-only leaf has no Amber implementation. In a bytecode build, calling
 // it must fail closed, so we synthesize a fallback body that raises
-// NativeRequiredError (the same body-synthesis approach the attr accessors use).
-// A native build instead routes `binding` to its symbol and ignores this body.
+// NativeRequiredError (the same body-synthesis approach the attr accessors
+// use). A native build instead routes `binding` to its symbol and ignores this
+// body.
 std::vector<std::unique_ptr<ast::Expr>>
 synthesize_native_required_body(const std::string &def_name,
                                 const std::string &binding) {
@@ -375,8 +376,8 @@ bool no_space_after_pattern_token(lexer::TokenKind kind) {
   return kind == lexer::TokenKind::Colon || kind == lexer::TokenKind::Dot ||
          kind == lexer::TokenKind::DotDot ||
          kind == lexer::TokenKind::DotDotDot ||
-         kind == lexer::TokenKind::Caret ||
-         kind == lexer::TokenKind::Star || kind == lexer::TokenKind::LParen ||
+         kind == lexer::TokenKind::Caret || kind == lexer::TokenKind::Star ||
+         kind == lexer::TokenKind::LParen ||
          kind == lexer::TokenKind::LBracket || kind == lexer::TokenKind::LBrace;
 }
 
@@ -682,20 +683,19 @@ void shift_token_spans_from_interpolation(std::vector<lexer::Token> *tokens,
 }
 
 bool is_operator_method_name(lexer::TokenKind kind) {
-  return kind == lexer::TokenKind::Plus ||
-         kind == lexer::TokenKind::Minus ||
-         kind == lexer::TokenKind::Star ||
-         kind == lexer::TokenKind::StarStar ||
+  return kind == lexer::TokenKind::Plus || kind == lexer::TokenKind::Minus ||
+         kind == lexer::TokenKind::Star || kind == lexer::TokenKind::StarStar ||
          kind == lexer::TokenKind::Slash ||
          kind == lexer::TokenKind::SlashSlash ||
          kind == lexer::TokenKind::Percent ||
          kind == lexer::TokenKind::Ampersand ||
-         kind == lexer::TokenKind::Pipe ||
-         kind == lexer::TokenKind::Caret ||
+         kind == lexer::TokenKind::Pipe || kind == lexer::TokenKind::Caret ||
          kind == lexer::TokenKind::LessLess ||
          kind == lexer::TokenKind::GreaterGreater ||
+         kind == lexer::TokenKind::EqualTilde ||
          kind == lexer::TokenKind::EqualEqual ||
          kind == lexer::TokenKind::EqualEqualEqual ||
+         kind == lexer::TokenKind::BangTilde ||
          kind == lexer::TokenKind::BangEqual ||
          kind == lexer::TokenKind::Less ||
          kind == lexer::TokenKind::LessEqual ||
@@ -916,8 +916,7 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
 
   if (context == BodyContext::Module &&
       current().kind == lexer::TokenKind::Identifier &&
-      current().lexeme == "error" &&
-      is_identifier_like_token(peek(1).kind)) {
+      current().lexeme == "error" && is_identifier_like_token(peek(1).kind)) {
     return parse_error_decl();
   }
 
@@ -935,16 +934,15 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     const bool bare = after == lexer::TokenKind::Newline ||
                       after == lexer::TokenKind::Dedent ||
                       after == lexer::TokenKind::Eof;
-    const bool valued = after == lexer::TokenKind::Integer ||
-                        after == lexer::TokenKind::Float ||
-                        after == lexer::TokenKind::String ||
-                        after == lexer::TokenKind::Identifier ||
-                        after == lexer::TokenKind::At ||
-                        after == lexer::TokenKind::AtAt ||
-                        after == lexer::TokenKind::LastValue ||
-                        after == lexer::TokenKind::KeywordTrue ||
-                        after == lexer::TokenKind::KeywordFalse ||
-                        after == lexer::TokenKind::KeywordNull;
+    const bool valued =
+        after == lexer::TokenKind::Integer ||
+        after == lexer::TokenKind::Float || after == lexer::TokenKind::String ||
+        after == lexer::TokenKind::Identifier ||
+        after == lexer::TokenKind::At || after == lexer::TokenKind::AtAt ||
+        after == lexer::TokenKind::LastValue ||
+        after == lexer::TokenKind::KeywordTrue ||
+        after == lexer::TokenKind::KeywordFalse ||
+        after == lexer::TokenKind::KeywordNull;
     if (bare || valued) {
       return parse_next_expr();
     }
@@ -997,8 +995,8 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     advance();
     consume(lexer::TokenKind::KeywordDef,
             "expected 'def' after string_tag macro");
-    std::unique_ptr<ast::Expr> def = parse_def_stmt(
-        false, &start, /*is_native=*/false, /*is_macro=*/true);
+    std::unique_ptr<ast::Expr> def =
+        parse_def_stmt(false, &start, /*is_native=*/false, /*is_macro=*/true);
     if (def) {
       def->bool_field("is_string_tag", true);
     }
@@ -1012,8 +1010,7 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
   // dedicated quasiquote node. F1.5 expands the chain when the name resolves
   // to a macro; a leftover reaching the binder is rejected there.
   if (current().kind == lexer::TokenKind::Identifier &&
-      current().lexeme != "quote" &&
-      peek(1).kind == lexer::TokenKind::Colon &&
+      current().lexeme != "quote" && peek(1).kind == lexer::TokenKind::Colon &&
       peek(2).kind == lexer::TokenKind::Newline) {
     const lexer::Token name = advance();
     auto base = ast::make_expr("AstName", name.span);
@@ -1024,8 +1021,8 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     block_tail->node_field("block", std::move(block));
     std::vector<std::unique_ptr<ast::Expr>> tails;
     tails.push_back(std::move(block_tail));
-    auto chain = ast::make_expr("AstPostfixChain",
-                                ast::join_spans(name.span, end_span));
+    auto chain =
+        ast::make_expr("AstPostfixChain", ast::join_spans(name.span, end_span));
     chain->node_field("base", std::move(base));
     chain->list_field("tails", std::move(tails));
     auto stmt = ast::make_expr("AstExprStmt", chain->span);
@@ -1149,12 +1146,11 @@ std::unique_ptr<ast::Expr> Parser::parse_numeric_directive() {
   const lexer::Token start = advance();
   consume(lexer::TokenKind::Colon, "expected ':' after numeric");
   consume(lexer::TokenKind::Newline, "expected newline after `numeric:`");
-  consume(lexer::TokenKind::Indent,
-          "expected indented block after `numeric:`");
+  consume(lexer::TokenKind::Indent, "expected indented block after `numeric:`");
 
-  static const char *kIntTypes[] = {"Int8",  "Int16",  "Int32",  "Int64",
-                                    "UInt8", "UInt16", "UInt32", "UInt64",
-                                    "BigInt"};
+  static const char *kIntTypes[] = {"Int8",   "Int16",  "Int32",
+                                    "Int64",  "UInt8",  "UInt16",
+                                    "UInt32", "UInt64", "BigInt"};
   std::string int_type;
   std::string overflow;
   while (!check(lexer::TokenKind::Dedent) && !at_end()) {
@@ -1163,13 +1159,13 @@ std::unique_ptr<ast::Expr> Parser::parse_numeric_directive() {
     if (check(lexer::TokenKind::Dedent) || at_end()) {
       break;
     }
-    const lexer::Token key = consume(
-        lexer::TokenKind::Identifier,
-        "expected numeric profile entry name (`int` or `overflow`)");
+    const lexer::Token key =
+        consume(lexer::TokenKind::Identifier,
+                "expected numeric profile entry name (`int` or `overflow`)");
     consume(lexer::TokenKind::Colon,
             "expected ':' after numeric profile entry name");
-    const lexer::Token value = consume(
-        lexer::TokenKind::Identifier, "expected numeric profile entry value");
+    const lexer::Token value = consume(lexer::TokenKind::Identifier,
+                                       "expected numeric profile entry value");
     if (key.lexeme == "int") {
       if (!int_type.empty()) {
         error(key, "duplicate numeric profile entry `int`");
@@ -1199,8 +1195,7 @@ std::unique_ptr<ast::Expr> Parser::parse_numeric_directive() {
       error(key, "unknown numeric profile entry `" + key.lexeme +
                      "` (expected `int` or `overflow`)");
     }
-    if (!match(lexer::TokenKind::Newline) &&
-        !check(lexer::TokenKind::Dedent)) {
+    if (!match(lexer::TokenKind::Newline) && !check(lexer::TokenKind::Dedent)) {
       break;
     }
   }
@@ -1221,8 +1216,8 @@ std::unique_ptr<ast::Expr> Parser::parse_error_decl() {
   if (match(lexer::TokenKind::Less)) {
     parent = parse_module_path();
   }
-  auto node =
-      ast::make_expr("AstErrorDecl", ast::join_spans(start.span, previous().span));
+  auto node = ast::make_expr("AstErrorDecl",
+                             ast::join_spans(start.span, previous().span));
   node->string_field("name", name);
   node->string_field("parent", parent);
   return node;
@@ -1433,12 +1428,13 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
                "method inside a `native class`");
   }
   if (has_binding && !check(lexer::TokenKind::Colon)) {
-    auto node = ast::make_expr(class_method ? "AstClassMethodDef" : "AstDefStmt",
-                               ast::join_spans(start.span, previous().span));
+    auto node =
+        ast::make_expr(class_method ? "AstClassMethodDef" : "AstDefStmt",
+                       ast::join_spans(start.span, previous().span));
     node->string_field("name", name_text);
     node->node_field("signature", std::move(signature));
-    node->list_field("body",
-                     synthesize_native_required_body(name_text, native_binding));
+    node->list_field(
+        "body", synthesize_native_required_body(name_text, native_binding));
     node->bool_field("is_native", is_native);
     node->bool_field("native_only", true);
     node->string_field("native_binding", native_binding);
@@ -1478,7 +1474,8 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
   }
   const lexer::Span body_end_span =
       body.empty() ? previous().span : body.back()->span;
-  HandlerSuffix handlers = parse_handler_suffix(body_end_span, BodyContext::Def);
+  HandlerSuffix handlers =
+      parse_handler_suffix(body_end_span, BodyContext::Def);
   const lexer::Span end_span =
       handlers.end_span.end.offset >= body_end_span.end.offset
           ? handlers.end_span
@@ -1510,8 +1507,7 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
 
 std::unique_ptr<ast::Expr> Parser::parse_prop_def(bool class_property) {
   const lexer::Token start = advance();
-  const lexer::Token name =
-      consume_identifier_like("expected property name");
+  const lexer::Token name = consume_identifier_like("expected property name");
 
   if (match(lexer::TokenKind::LParen)) {
     const lexer::Token open = previous();
@@ -1723,8 +1719,7 @@ void Parser::parse_property_arm(PropertySuite *suite) {
       }
     }
     consume(lexer::TokenKind::Colon, "expected ':' after getter arm");
-    std::vector<std::unique_ptr<ast::Expr>> body =
-        parse_body(BodyContext::Def);
+    std::vector<std::unique_ptr<ast::Expr>> body = parse_body(BodyContext::Def);
     if (!body.empty()) {
       suite->end_span = body.back()->span;
     } else {
@@ -1799,11 +1794,10 @@ void Parser::parse_property_arm(PropertySuite *suite) {
   }
 }
 
-std::unique_ptr<ast::Expr> Parser::parse_class_def(
-    const lexer::Token *native_start) {
+std::unique_ptr<ast::Expr>
+Parser::parse_class_def(const lexer::Token *native_start) {
   const lexer::Token class_kw = advance();
-  const lexer::Token start =
-      native_start != nullptr ? *native_start : class_kw;
+  const lexer::Token start = native_start != nullptr ? *native_start : class_kw;
   const bool is_native = native_start != nullptr;
   const lexer::Token name =
       consume(lexer::TokenKind::Identifier, "expected class name");
@@ -1918,8 +1912,9 @@ std::unique_ptr<ast::Expr> Parser::parse_pass_like_stmt(const char *kind) {
 std::unique_ptr<ast::Expr> Parser::parse_invalid_handler_stmt(bool rescue) {
   const lexer::Token token = advance();
   error_code(token, rescue ? "E_RESCUE_WITHOUT_BODY" : "E_ENSURE_WITHOUT_BODY",
-             rescue ? "`rescue` must follow a `try` body or function/method body"
-                    : "`ensure` must follow a `try` body or function/method body");
+             rescue
+                 ? "`rescue` must follow a `try` body or function/method body"
+                 : "`ensure` must follow a `try` body or function/method body");
   while (!at_end() && !check(lexer::TokenKind::Newline) &&
          !check(lexer::TokenKind::Dedent)) {
     advance();
@@ -2003,8 +1998,9 @@ std::unique_ptr<ast::Expr> Parser::parse_rescue_clause(BodyContext context) {
       const lexer::Span matcher_start = current().span;
       std::string matcher = parse_rescue_matcher_text();
       if (!matcher.empty()) {
-        auto matcher_node = ast::make_expr(
-            "AstRescueMatcher", ast::join_spans(matcher_start, previous().span));
+        auto matcher_node =
+            ast::make_expr("AstRescueMatcher",
+                           ast::join_spans(matcher_start, previous().span));
         matcher_node->string_field("type_expr", matcher);
         matchers.push_back(std::move(matcher_node));
       } else if (!check(lexer::TokenKind::Pipe)) {
@@ -2060,8 +2056,7 @@ std::string Parser::parse_rescue_matcher_text() {
     const lexer::TokenKind kind = current().kind;
     if (bracket_depth == 0 &&
         (kind == lexer::TokenKind::Comma || kind == lexer::TokenKind::Pipe ||
-         kind == lexer::TokenKind::Colon ||
-         kind == lexer::TokenKind::Newline ||
+         kind == lexer::TokenKind::Colon || kind == lexer::TokenKind::Newline ||
          kind == lexer::TokenKind::Eof)) {
       break;
     }
@@ -2171,10 +2166,10 @@ std::unique_ptr<ast::Expr> Parser::parse_param() {
   }
   const lexer::Token name =
       consume(lexer::TokenKind::Identifier, "expected parameter name");
-  std::string kind = is_block      ? "block"
-                     : is_rest      ? "rest"
-                     : is_kw_rest   ? "kw_rest"
-                                    : "positional";
+  std::string kind = is_block     ? "block"
+                     : is_rest    ? "rest"
+                     : is_kw_rest ? "kw_rest"
+                                  : "positional";
   std::string type_expr;
   std::unique_ptr<ast::Expr> default_expr;
 
@@ -2552,9 +2547,8 @@ bool Parser::is_simple_many_def_header() const {
                  kind == lexer::TokenKind::RBracket ||
                  kind == lexer::TokenKind::RBrace) {
         --rest_depth;
-      } else if (rest_depth == 0 &&
-                 (kind == lexer::TokenKind::Star ||
-                  kind == lexer::TokenKind::StarStar)) {
+      } else if (rest_depth == 0 && (kind == lexer::TokenKind::Star ||
+                                     kind == lexer::TokenKind::StarStar)) {
         return false;
       }
     }
@@ -2835,9 +2829,8 @@ std::unique_ptr<ast::Expr> Parser::parse_next_expr() {
   if (!is_stop_token(StopMode::Normal)) {
     value = parse_expression(1, StopMode::Normal);
   }
-  auto node = ast::make_expr("AstNext",
-                             value ? ast::join_spans(start.span, value->span)
-                                   : start.span);
+  auto node = ast::make_expr(
+      "AstNext", value ? ast::join_spans(start.span, value->span) : start.span);
   if (value) {
     node->node_field("value", std::move(value));
   }
@@ -2873,10 +2866,10 @@ std::unique_ptr<ast::Expr> Parser::parse_throw_expr() {
     value = parse_expression(1, StopMode::Normal);
   }
 
-  const lexer::Span end_span =
-      value != nullptr ? value->span : (tag != nullptr ? tag->span : start.span);
-  auto node =
-      ast::make_expr("AstThrow", ast::join_spans(start.span, end_span));
+  const lexer::Span end_span = value != nullptr
+                                   ? value->span
+                                   : (tag != nullptr ? tag->span : start.span);
+  auto node = ast::make_expr("AstThrow", ast::join_spans(start.span, end_span));
   if (tag != nullptr) {
     node->node_field("tag", std::move(tag));
   }
@@ -2900,8 +2893,7 @@ std::unique_ptr<ast::Expr> Parser::parse_catch_expr() {
       parse_control_body(BodyContext::Def);
   const lexer::Span end_span =
       body.empty() ? previous().span : body.back()->span;
-  auto node =
-      ast::make_expr("AstCatch", ast::join_spans(start.span, end_span));
+  auto node = ast::make_expr("AstCatch", ast::join_spans(start.span, end_span));
   node->node_field("tag", std::move(tag));
   node->list_field("body", std::move(body));
   return node;
@@ -2916,10 +2908,9 @@ std::unique_ptr<ast::Expr> Parser::parse_raise_expr() {
   } else {
     value = parse_expression(1, StopMode::Normal);
   }
-  auto node = ast::make_expr("AstRaise",
-                             value != nullptr
-                                 ? ast::join_spans(start.span, value->span)
-                                 : start.span);
+  auto node = ast::make_expr(
+      "AstRaise",
+      value != nullptr ? ast::join_spans(start.span, value->span) : start.span);
   if (value) {
     node->node_field("expr", std::move(value));
   }
@@ -2933,7 +2924,8 @@ std::unique_ptr<ast::Expr> Parser::parse_try_expr() {
       parse_control_body(BodyContext::Def);
   const lexer::Span body_end_span =
       body.empty() ? previous().span : body.back()->span;
-  HandlerSuffix handlers = parse_handler_suffix(body_end_span, BodyContext::Def);
+  HandlerSuffix handlers =
+      parse_handler_suffix(body_end_span, BodyContext::Def);
   if (handlers.rescues.empty() && !handlers.has_ensure) {
     error_code(start, "E_TRY_WITHOUT_HANDLER",
                "`try` must have at least one `rescue` or `ensure` clause");
@@ -3059,10 +3051,10 @@ std::unique_ptr<ast::Expr> Parser::try_parse_pattern_assignment() {
     return nullptr;
   }
 
-  // A top-level (depth-0) comma in the left-hand side marks a bare destructuring
-  // target list (`a, b = …` / `a, *b = …`). Treat it as a parenthesized tuple
-  // pattern so the surrounding parens are optional sugar, lowering `a, *b = e`
-  // to `(a, *b) = e`.
+  // A top-level (depth-0) comma in the left-hand side marks a bare
+  // destructuring target list (`a, b = …` / `a, *b = …`). Treat it as a
+  // parenthesized tuple pattern so the surrounding parens are optional sugar,
+  // lowering `a, *b = e` to `(a, *b) = e`.
   bool lhs_has_top_comma = false;
   for (std::size_t i = current_, depth = 0; i < equal_index; ++i) {
     const lexer::TokenKind k = tokens_[i].kind;
@@ -3241,9 +3233,9 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
       advance();
     }
 
-    if (is_stop_token(stop_mode) && !(check(lexer::TokenKind::Colon) &&
-                                      !header_mode &&
-                                      can_accept_direct_block_suffix(*left))) {
+    if (is_stop_token(stop_mode) &&
+        !(check(lexer::TokenKind::Colon) && !header_mode &&
+          can_accept_direct_block_suffix(*left))) {
       break;
     }
 
@@ -3334,8 +3326,7 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
     } else {
       right = parse_expression(right_min, stop_mode);
     }
-    const bool range_left_is_float =
-        range_op && is_literal_float_expr(*left);
+    const bool range_left_is_float = range_op && is_literal_float_expr(*left);
     const bool range_right_is_float =
         range_op && !open_ended_range && is_literal_float_expr(*right);
     lexer::Span span = ast::join_spans(left->span, right->span);
@@ -3357,8 +3348,7 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
       const lexer::Token colon = previous();
       std::unique_ptr<ast::Expr> step = parse_expression(1, stop_mode);
       if (is_literal_zero_expr(*step)) {
-        error_code(colon, "E_RANGE_ZERO_STEP",
-                   "range step must not be zero");
+        error_code(colon, "E_RANGE_ZERO_STEP", "range step must not be zero");
       }
       binary->span = ast::join_spans(binary->span, step->span);
       binary->bool_field("has_step", true);
@@ -3382,11 +3372,9 @@ std::unique_ptr<ast::Expr> Parser::parse_expression(int min_precedence,
   return left;
 }
 
-std::unique_ptr<ast::Expr>
-Parser::parse_comparison_chain(std::unique_ptr<ast::Expr> left,
-                               const InfixInfo &first_info,
-                               const lexer::Token &first_op_token,
-                               StopMode stop_mode) {
+std::unique_ptr<ast::Expr> Parser::parse_comparison_chain(
+    std::unique_ptr<ast::Expr> left, const InfixInfo &first_info,
+    const lexer::Token &first_op_token, StopMode stop_mode) {
   const int direction = chain_comparison_direction(first_info.op);
   const int next_min = first_info.assoc == Assoc::Left
                            ? first_info.precedence + 1
@@ -3430,9 +3418,8 @@ Parser::parse_comparison_chain(std::unique_ptr<ast::Expr> left,
     std::unique_ptr<ast::Expr> right =
         parse_expression(link_next_min, stop_mode);
     span = ast::join_spans(span, right->span);
-    auto link =
-        ast::make_expr("AstCompareLink",
-                       ast::join_spans(op_token.span, right->span));
+    auto link = ast::make_expr("AstCompareLink",
+                               ast::join_spans(op_token.span, right->span));
     link->string_field("op", info.op);
     link->node_field("right", std::move(right));
     links.push_back(std::move(link));
@@ -3491,8 +3478,7 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
         check(lexer::TokenKind::LParen)) {
       const bool splice = token.lexeme == "unquote_splice";
       advance(); // consume '('
-      std::unique_ptr<ast::Expr> inner =
-          parse_expression(1, StopMode::Normal);
+      std::unique_ptr<ast::Expr> inner = parse_expression(1, StopMode::Normal);
       const lexer::Token close = consume(lexer::TokenKind::RParen,
                                          "expected ')' after unquote argument");
       auto node = ast::make_expr(splice ? "AstUnquoteSplice" : "AstUnquote",
@@ -3787,8 +3773,9 @@ Parser::parse_collection_element(lexer::TokenKind closing_kind,
                "`**` spread is only valid in call arguments and map literals");
     std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
     auto error_node = ast::make_expr(
-        "AstError", value == nullptr ? spread.span
-                                     : ast::join_spans(spread.span, value->span));
+        "AstError", value == nullptr
+                        ? spread.span
+                        : ast::join_spans(spread.span, value->span));
     error_node->string_field("token", "**");
     return error_node;
   }
@@ -3896,8 +3883,9 @@ std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
           "AstMapSpread",
           condition != nullptr
               ? ast::join_spans(spread_token.span, condition->span)
-              : (value == nullptr ? spread_token.span
-                                  : ast::join_spans(spread_token.span, value->span)));
+              : (value == nullptr
+                     ? spread_token.span
+                     : ast::join_spans(spread_token.span, value->span)));
       spread->node_field("expr", std::move(value));
       if (condition != nullptr) {
         spread->node_field("condition", std::move(condition));
@@ -3945,8 +3933,7 @@ std::unique_ptr<ast::Expr> Parser::parse_map_literal(const lexer::Token &open,
 
     consume(lexer::TokenKind::Colon, "expected ':' after map literal key");
     std::unique_ptr<ast::Expr> value =
-        allow_same_name_value &&
-                is_same_name_map_value_boundary(current().kind)
+        allow_same_name_value && is_same_name_map_value_boundary(current().kind)
             ? make_same_name_value(key)
             : parse_expression(1, stop_mode);
     std::unique_ptr<ast::Expr> condition = parse_collection_condition();
@@ -4000,8 +3987,7 @@ Parser::parse_string_literal_expr(const lexer::Token &token) {
   // is already dedented by the lexer; the same parts scanning applies over
   // the wider content window, and quote_kind records the block form.
   const bool block =
-      token.lexeme.size() >= 6U &&
-      token.lexeme.compare(0, 3, "\"\"\"") == 0 &&
+      token.lexeme.size() >= 6U && token.lexeme.compare(0, 3, "\"\"\"") == 0 &&
       token.lexeme.compare(token.lexeme.size() - 3U, 3, "\"\"\"") == 0;
   const std::size_t content_begin = block ? 3U : 1U;
   const std::size_t content_end = token.lexeme.size() - (block ? 3U : 1U);
@@ -4176,8 +4162,8 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
       append_postfix_tail(*chain, std::move(tail));
       return chain;
     }
-    const lexer::Token name = consume_member_name(
-        "expected method or field name");
+    const lexer::Token name =
+        consume_member_name("expected method or field name");
     auto tail = ast::make_expr("AstTailDotMember",
                                ast::join_spans(dot.span, name.span));
     tail->string_field("name", name.lexeme);
@@ -4222,8 +4208,8 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
       append_postfix_tail(*chain, std::move(tail));
       return chain;
     }
-    const lexer::Token name = consume_member_name(
-        "expected method or field name");
+    const lexer::Token name =
+        consume_member_name("expected method or field name");
     auto tail = ast::make_expr("AstTailSafeMember",
                                ast::join_spans(dot.span, name.span));
     tail->string_field("name", name.lexeme);
@@ -4360,8 +4346,8 @@ Parser::parse_call_arg(StopMode stop_mode, lexer::TokenKind closing_kind) {
       const lexer::Token name = advance();
       auto value = ast::make_expr("AstName", name.span);
       value->string_field("name", name.lexeme);
-      auto arg = ast::make_expr("AstBlockPass",
-                                ast::join_spans(amp.span, name.span));
+      auto arg =
+          ast::make_expr("AstBlockPass", ast::join_spans(amp.span, name.span));
       arg->string_field("name", name.lexeme);
       arg->node_field("value", std::move(value));
       return arg;
@@ -4377,10 +4363,10 @@ Parser::parse_call_arg(StopMode stop_mode, lexer::TokenKind closing_kind) {
   if (is_keyword_spread_start(current(), peek())) {
     const lexer::Token spread = advance();
     std::unique_ptr<ast::Expr> value = parse_expression(1, stop_mode);
-    auto arg = ast::make_expr(
-        "AstKeywordSpreadArg",
-        value == nullptr ? spread.span
-                         : ast::join_spans(spread.span, value->span));
+    auto arg = ast::make_expr("AstKeywordSpreadArg",
+                              value == nullptr
+                                  ? spread.span
+                                  : ast::join_spans(spread.span, value->span));
     arg->node_field("expr", std::move(value));
     return arg;
   }
@@ -4411,8 +4397,7 @@ Parser::parse_call_arg(StopMode stop_mode, lexer::TokenKind closing_kind) {
 }
 
 std::vector<std::unique_ptr<ast::Expr>>
-Parser::parse_call_arg_list(lexer::TokenKind closing_kind,
-                            StopMode stop_mode) {
+Parser::parse_call_arg_list(lexer::TokenKind closing_kind, StopMode stop_mode) {
   std::vector<std::unique_ptr<ast::Expr>> values;
   if (match(closing_kind)) {
     return values;
@@ -4433,16 +4418,14 @@ Parser::parse_call_arg_list(lexer::TokenKind closing_kind,
     const bool positional =
         arg != nullptr &&
         (arg->kind != "AstKeywordArg" && arg->kind != "AstKeywordSpreadArg");
-    const bool keyword =
-        arg != nullptr &&
-        (arg->kind == "AstKeywordArg" || arg->kind == "AstKeywordSpreadArg");
+    const bool keyword = arg != nullptr && (arg->kind == "AstKeywordArg" ||
+                                            arg->kind == "AstKeywordSpreadArg");
     if (positional && saw_keyword) {
       error_code(current(), "E_ARGUMENT_ORDER",
                  "positional arguments and `*` spreads must appear before "
                  "keyword arguments and `**` spreads");
     }
-    if (arg != nullptr && arg->kind == "AstKeywordArg" &&
-        saw_keyword_spread) {
+    if (arg != nullptr && arg->kind == "AstKeywordArg" && saw_keyword_spread) {
       error_code(current(), "E_ARGUMENT_ORDER",
                  "ordinary keyword arguments must appear before `**` keyword "
                  "spread");
@@ -4669,10 +4652,9 @@ bool Parser::starts_map_literal_entry() const {
       if (depth == 0 && kind == lexer::TokenKind::Colon) {
         return true;
       }
-      if (depth == 0 &&
-          (kind == lexer::TokenKind::Comma ||
-           kind == lexer::TokenKind::Newline ||
-           kind == lexer::TokenKind::Eof)) {
+      if (depth == 0 && (kind == lexer::TokenKind::Comma ||
+                         kind == lexer::TokenKind::Newline ||
+                         kind == lexer::TokenKind::Eof)) {
         return false;
       }
     }
@@ -4790,8 +4772,14 @@ bool Parser::infix_info(lexer::TokenKind kind, InfixInfo *info) const {
   case lexer::TokenKind::EqualEqual:
     *info = InfixInfo{4, Assoc::Left, "=="};
     return true;
+  case lexer::TokenKind::EqualTilde:
+    *info = InfixInfo{4, Assoc::Left, "=~"};
+    return true;
   case lexer::TokenKind::EqualEqualEqual:
     *info = InfixInfo{4, Assoc::Left, "==="};
+    return true;
+  case lexer::TokenKind::BangTilde:
+    *info = InfixInfo{4, Assoc::Left, "!~"};
     return true;
   case lexer::TokenKind::BangEqual:
     *info = InfixInfo{4, Assoc::Left, "!="};

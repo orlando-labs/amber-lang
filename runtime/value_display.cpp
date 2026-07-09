@@ -4,6 +4,7 @@
 #include "runtime/errors.h"
 #include "runtime/io.h"
 #include "runtime/objects.h"
+#include "runtime/stdlib_regexp.h"
 #include "runtime/text.h"
 #include "runtime/watch.h"
 
@@ -305,6 +306,18 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_uuid()) {
     const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
     return uuid == nullptr ? "<uuid null>" : runtime_uuid_to_string(*uuid);
+  }
+  if (value.is_regexp_pattern()) {
+    const std::shared_ptr<RuntimeRegexpPatternValue> pattern =
+        value.as_regexp_pattern();
+    return pattern == nullptr ? "<regexp null>"
+                              : runtime_regexp_pattern_to_string(*pattern);
+  }
+  if (value.is_regexp_match()) {
+    const std::shared_ptr<RuntimeRegexpMatchValue> match =
+        value.as_regexp_match();
+    return match == nullptr ? "<regexp-match null>"
+                            : runtime_regexp_match_to_string(*match);
   }
   if (value.is_foreign_handle()) {
     const std::shared_ptr<RuntimeForeignHandle> handle =
@@ -694,6 +707,18 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_uuid()) {
     const std::shared_ptr<RuntimeUuidValue> uuid = value.as_uuid();
     return uuid == nullptr ? "<uuid null>" : runtime_uuid_to_string(*uuid);
+  }
+  if (value.is_regexp_pattern()) {
+    const std::shared_ptr<RuntimeRegexpPatternValue> pattern =
+        value.as_regexp_pattern();
+    return pattern == nullptr ? "<regexp null>"
+                              : runtime_regexp_pattern_to_string(*pattern);
+  }
+  if (value.is_regexp_match()) {
+    const std::shared_ptr<RuntimeRegexpMatchValue> match =
+        value.as_regexp_match();
+    return match == nullptr ? "<regexp-match null>"
+                            : runtime_regexp_match_to_string(*match);
   }
   if (value.is_foreign_handle()) {
     const std::shared_ptr<RuntimeForeignHandle> handle =

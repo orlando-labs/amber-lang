@@ -183,14 +183,16 @@ templates. A is the pick because it is a *first-class expression* — it drops i
 wherever a string goes, including as a call argument, which is precisely the
 ergonomic Ruby's heredoc achieves only by floating the body away from the call.
 
-Variants of A, all decided at lex time:
+Variants of A:
 
-1. **Interpolating (default):** `"""…"""` — `#{}` active, escapes active.
-2. **Raw:** `'''…'''` (or prefix `r"""…"""`) — no interpolation, no escapes;
-   the bytes are literal. For regexes, Windows paths, shell with literal `$`, or
-   content that itself contains `#{}`. (`\#` in §7.2 already escapes the marker
-   in the interpolating form; raw is for when *nothing* should be processed.)
-3. **Tagged:** `sql"""…"""`, `html"""…"""`, `json"""…"""` — see §7.
+1. **Plain / untagged (default):** `"""…"""` — an ordinary `Str`; no string-tag
+   macro runs. `#{}` and escapes are active exactly like single-line strings.
+2. **Literal / no-escape:** `'''…'''` — no interpolation, no escapes; the bytes
+   are literal. For Windows paths, shell with literal `$`, or content that itself
+   contains `#{}`. (`\#` in §7.2 already escapes the marker in the interpolating
+   form; the literal form is for when *nothing* should be processed.)
+3. **Tagged:** `sql"""…"""`, `html"""…"""`, `json"""…"""`, `r"""…"""` — see §7
+   and `DESIGN-stdlib-regexp-api-2026-07-08.md`.
 
 AST/HIR impact is deliberately tiny:
 
@@ -469,9 +471,10 @@ core lexer with new `INDENT`/`DEDENT` tokens after parsing.
 
 ## 9. Open questions
 
-1. **Raw spelling:** dedicated `'''…'''` (mirrors `"""`) vs a `r"""…"""` prefix
-   (composes with future prefixes like `b"""` bytes). Prefixes scale better if
-   we anticipate more string flavors; `'''` reads cleaner. Lean: prefix family.
+1. **Literal/no-escape spelling:** settled as dedicated `'''…'''`, mirroring
+   `"""`. Do not reserve `r"""…"""` as a lexer-level raw-string prefix; `r` is
+   the canonical regexp string-tag macro (`r"""…"""`), and plain untagged
+   `"""…"""` remains an ordinary `Str` with no macro expansion.
 2. **Ship B (`text:`) at all,** or only A? B's only unique value is the
    standalone big-template binding; if A's ergonomics there are fine, drop B to
    keep one surface.
@@ -501,7 +504,7 @@ core lexer with new `INDENT`/`DEDENT` tokens after parsing.
 
 ## 10. Definition of done (for the implementation that follows)
 
-1. Lexer: `"""` / `'''` (or `r"""`) open a layout-suspended span to the matching
+1. Lexer: `"""` / `'''` open a layout-suspended span to the matching
    delimiter; opener-newline and under-indent diagnostics fire.
 2. Dedent by closing-delimiter column applied in HIR lowering; golden corpus for
    the whitespace edge cases in §8.

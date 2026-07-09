@@ -1038,6 +1038,11 @@ void register_argparser_runtime_module(RuntimeModuleRegistry &modules,
                                        RuntimeDispatchRegistry &dispatch,
                                        RuntimeTypeRegistry &types,
                                        RuntimeErrorRegistry *errors = nullptr);
+void register_regexp(NativeRegistry &registry);
+void register_regexp_runtime_module(RuntimeModuleRegistry &modules,
+                                    RuntimeDispatchRegistry &dispatch,
+                                    RuntimeTypeRegistry &types,
+                                    RuntimeErrorRegistry *errors = nullptr);
 void register_uuid(NativeRegistry &registry);
 void register_uuid_runtime_module(RuntimeModuleRegistry &modules,
                                   RuntimeDispatchRegistry &dispatch,

@@ -43,7 +43,8 @@ const runtime::RuntimeCapabilityResolution &sandbox_no_capabilities() {
   return resolution;
 }
 
-const std::string *string_field(const ast::Expr &expr, const std::string &name) {
+const std::string *string_field(const ast::Expr &expr,
+                                const std::string &name) {
   for (const ast::StringField &field : expr.string_fields) {
     if (field.name == name) {
       return &field.value;
@@ -133,8 +134,7 @@ bool is_kernel_style_body(const std::vector<std::unique_ptr<ast::Expr>> &body) {
       return true;
     }
   }
-  const ast::Expr *last =
-      body.back() ? statement_expr(*body.back()) : nullptr;
+  const ast::Expr *last = body.back() ? statement_expr(*body.back()) : nullptr;
   return last != nullptr && last->kind == "AstQuote";
 }
 
@@ -152,12 +152,12 @@ bool is_macro_control(const ast::Expr &expr) {
 }
 
 void strip_control_marker(ast::Expr &expr) {
-  expr.bool_fields.erase(
-      std::remove_if(expr.bool_fields.begin(), expr.bool_fields.end(),
-                     [](const ast::BoolField &field) {
-                       return field.name == "macro_control";
-                     }),
-      expr.bool_fields.end());
+  expr.bool_fields.erase(std::remove_if(expr.bool_fields.begin(),
+                                        expr.bool_fields.end(),
+                                        [](const ast::BoolField &field) {
+                                          return field.name == "macro_control";
+                                        }),
+                         expr.bool_fields.end());
 }
 
 bool body_has_control_lines(
@@ -281,8 +281,8 @@ void wrap_template_body(ast::Expr &def) {
   }
   lexer::Span span = def.span;
   if (!body->values.empty() && body->values.front() && body->values.back()) {
-    span = ast::join_spans(body->values.front()->span,
-                           body->values.back()->span);
+    span =
+        ast::join_spans(body->values.front()->span, body->values.back()->span);
   }
   if (body_has_control_lines(body->values)) {
     lower_control_statements(body->values);
@@ -384,8 +384,8 @@ std::string at_location(const lexer::Span &span) {
          std::to_string(span.start.col) + ")";
 }
 
-std::optional<MacroCall>
-match_macro_call(const ast::Expr &expr, const MacroNameTable &macro_names) {
+std::optional<MacroCall> match_macro_call(const ast::Expr &expr,
+                                          const MacroNameTable &macro_names) {
   if (expr.kind != "AstPostfixChain") {
     return std::nullopt;
   }
@@ -397,8 +397,7 @@ match_macro_call(const ast::Expr &expr, const MacroNameTable &macro_names) {
   }
   std::size_t index = 0;
   const std::string spelling = chain_head_spelling(*base, *tails, &index);
-  if (spelling.empty() ||
-      macro_names.find(spelling) == macro_names.end()) {
+  if (spelling.empty() || macro_names.find(spelling) == macro_names.end()) {
     return std::nullopt;
   }
   MacroCall call{spelling, nullptr, nullptr, expr.span};
@@ -437,8 +436,8 @@ struct UseTrigger {
   lexer::Span span;
 };
 
-std::optional<UseTrigger>
-match_use_trigger(const ast::Expr &expr, const MacroNameTable &macro_names) {
+std::optional<UseTrigger> match_use_trigger(const ast::Expr &expr,
+                                            const MacroNameTable &macro_names) {
   if (expr.kind != "AstPostfixChain") {
     return std::nullopt;
   }
@@ -478,8 +477,7 @@ match_use_trigger(const ast::Expr &expr, const MacroNameTable &macro_names) {
       }
     }
   }
-  if (spelling.empty() ||
-      macro_names.find(spelling) == macro_names.end()) {
+  if (spelling.empty() || macro_names.find(spelling) == macro_names.end()) {
     return std::nullopt;
   }
   return UseTrigger{spelling, expr.span};
@@ -543,6 +541,108 @@ match_string_tag(const ast::Expr &expr,
     return std::nullopt; // whitespace before the opener: not a tag
   }
   return StringTagCall{spelling, &literal, expr.span};
+}
+
+struct BuiltinRegexpTag {
+  const ast::Expr *literal = nullptr;
+  lexer::Span span;
+};
+
+std::optional<BuiltinRegexpTag>
+match_builtin_regexp_tag(const ast::Expr &expr) {
+  if (expr.kind != "AstPostfixChain") {
+    return std::nullopt;
+  }
+  const ast::Expr *base = node_field(expr, "base");
+  const ast::ListField *tails = list_field(expr, "tails");
+  if (base == nullptr || base->kind != "AstName" || tails == nullptr ||
+      tails->values.size() != 1U || !tails->values[0]) {
+    return std::nullopt;
+  }
+  const std::string *name = string_field(*base, "name");
+  if (name == nullptr || *name != "r" ||
+      tails->values[0]->kind != "AstTailCall") {
+    return std::nullopt;
+  }
+  const ast::Expr &call_tail = *tails->values[0];
+  const std::string *style = string_field(call_tail, "call_style");
+  const ast::ListField *args = list_field(call_tail, "args");
+  if (style == nullptr || *style != "bare" || args == nullptr ||
+      args->values.size() != 1U || !args->values[0] ||
+      args->values[0]->kind != "AstStringLiteral") {
+    return std::nullopt;
+  }
+  if (args->values[0]->span.start.offset != base->span.end.offset) {
+    return std::nullopt;
+  }
+  return BuiltinRegexpTag{args->values[0].get(), expr.span};
+}
+
+std::optional<std::string>
+regexp_source_from_literal(const ast::Expr &literal) {
+  const ast::ListField *parts = list_field(literal, "parts");
+  if (parts == nullptr) {
+    return std::string{};
+  }
+  std::string source;
+  for (const std::unique_ptr<ast::Expr> &part : parts->values) {
+    if (!part) {
+      continue;
+    }
+    if (part->kind == "AstStringText") {
+      if (const std::string *value = string_field(*part, "value")) {
+        source += *value;
+      }
+      continue;
+    }
+    if (part->kind == "AstStringEscape") {
+      if (const std::string *raw = string_field(*part, "source")) {
+        source += *raw;
+      }
+      continue;
+    }
+    if (part->kind == "AstStringExpr") {
+      return std::nullopt;
+    }
+  }
+  return source;
+}
+
+std::unique_ptr<ast::Expr> make_plain_string_literal(std::string text,
+                                                     const lexer::Span &span) {
+  auto literal = ast::make_expr("AstStringLiteral", span);
+  literal->string_field("quote_kind", "double");
+  literal->bool_field("interpolation", false);
+  auto part = ast::make_expr("AstStringText", span);
+  part->string_field("value", std::move(text));
+  std::vector<std::unique_ptr<ast::Expr>> parts;
+  parts.push_back(std::move(part));
+  literal->list_field("parts", std::move(parts));
+  return literal;
+}
+
+std::unique_ptr<ast::Expr> make_regexp_compile_call(std::string source,
+                                                    const lexer::Span &span) {
+  auto base = ast::make_expr("AstName", span);
+  base->string_field("name", "Regexp");
+
+  auto member = ast::make_expr("AstTailDotMember", span);
+  member->string_field("name", "compile");
+  member->bool_field("chain_boundary", false);
+
+  std::vector<std::unique_ptr<ast::Expr>> args;
+  args.push_back(make_plain_string_literal(std::move(source), span));
+  auto call = ast::make_expr("AstTailCall", span);
+  call->string_field("call_style", "paren");
+  call->list_field("args", std::move(args));
+
+  std::vector<std::unique_ptr<ast::Expr>> tails;
+  tails.push_back(std::move(member));
+  tails.push_back(std::move(call));
+  auto chain = ast::make_expr("AstPostfixChain", span);
+  chain->node_field("base", std::move(base));
+  chain->list_field("tails", std::move(tails));
+  return chain;
 }
 
 // Wrap an AST subtree as an `Ast` value, carrying the module source so the
@@ -612,6 +712,17 @@ public:
   // expand_statements, where multi-node expansion and annotations live.
   void expand(std::unique_ptr<ast::Expr> &slot, int depth) {
     if (!result_.ok || !slot) {
+      return;
+    }
+    if (std::optional<BuiltinRegexpTag> tag = match_builtin_regexp_tag(*slot)) {
+      const std::optional<std::string> source =
+          regexp_source_from_literal(*tag->literal);
+      if (!source.has_value()) {
+        fail("builtin regexp tag `r` does not support interpolation yet" +
+             at_location(tag->span));
+        return;
+      }
+      slot = make_regexp_compile_call(*source, tag->span);
       return;
     }
     if (std::optional<StringTagCall> tag =
@@ -710,9 +821,8 @@ public:
                  at_location(trigger->span));
             return;
           }
-          if (enclosing == nullptr ||
-              (enclosing->kind != "AstClassDef" &&
-               enclosing->kind != "AstMixinDef")) {
+          if (enclosing == nullptr || (enclosing->kind != "AstClassDef" &&
+                                       enclosing->kind != "AstMixinDef")) {
             fail("`use " + trigger->name +
                  "` is only supported inside a class or mixin body (v1)" +
                  at_location(trigger->span));
@@ -828,13 +938,12 @@ private:
     for (auto it = expansion_stack_.rbegin(); it != expansion_stack_.rend();
          ++it) {
       if (shown == kMaxShownFrames) {
-        out += "\n  … (" +
-               std::to_string(expansion_stack_.size() - shown) +
+        out += "\n  … (" + std::to_string(expansion_stack_.size() - shown) +
                " more expansion frames)";
         break;
       }
-      out += "\n  expanded from macro `" + it->name + "`" +
-             at_location(it->span);
+      out +=
+          "\n  expanded from macro `" + it->name + "`" + at_location(it->span);
       ++shown;
     }
     return out;
@@ -964,11 +1073,11 @@ private:
       if (k + 1 != run) {
         fail("annotation macro `" + call->name +
              "` expanded to multiple declarations but is not the last "
-             "annotation on its declaration" + at_location(call->span));
+             "annotation on its declaration" +
+             at_location(call->span));
         return {};
       }
-      if (!splice_statement_result(*value, call->name, call->span,
-                                   &results)) {
+      if (!splice_statement_result(*value, call->name, call->span, &results)) {
         return {};
       }
       current.reset();
@@ -1085,7 +1194,8 @@ private:
             fail("macro `" + call.name +
                  "` was called with a `*` spread whose literal has a nested "
                  "spread or conditional element, which cannot be expanded at "
-                 "compile time" + at_location(call.span));
+                 "compile time" +
+                 at_location(call.span));
             return false;
           }
           arg_values->push_back(make_ast_value(*element, source_));
@@ -1099,7 +1209,8 @@ private:
         fail("macro `" + call.name +
              "` was called with a `**` spread whose operand is not a map "
              "literal; macro arguments are unevaluated ASTs, so only literal "
-             "entries can be spliced at compile time" + at_location(call.span));
+             "entries can be spliced at compile time" +
+             at_location(call.span));
         return false;
       }
       if (const ast::ListField *entries = list_field(*operand, "entries")) {
@@ -1107,18 +1218,18 @@ private:
           if (!entry) {
             continue;
           }
-          const std::string *key_kind =
-              entry->kind == "AstMapEntry" ? string_field(*entry, "key_kind")
-                                           : nullptr;
+          const std::string *key_kind = entry->kind == "AstMapEntry"
+                                            ? string_field(*entry, "key_kind")
+                                            : nullptr;
           const std::string *key = string_field(*entry, "key");
           const ast::Expr *value = node_field(*entry, "value");
           if (key_kind == nullptr || *key_kind != "symbol" || key == nullptr ||
-              value == nullptr ||
-              node_field(*entry, "condition") != nullptr) {
+              value == nullptr || node_field(*entry, "condition") != nullptr) {
             fail("macro `" + call.name +
                  "` was called with a `**` spread entry that is not a plain "
                  "symbol-keyed literal entry, which cannot be expanded at "
-                 "compile time" + at_location(call.span));
+                 "compile time" +
+                 at_location(call.span));
             return false;
           }
           kw_values->emplace_back(*key, make_ast_value(*value, source_));
@@ -1141,8 +1252,9 @@ private:
     return true;
   }
 
-  std::optional<runtime::Value> run_macro(const MacroCall &call, int depth,
-                                          const ast::Expr *extra_decl = nullptr) {
+  std::optional<runtime::Value>
+  run_macro(const MacroCall &call, int depth,
+            const ast::Expr *extra_decl = nullptr) {
     std::vector<runtime::Value> arg_values;
     std::vector<std::pair<std::string, runtime::Value>> kw_values;
     const ast::Expr *block_pass = nullptr;
@@ -1202,7 +1314,8 @@ private:
                 std::vector<std::pair<std::string, runtime::Value>> kw_values,
                 int depth) {
     if (depth >= kExpansionDepthLimit) {
-      fail("AMB_MACRO_EXPANSION_LIMIT: macro expansion exceeded depth limit at `" +
+      fail("AMB_MACRO_EXPANSION_LIMIT: macro expansion exceeded depth limit at "
+           "`" +
            name + "`" + at_location(span));
       return std::nullopt;
     }
@@ -1220,8 +1333,7 @@ private:
     std::vector<std::pair<std::uint32_t, runtime::Value>> kw_args;
     kw_args.reserve(kw_values.size());
     for (std::pair<std::string, runtime::Value> &kw : kw_values) {
-      kw_args.emplace_back(intern_macro_symbol(kw.first),
-                           std::move(kw.second));
+      kw_args.emplace_back(intern_macro_symbol(kw.first), std::move(kw.second));
     }
     // Sandbox (§10): the expander VM runs with an armed capability gate,
     // nothing granted, and a step budget — macro IO and macro loops are
@@ -1230,11 +1342,9 @@ private:
     context.world_options = &sandbox_world_options();
     context.capabilities = &sandbox_no_capabilities();
     context.step_budget = kExpansionStepBudget;
-    const runtime::ExecutionResult exec =
-        runtime::execute_runtime_vm(macro_module_, std::move(context),
-                                    method->entry_code_id, arg_values, kw_args,
-                                    runtime::Value::null(),
-                                    runtime::Value::null());
+    const runtime::ExecutionResult exec = runtime::execute_runtime_vm(
+        macro_module_, std::move(context), method->entry_code_id, arg_values,
+        kw_args, runtime::Value::null(), runtime::Value::null());
     if (exec.fault.has_value()) {
       if (exec.fault->error_name == "BudgetError") {
         fail("AMB_MACRO_BUDGET: macro `" + call.name +
@@ -1244,12 +1354,12 @@ private:
       } else if (exec.fault->error_name == "CapabilityError") {
         fail("AMB_MACRO_CAPABILITY: macro `" + call.name +
              "` attempted IO during expansion; the macro expander runs with "
-             "no capabilities (" + exec.fault->message + ")" +
-             at_location(call.span));
+             "no capabilities (" +
+             exec.fault->message + ")" + at_location(call.span));
       } else {
-        fail("macro `" + call.name + "` raised during expansion: " +
-             exec.fault->error_name + ": " + exec.fault->message +
-             at_location(call.span));
+        fail("macro `" + call.name +
+             "` raised during expansion: " + exec.fault->error_name + ": " +
+             exec.fault->message + at_location(call.span));
       }
       return std::nullopt;
     }
@@ -1577,8 +1687,7 @@ collect_macro_exports(const std::vector<std::unique_ptr<ast::Expr>> &items) {
         if (def && is_macro_def(*def) &&
             string_field(*def, "name") != nullptr &&
             *string_field(*def, "name") == *local_name) {
-          exports.push_back(
-              MacroExport{*public_name, ast::clone_expr(*def)});
+          exports.push_back(MacroExport{*public_name, ast::clone_expr(*def)});
           break;
         }
       }
@@ -1737,14 +1846,12 @@ std::vector<MacroExport> parse_macro_exports(const std::string &payload,
     lexer::Lexer snippet_lexer(snippet, provider_path);
     lexer::LexResult lex = snippet_lexer.lex();
     if (!lex.ok()) {
-      return malformed("definition for `" + fields[0] +
-                       "` no longer lexes");
+      return malformed("definition for `" + fields[0] + "` no longer lexes");
     }
     parser::Parser snippet_parser(lex.tokens);
     parser::ParseModuleResult mod = snippet_parser.parse_module_unit();
     if (!mod.ok()) {
-      return malformed("definition for `" + fields[0] +
-                       "` no longer parses");
+      return malformed("definition for `" + fields[0] + "` no longer parses");
     }
     std::unique_ptr<ast::Expr> def;
     for (std::unique_ptr<ast::Expr> &item : mod.items) {
@@ -1757,8 +1864,7 @@ std::vector<MacroExport> parse_macro_exports(const std::string &payload,
       }
     }
     if (def == nullptr) {
-      return malformed("definition for `" + fields[0] +
-                       "` is not a macro def");
+      return malformed("definition for `" + fields[0] + "` is not a macro def");
     }
     const bool is_tag = is_string_tag_def(*def);
     if (is_tag != (fields[1] == "string_tag")) {
@@ -1768,9 +1874,8 @@ std::vector<MacroExport> parse_macro_exports(const std::string &payload,
     if (start_line > 0) {
       shift_expr_lines(*def, static_cast<int>(start_line) - 1);
     }
-    exports.push_back(
-        MacroExport{fields[0], std::shared_ptr<const ast::Expr>(
-                                   std::move(def))});
+    exports.push_back(MacroExport{
+        fields[0], std::shared_ptr<const ast::Expr>(std::move(def))});
   }
   if (cursor != payload.size()) {
     return malformed("trailing bytes after the export table");
@@ -1861,10 +1966,9 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
       }
       const std::string spelling = *alias + "." + entry.public_name;
       if (macro_names.find(spelling) != macro_names.end()) {
-        return ExpandResult{false,
-                            "macro import `" + spelling +
-                                "` is bound more than once through "
-                                "module-alias imports in this module"};
+        return ExpandResult{false, "macro import `" + spelling +
+                                       "` is bound more than once through "
+                                       "module-alias imports in this module"};
       }
       const std::string selector =
           "__macro_alias__" + *alias + "__" + entry.public_name;
@@ -1879,15 +1983,13 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
       alias_imported.push_back(std::move(def));
     }
   }
-  if (macro_defs.empty()) {
-    return ExpandResult{};
-  }
-
   bytecode::BcModule macro_module;
-  std::string error;
-  if (!compile_macro_module(macro_defs, module_name + ".macros", &macro_module,
-                            &error)) {
-    return ExpandResult{false, error};
+  if (!macro_defs.empty()) {
+    std::string error;
+    if (!compile_macro_module(macro_defs, module_name + ".macros",
+                              &macro_module, &error)) {
+      return ExpandResult{false, error};
+    }
   }
 
   Expander expander(std::move(macro_module), std::move(macro_names),
@@ -1997,51 +2099,50 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
       continue;
     }
     export_items->values.erase(
-        std::remove_if(
-            export_items->values.begin(), export_items->values.end(),
-            [&](const std::unique_ptr<ast::Expr> &entry) {
-              if (!entry || entry->kind != "AstExportItem") {
-                return false;
-              }
-              bool is_macro = false;
-              for (const ast::BoolField &field : entry->bool_fields) {
-                if (field.name == "is_macro") {
-                  is_macro = field.value;
-                }
-              }
-              const std::string *local = string_field(*entry, "local_name");
-              return is_macro && local != nullptr &&
-                     local_macro_names.count(*local) != 0;
-            }),
+        std::remove_if(export_items->values.begin(), export_items->values.end(),
+                       [&](const std::unique_ptr<ast::Expr> &entry) {
+                         if (!entry || entry->kind != "AstExportItem") {
+                           return false;
+                         }
+                         bool is_macro = false;
+                         for (const ast::BoolField &field :
+                              entry->bool_fields) {
+                           if (field.name == "is_macro") {
+                             is_macro = field.value;
+                           }
+                         }
+                         const std::string *local =
+                             string_field(*entry, "local_name");
+                         return is_macro && local != nullptr &&
+                                local_macro_names.count(*local) != 0;
+                       }),
         export_items->values.end());
   }
-  items.erase(std::remove_if(items.begin(), items.end(),
-                             [](const std::unique_ptr<ast::Expr> &item) {
-                               if (!item) {
-                                 return false;
-                               }
-                               if (is_macro_def(*item)) {
-                                 return true;
-                               }
-                               // Export/from-import statements emptied by the
-                               // strips above carry nothing for the runtime.
-                               if (item->kind == "AstExportStmt") {
-                                 const ast::ListField *entries =
-                                     list_field(*item, "items");
-                                 return entries != nullptr &&
-                                        entries->values.empty();
-                               }
-                               if (item->kind == "AstImportStmt") {
-                                 const std::string *kind =
-                                     string_field(*item, "import_kind");
-                                 const ast::ListField *names =
-                                     list_field(*item, "names");
-                                 return kind != nullptr && *kind == "from" &&
-                                        names != nullptr &&
-                                        names->values.empty();
-                               }
-                               return false;
-                             }),
+  items.erase(std::remove_if(
+                  items.begin(), items.end(),
+                  [](const std::unique_ptr<ast::Expr> &item) {
+                    if (!item) {
+                      return false;
+                    }
+                    if (is_macro_def(*item)) {
+                      return true;
+                    }
+                    // Export/from-import statements emptied by the
+                    // strips above carry nothing for the runtime.
+                    if (item->kind == "AstExportStmt") {
+                      const ast::ListField *entries =
+                          list_field(*item, "items");
+                      return entries != nullptr && entries->values.empty();
+                    }
+                    if (item->kind == "AstImportStmt") {
+                      const std::string *kind =
+                          string_field(*item, "import_kind");
+                      const ast::ListField *names = list_field(*item, "names");
+                      return kind != nullptr && *kind == "from" &&
+                             names != nullptr && names->values.empty();
+                    }
+                    return false;
+                  }),
               items.end());
   return ExpandResult{};
 }

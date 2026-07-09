@@ -31,6 +31,8 @@ struct RuntimeTimeValue;
 struct RuntimeTimeZoneValue;
 struct RuntimeTimePeriodValue;
 struct RuntimeUuidValue;
+struct RuntimeRegexpPatternValue;
+struct RuntimeRegexpMatchValue;
 struct RuntimeForeignHandle;
 struct RuntimeArgParserValue;
 
@@ -206,6 +208,7 @@ enum class RuntimeNativeTypeKind {
   Url,
   SecureRandom,
   ArgParser,
+  Regexp,
   Time,
   TimePeriod,
   Io,
@@ -429,6 +432,10 @@ struct RuntimeForeignHandle {
   X(time_period, is_time_period, as_time_period, RuntimeTimePeriodValue,       \
     TimePeriod)                                                                \
   X(uuid, is_uuid, as_uuid, RuntimeUuidValue, Uuid)                            \
+  X(regexp_pattern, is_regexp_pattern, as_regexp_pattern,                      \
+    RuntimeRegexpPatternValue, RegexpPattern)                                  \
+  X(regexp_match, is_regexp_match, as_regexp_match, RuntimeRegexpMatchValue,   \
+    RegexpMatch)                                                               \
   X(foreign_handle, is_foreign_handle, as_foreign_handle,                      \
     RuntimeForeignHandle, ForeignHandle)                                       \
   X(ast_node, is_ast_node, as_ast_node, RuntimeAstNode, AstNode)               \
@@ -454,8 +461,11 @@ struct Value {
       std::shared_ptr<RuntimeWatchHandle>, std::shared_ptr<ResultValue>,
       std::shared_ptr<RuntimeArgParserValue>, std::shared_ptr<RuntimeTimeValue>,
       std::shared_ptr<RuntimeTimePeriodValue>,
-      std::shared_ptr<RuntimeUuidValue>, std::shared_ptr<RuntimeForeignHandle>,
-      std::shared_ptr<RuntimeAstNode>, std::shared_ptr<RuntimeTimeZoneValue>>;
+      std::shared_ptr<RuntimeUuidValue>,
+      std::shared_ptr<RuntimeRegexpPatternValue>,
+      std::shared_ptr<RuntimeRegexpMatchValue>,
+      std::shared_ptr<RuntimeForeignHandle>, std::shared_ptr<RuntimeAstNode>,
+      std::shared_ptr<RuntimeTimeZoneValue>>;
 
   Payload payload;
 
@@ -496,6 +506,8 @@ struct Value {
   static Value result(std::shared_ptr<ResultValue> value);
   static Value arg_parser(std::shared_ptr<RuntimeArgParserValue> value);
   static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
+  static Value regexp_pattern(std::shared_ptr<RuntimeRegexpPatternValue> value);
+  static Value regexp_match(std::shared_ptr<RuntimeRegexpMatchValue> value);
   static Value foreign_handle(std::shared_ptr<RuntimeForeignHandle> value);
   static Value ast_node(std::shared_ptr<RuntimeAstNode> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
@@ -537,6 +549,8 @@ struct Value {
   bool is_result() const;
   bool is_arg_parser() const;
   bool is_uuid() const;
+  bool is_regexp_pattern() const;
+  bool is_regexp_match() const;
   bool is_foreign_handle() const;
   bool is_ast_node() const;
   bool is_time() const;
@@ -577,6 +591,8 @@ struct Value {
   std::shared_ptr<ResultValue> as_result() const;
   std::shared_ptr<RuntimeArgParserValue> as_arg_parser() const;
   std::shared_ptr<RuntimeUuidValue> as_uuid() const;
+  std::shared_ptr<RuntimeRegexpPatternValue> as_regexp_pattern() const;
+  std::shared_ptr<RuntimeRegexpMatchValue> as_regexp_match() const;
   std::shared_ptr<RuntimeForeignHandle> as_foreign_handle() const;
   std::shared_ptr<RuntimeAstNode> as_ast_node() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;
@@ -643,6 +659,8 @@ enum class ValueTailKind : std::uint8_t {
   Time,
   TimePeriod,
   Uuid,
+  RegexpPattern,
+  RegexpMatch,
   ForeignHandle,
   AstNode,
   TimeZone,
@@ -695,6 +713,8 @@ struct Value {
   static Value result(std::shared_ptr<ResultValue> value);
   static Value arg_parser(std::shared_ptr<RuntimeArgParserValue> value);
   static Value uuid(std::shared_ptr<RuntimeUuidValue> value);
+  static Value regexp_pattern(std::shared_ptr<RuntimeRegexpPatternValue> value);
+  static Value regexp_match(std::shared_ptr<RuntimeRegexpMatchValue> value);
   static Value foreign_handle(std::shared_ptr<RuntimeForeignHandle> value);
   static Value ast_node(std::shared_ptr<RuntimeAstNode> value);
   static Value time(std::shared_ptr<RuntimeTimeValue> value);
@@ -736,6 +756,8 @@ struct Value {
   bool is_result() const;
   bool is_arg_parser() const;
   bool is_uuid() const;
+  bool is_regexp_pattern() const;
+  bool is_regexp_match() const;
   bool is_foreign_handle() const;
   bool is_ast_node() const;
   bool is_time() const;
@@ -776,6 +798,8 @@ struct Value {
   std::shared_ptr<ResultValue> as_result() const;
   std::shared_ptr<RuntimeArgParserValue> as_arg_parser() const;
   std::shared_ptr<RuntimeUuidValue> as_uuid() const;
+  std::shared_ptr<RuntimeRegexpPatternValue> as_regexp_pattern() const;
+  std::shared_ptr<RuntimeRegexpMatchValue> as_regexp_match() const;
   std::shared_ptr<RuntimeForeignHandle> as_foreign_handle() const;
   std::shared_ptr<RuntimeAstNode> as_ast_node() const;
   std::shared_ptr<RuntimeTimeValue> as_time() const;

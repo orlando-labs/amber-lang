@@ -507,6 +507,7 @@ void register_builtin_stdlib(NativeRegistry &registry) {
   register_benchmark(registry);
   register_secure_random(registry);
   register_argparser(registry);
+  register_regexp(registry);
   register_uuid(registry);
   register_time(registry);
   register_url(registry);
@@ -529,6 +530,7 @@ void register_builtin_runtime_modules(RuntimeModuleRegistry &modules,
   register_benchmark_runtime_module(modules, dispatch, types, errors);
   register_secure_random_runtime_module(modules, dispatch, types, errors);
   register_argparser_runtime_module(modules, dispatch, types, errors);
+  register_regexp_runtime_module(modules, dispatch, types, errors);
   register_uuid_runtime_module(modules, dispatch, types, errors);
   register_time_runtime_module(modules, dispatch, types, errors);
   register_url_runtime_module(modules, dispatch, types, errors);

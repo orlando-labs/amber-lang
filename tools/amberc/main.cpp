@@ -1309,9 +1309,9 @@ bool native_cpp_scalar_selector(const amber::bytecode::BcModule &module,
          *selector == "/" || *selector == "%" || *selector == "//" ||
          *selector == "**" || *selector == "<" || *selector == ">" ||
          *selector == "<=" || *selector == ">=" || *selector == "==" ||
-         *selector == "!=" || *selector == "<=>" || *selector == "&" ||
-         *selector == "|" || *selector == "^" || *selector == "<<" ||
-         *selector == ">>";
+         *selector == "!=" || *selector == "=~" || *selector == "!~" ||
+         *selector == "<=>" || *selector == "&" || *selector == "|" ||
+         *selector == "^" || *selector == "<<" || *selector == ">>";
 }
 
 bool native_cpp_scalar_nullary_selector(const std::string &selector) {
@@ -1371,7 +1371,8 @@ bool native_cpp_collection_selector(const std::string &selector,
           (selector == "except" && pos_count >= 1U)) ||
          (selector == "merge" && pos_count == 1U) ||
          (selector == "compact" && pos_count == 0U) ||
-         (selector == "replace" && pos_count == 2U) ||
+         ((selector == "replace" || selector == "replaced") &&
+          pos_count == 2U) ||
          ((selector == "upcase" || selector == "downcase" ||
            selector == "trim" || selector == "strip" || selector == "reverse" ||
            selector == "chars") &&
@@ -1472,6 +1473,24 @@ std::string native_cpp_time_selector_enum(const std::string &selector) {
 
 bool native_cpp_uuid_nullary_selector(const std::string &selector) {
   return selector == "to_str" || selector == "inspect" || selector == "version";
+}
+
+bool native_cpp_regexp_selector(const std::string &selector,
+                                std::uint32_t pos_count) {
+  return ((selector == "compile" || selector == "new" || selector == "r" ||
+           selector == "__call__" || selector == "escape" ||
+           selector == "match" || selector == "find" || selector == "match?" ||
+           selector == "matches?" || selector == "full_match" ||
+           selector == "full_match?" || selector == "=~" || selector == "!~" ||
+           selector == "[]" || selector == "group") &&
+          pos_count == 1U) ||
+         ((selector == "source" || selector == "to_str" ||
+           selector == "inspect" || selector == "text" ||
+           selector == "pattern" || selector == "count" || selector == "size" ||
+           selector == "length" || selector == "start" ||
+           selector == "finish" || selector == "end" ||
+           selector == "captures") &&
+          pos_count == 0U);
 }
 
 bool native_cpp_url_selector(const std::string &selector,
@@ -1918,6 +1937,40 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                  pos_count == 1U && kw_count == 0U && no_block) {
         uuid_send = true;
       }
+      bool regexp_send = false;
+      if (native_cpp_regexp_selector(selector, pos_count) && no_block) {
+        if ((selector == "compile" || selector == "new" || selector == "r" ||
+             selector == "__call__") &&
+            kw_count <= 1U) {
+          if (kw_count == 1U) {
+            std::uint32_t kw_symbol_id = 0;
+            if (!operand_u32_value(instruction, kw_index + 1U, &kw_symbol_id) ||
+                kw_symbol_id >= module.symbols.size() ||
+                module.symbols[kw_symbol_id] != "flags") {
+              *reason = "unsupported Regexp.compile keyword shape";
+              return false;
+            }
+          }
+          regexp_send = true;
+        } else if (kw_count == 0U) {
+          regexp_send = true;
+        }
+      }
+      bool regexp_replace_send = false;
+      if ((selector == "replace" || selector == "replaced") &&
+          (pos_count == 1U || pos_count == 2U) && kw_count <= 1U &&
+          ((no_block && pos_count == 2U) || (!no_block && pos_count == 1U))) {
+        if (kw_count == 1U) {
+          std::uint32_t kw_symbol_id = 0;
+          if (!operand_u32_value(instruction, kw_index + 1U, &kw_symbol_id) ||
+              kw_symbol_id >= module.symbols.size() ||
+              module.symbols[kw_symbol_id] != "count") {
+            *reason = "unsupported regexp replace keyword shape";
+            return false;
+          }
+        }
+        regexp_replace_send = true;
+      }
       const bool url_send = native_cpp_url_selector(selector, pos_count) &&
                             kw_count == 0U && no_block;
       const bool math_send = native_cpp_math_selector(selector, pos_count) &&
@@ -2011,14 +2064,16 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
           kw_count == 0U && no_block;
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
           !json_send && !codec_send && !digest_send && !range_send &&
-          !random_send && !time_send && !uuid_send && !url_send && !math_send &&
-          !benchmark_send && !argparser_send && !fs_path_send) {
+          !random_send && !time_send && !uuid_send && !regexp_send &&
+          !regexp_replace_send && !url_send && !math_send && !benchmark_send &&
+          !argparser_send && !fs_path_send) {
         *reason = "unsupported SEND still uses VM fallback";
         return false;
       }
       if (!json_send && !codec_send && !digest_send && !range_send &&
-          !random_send && !time_send && !uuid_send && !url_send && !math_send &&
-          !benchmark_send && !argparser_send && !fs_path_send &&
+          !random_send && !time_send && !uuid_send && !regexp_send &&
+          !regexp_replace_send && !url_send && !math_send && !benchmark_send &&
+          !argparser_send && !fs_path_send &&
           (kw_count != 0U || (!no_block && !collection_block_send))) {
         *reason = "keyword/block SEND still uses VM fallback";
         return false;
@@ -3599,6 +3654,8 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr = "NativeValue::url_module()";
           } else if (name == "ArgParser") {
             native_module_expr = "NativeValue::argparser_module()";
+          } else if (name == "Regexp") {
+            native_module_expr = "NativeValue::regexp_module()";
           } else if (name == "fs") {
             native_module_expr = "NativeValue::fs_module()";
           } else if (name == "SecureRandom") {
@@ -3855,6 +3912,14 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "!=") {
         write_reg_stmt(dst, "native_numeric_fast_eq(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ", true)");
+      } else if (selector == "=~") {
+        write_reg_stmt(dst, "native_regexp_match_operator(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", false)");
+      } else if (selector == "!~") {
+        write_reg_stmt(dst, "native_regexp_match_operator(" +
+                                read_reg_expr(recv) + ", " +
+                                read_reg_expr(arg) + ", true)");
       } else if (selector == "<=>") {
         write_reg_stmt(dst, "native_numeric_fast_cmp(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
@@ -3919,6 +3984,15 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_fs_path_nullary(" + read_reg_expr(recv) +
                                 ", native_hex_to_string(\"" +
                                 string_to_hex_text(selector) + "\"))");
+      } else if (native_cpp_regexp_selector(selector, pos_count) &&
+                 selector != "[]" && selector != "count" &&
+                 selector != "length" && selector != "size" &&
+                 selector != "to_str" && selector != "=~" && selector != "!~") {
+        write_reg_stmt(dst, "native_regexp_send(" + read_reg_expr(recv) +
+                                ", native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"), " +
+                                pos_args_expr(0U) + ", " + kw_args_expr() +
+                                ")");
       } else if (selector == "[]") {
         write_reg_stmt(dst, "native_index(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ")");
@@ -4030,10 +4104,18 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
       } else if (selector == "split") {
         write_reg_stmt(dst, "native_string_split(" + read_reg_expr(recv) +
                                 ", " + read_reg_expr(arg) + ")");
-      } else if (selector == "replace") {
-        write_reg_stmt(dst, "native_string_replace(" + read_reg_expr(recv) +
-                                ", " + read_reg_expr(arg) + ", " +
-                                read_reg_expr(arg2) + ")");
+      } else if (selector == "replace" || selector == "replaced") {
+        write_reg_stmt(
+            dst, "native_string_replace(" + read_reg_expr(recv) + ", " +
+                     read_reg_expr(arg) + ", " +
+                     (pos_count >= 2U ? read_reg_expr(arg2)
+                                      : "NativeValue::nullv()") +
+                     ", " + (pos_count >= 2U ? "true" : "false") + ", " +
+                     (has_block
+                          ? read_reg_expr(static_cast<std::uint32_t>(block_reg))
+                          : "NativeValue::nullv()") +
+                     ", " + (has_block ? "true" : "false") + ", " +
+                     kw_args_expr() + ")");
       } else if (selector == "slice") {
         write_reg_stmt(dst, "native_slice(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ", " +
@@ -5142,11 +5224,11 @@ augment_native_extensions_from_source(
     }
   }
   for (amber::pkg::PackageNativeError &error : errors) {
-    const bool exists = std::any_of(
-        target.errors.begin(), target.errors.end(),
-        [&](const amber::pkg::PackageNativeError &registered) {
-          return registered.name == error.name;
-        });
+    const bool exists =
+        std::any_of(target.errors.begin(), target.errors.end(),
+                    [&](const amber::pkg::PackageNativeError &registered) {
+                      return registered.name == error.name;
+                    });
     if (!exists) {
       target.errors.push_back(std::move(error));
     }
@@ -5383,6 +5465,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "#include <memory>\n";
   out << "#include <optional>\n";
   out << "#include <charconv>\n";
+  out << "#include <regex>\n";
   out << "#include <sstream>\n";
   out << "#include <stdexcept>\n";
   out << "#include <string>\n";
@@ -5432,6 +5515,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeRange;\n";
   out << "struct NativeArgParser;\n";
   out << "struct NativeFsPath;\n";
+  out << "struct NativeRegexp;\n";
+  out << "struct NativeRegexpMatch;\n";
   out << "using NativeTime = amber::runtime::RuntimeTimeValue;\n";
   out << "using NativeTimePeriod = amber::runtime::RuntimeTimePeriodValue;\n";
   out << "using NativeUuid = amber::runtime::RuntimeUuidValue;\n";
@@ -5443,11 +5528,12 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "NullType, ObjectType, MathModule, JsonModule, YamlModule, "
          "BytesModule, "
          "Base64Module, Base64UrlModule, HexModule, "
-         "DigestModule, BenchmarkModule, UrlModule, ArgParserModule, FsModule, "
-         "SecureRandomModule, UuidModule, "
+         "DigestModule, BenchmarkModule, UrlModule, ArgParserModule, "
+         "RegexpModule, FsModule, SecureRandomModule, UuidModule, "
          "RangeModule, TimeModule, "
          "TimePeriodModule, Bytes, List, Tuple, Set, Map, Range, ArgParser, "
-         "FsPath, Uuid, Time, TimePeriod, HeapString, Closure };\n";
+         "FsPath, Regexp, RegexpMatch, Uuid, Time, TimePeriod, HeapString, "
+         "Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
   // id equality equivalent to content equality, like the VM.
@@ -5517,6 +5603,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue argparser_module() { NativeValue out; "
          "out.tag = Tag::ArgParserModule; out.scalar_value = 0; return "
          "out; }\n";
+  out << "  static NativeValue regexp_module() { NativeValue out; "
+         "out.tag = Tag::RegexpModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue fs_module() { NativeValue out; "
          "out.tag = Tag::FsModule; out.scalar_value = 0; return out; }\n";
   out << "  static NativeValue secure_random_module() { NativeValue out; "
@@ -5544,6 +5632,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  static NativeValue range(NativeRange value);\n";
   out << "  static NativeValue arg_parser(NativeArgParser value);\n";
   out << "  static NativeValue fs_path(NativeFsPath value);\n";
+  out << "  static NativeValue regexp(NativeRegexp value);\n";
+  out << "  static NativeValue regexp_match(NativeRegexpMatch value);\n";
   out << "  static NativeValue uuid(amber::runtime::RuntimeUuidValue value);\n";
   out << "  static NativeValue time(amber::runtime::RuntimeTimeValue value);\n";
   out << "  static NativeValue time_period("
@@ -5602,6 +5692,21 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::string path;\n";
   out << "  NativeFsPath() = default;\n";
   out << "  explicit NativeFsPath(std::string p) : path(std::move(p)) {}\n";
+  out << "};\n";
+  out << "struct NativeRegexp : NativeRcHeader {\n";
+  out << "  std::string source;\n";
+  out << "  std::regex::flag_type flags = std::regex::ECMAScript;\n";
+  out << "  std::regex compiled;\n";
+  out << "};\n";
+  out << "struct NativeRegexpCapture {\n";
+  out << "  bool matched = false;\n";
+  out << "  std::size_t start = 0;\n";
+  out << "  std::size_t end = 0;\n";
+  out << "};\n";
+  out << "struct NativeRegexpMatch : NativeRcHeader {\n";
+  out << "  std::string source;\n";
+  out << "  NativeValue pattern = NativeValue::nullv();\n";
+  out << "  std::vector<NativeRegexpCapture> captures;\n";
   out << "};\n";
   out << "enum class NativeArgValueType { Str, Int, Float, Bool, Symbol };\n";
   out << "struct NativeArgParser : NativeRcHeader {\n";
@@ -5725,6 +5830,10 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
       delete static_cast<NativeArgParser *>(payload); return;
     case NativeValue::Tag::FsPath:
       delete static_cast<NativeFsPath *>(payload); return;
+    case NativeValue::Tag::Regexp:
+      delete static_cast<NativeRegexp *>(payload); return;
+    case NativeValue::Tag::RegexpMatch:
+      delete static_cast<NativeRegexpMatch *>(payload); return;
     case NativeValue::Tag::Uuid:
       delete static_cast<NativeUuidBox *>(payload); return;
     case NativeValue::Tag::Time:
@@ -5870,6 +5979,16 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  NativeValue out;\n";
   out << "  out.heap_value = new NativeFsPath(std::move(value));\n";
   out << "  out.tag = Tag::FsPath; return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::regexp(NativeRegexp value) {\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeRegexp(std::move(value));\n";
+  out << "  out.tag = Tag::Regexp; return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::regexp_match(NativeRegexpMatch value) {\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeRegexpMatch(std::move(value));\n";
+  out << "  out.tag = Tag::RegexpMatch; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::uuid(amber::runtime::RuntimeUuidValue "
          "value) {\n";
@@ -6024,6 +6143,18 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeFsPath *>(value.heap_value);\n";
   out << "}\n";
+  out << "static const NativeRegexp &as_regexp("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::Regexp || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeRegexp *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static const NativeRegexpMatch &as_regexp_match("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::RegexpMatch || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeRegexpMatch *>(value.heap_value);\n";
+  out << "}\n";
   out << "static const NativeUuid &as_uuid(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Uuid || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
@@ -6148,6 +6279,13 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  if (value.tag == NativeValue::Tag::Bytes) return "
          "NativeValue::integer(static_cast<std::int64_t>("
          "as_bytes(value).bytes.size()));\n";
+  out << "  if (value.tag == NativeValue::Tag::RegexpMatch) {\n";
+  out << "    const NativeRegexpMatch &match = as_regexp_match(value);\n";
+  out << "    const std::size_t captures = match.captures.empty() ? 0U : "
+         "match.captures.size() - 1U;\n";
+  out << "    return NativeValue::integer(static_cast<std::int64_t>("
+         "captures));\n";
+  out << "  }\n";
   out << "  throw NativeBailout();\n";
   out << "}\n";
   out << "static NativeValue native_list_first(const NativeValue &value, "
@@ -6203,6 +6341,7 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  case NativeValue::Tag::BenchmarkModule: return \"Benchmark\";\n";
   out << "  case NativeValue::Tag::UrlModule: return \"Url\";\n";
   out << "  case NativeValue::Tag::ArgParserModule: return \"ArgParser\";\n";
+  out << "  case NativeValue::Tag::RegexpModule: return \"Regexp\";\n";
   out << "  case NativeValue::Tag::FsModule: return \"fs\";\n";
   out << "  case NativeValue::Tag::SecureRandomModule: return "
          "\"SecureRandom\";\n";
@@ -6666,27 +6805,466 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  }\n";
   out << "  return NativeValue::list(std::move(parts));\n";
   out << "}\n\n";
-  out << "static NativeValue native_string_replace(const NativeValue &value, "
-         "const NativeValue &from_value, const NativeValue &to_value) {\n";
-  out << "  if (!native_value_is_string(value) || "
-         "!native_value_is_string(from_value) || "
-         "!native_value_is_string(to_value)) throw NativeBailout();\n";
-  out << "  const std::string &text = native_string_text(value);\n";
-  out << "  const std::string &from = native_string_text(from_value);\n";
-  out << "  const std::string &to = native_string_text(to_value);\n";
-  out << "  if (from.empty()) return value;\n";
-  out << "  std::string replaced;\n";
-  out << "  std::size_t start = 0;\n";
-  out << "  while (true) {\n";
-  out << "    const std::size_t pos = text.find(from, start);\n";
-  out << "    if (pos == std::string::npos) { replaced += text.substr(start); "
-         "break; }\n";
-  out << "    replaced += text.substr(start, pos - start);\n";
-  out << "    replaced += to;\n";
-  out << "    start = pos + from.size();\n";
-  out << "  }\n";
-  out << "  return NativeValue::heap_string(replaced);\n";
-  out << "}\n\n";
+  out << R"AMBERCPP(static NativeValue amber_native_call_closure(
+    const NativeValue &value, std::initializer_list<NativeValue> args);
+
+static std::string native_regexp_pattern_to_string(
+    const NativeRegexp &pattern) {
+  return "/" + pattern.source + "/";
+}
+
+static std::optional<std::string> native_regexp_group_text(
+    const NativeRegexpMatch &match, std::size_t index) {
+  if (index >= match.captures.size()) return std::nullopt;
+  const NativeRegexpCapture &capture = match.captures[index];
+  if (!capture.matched || capture.start > capture.end ||
+      capture.end > match.source.size()) {
+    return std::nullopt;
+  }
+  return match.source.substr(capture.start, capture.end - capture.start);
+}
+
+static std::string native_regexp_match_to_string(
+    const NativeRegexpMatch &match) {
+  return native_regexp_group_text(match, 0U).value_or(std::string{});
+}
+
+static std::string native_regexp_text_arg(const NativeValue &value) {
+  if (native_value_is_string(value)) return native_string_text(value);
+  if (value.tag == NativeValue::Tag::Symbol) {
+    return native_symbol_text(value.scalar_value);
+  }
+  throw NativeBailout();
+}
+
+static std::regex::flag_type native_regexp_flags_from_value(
+    const NativeValue &value) {
+  const std::string text = native_regexp_text_arg(value);
+  std::regex::flag_type flags = std::regex::ECMAScript;
+  for (char c : text) {
+    if (c == 'i') {
+      flags |= std::regex::icase;
+      continue;
+    }
+    throw NativeBailout();
+  }
+  return flags;
+}
+
+static const NativeValue *native_regexp_kw(
+    std::initializer_list<std::pair<std::string, NativeValue>> kwargs,
+    const std::string &name) {
+  for (const auto &entry : kwargs) {
+    if (entry.first == name) return &entry.second;
+  }
+  return nullptr;
+}
+
+static void native_regexp_reject_unknown_kw(
+    std::initializer_list<std::pair<std::string, NativeValue>> kwargs,
+    std::initializer_list<const char *> allowed) {
+  for (const auto &entry : kwargs) {
+    bool matched = false;
+    for (const char *name : allowed) {
+      if (entry.first == name) {
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) throw NativeBailout();
+  }
+}
+
+static NativeValue native_regexp_compile_value(
+    const NativeValue &source_value,
+    std::initializer_list<std::pair<std::string, NativeValue>> kwargs) {
+  native_regexp_reject_unknown_kw(kwargs, {"flags"});
+  const std::string source = native_regexp_text_arg(source_value);
+  std::regex::flag_type flags = std::regex::ECMAScript;
+  if (const NativeValue *flag_value = native_regexp_kw(kwargs, "flags")) {
+    flags = native_regexp_flags_from_value(*flag_value);
+  }
+  NativeRegexp pattern;
+  pattern.source = source;
+  pattern.flags = flags;
+  try {
+    pattern.compiled = std::regex(pattern.source, pattern.flags);
+  } catch (const std::regex_error &) {
+    throw NativeBailout();
+  }
+  return NativeValue::regexp(std::move(pattern));
+}
+
+static NativeRegexpMatch native_regexp_make_match(
+    const NativeValue &pattern_value, const std::string &source,
+    const std::smatch &match, std::size_t base_offset) {
+  NativeRegexpMatch value;
+  value.source = source;
+  value.pattern = pattern_value;
+  value.captures.reserve(match.size());
+  for (std::size_t i = 0; i < match.size(); ++i) {
+    NativeRegexpCapture capture;
+    capture.matched = match[i].matched;
+    if (capture.matched) {
+      capture.start =
+          base_offset + static_cast<std::size_t>(match.position(i));
+      capture.end = capture.start + static_cast<std::size_t>(match.length(i));
+    }
+    value.captures.push_back(capture);
+  }
+  return value;
+}
+
+static NativeValue native_regexp_search_value(const NativeValue &pattern_value,
+                                              const NativeValue &source_value,
+                                              bool full_match,
+                                              bool bool_only,
+                                              bool negate) {
+  const NativeRegexp &pattern = as_regexp(pattern_value);
+  const std::string source = native_regexp_text_arg(source_value);
+  std::smatch match;
+  bool matched = false;
+  try {
+    matched = full_match ? std::regex_match(source, match, pattern.compiled)
+                         : std::regex_search(source, match, pattern.compiled);
+  } catch (const std::regex_error &) {
+    throw NativeBailout();
+  }
+  if (bool_only) return NativeValue::boolean(negate ? !matched : matched);
+  if (!matched) return NativeValue::nullv();
+  return NativeValue::regexp_match(
+      native_regexp_make_match(pattern_value, source, match, 0U));
+}
+
+static NativeValue native_regexp_match_operator(const NativeValue &lhs,
+                                                const NativeValue &rhs,
+                                                bool negate) {
+  if (lhs.tag == NativeValue::Tag::Regexp) {
+    return native_regexp_search_value(lhs, rhs, false, negate, negate);
+  }
+  if (rhs.tag == NativeValue::Tag::Regexp) {
+    return native_regexp_search_value(rhs, lhs, false, negate, negate);
+  }
+  throw NativeBailout();
+}
+
+static std::optional<std::size_t> native_regexp_parse_group_index(
+    const std::string &text) {
+  if (text.empty()) return std::nullopt;
+  std::size_t value = 0;
+  for (char c : text) {
+    if (!std::isdigit(static_cast<unsigned char>(c))) return std::nullopt;
+    const std::size_t digit = static_cast<std::size_t>(c - '0');
+    if (value >
+        (std::numeric_limits<std::size_t>::max() - digit) / 10U) {
+      return std::nullopt;
+    }
+    value = value * 10U + digit;
+  }
+  return value;
+}
+
+static std::string native_regexp_expand_replacement(
+    const NativeRegexpMatch &match, const std::string &replacement) {
+  std::string out;
+  out.reserve(replacement.size());
+  for (std::size_t i = 0; i < replacement.size();) {
+    if (replacement[i] != '$') {
+      out.push_back(replacement[i++]);
+      continue;
+    }
+    if (i + 1U >= replacement.size()) {
+      out.push_back('$');
+      ++i;
+      continue;
+    }
+    const char next = replacement[i + 1U];
+    if (next == '$') {
+      out.push_back('$');
+      i += 2U;
+      continue;
+    }
+    if (next == '&') {
+      if (const auto text = native_regexp_group_text(match, 0U)) out += *text;
+      i += 2U;
+      continue;
+    }
+    if (std::isdigit(static_cast<unsigned char>(next))) {
+      std::size_t cursor = i + 1U;
+      while (cursor < replacement.size() &&
+             std::isdigit(static_cast<unsigned char>(replacement[cursor]))) {
+        ++cursor;
+      }
+      const auto index = native_regexp_parse_group_index(
+          replacement.substr(i + 1U, cursor - (i + 1U)));
+      if (index.has_value()) {
+        if (const auto text = native_regexp_group_text(match, *index)) {
+          out += *text;
+        }
+      }
+      i = cursor;
+      continue;
+    }
+    if (next == '{') {
+      const std::size_t close = replacement.find('}', i + 2U);
+      if (close == std::string::npos) throw NativeBailout();
+      const std::string name = replacement.substr(i + 2U, close - (i + 2U));
+      const auto index = native_regexp_parse_group_index(name);
+      if (!index.has_value()) throw NativeBailout();
+      if (const auto text = native_regexp_group_text(match, *index)) {
+        out += *text;
+      }
+      i = close + 1U;
+      continue;
+    }
+    out.push_back('$');
+    ++i;
+  }
+  return out;
+}
+
+static std::size_t native_regexp_replace_limit(
+    std::initializer_list<std::pair<std::string, NativeValue>> kwargs) {
+  native_regexp_reject_unknown_kw(kwargs, {"count"});
+  const NativeValue *count_value = native_regexp_kw(kwargs, "count");
+  if (count_value == nullptr) return std::numeric_limits<std::size_t>::max();
+  if (count_value->tag == NativeValue::Tag::Integer) {
+    if (count_value->scalar_value < 0) throw NativeBailout();
+    return static_cast<std::size_t>(count_value->scalar_value);
+  }
+  if (native_regexp_text_arg(*count_value) == "all") {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  throw NativeBailout();
+}
+
+static NativeValue native_regexp_replace_string(
+    const NativeValue &value, const NativeValue &pattern_value,
+    const NativeValue &replacement_value, bool has_replacement,
+    const NativeValue &block_value, bool has_block,
+    std::initializer_list<std::pair<std::string, NativeValue>> kwargs) {
+  if (!native_value_is_string(value)) throw NativeBailout();
+  const NativeRegexp &pattern = as_regexp(pattern_value);
+  const std::string source = native_string_text(value);
+  const std::size_t limit = native_regexp_replace_limit(kwargs);
+  if (limit == 0U) return value;
+  std::optional<std::string> replacement;
+  if (has_block) {
+    if (has_replacement) throw NativeBailout();
+  } else {
+    if (!has_replacement) throw NativeBailout();
+    replacement = native_regexp_text_arg(replacement_value);
+  }
+
+  std::string out;
+  std::size_t last_append = 0;
+  std::size_t search_offset = 0;
+  std::size_t replaced = 0;
+  while (replaced < limit && search_offset <= source.size()) {
+    std::smatch match;
+    const auto begin =
+        source.cbegin() + static_cast<std::ptrdiff_t>(search_offset);
+    try {
+      if (!std::regex_search(begin, source.cend(), match, pattern.compiled)) {
+        break;
+      }
+    } catch (const std::regex_error &) {
+      throw NativeBailout();
+    }
+    const std::size_t match_start =
+        search_offset + static_cast<std::size_t>(match.position(0));
+    const std::size_t match_end =
+        match_start + static_cast<std::size_t>(match.length(0));
+    out.append(source, last_append, match_start - last_append);
+    NativeValue match_value = NativeValue::regexp_match(
+        native_regexp_make_match(pattern_value, source, match, search_offset));
+    if (replacement.has_value()) {
+      out += native_regexp_expand_replacement(as_regexp_match(match_value),
+                                              *replacement);
+    } else {
+      out += native_regexp_text_arg(
+          amber_native_call_closure(block_value, {match_value}));
+    }
+    ++replaced;
+    last_append = match_end;
+    if (match_start == match_end) {
+      if (match_end >= source.size()) break;
+      search_offset = match_end + 1U;
+    } else {
+      search_offset = match_end;
+    }
+  }
+  out.append(source, last_append, std::string::npos);
+  return NativeValue::heap_string(std::move(out));
+}
+
+static NativeValue native_string_replace(
+    const NativeValue &value, const NativeValue &from_value,
+    const NativeValue &to_value, bool has_to = true,
+    const NativeValue &block_value = NativeValue::nullv(),
+    bool has_block = false,
+    std::initializer_list<std::pair<std::string, NativeValue>> kwargs = {}) {
+  if (from_value.tag == NativeValue::Tag::Regexp) {
+    return native_regexp_replace_string(value, from_value, to_value, has_to,
+                                        block_value, has_block, kwargs);
+  }
+  if (!native_value_is_string(value) || !native_value_is_string(from_value) ||
+      !native_value_is_string(to_value) || !has_to || has_block ||
+      kwargs.size() != 0U) {
+    throw NativeBailout();
+  }
+  const std::string &text = native_string_text(value);
+  const std::string &from = native_string_text(from_value);
+  const std::string &to = native_string_text(to_value);
+  if (from.empty()) return value;
+  std::string replaced;
+  std::size_t start = 0;
+  while (true) {
+    const std::size_t pos = text.find(from, start);
+    if (pos == std::string::npos) {
+      replaced += text.substr(start);
+      break;
+    }
+    replaced += text.substr(start, pos - start);
+    replaced += to;
+    start = pos + from.size();
+  }
+  return NativeValue::heap_string(replaced);
+}
+
+static NativeValue native_regexp_group_value(const NativeRegexpMatch &match,
+                                             const NativeValue &index_value) {
+  if (index_value.tag != NativeValue::Tag::Integer ||
+      index_value.scalar_value < 0) {
+    throw NativeBailout();
+  }
+  const auto text = native_regexp_group_text(
+      match, static_cast<std::size_t>(index_value.scalar_value));
+  return text.has_value() ? NativeValue::heap_string(*text)
+                          : NativeValue::nullv();
+}
+
+static NativeValue native_regexp_send(
+    const NativeValue &receiver, std::string_view selector,
+    std::initializer_list<NativeValue> args,
+    std::initializer_list<std::pair<std::string, NativeValue>> kwargs) {
+  const NativeValue *arg0 = args.size() >= 1U ? args.begin() : nullptr;
+  if (selector == "compile" || selector == "new" || selector == "r" ||
+      selector == "__call__") {
+    if (receiver.tag != NativeValue::Tag::RegexpModule ||
+        args.size() != 1U) {
+      throw NativeBailout();
+    }
+    return native_regexp_compile_value(*arg0, kwargs);
+  }
+  if (selector == "escape") {
+    if (receiver.tag != NativeValue::Tag::RegexpModule ||
+        args.size() != 1U) {
+      throw NativeBailout();
+    }
+    native_regexp_reject_unknown_kw(kwargs, {});
+    const std::string source = native_regexp_text_arg(*arg0);
+    std::string out;
+    out.reserve(source.size() * 2U);
+    for (char c : source) {
+      switch (c) {
+      case '\\':
+      case '^':
+      case '$':
+      case '.':
+      case '|':
+      case '?':
+      case '*':
+      case '+':
+      case '(':
+      case ')':
+      case '[':
+      case ']':
+      case '{':
+      case '}':
+        out.push_back('\\');
+        break;
+      default:
+        break;
+      }
+      out.push_back(c);
+    }
+    return NativeValue::heap_string(std::move(out));
+  }
+  native_regexp_reject_unknown_kw(kwargs, {});
+  if (receiver.tag == NativeValue::Tag::Regexp) {
+    if ((selector == "source" || selector == "to_str" ||
+         selector == "inspect") &&
+        args.size() == 0U) {
+      const NativeRegexp &pattern = as_regexp(receiver);
+      return selector == "source"
+                 ? NativeValue::heap_string(pattern.source)
+                 : NativeValue::heap_string(
+                       native_regexp_pattern_to_string(pattern));
+    }
+    if ((selector == "match" || selector == "find" ||
+         selector == "match?" || selector == "matches?" ||
+         selector == "full_match" || selector == "full_match?" ||
+         selector == "=~" || selector == "!~") &&
+        args.size() == 1U) {
+      const bool full =
+          selector == "full_match" || selector == "full_match?";
+      const bool bool_only = selector == "match?" ||
+                             selector == "matches?" ||
+                             selector == "full_match?" ||
+                             selector == "!~";
+      return native_regexp_search_value(receiver, *arg0, full, bool_only,
+                                        selector == "!~");
+    }
+    throw NativeBailout();
+  }
+  if (receiver.tag == NativeValue::Tag::RegexpMatch) {
+    const NativeRegexpMatch &match = as_regexp_match(receiver);
+    if ((selector == "text" || selector == "to_str" ||
+         selector == "inspect") &&
+        args.size() == 0U) {
+      return NativeValue::heap_string(native_regexp_match_to_string(match));
+    }
+    if (selector == "pattern" && args.size() == 0U) {
+      return match.pattern;
+    }
+    if (selector == "source" && args.size() == 0U) {
+      return NativeValue::heap_string(match.source);
+    }
+    if ((selector == "count" || selector == "size" ||
+         selector == "length") &&
+        args.size() == 0U) {
+      const std::size_t captures =
+          match.captures.empty() ? 0U : match.captures.size() - 1U;
+      return NativeValue::integer(static_cast<std::int64_t>(captures));
+    }
+    if ((selector == "[]" || selector == "group") && args.size() == 1U) {
+      return native_regexp_group_value(match, *arg0);
+    }
+    if ((selector == "start" || selector == "finish" ||
+         selector == "end") &&
+        args.size() == 0U) {
+      if (match.captures.empty() || !match.captures[0].matched) {
+        return NativeValue::nullv();
+      }
+      return NativeValue::integer(static_cast<std::int64_t>(
+          selector == "start" ? match.captures[0].start
+                              : match.captures[0].end));
+    }
+    if (selector == "captures" && args.size() == 0U) {
+      std::vector<NativeValue> captures;
+      for (std::size_t i = 1; i < match.captures.size(); ++i) {
+        const auto text = native_regexp_group_text(match, i);
+        captures.push_back(text.has_value() ? NativeValue::heap_string(*text)
+                                            : NativeValue::nullv());
+      }
+      return NativeValue::list(std::move(captures));
+    }
+  }
+  throw NativeBailout();
+}
+
+)AMBERCPP";
   out << R"AMBERCPP(static bool native_is_sequence(const NativeValue &value) {
   return value.tag == NativeValue::Tag::List ||
          value.tag == NativeValue::Tag::Tuple ||
@@ -6759,6 +7337,13 @@ static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs) {
            left.step == right.step &&
            left.inclusive_end == right.inclusive_end;
   }
+  case NativeValue::Tag::Regexp: {
+    const NativeRegexp &left = as_regexp(lhs);
+    const NativeRegexp &right = as_regexp(rhs);
+    return left.source == right.source && left.flags == right.flags;
+  }
+  case NativeValue::Tag::RegexpMatch:
+    return lhs.heap_value == rhs.heap_value;
   default:
     throw NativeBailout();
   }
@@ -7668,6 +8253,9 @@ static NativeValue native_index(const NativeValue &value, const NativeValue &key
   if (value.tag == NativeValue::Tag::Map) {
     return native_map_lookup(value, key, false);
   }
+  if (value.tag == NativeValue::Tag::RegexpMatch) {
+    return native_regexp_group_value(as_regexp_match(value), key);
+  }
   throw NativeBailout();
 }
 
@@ -8084,6 +8672,10 @@ static NativeValue native_type_matches(const NativeValue &module,
   } else if (module.tag == NativeValue::Tag::UuidModule) {
     matched = value.tag == NativeValue::Tag::Uuid ||
               value.tag == NativeValue::Tag::UuidModule;
+  } else if (module.tag == NativeValue::Tag::RegexpModule) {
+    matched = value.tag == NativeValue::Tag::Regexp ||
+              value.tag == NativeValue::Tag::RegexpMatch ||
+              value.tag == NativeValue::Tag::RegexpModule;
   } else if (module.tag == NativeValue::Tag::TimeModule) {
     matched = value.tag == NativeValue::Tag::Time ||
               value.tag == NativeValue::Tag::TimeModule;
@@ -11980,6 +12572,19 @@ static NativeValue native_benchmark_send(
   out << "    const bool equal = as_uuid(lhs).bytes == as_uuid(rhs).bytes;\n";
   out << "    return NativeValue::boolean(negate ? !equal : equal);\n";
   out << "  }\n";
+  out << "  if (lhs.tag == NativeValue::Tag::Regexp && "
+         "rhs.tag == NativeValue::Tag::Regexp) {\n";
+  out << "    const NativeRegexp &left = as_regexp(lhs);\n";
+  out << "    const NativeRegexp &right = as_regexp(rhs);\n";
+  out << "    const bool equal = left.source == right.source && "
+         "left.flags == right.flags;\n";
+  out << "    return NativeValue::boolean(negate ? !equal : equal);\n";
+  out << "  }\n";
+  out << "  if (lhs.tag == NativeValue::Tag::RegexpMatch && "
+         "rhs.tag == NativeValue::Tag::RegexpMatch) {\n";
+  out << "    const bool equal = lhs.heap_value == rhs.heap_value;\n";
+  out << "    return NativeValue::boolean(negate ? !equal : equal);\n";
+  out << "  }\n";
   out << "  if (lhs.tag == NativeValue::Tag::List || "
          "lhs.tag == NativeValue::Tag::Tuple || "
          "lhs.tag == NativeValue::Tag::Set || "
@@ -12110,6 +12715,14 @@ static NativeValue native_benchmark_send(
   out << "  case NativeValue::Tag::FsPath: return "
          "NativeValue::heap_string(as_fs_path(value).path);"
          "\n";
+  out << "  case NativeValue::Tag::Regexp: return "
+         "NativeValue::heap_string(native_regexp_pattern_to_string("
+         "as_regexp(value)));"
+         "\n";
+  out << "  case NativeValue::Tag::RegexpMatch: return "
+         "NativeValue::heap_string(native_regexp_match_to_string("
+         "as_regexp_match(value)));"
+         "\n";
   out << "  case NativeValue::Tag::List:\n";
   out << "  case NativeValue::Tag::Tuple:\n";
   out << "  case NativeValue::Tag::Set:\n";
@@ -12137,6 +12750,7 @@ static NativeValue native_benchmark_send(
   out << "  case NativeValue::Tag::BenchmarkModule:\n";
   out << "  case NativeValue::Tag::UrlModule:\n";
   out << "  case NativeValue::Tag::ArgParserModule:\n";
+  out << "  case NativeValue::Tag::RegexpModule:\n";
   out << "  case NativeValue::Tag::FsModule:\n";
   out << "  case NativeValue::Tag::SecureRandomModule:\n";
   out << "  case NativeValue::Tag::UuidModule:\n";
@@ -12860,6 +13474,7 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "  case NativeValue::Tag::BenchmarkModule: return \"Benchmark\";\n";
   out << "  case NativeValue::Tag::UrlModule: return \"Url\";\n";
   out << "  case NativeValue::Tag::ArgParserModule: return \"ArgParser\";\n";
+  out << "  case NativeValue::Tag::RegexpModule: return \"Regexp\";\n";
   out << "  case NativeValue::Tag::FsModule: return \"fs\";\n";
   out << "  case NativeValue::Tag::SecureRandomModule: return "
          "\"SecureRandom\";\n";
@@ -12873,6 +13488,10 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "  case NativeValue::Tag::ArgParser: return "
          "\"<instance ArgParser>\";\n";
   out << "  case NativeValue::Tag::FsPath: return as_fs_path(value).path;\n";
+  out << "  case NativeValue::Tag::Regexp: return "
+         "native_regexp_pattern_to_string(as_regexp(value));\n";
+  out << "  case NativeValue::Tag::RegexpMatch: return "
+         "native_regexp_match_to_string(as_regexp_match(value));\n";
   out << "  case NativeValue::Tag::Uuid: return "
          "amber::runtime::runtime_uuid_to_string(as_uuid(value));\n";
   out << "  case NativeValue::Tag::Time: return "
@@ -13226,6 +13845,7 @@ native_runtime_sources(const std::filesystem::path &root) {
       "runtime/stdlib_benchmark.cpp",
       "runtime/stdlib_secure_random.cpp",
       "runtime/stdlib_argparser.cpp",
+      "runtime/stdlib_regexp.cpp",
       "runtime/stdlib_uuid.cpp",
       "runtime/stdlib_time.cpp",
       "runtime/stdlib_url.cpp",
@@ -15602,8 +16222,8 @@ int run_build_command(int argc, char **argv) {
       const std::filesystem::path native_source_path =
           out_dir /
           (safe_artifact_name(parsed.manifest.root_module) + ".native.cpp");
-      const std::vector<amber::pkg::PackageNativeExtension>
-          native_extensions = augment_native_extensions_from_source(
+      const std::vector<amber::pkg::PackageNativeExtension> native_extensions =
+          augment_native_extensions_from_source(
               parsed.manifest.native_extensions, linked_graph.artifact.module);
       const std::vector<amber::pkg::PackageNativeBlob> native_blobs =
           collect_native_blobs(native_extensions, manifest_dir.string());

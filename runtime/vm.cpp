@@ -7,6 +7,7 @@
 #include "runtime/net_http.h"
 #include "runtime/net_http_transport.h"
 #include "runtime/reactor.h"
+#include "runtime/stdlib_regexp.h"
 #include "runtime/stdlib_registry.h"
 #include "runtime/stdlib_url.h"
 #include "runtime/vm_internal.h"
@@ -8457,6 +8458,10 @@ private:
       return value_is_range_instance(value);
     case RuntimeNativeTypeKind::ArgParser:
       return value.is_arg_parser();
+    case RuntimeNativeTypeKind::Regexp:
+      return value.is_regexp_pattern() || value.is_regexp_match() ||
+             (value.is_native_type() &&
+              value.as_native_type().kind == RuntimeNativeTypeKind::Regexp);
     case RuntimeNativeTypeKind::Uuid:
       return value.is_uuid();
     case RuntimeNativeTypeKind::Time:
@@ -13266,12 +13271,11 @@ private:
     // An IO failure (missing file, permission denied, connection reset, ...) is
     // recoverable, not fatal: raise it rescuably so `rescue IOError` / the
     // specific subclass can catch it. Degrades to a terminal fault when the
-    // class is unregistered or no handler is active. Callers return immediately.
-    raise_runtime_error(frame,
-                        result.error_name.empty() ? "IOError"
-                                                  : result.error_name,
-                        result.message.empty() ? "IO operation failed"
-                                               : result.message);
+    // class is unregistered or no handler is active. Callers return
+    // immediately.
+    raise_runtime_error(
+        frame, result.error_name.empty() ? "IOError" : result.error_name,
+        result.message.empty() ? "IO operation failed" : result.message);
     return false;
   }
 
@@ -17944,18 +17948,18 @@ private:
       return true;
     };
 
-    if (receiver.is_arg_parser() || receiver.is_uuid() || receiver.is_time() ||
-        receiver.is_time_zone() || receiver.is_time_period()) {
+    if (receiver.is_arg_parser() || receiver.is_regexp_pattern() ||
+        receiver.is_regexp_match() || receiver.is_uuid() ||
+        receiver.is_time() || receiver.is_time_zone() ||
+        receiver.is_time_period()) {
       const RuntimeNativeTypeKind kind =
-          receiver.is_arg_parser()
-              ? RuntimeNativeTypeKind::ArgParser
-              : (receiver.is_uuid()
-                     ? RuntimeNativeTypeKind::Uuid
-                     : (receiver.is_time()
-                            ? RuntimeNativeTypeKind::Time
-                            : (receiver.is_time_zone()
-                                   ? RuntimeNativeTypeKind::TimeZone
-                                   : RuntimeNativeTypeKind::TimePeriod)));
+          receiver.is_arg_parser() ? RuntimeNativeTypeKind::ArgParser
+          : (receiver.is_regexp_pattern() || receiver.is_regexp_match())
+              ? RuntimeNativeTypeKind::Regexp
+          : receiver.is_uuid()      ? RuntimeNativeTypeKind::Uuid
+          : receiver.is_time()      ? RuntimeNativeTypeKind::Time
+          : receiver.is_time_zone() ? RuntimeNativeTypeKind::TimeZone
+                                    : RuntimeNativeTypeKind::TimePeriod;
       if (const std::optional<NativeStdlibHandler> handler =
               dispatch_registry().native_handler(kind)) {
         NativeStdlibCall call{*this, &frame, receiver, kind, selector,
@@ -21934,6 +21938,28 @@ private:
           *dst = *t;
           return true;
         };
+
+        if (selector == "=~" || selector == "!~") {
+          NativeStdlibCall call{
+              *this,    &frame, receiver, RuntimeNativeTypeKind::Regexp,
+              selector, args,   block,    kw_args,
+              out};
+          const SendStatus status = regexp_string_match_operator(call, self);
+          if (status != SendStatus::NotHandled) {
+            return status;
+          }
+        }
+        if ((selector == "replace" || selector == "replaced") &&
+            !args.empty() && args[0].is_regexp_pattern()) {
+          NativeStdlibCall call{
+              *this,    &frame, receiver, RuntimeNativeTypeKind::Regexp,
+              selector, args,   block,    kw_args,
+              out};
+          const SendStatus status = regexp_string_replace(call, self);
+          if (status != SendStatus::NotHandled) {
+            return status;
+          }
+        }
 
         if (selector == "length" || selector == "size") {
           if (!require_arity(0) || !require_no_block()) {
@@ -26480,7 +26506,8 @@ private:
           return true;
         }
       }
-      if (receiver.is_uuid() || receiver.is_time() ||
+      if (receiver.is_uuid() || receiver.is_regexp_pattern() ||
+          receiver.is_regexp_match() || receiver.is_time() ||
           receiver.is_time_period() ||
           ((receiver.is_integer() || receiver.is_float()) &&
            period_unit_selector(*selector))) {

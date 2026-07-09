@@ -65,6 +65,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
     return "SecureRandom";
   case RuntimeNativeTypeKind::ArgParser:
     return "ArgParser";
+  case RuntimeNativeTypeKind::Regexp:
+    return "Regexp";
   case RuntimeNativeTypeKind::Uuid:
     return "Uuid";
   case RuntimeNativeTypeKind::Time:
@@ -347,6 +349,14 @@ Value Value::uuid(std::shared_ptr<RuntimeUuidValue> value) {
   return {std::move(value)};
 }
 
+Value Value::regexp_pattern(std::shared_ptr<RuntimeRegexpPatternValue> value) {
+  return {std::move(value)};
+}
+
+Value Value::regexp_match(std::shared_ptr<RuntimeRegexpMatchValue> value) {
+  return {std::move(value)};
+}
+
 Value Value::foreign_handle(std::shared_ptr<RuntimeForeignHandle> value) {
   return {std::move(value)};
 }
@@ -506,6 +516,16 @@ bool Value::is_uuid() const {
   return std::holds_alternative<std::shared_ptr<RuntimeUuidValue>>(payload);
 }
 
+bool Value::is_regexp_pattern() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeRegexpPatternValue>>(
+      payload);
+}
+
+bool Value::is_regexp_match() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeRegexpMatchValue>>(
+      payload);
+}
+
 bool Value::is_foreign_handle() const {
   return std::holds_alternative<std::shared_ptr<RuntimeForeignHandle>>(payload);
 }
@@ -655,6 +675,14 @@ std::shared_ptr<RuntimeArgParserValue> Value::as_arg_parser() const {
 
 std::shared_ptr<RuntimeUuidValue> Value::as_uuid() const {
   return std::get<std::shared_ptr<RuntimeUuidValue>>(payload);
+}
+
+std::shared_ptr<RuntimeRegexpPatternValue> Value::as_regexp_pattern() const {
+  return std::get<std::shared_ptr<RuntimeRegexpPatternValue>>(payload);
+}
+
+std::shared_ptr<RuntimeRegexpMatchValue> Value::as_regexp_match() const {
+  return std::get<std::shared_ptr<RuntimeRegexpMatchValue>>(payload);
 }
 
 std::shared_ptr<RuntimeForeignHandle> Value::as_foreign_handle() const {

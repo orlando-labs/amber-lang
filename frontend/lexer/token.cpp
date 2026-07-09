@@ -143,10 +143,14 @@ const char *token_kind_name(TokenKind kind) {
     return "PERCENT";
   case TokenKind::Equal:
     return "EQUAL";
+  case TokenKind::EqualTilde:
+    return "EQUAL_TILDE";
   case TokenKind::EqualEqual:
     return "EQUAL_EQUAL";
   case TokenKind::EqualEqualEqual:
     return "EQUAL_EQUAL_EQUAL";
+  case TokenKind::BangTilde:
+    return "BANG_TILDE";
   case TokenKind::BangEqual:
     return "BANG_EQUAL";
   case TokenKind::Less:

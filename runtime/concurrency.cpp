@@ -5,6 +5,7 @@
 #include "runtime/io.h"
 #include "runtime/objects.h"
 #include "runtime/reactor.h"
+#include "runtime/stdlib_regexp.h"
 #include "runtime/text.h"
 #include "runtime/watch.h"
 
@@ -1837,6 +1838,20 @@ private:
         return true;
       }
       return left != nullptr && right != nullptr && left->bytes == right->bytes;
+    }
+    if (lhs.is_regexp_pattern()) {
+      const std::shared_ptr<RuntimeRegexpPatternValue> left =
+          lhs.as_regexp_pattern();
+      const std::shared_ptr<RuntimeRegexpPatternValue> right =
+          rhs.as_regexp_pattern();
+      if (left == right) {
+        return true;
+      }
+      return left != nullptr && right != nullptr &&
+             left->source == right->source && left->flags == right->flags;
+    }
+    if (lhs.is_regexp_match()) {
+      return lhs.as_regexp_match() == rhs.as_regexp_match();
     }
     if (lhs.is_foreign_handle()) {
       return lhs.as_foreign_handle() == rhs.as_foreign_handle();
