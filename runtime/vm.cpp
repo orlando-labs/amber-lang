@@ -5981,11 +5981,6 @@ private:
             error_registry().error_id(path)) {
       return Value::native_error_class(*error_id);
     }
-    if (error_registry().has_error_namespace(path)) {
-      auto value = std::make_shared<NativeErrorNamespaceValue>();
-      value->path = path;
-      return Value::native_error_namespace(std::move(value));
-    }
     // Registered prelude/module paths resolve through the world-owned module
     // registry. During migration the binding can still point at a legacy
     // RuntimeNativeTypeKind.
@@ -6001,6 +5996,14 @@ private:
       case RuntimeBindingKind::FlowModule:
         return Value::flow_module(std::make_shared<RuntimeFlowModule>());
       }
+    }
+    // Error namespaces are a fallback for prefixes such as `ArgParser` in
+    // `ArgParser.InvalidValue`; exact native type/module bindings must keep
+    // precedence so callable builtin types such as `ArgParser(...)` work.
+    if (error_registry().has_error_namespace(path)) {
+      auto value = std::make_shared<NativeErrorNamespaceValue>();
+      value->path = path;
+      return Value::native_error_namespace(std::move(value));
     }
     return std::nullopt;
   }
