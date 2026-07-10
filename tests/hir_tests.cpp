@@ -1572,6 +1572,24 @@ void test_property_lowering() {
          "attr setter property flag");
 }
 
+void test_bodyless_class_lowering() {
+  const amber::hir::Program program =
+      lower_ok("class Empty\n"
+               "mixin Blank\n");
+
+  const amber::ast::Expr *empty_class = module_item_by_name(program, "Empty");
+  expect(empty_class != nullptr && empty_class->kind == "HClass",
+         "bodyless class lowers to HClass");
+  expect(list_item(*empty_class, "body", 0) == nullptr,
+         "bodyless class has no member list entries");
+
+  const amber::ast::Expr *blank_mixin = module_item_by_name(program, "Blank");
+  expect(blank_mixin != nullptr && blank_mixin->kind == "HMixin",
+         "bodyless mixin lowers to HMixin");
+  expect(list_item(*blank_mixin, "body", 0) == nullptr,
+         "bodyless mixin has no member list entries");
+}
+
 void test_try_rescue_ensure_lowering() {
   const amber::hir::Program program =
       lower_ok("try:\n"
@@ -1664,6 +1682,7 @@ int main() {
   test_indented_block_suffix_lowering();
   test_nested_capture_propagation();
   test_property_lowering();
+  test_bodyless_class_lowering();
   test_try_rescue_ensure_lowering();
   test_throw_catch_lowering();
   std::cout << "hir_tests: ok\n";

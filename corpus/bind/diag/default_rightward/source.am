@@ -1,2 +1,1 @@
-def f(x = y, y):
-  pass
+def f(x = y, y)

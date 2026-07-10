@@ -673,9 +673,6 @@ private:
         return infer_expr(*expr, env);
       }
     }
-    if (stmt.kind == "AstPassStmt" || stmt.kind == "AstNoopStmt") {
-      return named_type("Null");
-    }
     return infer_expr(stmt, env);
   }
 

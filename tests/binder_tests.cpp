@@ -224,15 +224,13 @@ void test_module_class_and_unicode_bindings() {
                              "export Particle, Метр\n"
                              "\n"
                              "mixin Timestamped:\n"
-                             "  def touch!():\n"
-                             "    noop\n"
+                             "  def touch!()\n"
                              "\n"
                              "class Particle < Entity:\n"
                              "  include Timestamped\n"
                              "  class_method def find(id):\n"
                              "    id\n"
-                             "  def init(@масса, α = 1):\n"
-                             "    pass\n";
+                             "  def init(@масса, α = 1)\n";
 
   amber::binder::BindResult result = bind_ok(source);
   const amber::binder::BindGraph &graph = result.graph;
@@ -354,8 +352,7 @@ void test_placeholder_diagnostics() {
 }
 
 void test_duplicate_binding_diagnostics() {
-  amber::binder::BindResult duplicate_param = bind_any("def f(x, x):\n"
-                                                       "  pass\n");
+  amber::binder::BindResult duplicate_param = bind_any("def f(x, x)\n");
   expect(!duplicate_param.ok(), "duplicate params rejected");
   expect_diagnostic_code(duplicate_param, "B0001");
 
@@ -420,18 +417,15 @@ void test_unresolved_name_diagnostics() {
 }
 
 void test_default_ordering_diagnostics() {
-  amber::binder::BindResult rightward = bind_any("def f(x = y, y):\n"
-                                                 "  pass\n");
+  amber::binder::BindResult rightward = bind_any("def f(x = y, y)\n");
   expect(!rightward.ok(), "rightward default reference rejected");
   expect_diagnostic_code(rightward, "E1007");
 
-  amber::binder::BindResult self = bind_any("def f(x = x):\n"
-                                            "  pass\n");
+  amber::binder::BindResult self = bind_any("def f(x = x)\n");
   expect(!self.ok(), "self default reference rejected");
   expect_diagnostic_code(self, "E1007");
 
-  amber::binder::BindResult leftward = bind_any("def f(x, y = x):\n"
-                                                "  pass\n");
+  amber::binder::BindResult leftward = bind_any("def f(x, y = x)\n");
   expect(leftward.ok(), "leftward default reference accepted");
   expect_no_diagnostic_code(leftward, "E1007");
 }
@@ -439,8 +433,7 @@ void test_default_ordering_diagnostics() {
 void test_auto_assign_default_warning() {
   amber::binder::BindResult warning =
       bind_any("class Timer:\n"
-               "  def update(@timeout = @timeout):\n"
-               "    pass\n");
+               "  def update(@timeout = @timeout)\n");
   expect(warning.ok(), "auto-assign field read is warning-only");
   expect_diagnostic_code(warning, "W1001");
 }
@@ -640,8 +633,7 @@ void test_invalid_pattern_context_diagnostics() {
 
 void test_bind_call_shape_success() {
   amber::binder::BindResult bind_result =
-      bind_ok("def configure(x, y = 1, α:, β: 2):\n"
-              "  pass\n");
+      bind_ok("def configure(x, y = 1, α:, β: 2)\n");
   const amber::binder::Signature *signature =
       signature_by_owner(bind_result.graph, "configure");
   expect(signature != nullptr, "configure signature exists");
@@ -694,8 +686,7 @@ void test_extract_call_shape_from_ast() {
 
 void test_bind_call_shape_from_ast_args() {
   amber::binder::BindResult bind_result =
-      bind_ok("def configure(x, α:, β: 2):\n"
-              "  pass\n");
+      bind_ok("def configure(x, α:, β: 2)\n");
   const amber::binder::Signature *signature =
       signature_by_owner(bind_result.graph, "configure");
   expect(signature != nullptr, "configure signature for ast-arg bind exists");
@@ -719,8 +710,7 @@ void test_bind_call_shape_from_ast_args() {
 
 void test_bind_call_auto_assign_plan() {
   amber::binder::BindResult bind_result =
-      bind_ok("def init(@масса, α = 1, @@ρ: 2):\n"
-              "  pass\n");
+      bind_ok("def init(@масса, α = 1, @@ρ: 2)\n");
   const amber::binder::Signature *signature =
       signature_by_owner(bind_result.graph, "init");
   expect(signature != nullptr, "init signature exists");
@@ -743,8 +733,7 @@ void test_bind_call_auto_assign_plan() {
 }
 
 void test_bind_call_shape_diagnostics() {
-  amber::binder::BindResult positional_bind = bind_ok("def add(x):\n"
-                                                      "  pass\n");
+  amber::binder::BindResult positional_bind = bind_ok("def add(x)\n");
   const amber::binder::Signature *positional_signature =
       signature_by_owner(positional_bind.graph, "add");
   expect(positional_signature != nullptr, "add signature exists");
@@ -754,8 +743,7 @@ void test_bind_call_shape_diagnostics() {
   expect(!too_many.ok(), "too many positional args rejected");
   expect_call_diagnostic_code(too_many, "E2010");
 
-  amber::binder::BindResult keyword_bind = bind_ok("def route(x, α:, β: 2):\n"
-                                                   "  pass\n");
+  amber::binder::BindResult keyword_bind = bind_ok("def route(x, α:, β: 2)\n");
   const amber::binder::Signature *keyword_signature =
       signature_by_owner(keyword_bind.graph, "route");
   expect(keyword_signature != nullptr, "route signature exists");
@@ -800,7 +788,7 @@ void test_property_bindings_and_conflicts() {
   amber::binder::BindResult storage_separation =
       bind_any("class User:\n"
                "  attr name\n"
-               "  def init(@name): pass\n");
+               "  def init(@name)\n");
   if (!storage_separation.ok()) {
     std::cerr << amber::lexer::diagnostics_to_json(
         storage_separation.diagnostics);
@@ -814,7 +802,7 @@ void test_property_bindings_and_conflicts() {
   amber::binder::BindResult top_level_setter =
       bind_any("prop answer:\n"
                "  get: 42\n"
-               "  set(value): pass\n");
+               "  set(value): null\n");
   expect_diagnostic_code(top_level_setter, "AMB_PROP_TOP_LEVEL_SETTER");
 
   amber::binder::BindResult setter_property =

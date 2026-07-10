@@ -556,7 +556,7 @@ private:
            item.kind != "AstExportStmt" && item.kind != "AstClassDef" &&
            item.kind != "AstMixinDef" && item.kind != "AstDefStmt" &&
            item.kind != "AstClassMethodDef" && item.kind != "AstClauseDef" &&
-           item.kind != "AstErrorDecl" && item.kind != "AstNumericProfile" &&
+           item.kind != "AstNumericProfile" &&
            !ast_is_property_decl(item);
   }
 
@@ -856,8 +856,7 @@ private:
     for (const std::unique_ptr<ast::Expr> &item : items_) {
       if (item->kind == "AstClassDef" || item->kind == "AstMixinDef" ||
           item->kind == "AstDefStmt" || item->kind == "AstClassMethodDef" ||
-          item->kind == "AstClauseDef" || item->kind == "AstErrorDecl" ||
-          ast_is_property_decl(*item)) {
+          item->kind == "AstClauseDef" || ast_is_property_decl(*item)) {
         append_lowered_item_decls(&nodes, *item, "module");
       }
     }
@@ -910,12 +909,6 @@ private:
     }
     if (item.kind == "AstMixinDef") {
       return lower_class_like(item, "HMixin");
-    }
-    if (item.kind == "AstErrorDecl") {
-      auto node = make_node("HErrorDecl", item.span);
-      node->string_field("name", string_value(item, "name"));
-      node->string_field("parent", string_value(item, "parent"));
-      return node;
     }
     if (item.kind == "AstDefStmt" || item.kind == "AstClassMethodDef") {
       const std::string method_dispatch_side =
@@ -1601,9 +1594,6 @@ private:
         node->node_field("expr", lower_expr(*expr));
       }
       return node;
-    }
-    if (item.kind == "AstPassStmt" || item.kind == "AstNoopStmt") {
-      return make_node("HSeq", item.span);
     }
     if (item.kind == "AstClassDef" || item.kind == "AstMixinDef" ||
         item.kind == "AstDefStmt" || item.kind == "AstClassMethodDef" ||

@@ -85,7 +85,6 @@ private:
   std::unique_ptr<ast::Expr> parse_import_decl();
   std::unique_ptr<ast::Expr> parse_from_import_decl();
   std::unique_ptr<ast::Expr> parse_export_stmt();
-  std::unique_ptr<ast::Expr> parse_error_decl();
   std::unique_ptr<ast::Expr>
   parse_def_stmt(bool class_method,
                  const lexer::Token *start_override = nullptr,
@@ -99,7 +98,6 @@ private:
   parse_class_def(const lexer::Token *native_start = nullptr);
   std::unique_ptr<ast::Expr> parse_mixin_def();
   std::unique_ptr<ast::Expr> parse_include_stmt(bool extend);
-  std::unique_ptr<ast::Expr> parse_pass_like_stmt(const char *kind);
   std::unique_ptr<ast::Expr> parse_invalid_handler_stmt(bool rescue);
   std::vector<std::unique_ptr<ast::Expr>> parse_body(BodyContext context);
   HandlerSuffix parse_handler_suffix(const lexer::Span &fallback_span,

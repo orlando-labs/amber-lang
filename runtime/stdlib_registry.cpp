@@ -178,6 +178,7 @@ RuntimeNativePackageDescriptor runtime_native_package_descriptor_from_module(
     const bytecode::BcModule &module) {
   static const std::string kBindPrefix = "amber.native.bind:";
   static const std::string kMethodPrefix = "amber.native.method:";
+  static const std::string kErrorPrefix = "amber.native.error:";
   RuntimeNativePackageDescriptor descriptor;
   for (const bytecode::AttrEntry &attr : module.attrs) {
     const std::string key = registry_string_or_empty(module, attr.key_str_id);
@@ -206,6 +207,16 @@ RuntimeNativePackageDescriptor runtime_native_package_descriptor_from_module(
       descriptor.method_bindings.push_back({method_key.substr(0, separator),
                                             method_key.substr(separator + 1U),
                                             logical});
+      continue;
+    }
+    if (key.compare(0, kErrorPrefix.size(), kErrorPrefix) == 0) {
+      RuntimeNativePackageErrorDescriptor error;
+      error.name = key.substr(kErrorPrefix.size());
+      error.parent =
+          registry_string_or_empty(module, attr.value_str_id);
+      if (!error.name.empty()) {
+        descriptor.errors.push_back(std::move(error));
+      }
     }
   }
   return descriptor;

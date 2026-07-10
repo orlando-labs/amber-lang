@@ -75,22 +75,23 @@ void expect_identifier_lexemes(const std::string &name,
 void test_block_tokens() {
   expect_kinds(
       "indent/dedent",
-      "def todo():\n"
-      "  pass\n"
-      "\n"
+      "def todo()\n"
       "if active?:\n"
-      "  noop\n"
+      "  null\n"
       "else:\n"
       "  log \"disabled\"\n",
       {TokenKind::KeywordDef,  TokenKind::Identifier,  TokenKind::LParen,
-       TokenKind::RParen,      TokenKind::Colon,       TokenKind::Newline,
-       TokenKind::Indent,      TokenKind::KeywordPass, TokenKind::Newline,
-       TokenKind::Dedent,      TokenKind::KeywordIf,   TokenKind::Identifier,
+       TokenKind::RParen,      TokenKind::Newline,
+       TokenKind::KeywordIf,   TokenKind::Identifier,
        TokenKind::Colon,       TokenKind::Newline,     TokenKind::Indent,
-       TokenKind::KeywordNoop, TokenKind::Newline,     TokenKind::Dedent,
+       TokenKind::KeywordNull, TokenKind::Newline,     TokenKind::Dedent,
        TokenKind::KeywordElse, TokenKind::Colon,       TokenKind::Newline,
        TokenKind::Indent,      TokenKind::Identifier,  TokenKind::String,
        TokenKind::Newline,     TokenKind::Dedent,      TokenKind::Eof});
+
+  expect_kinds("pass and noop are ordinary identifiers", "pass = noop\n",
+               {TokenKind::Identifier, TokenKind::Equal,
+                TokenKind::Identifier, TokenKind::Newline, TokenKind::Eof});
 }
 
 void test_safe_and_chain_dot() {

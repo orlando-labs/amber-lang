@@ -37,6 +37,11 @@ bool is_same_name_bare_arg_value_boundary(lexer::TokenKind kind) {
          kind == lexer::TokenKind::Dedent || kind == lexer::TokenKind::Eof;
 }
 
+bool is_declaration_boundary(lexer::TokenKind kind) {
+  return kind == lexer::TokenKind::Newline ||
+         kind == lexer::TokenKind::Dedent || kind == lexer::TokenKind::Eof;
+}
+
 bool is_keyword_spread_start(const lexer::Token &first,
                              const lexer::Token &second) {
   (void)second;
@@ -914,12 +919,6 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     return parse_numeric_directive();
   }
 
-  if (context == BodyContext::Module &&
-      current().kind == lexer::TokenKind::Identifier &&
-      current().lexeme == "error" && is_identifier_like_token(peek(1).kind)) {
-    return parse_error_decl();
-  }
-
   // `next` is a contextual loop/block control keyword. At statement-leading
   // position it is the next-iteration statement when it stands alone (followed
   // by a statement terminator) or is immediately followed by a value expression
@@ -1090,10 +1089,6 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
       error_code(current(), "E3007", "extend is only allowed in class body");
     }
     return parse_include_stmt(true);
-  case lexer::TokenKind::KeywordPass:
-    return parse_pass_like_stmt("AstPassStmt");
-  case lexer::TokenKind::KeywordNoop:
-    return parse_pass_like_stmt("AstNoopStmt");
   case lexer::TokenKind::KeywordRescue:
     return parse_invalid_handler_stmt(true);
   case lexer::TokenKind::KeywordEnsure:
@@ -1206,20 +1201,6 @@ std::unique_ptr<ast::Expr> Parser::parse_numeric_directive() {
                              ast::join_spans(start.span, previous().span));
   node->string_field("int_type", int_type.empty() ? "Int64" : int_type);
   node->string_field("overflow", overflow.empty() ? "checked" : overflow);
-  return node;
-}
-
-std::unique_ptr<ast::Expr> Parser::parse_error_decl() {
-  const lexer::Token start = advance();
-  const std::string name = parse_module_path();
-  std::string parent = "NativeError";
-  if (match(lexer::TokenKind::Less)) {
-    parent = parse_module_path();
-  }
-  auto node = ast::make_expr("AstErrorDecl",
-                             ast::join_spans(start.span, previous().span));
-  node->string_field("name", name);
-  node->string_field("parent", parent);
   return node;
 }
 
@@ -1438,6 +1419,28 @@ Parser::parse_def_stmt(bool class_method, const lexer::Token *start_override,
     node->bool_field("is_native", is_native);
     node->bool_field("native_only", true);
     node->string_field("native_binding", native_binding);
+    return node;
+  }
+
+  if (!check(lexer::TokenKind::Colon) &&
+      is_declaration_boundary(current().kind)) {
+    if (is_macro) {
+      error(start, "macro definition requires a body");
+    }
+    auto node =
+        ast::make_expr(class_method ? "AstClassMethodDef" : "AstDefStmt",
+                       ast::join_spans(start.span, previous().span));
+    node->string_field("name", name_text);
+    node->node_field("signature", std::move(signature));
+    node->list_field("body", {});
+    if (is_native || has_binding) {
+      node->bool_field("is_native", is_native);
+      node->bool_field("native_only", false);
+      node->string_field("native_binding", native_binding);
+    }
+    if (is_macro) {
+      node->bool_field("is_macro", true);
+    }
     return node;
   }
 
@@ -1830,10 +1833,17 @@ Parser::parse_class_def(const lexer::Token *native_start) {
     }
   }
 
-  consume(lexer::TokenKind::Colon, "expected ':' after class header");
+  const bool bodyless = !check(lexer::TokenKind::Colon) &&
+                        is_declaration_boundary(current().kind);
+  if (!bodyless) {
+    consume(lexer::TokenKind::Colon, "expected ':' after class header");
+  }
   const bool prev_in_native_class = in_native_class_body_;
   in_native_class_body_ = is_native;
-  std::vector<std::unique_ptr<ast::Expr>> body = parse_body(BodyContext::Class);
+  std::vector<std::unique_ptr<ast::Expr>> body;
+  if (!bodyless) {
+    body = parse_body(BodyContext::Class);
+  }
   in_native_class_body_ = prev_in_native_class;
   const lexer::Span end_span =
       body.empty() ? previous().span : body.back()->span;
@@ -1882,8 +1892,15 @@ std::unique_ptr<ast::Expr> Parser::parse_mixin_def() {
   const lexer::Token start = advance();
   const lexer::Token name =
       consume(lexer::TokenKind::Identifier, "expected mixin name");
-  consume(lexer::TokenKind::Colon, "expected ':' after mixin header");
-  std::vector<std::unique_ptr<ast::Expr>> body = parse_body(BodyContext::Mixin);
+  const bool bodyless = !check(lexer::TokenKind::Colon) &&
+                        is_declaration_boundary(current().kind);
+  if (!bodyless) {
+    consume(lexer::TokenKind::Colon, "expected ':' after mixin header");
+  }
+  std::vector<std::unique_ptr<ast::Expr>> body;
+  if (!bodyless) {
+    body = parse_body(BodyContext::Mixin);
+  }
   const lexer::Span end_span =
       body.empty() ? previous().span : body.back()->span;
 
@@ -1902,11 +1919,6 @@ std::unique_ptr<ast::Expr> Parser::parse_include_stmt(bool extend) {
                              ast::join_spans(start.span, previous().span));
   node->list_field("paths", std::move(paths));
   return node;
-}
-
-std::unique_ptr<ast::Expr> Parser::parse_pass_like_stmt(const char *kind) {
-  const lexer::Token token = advance();
-  return ast::make_expr(kind, token.span);
 }
 
 std::unique_ptr<ast::Expr> Parser::parse_invalid_handler_stmt(bool rescue) {
@@ -2035,7 +2047,7 @@ std::unique_ptr<ast::Expr> Parser::parse_rescue_clause(BodyContext context) {
   std::vector<std::unique_ptr<ast::Expr>> body = parse_control_body(context);
   if (body.empty()) {
     error_code(start, "E_RESCUE_WITHOUT_BODY",
-               "empty rescue body is not allowed; use `pass` or `noop`");
+               "empty rescue body is not allowed; use `null` explicitly");
   }
 
   const lexer::Span end_span =
@@ -2101,7 +2113,7 @@ Parser::parse_ensure_clause(BodyContext context) {
   std::vector<std::unique_ptr<ast::Expr>> body = parse_control_body(context);
   if (body.empty()) {
     error_code(start, "E_ENSURE_WITHOUT_BODY",
-               "empty ensure body is not allowed; use `pass` or `noop`");
+               "empty ensure body is not allowed; use `null` explicitly");
   }
   return body;
 }

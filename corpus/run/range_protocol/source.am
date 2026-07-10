@@ -1,8 +1,7 @@
 class Range:
   class_method def new(start, finish, inclusive_end:):
     Range(start, finish, inclusive_end: inclusive_end)
-  def init(@start, @finish, @inclusive_end:):
-    pass
+  def init(@start, @finish, @inclusive_end:)
   def contains?(value):
     value >= @start and value <= @finish
   def ===(value):

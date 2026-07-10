@@ -470,9 +470,7 @@ private:
   }
 
   void visit_item(int scope_index, const ast::Expr &item) {
-    if (item.kind == "AstPackageDecl" || item.kind == "AstImportStmt" ||
-        item.kind == "AstPassStmt" || item.kind == "AstNoopStmt" ||
-        item.kind == "AstErrorDecl") {
+    if (item.kind == "AstPackageDecl" || item.kind == "AstImportStmt") {
       return;
     }
     if (item.kind == "AstExportStmt") {

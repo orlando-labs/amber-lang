@@ -643,6 +643,7 @@ public:
     const ast::Expr &root = *program_->root;
     apply_numeric_profile(root);
     gather_dependencies(root);
+    index_class_ancestry(root);
     assign_exports(root);
     compile_procedures();
     build_items(root);
@@ -1197,23 +1198,111 @@ private:
     }
   }
 
+  std::string native_error_namespace() const {
+    std::string out;
+    bool capitalize = true;
+    for (const char ch : module_name_) {
+      if (ch == '_' || ch == '-') {
+        capitalize = true;
+        continue;
+      }
+      if (ch == '.') {
+        out.push_back(ch);
+        capitalize = true;
+        continue;
+      }
+      if (capitalize && ch >= 'a' && ch <= 'z') {
+        out.push_back(static_cast<char>(ch - 'a' + 'A'));
+      } else {
+        out.push_back(ch);
+      }
+      capitalize = false;
+    }
+    return out;
+  }
+
+  std::string qualified_native_error_name(const std::string &name) const {
+    if (name.find('.') != std::string::npos || module_name_.empty()) {
+      return name;
+    }
+    const std::string name_space = native_error_namespace();
+    return name_space.empty() ? name : name_space + "." + name;
+  }
+
+  std::uint32_t class_ancestry_flags(const std::string &name,
+                                     std::vector<std::string> *active) {
+    const auto cached = class_ancestry_flags_.find(name);
+    if (cached != class_ancestry_flags_.end()) {
+      return cached->second;
+    }
+    if (std::find(active->begin(), active->end(), name) != active->end()) {
+      return 0U;
+    }
+    active->push_back(name);
+    std::uint32_t flags = 0U;
+    const auto found = class_superclasses_.find(name);
+    if (found != class_superclasses_.end()) {
+      const std::string &parent = found->second;
+      if (parent == "NativeError") {
+        flags = kClassFlagException | kClassFlagNativeError;
+      } else if (parent == "Exception") {
+        flags = kClassFlagException;
+      } else if (class_superclasses_.count(parent) != 0U) {
+        flags = class_ancestry_flags(parent, active);
+      }
+    }
+    active->pop_back();
+    class_ancestry_flags_[name] = flags;
+    return flags;
+  }
+
+  void index_class_ancestry(const ast::Expr &root) {
+    const ast::ListField *items = list_field(root, "items");
+    if (items == nullptr) {
+      return;
+    }
+    for (const std::unique_ptr<ast::Expr> &item : items->values) {
+      if (item->kind == "HClass") {
+        class_superclasses_[string_field(*item, "name")] =
+            string_field(*item, "superclass");
+      }
+    }
+    for (const auto &[name, parent] : class_superclasses_) {
+      (void)parent;
+      std::vector<std::string> active;
+      class_ancestry_flags(name, &active);
+    }
+  }
+
   BcClass build_class_like(const ast::Expr &item, bool is_mixin) {
     const std::string class_name = string_field(item, "name");
+    const std::uint32_t ancestry_flags =
+        is_mixin ? 0U : class_ancestry_flags_[class_name];
+    const bool native_error =
+        (ancestry_flags & kClassFlagNativeError) != 0U;
+    const std::string runtime_class_name =
+        native_error ? qualified_native_error_name(class_name) : class_name;
     const std::uint32_t class_index =
         static_cast<std::uint32_t>(module_.classes.size());
     declared_classes_[class_name] = class_index;
 
     BcClass klass;
-    klass.class_name_sym_id = intern_symbol(class_name);
+    klass.class_name_sym_id = intern_symbol(runtime_class_name);
     klass.ivar_schema_id = intern_empty_keyset();
     klass.method_range_start =
         static_cast<std::uint32_t>(module_.methods.size());
     if (is_mixin) {
       klass.flags |= kClassFlagMixin;
     }
+    klass.flags |= ancestry_flags;
 
-    const std::string superclass = string_field(item, "superclass");
-    if (!superclass.empty()) {
+    std::string superclass = string_field(item, "superclass");
+    if (native_error &&
+        (class_ancestry_flags_[superclass] & kClassFlagNativeError) != 0U) {
+      superclass = qualified_native_error_name(superclass);
+    }
+    if (!superclass.empty() && superclass != "Exception" &&
+        superclass != "NativeError") {
       klass.has_superclass_ref = true;
       klass.superclass_ref = intern_path_ref(superclass);
     }
@@ -1229,6 +1318,10 @@ private:
     std::string native_destructor;
 
     const ast::ListField *body = list_field(item, "body");
+    if (native_error && body != nullptr && !body->values.empty()) {
+      diag(item.span, "BC2002",
+           "NativeError subclasses must be bodyless declarations");
+    }
     if (body != nullptr) {
       for (const std::unique_ptr<ast::Expr> &member : body->values) {
         if (member->kind == "HMethod") {
@@ -1257,6 +1350,13 @@ private:
     if (!native_tag.empty()) {
       native_types_.push_back({module_name_ + "." + class_name, native_tag,
                                native_ownership, native_destructor});
+    }
+    if (native_error) {
+      std::string parent = string_field(item, "superclass");
+      if ((class_ancestry_flags_[parent] & kClassFlagNativeError) != 0U) {
+        parent = qualified_native_error_name(parent);
+      }
+      native_errors_.push_back({runtime_class_name, parent});
     }
 
     klass.method_range_count =
@@ -1289,12 +1389,6 @@ private:
 
       if (item->kind == "HMixin") {
         module_.classes.push_back(build_class_like(*item, true));
-        continue;
-      }
-
-      if (item->kind == "HErrorDecl") {
-        native_errors_.push_back(
-            {string_field(*item, "name"), string_field(*item, "parent")});
         continue;
       }
 
@@ -1489,6 +1583,8 @@ private:
   std::unordered_map<std::string, std::uint32_t> code_id_by_procedure_;
   std::unordered_map<std::string, ProcedureMethodInfo> declared_exports_;
   std::unordered_map<std::string, std::uint32_t> declared_classes_;
+  std::unordered_map<std::string, std::string> class_superclasses_;
+  std::unordered_map<std::string, std::uint32_t> class_ancestry_flags_;
   std::uint32_t next_code_id_ = 1;
   std::string numeric_int_type_ = "Int64";
   std::string numeric_overflow_ = "checked";

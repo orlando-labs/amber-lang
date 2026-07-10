@@ -2307,6 +2307,7 @@ bool native_vm_callable_local_mutator_selector(const std::string &selector) {
       "clear!",
       "replace!",
       // Map (vm.cpp RFC §8.2)
+      "get_or_set!",
       "store!",
       "merge!",
       "update!",

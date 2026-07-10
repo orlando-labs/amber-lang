@@ -37,8 +37,7 @@ def string_rounds():
   8000
 
 class Node:
-  def init(@id, @meta, @items):
-    pass
+  def init(@id, @meta, @items)
   def weight():
     @id + @items.count()
 

@@ -219,8 +219,6 @@ const char *token_kind_name(TokenKind kind) {
     return "KEYWORD_LOOP";
   case TokenKind::KeywordMixin:
     return "KEYWORD_MIXIN";
-  case TokenKind::KeywordNoop:
-    return "KEYWORD_NOOP";
   case TokenKind::KeywordNot:
     return "KEYWORD_NOT";
   case TokenKind::KeywordNull:
@@ -229,8 +227,6 @@ const char *token_kind_name(TokenKind kind) {
     return "KEYWORD_OR";
   case TokenKind::KeywordPackage:
     return "KEYWORD_PACKAGE";
-  case TokenKind::KeywordPass:
-    return "KEYWORD_PASS";
   case TokenKind::KeywordProp:
     return "KEYWORD_PROP";
   case TokenKind::KeywordRaise:

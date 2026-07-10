@@ -878,16 +878,14 @@ void test_module_forms() {
                              "export Particle, Метр\n"
                              "\n"
                              "mixin Timestamped:\n"
-                             "  def touch!():\n"
-                             "    noop\n"
+                             "  def touch!()\n"
                              "\n"
                              "class Particle < Entity:\n"
                              "  include Timestamped\n"
                              "  extend Serializable\n"
                              "  class_method def find(id):\n"
                              "    id\n"
-                             "  def init(@масса, α = 1):\n"
-                             "    pass\n";
+                             "  def init(@масса, α = 1)\n";
 
   amber::lexer::Lexer lexer(source, "<test>");
   amber::lexer::LexResult lex_result = lexer.lex();
@@ -1082,7 +1080,7 @@ void test_property_grouped_diagnostics_and_context() {
       parse_module_raw("class Box:\n"
                        "  prop value:\n"
                        "    set(a, b):\n"
-                       "      pass\n");
+                       "      null\n");
   expect(!setter_result.ok(), "bad setter arity rejected");
   expect(!setter_result.diagnostics.empty() &&
              setter_result.diagnostics[0].code == "AMB_PROP_SETTER_ARITY",
@@ -1415,7 +1413,7 @@ void test_native_packages() {
   // borrowed / collected markers parse.
   {
     amber::parser::ParseModuleResult borrowed = parse_module_raw(
-        "native class B from \"z.B\" borrowed:\n  pass\n");
+        "native class B from \"z.B\" borrowed\n");
     expect(borrowed.ok() &&
                string_field(*borrowed.items[0], "ownership") == "borrowed",
            "borrowed marker");
@@ -1430,7 +1428,7 @@ void test_native_packages() {
   // Missing ownership marker is rejected.
   {
     amber::parser::ParseModuleResult module =
-        parse_module_raw("native class C from \"z.C\":\n  pass\n");
+        parse_module_raw("native class C from \"z.C\"\n");
     expect(has_diagnostic(module, "E_NATIVE_CLASS_OWNERSHIP_REQUIRED"),
            "native class without ownership marker is rejected");
   }
@@ -1480,22 +1478,28 @@ void test_native_packages() {
 
   {
     amber::parser::ParseModuleResult module = parse_module_raw(
-        "error Sqlite3.Error < NativeError\n"
-        "error Sqlite3.StepError < Sqlite3.Error\n");
-    expect(module.ok(), "error declarations parse");
-    expect(module.items.size() == 2, "error declarations yield items");
-    expect(module.items[0]->kind == "AstErrorDecl", "error decl kind");
-    expect(string_field(*module.items[0], "name") == "Sqlite3.Error",
-           "error decl name");
-    expect(string_field(*module.items[0], "parent") == "NativeError",
-           "error decl parent");
-    expect(string_field(*module.items[1], "parent") == "Sqlite3.Error",
-           "dotted error parent");
+        "class Error < NativeError\n"
+        "class StepError < Error\n");
+    expect(module.ok(), "bodyless error classes parse");
+    expect(module.items.size() == 2, "bodyless classes yield items");
+    expect(module.items[0]->kind == "AstClassDef", "error class uses class AST");
+    expect(string_field(*module.items[0], "name") == "Error",
+           "bodyless class name");
+    expect(string_field(*module.items[0], "superclass") == "NativeError",
+           "native error ancestry is explicit");
+    expect(string_field(*module.items[1], "superclass") == "Error",
+           "error ancestry is inherited");
+    expect(list_field(*module.items[0], "body").values.empty(),
+           "bodyless class has an empty body");
 
     amber::parser::ParseModuleResult error_assign =
         parse_module_raw("error = 1\n");
-    expect(error_assign.ok() && error_assign.items[0]->kind != "AstErrorDecl",
-           "error remains contextual");
+    expect(error_assign.ok(), "error is an ordinary identifier");
+
+    amber::parser::ParseModuleResult old_error =
+        parse_module_raw("error Sqlite3.Error < NativeError\n");
+    expect(old_error.items.empty() || old_error.items[0]->kind != "AstClassDef",
+           "legacy error spelling is not a declaration alias");
   }
 }
 

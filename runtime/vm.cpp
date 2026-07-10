@@ -5963,7 +5963,8 @@ private:
     return true;
   }
 
-  std::string join_path_segments(const std::vector<std::string> &segments) {
+  std::string
+  join_path_segments(const std::vector<std::string> &segments) const {
     std::string out;
     for (std::size_t i = 0; i < segments.size(); ++i) {
       if (i != 0U) {
@@ -6009,7 +6010,7 @@ private:
   }
 
   std::optional<std::uint32_t> lookup_class_by_path_segments_no_fault(
-      const std::vector<std::string> &segments, bool *ambiguous) {
+      const std::vector<std::string> &segments, bool *ambiguous) const {
     if (ambiguous != nullptr) {
       *ambiguous = false;
     }
@@ -6030,8 +6031,15 @@ private:
     std::optional<std::uint32_t> match;
     for (std::uint32_t index = 0; index < module_.classes.size(); ++index) {
       const std::uint32_t symbol_id = module_.classes[index].class_name_sym_id;
-      if (symbol_id >= module_.symbols.size() ||
-          module_.symbols[symbol_id] != leaf) {
+      if (symbol_id >= module_.symbols.size()) {
+        continue;
+      }
+      const std::string &class_name = module_.symbols[symbol_id];
+      const std::size_t separator = class_name.rfind('.');
+      const std::string class_leaf =
+          separator == std::string::npos ? class_name
+                                         : class_name.substr(separator + 1U);
+      if (class_leaf != leaf) {
         continue;
       }
       if (match.has_value()) {
@@ -9999,6 +10007,98 @@ private:
     return module_.symbols[symbol_id];
   }
 
+  bool class_has_flag(std::uint32_t class_index, std::uint32_t flag) const {
+    return class_index < module_.classes.size() &&
+           (module_.classes[class_index].flags & flag) != 0U;
+  }
+
+  std::optional<std::uint32_t>
+  superclass_index_no_fault(std::uint32_t class_index) const {
+    if (class_index >= module_.classes.size()) {
+      return std::nullopt;
+    }
+    const bytecode::BcClass &klass = module_.classes[class_index];
+    if (!klass.has_superclass_ref ||
+        klass.superclass_ref >= module_.const_pool.size()) {
+      return std::nullopt;
+    }
+    const Constant &constant = module_.const_pool[klass.superclass_ref];
+    if (constant.kind != ConstantKind::Path || constant.items.empty()) {
+      return std::nullopt;
+    }
+    std::vector<std::string> segments;
+    segments.reserve(constant.items.size());
+    for (const std::uint32_t symbol_id : constant.items) {
+      if (symbol_id >= module_.symbols.size()) {
+        return std::nullopt;
+      }
+      segments.push_back(module_.symbols[symbol_id]);
+    }
+    bool ambiguous = false;
+    return lookup_class_by_path_segments_no_fault(segments, &ambiguous);
+  }
+
+  bool class_has_effective_flag(std::uint32_t class_index,
+                                std::uint32_t flag) const {
+    std::vector<bool> active(module_.classes.size(), false);
+    std::uint32_t current = class_index;
+    while (current < module_.classes.size() && !active[current]) {
+      if (class_has_flag(current, flag)) {
+        return true;
+      }
+      active[current] = true;
+      const std::optional<std::uint32_t> parent =
+          superclass_index_no_fault(current);
+      if (!parent.has_value()) {
+        return false;
+      }
+      current = *parent;
+    }
+    return false;
+  }
+
+  std::optional<std::uint16_t>
+  native_error_id_for_class(std::uint32_t class_index) const {
+    if (!class_has_effective_flag(class_index,
+                                  bytecode::kClassFlagNativeError) ||
+        class_index >= module_.classes.size()) {
+      return std::nullopt;
+    }
+    const std::uint32_t symbol_id =
+        module_.classes[class_index].class_name_sym_id;
+    if (symbol_id >= module_.symbols.size()) {
+      return std::nullopt;
+    }
+    return error_registry().error_id(module_.symbols[symbol_id]);
+  }
+
+  bool native_error_matcher_matches(std::uint16_t matcher_error_id,
+                                    const Value &value) const {
+    if (value.is_error_instance() && value.as_error_instance() != nullptr) {
+      return error_registry().error_is_a(value.as_error_instance()->error_id,
+                                         matcher_error_id);
+    }
+    if (!value.is_instance_object() || value.as_instance_object() == nullptr) {
+      return false;
+    }
+    const std::uint32_t class_index =
+        value.as_instance_object()->class_index;
+    const std::string matcher_name =
+        error_registry().error_name(matcher_error_id);
+    if (matcher_name == "Exception") {
+      return class_has_effective_flag(class_index,
+                                      bytecode::kClassFlagException);
+    }
+    if (matcher_name == "NativeError") {
+      return class_has_effective_flag(class_index,
+                                      bytecode::kClassFlagNativeError);
+    }
+    const std::optional<std::uint16_t> value_error_id =
+        native_error_id_for_class(class_index);
+    return value_error_id.has_value() &&
+           error_registry().error_is_a(*value_error_id, matcher_error_id);
+  }
+
   std::string exception_error_name(const Value &exception) {
     if (exception.is_error_instance()) {
       const std::shared_ptr<ErrorInstanceValue> instance =
@@ -10415,15 +10515,23 @@ private:
   bool pattern_triple_eq(Frame &frame, const Value &matcher, const Value &value,
                          bool *out) {
     if (matcher.is_native_error_class()) {
-      *out =
-          value.is_error_instance() && value.as_error_instance() != nullptr &&
-          error_registry().error_is_a(value.as_error_instance()->error_id,
-                                      matcher.as_native_error_class().error_id);
+      *out = native_error_matcher_matches(
+          matcher.as_native_error_class().error_id, value);
       return true;
     }
     if (matcher.is_class_object()) {
       const std::uint32_t target_class_index =
           matcher.as_class_object().class_index;
+      if (value.is_error_instance() &&
+          class_has_flag(target_class_index,
+                         bytecode::kClassFlagNativeError)) {
+        const std::optional<std::uint16_t> target_error_id =
+            native_error_id_for_class(target_class_index);
+        *out = target_error_id.has_value() &&
+               error_registry().error_is_a(
+                   value.as_error_instance()->error_id, *target_error_id);
+        return true;
+      }
       if (value.is_instance_object()) {
         if (!ensure_lifecycle_access(frame, value)) {
           return false;
@@ -11425,6 +11533,20 @@ private:
 
     if (callee.is_class_object()) {
       const std::uint32_t class_index = callee.as_class_object().class_index;
+      if (const std::optional<std::uint16_t> error_id =
+              native_error_id_for_class(class_index)) {
+        Value instance = Value::null();
+        const SendStatus status = construct_native_error_instance(
+            frame, *error_id, pos_args, kw_args, block, &instance);
+        if (status != SendStatus::Matched) {
+          return false;
+        }
+        if (!write_reg(frame, dst, std::move(instance))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
       const bytecode::BcMethod *init = find_method_for_dispatch(
           frame, class_index, "init", kMethodFlagInstance);
       if (fault_.has_value()) {
@@ -20718,6 +20840,40 @@ private:
       return true;
     };
 
+    if (selector == "get_or_set!") {
+      const bool eager = args.size() == 2U && block.is_null();
+      const bool lazy = args.size() == 1U && !block.is_null();
+      if (!eager && !lazy) {
+        set_fault(frame, "TypeError",
+                  "get_or_set! expects (key, value) or (key) with a block");
+        return SendStatus::Faulted;
+      }
+      CollectionKeyError error;
+      std::optional<Value> key = normalize_map_key(args[0], &error);
+      if (!key.has_value()) {
+        set_fault(frame, error.error_name, error.message);
+        return SendStatus::Faulted;
+      }
+      const MapEntry *found =
+          map_value_find_entry(*map, *key, map_lookup_key_id(*key));
+      if (found != nullptr) {
+        *out = found->value;
+        return SendStatus::Matched;
+      }
+      Value value = args.size() == 2U ? args[1] : Value::null();
+      if (lazy) {
+        const std::optional<Value> produced =
+            call_block_to_value(frame, block, {});
+        if (!produced.has_value()) {
+          return SendStatus::Faulted;
+        }
+        value = *produced;
+      }
+      map_value_upsert_entry(
+          map.get(), make_canonical_map_entry(*key, value, map->strict));
+      *out = value;
+      return SendStatus::Matched;
+    }
     if (selector == "store!") {
       if (!reject_block() || !require_args(2)) {
         return SendStatus::Faulted;
@@ -21672,11 +21828,7 @@ private:
         if (!require_arity(1) || !require_no_block()) {
           return SendStatus::Faulted;
         }
-        *out = Value::boolean(
-            args[0].is_error_instance() &&
-            args[0].as_error_instance() != nullptr &&
-            error_registry().error_is_a(args[0].as_error_instance()->error_id,
-                                        error_id));
+        *out = Value::boolean(native_error_matcher_matches(error_id, args[0]));
         return SendStatus::Matched;
       }
     }
@@ -22643,8 +22795,9 @@ private:
              "flatten!", "compact!"});
     const bool map_mutation_selector =
         receiver.is_map() &&
-        collection_selector_in({"store!", "delete!", "delete_if!", "keep_if!",
-                                "select!", "reject!", "merge!", "update!",
+        collection_selector_in({"get_or_set!", "store!", "delete!",
+                                "delete_if!", "keep_if!", "select!",
+                                "reject!", "merge!", "update!",
                                 "transform_keys!", "transform_values!",
                                 "compact!", "clear!", "replace!", "shift!"});
     const bool set_mutation_selector =
@@ -22749,6 +22902,53 @@ private:
       }
       const bool equal = value_equals(receiver, args[0]);
       *out = Value::boolean(selector == "!=" ? !equal : equal);
+      return SendStatus::Matched;
+    }
+
+    if (receiver.is_class_object() && selector == "new") {
+      const std::optional<std::uint16_t> error_id = native_error_id_for_class(
+          receiver.as_class_object().class_index);
+      if (error_id.has_value()) {
+        return construct_native_error_instance(frame, *error_id, args, kw_args,
+                                               block, out);
+      }
+    }
+
+    if (receiver.is_class_object() && selector == "===") {
+      if (!require_arity(1) || !require_no_block()) {
+        return SendStatus::Faulted;
+      }
+      const std::uint32_t target_class_index =
+          receiver.as_class_object().class_index;
+      if (args[0].is_error_instance() &&
+          class_has_flag(target_class_index,
+                         bytecode::kClassFlagNativeError)) {
+        const std::optional<std::uint16_t> target_error_id =
+            native_error_id_for_class(target_class_index);
+        *out = Value::boolean(
+            target_error_id.has_value() &&
+            error_registry().error_is_a(args[0].as_error_instance()->error_id,
+                                        *target_error_id));
+        return SendStatus::Matched;
+      }
+      if (args[0].is_instance_object()) {
+        if (!ensure_lifecycle_access(frame, args[0])) {
+          return SendStatus::Faulted;
+        }
+        const IntrusivePtr<InstanceValue> instance =
+            args[0].as_instance_object();
+        if (instance == nullptr) {
+          set_fault(frame, "TypeError", "instance matcher value is null");
+          return SendStatus::Faulted;
+        }
+        *out = Value::boolean(value_is_instance_of(
+            frame, instance->class_index, target_class_index));
+        return fault_.has_value() ? SendStatus::Faulted
+                                  : SendStatus::Matched;
+      }
+      *out = Value::boolean(
+          args[0].is_class_object() &&
+          args[0].as_class_object().class_index == target_class_index);
       return SendStatus::Matched;
     }
 
@@ -26897,6 +27097,55 @@ private:
       return false;
     }
     if (method == nullptr) {
+      if ((*selector == "==" || *selector == "!=") && !property_access &&
+          !property_assignment) {
+        if (args.size() != 1U) {
+          set_fault(frame, "TypeError", "wrong builtin SEND arity");
+          return false;
+        }
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError",
+                    "builtin SEND does not accept keyword arguments");
+          return false;
+        }
+        if (!block.is_null()) {
+          set_fault(frame, "TypeError",
+                    "builtin SEND selector does not accept block arguments");
+          return false;
+        }
+        if (!ensure_lifecycle_access(frame, args[0])) {
+          return false;
+        }
+        const bool equal = value_equals(receiver, args[0]);
+        if (!write_reg(frame, dst,
+                       Value::boolean(*selector == "!=" ? !equal : equal))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
+      if (*selector == "present?" || *selector == "absent?") {
+        if (!args.empty()) {
+          set_fault(frame, "TypeError",
+                    "present?/absent? accept no arguments");
+          return false;
+        }
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError",
+                    "present?/absent? do not accept keyword arguments");
+          return false;
+        }
+        if (!block.is_null()) {
+          set_fault(frame, "TypeError",
+                    "present?/absent? do not accept a block");
+          return false;
+        }
+        if (!write_reg(frame, dst, Value::boolean(*selector == "present?"))) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
       if (property_assignment) {
         std::string property_name = *selector;
         if (!property_name.empty() && property_name.back() == '=') {
@@ -28277,6 +28526,21 @@ private:
       if (packet.callee.is_class_object()) {
         const std::uint32_t class_index =
             packet.callee.as_class_object().class_index;
+        if (const std::optional<std::uint16_t> error_id =
+                native_error_id_for_class(class_index)) {
+          Value instance = Value::null();
+          const SendStatus status = construct_native_error_instance(
+              frame, *error_id, packet.pos_args, packet.kw_args, packet.block,
+              &instance);
+          if (status != SendStatus::Matched) {
+            return;
+          }
+          if (!write_reg(frame, packet.dst, std::move(instance))) {
+            return;
+          }
+          ++frame.pc;
+          return;
+        }
         const bytecode::BcMethod *native_init = find_method_for_dispatch(
             frame, class_index, "init", kMethodFlagInstance);
         if (fault_.has_value()) {

@@ -1598,7 +1598,11 @@ void test_runtime_string_interpolation_and_conversions() {
 
 void test_runtime_present_absent_predicates() {
   amber::bytecode::EmitResult emit_result =
-      emit_ok("null.absent? and "
+      emit_ok("class Item\n"
+              "class Hidden:\n"
+              "  def present?(): false\n"
+              "  def absent?(): true\n"
+              "null.absent? and "
               "false.absent? and "
               "true.present? and "
               "0.present? and "
@@ -1609,7 +1613,9 @@ void test_runtime_present_absent_predicates() {
               "{}.absent? and "
               "{a: 1}.present? and "
               "(1..0).absent? and "
-              "(1..2).present?\n");
+              "(1..2).present? and "
+              "Item().present? and Item().absent? == false and "
+              "Hidden().absent?\n");
   expect(emit_result.module.init.has_entry_code_id,
          "present?/absent? module init exists");
   const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
@@ -1959,6 +1965,23 @@ void test_execute_emitted_send_method() {
          "add should return summed integer");
 }
 
+void test_execute_emitted_class_matcher() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "class Base\n"
+      "class Child < Base\n"
+      "base = Base()\n"
+      "child = Child()\n"
+      "if Base === base and Base === child and Child === child and "
+      "Base === Base and (Base === Child) == false and "
+      "(Base === 1) == false:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect(exec.ok(), "user class triple-eq matcher execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "user class triple-eq should match instances and subclasses");
+}
+
 void test_execute_emitted_implicit_receiver_method_call() {
   const amber::runtime::ExecutionResult exec = execute_emitted_init(
       "class A:\n"
@@ -2293,7 +2316,7 @@ void test_execute_emitted_properties() {
          "top-level property should evaluate getter on each access");
 
   emit_result = emit_ok("class Point:\n"
-                        "  def init(@x, @y): pass\n"
+                        "  def init(@x, @y)\n"
                         "  prop sum: @x + @y\n"
                         "Point(2, 5).sum\n");
   exec = amber::runtime::execute_code(emit_result.module,
@@ -2341,7 +2364,7 @@ void test_execute_emitted_properties() {
 
   emit_result =
       emit_ok("class User:\n"
-              "  def init(@email): pass\n"
+              "  def init(@email)\n"
               "  attr email\n"
               "User(\"ada@example.test\").email == \"ada@example.test\"\n");
   exec = amber::runtime::execute_code(emit_result.module,
@@ -3150,8 +3173,7 @@ void test_execute_emitted_constructor_call() {
 void test_execute_emitted_constructor_auto_assign() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("class Particle:\n"
-              "  def init(@масса):\n"
-              "    pass\n"
+              "  def init(@масса)\n"
               "  def масса():\n"
               "    @масса\n"
               "\n"
@@ -3166,6 +3188,34 @@ void test_execute_emitted_constructor_auto_assign() {
   expect(exec.ok(), "constructor auto-assign execution failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 7,
          "constructor auto-assign should materialize ivar");
+}
+
+void test_execute_bodyless_class_and_null_equality() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("class B\n"
+              "first = B()\n"
+              "second = B()\n"
+              "[first == null, first != null, null == first, first == first, "
+              "first == second]\n");
+
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      emit_result.module, emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "bodyless class and instance equality execution failed");
+  expect(exec.value.is_list(), "equality probe returns a list");
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> list =
+      exec.value.as_list();
+  expect(list != nullptr && list->items.size() == 5U,
+         "equality probe list shape");
+  expect(list->items[0].is_bool() && !list->items[0].as_bool(),
+         "instance == null is false");
+  expect(list->items[1].is_bool() && list->items[1].as_bool(),
+         "instance != null is true");
+  expect(list->items[2].is_bool() && !list->items[2].as_bool(),
+         "null == instance is false");
+  expect(list->items[3].is_bool() && list->items[3].as_bool(),
+         "same instance equality falls back to identity");
+  expect(list->items[4].is_bool() && !list->items[4].as_bool(),
+         "different instances are not equal by default");
 }
 
 void test_execute_emitted_constructor_default() {
@@ -3214,8 +3264,7 @@ void test_execute_emitted_cvar_store_and_load() {
 void test_execute_emitted_constructor_cvar_auto_assign() {
   const amber::bytecode::EmitResult emit_result =
       emit_ok("class Settings:\n"
-              "  def init(@@ρ):\n"
-              "    pass\n"
+              "  def init(@@ρ)\n"
               "  class_method def ρ():\n"
               "    @@ρ\n"
               "\n"
@@ -3707,8 +3756,7 @@ void test_execute_emitted_control_condition_assignment() {
 
   const amber::runtime::ExecutionResult while_assign = execute_emitted_init(
       "class Accum:\n"
-      "  def init(@values):\n"
-      "    pass\n"
+      "  def init(@values)\n"
       "  def pop():\n"
       "    @values.pop!()\n"
       "accum = Accum([0,1,2,3])\n"
@@ -3722,8 +3770,7 @@ void test_execute_emitted_control_condition_assignment() {
 
   const amber::runtime::ExecutionResult while_assign_and =
       execute_emitted_init("class Accum:\n"
-                           "  def init(@values):\n"
-                           "    pass\n"
+                           "  def init(@values)\n"
                            "  def pop():\n"
                            "    @values.pop!()\n"
                            "accum = Accum([0,1,2,3])\n"
@@ -3903,6 +3950,51 @@ void test_execute_emitted_v20_5_array_generation_and_optional_access() {
   expect(!non_int.ok() && non_int.fault.has_value() &&
              non_int.fault->error_name == "TypeError",
          "Array.filled non-Int length reports TypeError");
+}
+
+void test_runtime_map_get_or_set() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "calls = 0\n"
+      "values = {present: false, nullable: null}\n"
+      "missing = values.get_or_set!(:missing, 7)\n"
+      "present = values.get_or_set!(:present, 9)\n"
+      "nullable = values.get_or_set!(:nullable, 10)\n"
+      "lazy_first = values.get_or_set!(:lazy):\n"
+      "  calls = calls + 1\n"
+      "  11\n"
+      "lazy_second = values.get_or_set!(:lazy):\n"
+      "  calls = calls + 10\n"
+      "  12\n"
+      "values.get_or_set!(:group, []).push!(21)\n"
+      "strict = StrictMap{name: 1}\n"
+      "strict.get_or_set!(\"name\", 2)\n"
+      "[missing, present, nullable, lazy_first, lazy_second, calls, "
+      "values[:group][0], strict[:name], strict[\"name\"], strict.count]\n");
+  expect(exec.ok(), "Map#get_or_set! probe should execute");
+  expect(exec.value.is_list(), "Map#get_or_set! probe should return a list");
+  const amber::runtime::IntrusivePtr<amber::runtime::ListValue> values =
+      exec.value.as_list();
+  expect(values != nullptr && values->items.size() == 10U,
+         "Map#get_or_set! result shape");
+  expect(values->items[0].is_integer() && values->items[0].as_integer() == 7,
+         "missing key stores and returns eager default");
+  expect(values->items[1].is_bool() && !values->items[1].as_bool(),
+         "stored false is preserved");
+  expect(values->items[2].is_null(), "stored null is preserved");
+  expect(values->items[3].is_integer() && values->items[3].as_integer() == 11 &&
+             values->items[4].is_integer() &&
+             values->items[4].as_integer() == 11,
+         "lazy default is stored and reused");
+  expect(values->items[5].is_integer() && values->items[5].as_integer() == 1,
+         "lazy block runs only for an absent key");
+  expect(values->items[6].is_integer() && values->items[6].as_integer() == 21,
+         "returned default supports left-to-right mutation chaining");
+  expect(values->items[7].is_integer() && values->items[7].as_integer() == 1 &&
+             values->items[8].is_integer() &&
+             values->items[8].as_integer() == 2 &&
+             values->items[9].is_integer() &&
+             values->items[9].as_integer() == 2,
+         "StrictMap preserves exact-key insertion semantics");
 }
 
 void test_runtime_watch_local_storage_replacement() {
@@ -8482,9 +8574,7 @@ void test_source_try_rescue_ensure_execution() {
          "rescue binding appears initialized in execution locals");
 
   amber::runtime::ExecutionResult typed_rescue =
-      execute_emitted_init("class Boom:\n"
-                           "  def init():\n"
-                           "    pass\n"
+      execute_emitted_init("class Boom\n"
                            "try:\n"
                            "  raise Boom()\n"
                            "rescue Boom:\n"
@@ -8602,6 +8692,56 @@ void test_native_error_inherited_rescue_execution() {
   expect(qualified.ok() && qualified.value.is_integer() &&
              qualified.value.as_integer() == 7,
          "qualified native package error class should resolve and rescue");
+}
+
+void test_source_declared_error_ancestry_execution() {
+  const amber::runtime::ExecutionResult rich = execute_emitted_init(
+      "class OrmError < Exception\n"
+      "class ValidationError < OrmError\n"
+      "try:\n"
+      "  raise ValidationError()\n"
+      "rescue Exception |e|:\n"
+      "  if OrmError === e and ValidationError === e:\n"
+      "    if NativeError === e:\n"
+      "      0\n"
+      "    else:\n"
+      "      7\n"
+      "  else:\n"
+      "    0\n");
+  expect(rich.ok() && rich.value.is_integer() && rich.value.as_integer() == 7,
+         "Exception ancestry should classify rich Amber error classes");
+
+  amber::bytecode::EmitResult linked_emit = emit_ok(
+      "class PackageError < Exception\n"
+      "class ImportedChild < PackageError\n"
+      "try:\n"
+      "  raise ImportedChild()\n"
+      "rescue Exception:\n"
+      "  9\n");
+  expect(linked_emit.module.classes.size() >= 2U,
+         "linked ancestry probe emits both classes");
+  linked_emit.module.classes[1].flags = 0U;
+  const amber::runtime::ExecutionResult linked = amber::runtime::execute_code(
+      linked_emit.module, linked_emit.module.init.entry_code_id);
+  expect(linked.ok() && linked.value.is_integer() &&
+             linked.value.as_integer() == 9,
+         "runtime derives error ancestry through a linked superclass");
+
+  const amber::runtime::ExecutionResult native = execute_emitted_init(
+      "package sqlite3\n"
+      "class Error < NativeError\n"
+      "class StepError < Error\n"
+      "try:\n"
+      "  raise StepError(\"step failed\")\n"
+      "rescue Error |e|:\n"
+      "  if Exception === e and NativeError === e and StepError === e and "
+      "e.message == \"step failed\":\n"
+      "    7\n"
+      "  else:\n"
+      "    0\n");
+  expect(native.ok() && native.value.is_integer() &&
+             native.value.as_integer() == 7,
+         "NativeError ancestry should register, construct, and match errors");
 }
 
 void test_source_throw_catch_execution() {
@@ -9845,6 +9985,7 @@ int main() {
   test_runtime_uninitialized_register_read_raises_name_error();
   test_manual_call_invokes_object_call_method();
   test_execute_emitted_send_method();
+  test_execute_emitted_class_matcher();
   test_execute_emitted_implicit_receiver_method_call();
   test_execute_emitted_exclusive_slice_end_boundary();
   test_execute_emitted_integer_specialized_ops();
@@ -9873,6 +10014,7 @@ int main() {
   test_execute_emitted_class_method_send();
   test_execute_emitted_constructor_call();
   test_execute_emitted_constructor_auto_assign();
+  test_execute_bodyless_class_and_null_equality();
   test_execute_emitted_constructor_default();
   test_execute_emitted_cvar_store_and_load();
   test_execute_emitted_constructor_cvar_auto_assign();
@@ -9902,6 +10044,7 @@ int main() {
   test_execute_emitted_control_condition_assignment();
   test_execute_emitted_block_map_suffixes();
   test_execute_emitted_v20_5_array_generation_and_optional_access();
+  test_runtime_map_get_or_set();
   test_runtime_watch_local_storage_replacement();
   test_runtime_integer_specialized_op_preserves_watch_local_write();
   test_runtime_compare_branch_preserves_debug_local();
@@ -9982,6 +10125,7 @@ int main() {
   test_manual_pattern_deconstruct_protocol_map();
   test_source_try_rescue_ensure_execution();
   test_native_error_inherited_rescue_execution();
+  test_source_declared_error_ancestry_execution();
   test_source_throw_catch_execution();
   test_manual_raise_handler_table_recovers();
   test_manual_raise_unwinds_closure_to_outer_handler();

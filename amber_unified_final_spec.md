@@ -49,14 +49,17 @@ Amber — это язык с такими базовыми обязательс�
 - `class_method def`;
 - блокам, привязанным к вызовам (block suffix).
 
-Пустой блок без тела запрещён. Для намеренно пустого тела используются `pass` или `noop`.
+После `:` обязателен непустой suite. Декларации `def`, `class`, `mixin` и
+`class_method def` могут намеренно не иметь тела: в этом случае `:` опускается.
+Пустая функция выполняет parameter/auto-assign prologue и возвращает `null`.
+Для намеренно пустого control-flow suite используется явное выражение `null`.
+`pass` и `noop` не являются keywords и могут использоваться как обычные имена.
 
 ```amber
-def todo():
- pass
+def todo()
 
 if feature_enabled?:
- noop
+ null
 else:
  log "disabled"
 ```
@@ -626,7 +629,7 @@ Scope-уровни:
 
 - после любого expression-statement `$_` обновляется значением этого выражения;
 - присваивание тоже обновляет `$_`;
-- `pass` и `noop` дают `null`;
+- declaration-only `def` возвращает `null` при вызове;
 - если функция или блок завершаются без `return`, возвращается текущее `$_`.
 
 Примеры:
@@ -650,7 +653,7 @@ def normalize(str):
 - `x = expr` -> `$_ = x`
 - `@x = expr` -> `$_ = присвоенное значение`
 - `@@x = expr` -> `$_ = присвоенное значение`
-- `pass` / `noop` -> `$_ = null`
+- expression `null` -> `$_ = null`
 - `def name(...):...` как выражение даёт `:name`
 - `class Name:...` как выражение даёт созданный объект класса
 - `mixin Name:...` как выражение даёт созданный mixin object
@@ -786,24 +789,54 @@ def normalize(str):
 
 ### 8.1. `def`
 
-Поддерживаются многострочная и one-liner формы.
+Поддерживаются многострочная, one-liner и declaration-only формы.
 
 ```amber
 def add(a, b):
  a + b
 
 def double(x): x * 2
+
+def no_op()
 ```
+
+Declaration-only `def` не имеет `:` и body. При вызове выполняются обычные
+parameter binding, defaults и auto-assign, после чего функция возвращает
+`null`. Форма с `:` всегда требует suite.
 
 ### 8.2. `class` и наследование
 
 ```amber
-class User:
- pass
+class User
 
-class Admin < User:
- pass
+class Admin < User
 ```
+
+Declaration-only `class Name` и `class Name < Parent` создают классы с пустым
+body. Наличие `:` всегда означает, что далее должен следовать непустой suite.
+
+Exception identity задаётся только ancestry:
+
+```amber
+class OrmError < Exception
+class ValidationError < OrmError
+
+class Error < NativeError
+class StepError < Error
+```
+
+`NativeError` является descendant `Exception`. Поэтому ancestry `Exception`
+делает ordinary Amber class rescuable через `Exception`, а ancestry
+`NativeError` дополнительно включает class в native error registry. Свойство
+наследуется транзитивно; отдельные формы `error Name` и `error class Name` в
+язык не входят.
+
+Для class, чья ancestry включает `NativeError`, compiler экспортирует
+`amber.native.error:<qualified-name>` metadata. В package source используется
+локальное имя (`class Error < NativeError`), а canonical registry/API name
+получает package namespace (`Sqlite3.Error`). В core profile такие
+registry-backed declarations bodyless; rich application errors наследуются
+непосредственно или транзитивно от `Exception`.
 
 ### 8.3. `class_method def`
 
@@ -820,8 +853,7 @@ class User:
 
 ```amber
 class Point:
- def init(@x, @y):
- pass
+ def init(@x, @y)
 ```
 
 `new(...)` остаётся явным классовым путём создания объекта: он выделяет объект и вызывает `init(...)`, если тот существует.
@@ -904,8 +936,7 @@ name as T: expr
 Внешнее имя keyword-параметра всегда без `@`/`@@`.
 
 ```amber
-def init(@host:, @port: 5432):
- pass
+def init(@host:, @port: 5432)
 
 Connection.new(host: "db", port: 1000)
 ```
@@ -918,8 +949,7 @@ Connection.new(host: "db", port: 1000)
 - default-выражения могут ссылаться на `@...` и `@@...`.
 
 ```amber
-def init(@env: @@default_env, timeout = @timeout):
- pass
+def init(@env: @@default_env, timeout = @timeout)
 ```
 
 ### 8.9. Порядок вычисления аргументов, дефолтов и auto-assign
@@ -942,8 +972,7 @@ def init(@env: @@default_env, timeout = @timeout):
 Пример:
 
 ```amber
-def init(@x, @y = x):
- pass
+def init(@x, @y = x)
 ```
 
 Здесь `y` зависит от локального параметра `x`, а не от поля `@x`.
@@ -1062,7 +1091,7 @@ mixin AuditFields:
 - `mixin` не поддерживает superclass clause в v1;
 - один syntactic mixin-body коммитится **атомарно** по тем же правилам publish-point transaction, что и class-body;
 - mixin object является именованным binding'ом и может импортироваться/экспортироваться обычным `import` / `from... import...` / `export`;
-- mixin body допускает `def`, nested `class`, nested `mixin`, `include` и `pass`;
+- mixin body допускает `def`, nested `class`, nested `mixin` и `include`;
 - `class_method def` внутри mixin body в v1 запрещён как compile-time error;
 - методы mixin'а живут на **instance-side** и участвуют в lookup только после включения через `include`.
 
@@ -1793,7 +1822,9 @@ ensure:
 raise expr
 ```
 
-`expr` должен вычисляться в `ExceptionObject` или exception-compatible значение, которое runtime умеет канонически поднять как `ExceptionObject`.
+`expr` может быть любым first-class значением. Значения из ancestry
+`Exception` поддерживают typed rescue по class hierarchy; остальные значения
+могут быть перехвачены catch-all `rescue`, но не матчятся `rescue Exception`.
 
 Рекомендуемая stdlib-конвенция:
 
@@ -1801,8 +1832,6 @@ raise expr
 raise TypeError("message")
 raise TypeError.new("message")
 ```
-
-Если `raise` получает значение, которое не является `ExceptionObject` и не является exception-compatible value, это `TypeError`.
 
 `raise` без аргумента в v1 не вводится. Re-raise текущего исключения должен быть оформлен отдельным будущим решением, чтобы не создавать скрытую dynamic dependency на nearest rescue context.
 
@@ -1867,6 +1896,15 @@ ErrorClass === exception
 ```
 
 истинна, если `exception.error_class` равен `ErrorClass` или является его subclass.
+
+Обычные и registry-backed error objects образуют одну логическую hierarchy:
+
+- `Exception === value` истинно для каждого class instance с ancestry
+  `Exception` и для каждого native registry error;
+- `NativeError === value` истинно только для `NativeError` branch;
+- matcher ordinary class использует обычную superclass ancestry;
+- matcher class из `NativeError` branch использует ту же registry ancestry для
+  native-created error instances.
 
 Rescue clauses проверяются сверху вниз. Первая matching clause побеждает. Последующие clauses не выполняются.
 
@@ -2009,6 +2047,18 @@ CatchTag ::=
   Expr
 | "(" Expr ")"
 
+DefDecl ::=
+  DefHeader
+| DefWithHandlers
+
+ClassDecl ::=
+  "class" Identifier ("<" TypePath)?
+| "class" Identifier ("<" TypePath)? ":" Block
+
+MixinDecl ::=
+  "mixin" Identifier
+| "mixin" Identifier ":" Block
+
 DefWithHandlers ::=
   DefHeader ":" Block
   RescueClause*
@@ -2037,7 +2087,7 @@ EnsureClause ::=
 - `rescue` после `ensure` — compile-time error;
 - `rescue` без preceding `try` body или function/method body — compile-time error;
 - `ensure` без preceding `try` body или function/method body — compile-time error;
-- empty rescue/ensure body запрещён; для intentional no-op используются `pass` или `noop`;
+- empty rescue/ensure body запрещён; для intentional no-op используется `null`;
 - union spelling через `|` внутри rescue matcher list запрещён, даже если такой spelling допустим в обычном `TypeTerm`.
 - `catch` tag может записываться как `catch(:tag):` или без скобок как `catch :tag:`.
 
@@ -2996,6 +3046,15 @@ xs.reduce |acc, x|:...
 - `Map#each_pair` является алиасом `Map#each`, а без block возвращает
  `entries`;
 - `Map#contains?` и `Map#include?` проверяют наличие key.
+- `Map#get_or_set!(key, value)` возвращает stored value при наличии key, иначе
+  вставляет и возвращает `value`;
+- `Map#get_or_set!(key): ...` является lazy-вариантом: block исполняется только
+  при отсутствии key, а его результат вставляется и возвращается.
+
+`get_or_set!` проверяет именно наличие key, а не truthiness: stored `false` и
+stored `null` не заменяются. На frozen map вызов даёт `FrozenError` независимо
+от наличия key. `StrictMap` / `StrictHashMap` используют exact-key semantics;
+ordinary `Map` / `HashMap` используют normal name-indifferent semantics.
 
 С ordinary `Map` operations используют normalized key semantics. Для name keys canonical export — `Str`: `keys`, `entries`, `each`, `map`, `filter_map`, `select`, `reject`, `transform`, `transform_values` и `merge` обязаны передавать/возвращать string key для `Symbol(:name)` / `Str("name")` entry. `Map#[]`, `Map#[]?`, `contains?` и `include?` нормализуют lookup key тем же правилом, что и литерал; unsupported key values дают `TypeError`, отсутствующие valid keys дают `KeyError` только для обязательного `Map#[]`.
 
@@ -5003,8 +5062,7 @@ debug = env["DEBUG"].cast?(Bool) or false
 
 ```amber
 class Money:
- def init(@cents as Int):
- pass
+ def init(@cents as Int)
 
  class_method def cast(value):
  case value
@@ -5028,8 +5086,7 @@ class Money:
 
 ```amber
 class User:
- def init(@name):
- pass
+ def init(@name)
 
  def to_str():
  @name
@@ -6251,7 +6308,7 @@ prop scale(x):
 ```amber
 prop age:
  set():
- pass
+ null
 ### E_PROP_SETTER_ARITY
 ```
 
@@ -6264,7 +6321,7 @@ prop age:
 
 ```amber
 prop f=(value):
- pass
+ null
 ### E_PROP_SETTER_CALL_SYNTAX or E_PROP_INVALID_HEADER
 ```
 
@@ -6278,7 +6335,7 @@ def f():
 ```amber
 prop version:
  set(value):
- pass
+ null
 ### E_PROP_TOP_LEVEL_SETTER
 ```
 
@@ -6375,8 +6432,7 @@ Current code frequently requires boilerplate:
 
 ```amber
 class User:
- def init(@email):
- noop
+ def init(@email)
 
  prop email:
  get:
@@ -6387,8 +6443,7 @@ or
 
 ```amber
 class Box:
- def init(@value):
- noop
+ def init(@value)
 
  prop value:
  get:
@@ -6425,8 +6480,7 @@ while preserving the full property model.
 The following declaration:
 
 ```amber
-def init(@x):
- noop
+def init(@x)
 ```
 
 does not create a public member named `x`.
@@ -6435,8 +6489,7 @@ Therefore:
 
 ```amber
 class A:
- def init(@x):
- noop
+ def init(@x)
 
 A(42).x
 ```
@@ -6507,8 +6560,7 @@ Example:
 
 ```amber
 class User:
- def init(@email):
- noop
+ def init(@email)
 
  attr email
 ```
@@ -6538,8 +6590,7 @@ Example:
 
 ```amber
 class Box:
- def init(@value):
- noop
+ def init(@value)
 
  attr var value
 ```
@@ -8314,7 +8365,7 @@ Invalid according to ordinary block arity rules:
 
 ```amber
 5.times |a, b|:
- noop
+ null
 ```
 
 Required error:
@@ -9961,8 +10012,7 @@ class A:
  def ==(other):
  other.is_a?(A)
 
-class B < A:
- noop
+class B < A
 
 {B(): 1} # valid, because meaningful equality is inherited
 ```
@@ -11149,8 +11199,7 @@ Working custom object key:
 
 ```amber
 class Point:
- def init(@x, @y):
- noop
+ def init(@x, @y)
 
  attr x
  attr y
@@ -11170,8 +11219,7 @@ class A:
  def ==(other):
  other.is_a?(A)
 
-class B < A:
- noop
+class B < A
 
 m = {B()::b}
 assert(m[B()] ==:b)
@@ -11180,8 +11228,7 @@ assert(m[B()] ==:b)
 Missing equality:
 
 ```amber
-class NoEq:
- noop
+class NoEq
 
 assert_raises(TypeError):
  {NoEq(): 1}
@@ -11236,8 +11283,7 @@ assert(m[?[1, 3]] == null)
 Optional lookup does not hide invalid keys:
 
 ```amber
-class NoEq:
- noop
+class NoEq
 
 m = {}
 
@@ -11911,8 +11957,7 @@ class Point:
  attr x
  attr y
 
- def init(@x, @y):
- noop
+ def init(@x, @y)
 
  def ==(other):
  other.is_a?(Point) and @x == other.x and @y == other.y
@@ -13759,8 +13804,7 @@ User-defined objects often represent options/configuration bundles:
 
 ```amber
 class RequestOptions:
- def init(@timeout, @retries):
- noop
+ def init(@timeout, @retries)
 ```
 
 It is ergonomic to pass such an object as keyword arguments:
@@ -13777,8 +13821,7 @@ A user object may participate in keyword spread by exposing a readable `kwargs` 
 
 ```amber
 class RequestOptions:
- def init(@timeout, @retries):
- noop
+ def init(@timeout, @retries)
 
  prop kwargs:
  {
@@ -14207,8 +14250,7 @@ assert_raises(KeywordArgumentError):
 
 ```amber
 class Options:
- def init(@mode):
- noop
+ def init(@mode)
 
  prop kwargs:
  {mode: @mode}

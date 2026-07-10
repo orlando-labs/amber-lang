@@ -1,3 +1,2 @@
 class Timer:
-  def update(@timeout = @timeout):
-    pass
+  def update(@timeout = @timeout)

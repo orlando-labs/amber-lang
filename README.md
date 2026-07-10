@@ -120,7 +120,7 @@ artifact/container baseline for `W4.1`-`W4.4` from the implementation matrix:
   navigation, bare calls, and one-line block suffix chain boundaries;
 - module parser for package/import/export, def/class/class_method/mixin,
   clause-style `def`, unambiguous simple many-def sugar, include/extend,
-  pass/noop, expression statements, pattern assignment, and control-flow forms
+  declaration-only empty bodies, expression statements, pattern assignment, and control-flow forms
   (`if`, `unless`, `case`, loops, `break`);
 - `amberc parse <file>` `amber.ast.v1` JSON dump;
 - `amberc parse-expr <file>` `amber.ast.v1` JSON dump;

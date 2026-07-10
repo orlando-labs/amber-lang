@@ -633,8 +633,8 @@ void test_w13_operator_emission() {
 void test_native_source_metadata_emission() {
   const amber::bytecode::EmitResult emit_result = emit_ok(
       "package sqlite3\n"
-      "error Sqlite3.Error < NativeError\n"
-      "error Sqlite3.StepError < Sqlite3.Error\n"
+      "class Error < NativeError\n"
+      "class StepError < Error\n"
       "native class Conn from \"sqlite3.Conn\" owned:\n"
       "  def init(path as Str) from \"amsq_conn_open\"\n"
       "  def destroy!() from \"amsq_conn_free\"\n");
@@ -648,7 +648,13 @@ void test_native_source_metadata_emission() {
   expect(contains_attr(emit_result.module,
                        "amber.native.error:Sqlite3.StepError",
                        "Sqlite3.Error"),
-         "source error parent metadata");
+         "inherited native error parent metadata");
+  expect((emit_result.module.classes[0].flags &
+          amber::bytecode::kClassFlagNativeError) != 0U,
+         "NativeError ancestry marks the root class");
+  expect((emit_result.module.classes[1].flags &
+          amber::bytecode::kClassFlagNativeError) != 0U,
+         "NativeError ancestry is inherited");
 }
 
 void test_collection_literal_emission() {
@@ -814,16 +820,14 @@ void test_object_model_emission() {
               "export Timestamped, Particle\n"
               "\n"
               "mixin Timestamped:\n"
-              "  def touch!():\n"
-              "    noop\n"
+              "  def touch!()\n"
               "\n"
               "class Particle < Entity:\n"
               "  include Timestamped\n"
               "  extend Serializable\n"
               "  class_method def find(id):\n"
               "    id\n"
-              "  def init(@масса, α = 1):\n"
-              "    pass\n");
+              "  def init(@масса, α = 1)\n");
 
   expect(emit_result.module.classes.size() == 2,
          "expected mixin and class descriptors");
@@ -872,6 +876,16 @@ void test_object_model_emission() {
          "mixin export targets first descriptor");
   expect(emit_result.module.exports[1].target_index == 1,
          "class export targets second descriptor");
+}
+
+void test_bodyless_class_emission() {
+  const amber::bytecode::EmitResult emit_result =
+      emit_ok("class Empty\n");
+  expect(emit_result.ok(), "bodyless class emits cleanly");
+  expect(emit_result.module.classes.size() == 1U,
+         "bodyless class is emitted");
+  expect(emit_result.module.classes[0].method_range_count == 0U,
+         "bodyless class has no synthetic body members");
 }
 
 void test_property_emission() {
@@ -1088,6 +1102,7 @@ int main() {
   test_block_param_pattern_emission();
   test_simple_block_param_emission();
   test_object_model_emission();
+  test_bodyless_class_emission();
   test_property_emission();
   test_try_rescue_ensure_emission();
   test_throw_catch_emission();

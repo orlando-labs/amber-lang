@@ -1,7 +1,7 @@
 package conformance.run
 
 class Collection:
-  def init(@count): pass
+  def init(@count)
 
   def size():
     @count

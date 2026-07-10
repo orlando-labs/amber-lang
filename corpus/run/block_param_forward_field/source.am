@@ -1,8 +1,7 @@
 package conformance.run
 
 class Adder:
-  def init(&@op):
-    pass
+  def init(&@op)
   def apply(x):
     @op(x)
 

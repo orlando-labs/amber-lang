@@ -1,8 +1,7 @@
-def todo():
-  pass
+def todo()
 
 if feature_enabled?:
-  noop
+  null
 else:
   log "disabled"
 
