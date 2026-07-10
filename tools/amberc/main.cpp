@@ -15846,15 +15846,15 @@ private:
       amber::bytecode::BcClass klass = source;
       klass.class_name_sym_id = map_symbol(state, klass.class_name_sym_id);
       if (klass.has_superclass_ref) {
-        klass.superclass_ref = class_index(state, klass.superclass_ref);
+        klass.superclass_ref = map_constant(state, klass.superclass_ref);
       }
       klass.ivar_schema_id = map_constant(state, klass.ivar_schema_id);
       klass.method_range_start = method_index(state, klass.method_range_start);
       for (std::uint32_t &ref : klass.direct_include_refs) {
-        ref = class_index(state, ref);
+        ref = map_constant(state, ref);
       }
       for (std::uint32_t &ref : klass.direct_extend_refs) {
-        ref = class_index(state, ref);
+        ref = map_constant(state, ref);
       }
       if (klass.has_class_init_code_id) {
         klass.class_init_code_id = map_code(state, klass.class_init_code_id);
