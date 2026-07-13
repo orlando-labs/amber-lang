@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <utility>
 
@@ -361,6 +362,7 @@ struct RuntimeWorld::Impl {
   RuntimeReplayTrace trace;
   RuntimeReplayValidation replay_validation;
   std::size_t replay_cursor = 0;
+  std::mutex value_mutex;
 };
 
 RuntimeWorld::RuntimeWorld(const bytecode::BcModule &module)
@@ -387,6 +389,29 @@ RuntimeWorld::RuntimeWorld(const pkg::PackageArtifact &artifact,
 }
 
 RuntimeWorld::~RuntimeWorld() = default;
+
+Value RuntimeWorld::string_value(std::string text) {
+  if (impl_ == nullptr || impl_->owned_module == nullptr) {
+    return Value::null();
+  }
+  std::lock_guard<std::mutex> guard(impl_->value_mutex);
+  std::vector<std::string> &strings = impl_->owned_module->strings;
+  const auto found = std::find(strings.begin(), strings.end(), text);
+  if (found != strings.end()) {
+    return Value::string(
+        static_cast<std::uint32_t>(std::distance(strings.begin(), found)));
+  }
+  const std::uint32_t id = static_cast<std::uint32_t>(strings.size());
+  strings.push_back(std::move(text));
+  return Value::string(id);
+}
+
+Value RuntimeWorld::list_value(std::vector<Value> items) {
+  if (impl_ == nullptr || impl_->state == nullptr) {
+    return Value::null();
+  }
+  return impl_->state->heap.make_list_value(std::move(items));
+}
 
 ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
                                       const std::vector<Value> &args,
@@ -472,6 +497,40 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
         "task.failed", {{"code_id", std::to_string(code_id)},
                         {"error_name", result.fault->error_name}}));
   }
+  return result;
+}
+
+ExecutionResult RuntimeWorld::invoke_native_extension(
+    std::uint32_t code_id, const std::vector<Value> &args, Value self) {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {Value::null(),
+            Fault{"VMError", "runtime world is not bound", 0, 0}};
+  }
+  impl_->state->initialize_for_module(*impl_->module);
+  impl_->record_event(replay::make_event(
+      "native_extension.started", {{"code_id", std::to_string(code_id)}}));
+
+  RuntimeVmExecutionContext context;
+  context.state = impl_->state;
+  context.module_id =
+      impl_->package.has_value() ? impl_->package->manifest.root_module : "";
+  context.world_options = &impl_->options;
+  context.capabilities = &impl_->capabilities;
+  context.effects = &impl_->effects;
+  context.trace_recorder = [impl = impl_](RuntimeTraceEvent event) {
+    impl->record_event(std::move(event));
+  };
+  context.native_registry = &impl_->native_registry;
+  context.module_registry = &impl_->module_registry;
+  context.type_registry = &impl_->type_registry;
+  context.dispatch_registry = &impl_->dispatch_registry;
+  context.error_registry = &impl_->error_registry;
+
+  ExecutionResult result = invoke_runtime_native_extension(
+      *impl_->module, std::move(context), code_id, args, std::move(self));
+  impl_->record_event(replay::make_event(
+      result.ok() ? "native_extension.completed" : "native_extension.failed",
+      {{"code_id", std::to_string(code_id)}}));
   return result;
 }
 

@@ -9,6 +9,7 @@
 #include "runtime/amber_ext_runtime.h"
 #include "runtime/io.h"
 #include "runtime/stdlib_registry.h"
+#include "runtime/world.h"
 
 #include <chrono>
 #include <cstdint>
@@ -30,6 +31,7 @@ using amber::runtime::RuntimeErrorRegistry;
 using amber::runtime::RuntimeForeignHandle;
 using amber::runtime::RuntimeNativePackageDescriptor;
 using amber::runtime::RuntimeTypeRegistry;
+using amber::runtime::RuntimeWorld;
 using amber::runtime::SendStatus;
 using amber::runtime::StdlibHost;
 using amber::runtime::Value;
@@ -660,6 +662,47 @@ void test_native_extension_runtime_contributions() {
          "native extension contributor imports error messages");
 }
 
+AmberStatus direct_increment(AmberCtx *cx, const AmberValue *args,
+                             std::size_t argc, AmberValue *out) {
+  std::int64_t value = 0;
+  if (argc != 1U || !amber_as_int(cx, args[0], &value)) {
+    return amber_fault(cx, "TypeError", "increment expects one Int");
+  }
+  *out = amber_make_int(cx, value + 1);
+  return AMBER_OK;
+}
+
+void test_runtime_world_direct_native_extension_call() {
+  amber::bytecode::BcModule module;
+  module.strings = {"amber.native.bind:7", "F:test.direct_increment"};
+  module.attrs.push_back({0, 1});
+  amber::bytecode::BcCode code;
+  code.code_id = 7;
+  code.reg_count = 1;
+  module.code_objects.push_back(std::move(code));
+  amber::bytecode::BcCode unbound_code;
+  unbound_code.code_id = 8;
+  module.code_objects.push_back(std::move(unbound_code));
+
+  RuntimeNativePackageDescriptor package;
+  package.thunks.push_back(
+      {"test.direct_increment", reinterpret_cast<void *>(&direct_increment)});
+  NativeExtRegistry::global().register_package(std::move(package));
+
+  RuntimeWorld world(module);
+  const amber::runtime::ExecutionResult result =
+      world.invoke_native_extension(7, {Value::integer(41)});
+  expect(result.ok() && result.value.is_integer() &&
+             result.value.as_integer() == 42,
+         "RuntimeWorld invokes a native extension thunk directly");
+
+  const amber::runtime::ExecutionResult missing =
+      world.invoke_native_extension(8);
+  expect(!missing.ok() && missing.fault.has_value() &&
+             missing.fault->error_name == "NativeRequiredError",
+         "direct native extension invocation rejects an unbound code id");
+}
+
 } // namespace
 
 int main() {
@@ -671,6 +714,7 @@ int main() {
   test_native_extension_type_import();
   test_native_extension_thunk_import();
   test_native_extension_runtime_contributions();
+  test_runtime_world_direct_native_extension_call();
   std::cout << "amber_ext_tests: ok\n";
   return 0;
 }

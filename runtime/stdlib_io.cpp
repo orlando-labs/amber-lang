@@ -669,6 +669,17 @@ SendStatus text_writer_instance_send(NativeStdlibCall &call) {
     *call.out = Value::boolean(writer->closed());
     return SendStatus::Matched;
   }
+  if (call.selector == "xterm?") {
+    if (!call.require_arity(0) || !call.kw_args.empty() ||
+        !call.require_no_block()) {
+      if (!call.kw_args.empty()) {
+        call.fault("TypeError", "xterm? does not accept keywords");
+      }
+      return SendStatus::Faulted;
+    }
+    *call.out = Value::boolean(writer->xterm_color_available());
+    return SendStatus::Matched;
+  }
   if (call.selector == "to_str" || call.selector == "str") {
     if (!call.require_arity(0) || !call.kw_args.empty() ||
         !call.require_no_block()) {

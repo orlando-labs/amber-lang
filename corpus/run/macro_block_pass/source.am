@@ -1,6 +1,6 @@
 package conformance.run
 
-macro def plus_cb(x, cb):
+macro def plus_cb(x, &cb):
   #{x} + #{cb}
 
 def probe():

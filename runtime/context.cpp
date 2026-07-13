@@ -7,6 +7,7 @@ namespace amber::runtime {
 thread_local std::uint64_t tls_runtime_worker_id = 0;
 thread_local std::uint64_t tls_runtime_strand_id = 0;
 thread_local std::uint64_t tls_runtime_task_id = 0;
+thread_local std::uint64_t tls_runtime_sync_owner_id = 0;
 thread_local const std::atomic<bool> *tls_runtime_task_cancel_flag = nullptr;
 thread_local std::uint32_t tls_runtime_task_sync_depth = 0;
 thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stdout;
@@ -68,15 +69,20 @@ RuntimeTextSourceLocation resolve_runtime_text_source_location() {
 }
 
 RuntimeTaskScope::RuntimeTaskScope(std::uint64_t task_id,
-                                   const std::atomic<bool> *cancel_flag)
+                                   const std::atomic<bool> *cancel_flag,
+                                   std::uint64_t sync_owner_id)
     : previous_task_id_(tls_runtime_task_id),
+      previous_sync_owner_id_(tls_runtime_sync_owner_id),
       previous_cancel_flag_(tls_runtime_task_cancel_flag) {
   tls_runtime_task_id = task_id;
+  tls_runtime_sync_owner_id =
+      sync_owner_id == 0 ? (task_id << 1U) : sync_owner_id;
   tls_runtime_task_cancel_flag = cancel_flag;
 }
 
 RuntimeTaskScope::~RuntimeTaskScope() {
   tls_runtime_task_id = previous_task_id_;
+  tls_runtime_sync_owner_id = previous_sync_owner_id_;
   tls_runtime_task_cancel_flag = previous_cancel_flag_;
 }
 

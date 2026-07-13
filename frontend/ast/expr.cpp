@@ -308,12 +308,14 @@ std::unique_ptr<Expr> lower_generic_node(const Expr &node, bool hygienic) {
     }
     entries.push_back(make_map_entry(field.name, std::move(acc), span));
   }
-  // Identifiers written literally inside a quote are hygienic by default: mark
-  // them so the expander can stamp a fresh per-expansion syntax context
-  // (DESIGN-macro-system §9). Names arriving via unquote are spliced verbatim
-  // (not built here) and so carry no mark; names inside `unhygienic(...)`
-  // (hygienic == false) are deliberately left unmarked.
-  if (hygienic && node.kind == "AstName") {
+  // Identifiers and binding parameters written literally inside a quote are
+  // hygienic by default: mark them so the expander can stamp one fresh
+  // per-expansion syntax context. Nodes arriving via unquote are spliced
+  // verbatim and carry no marker, so a wrapper macro cannot restamp a block
+  // parameter without also restamping its already-expanded body references.
+  if (hygienic &&
+      (node.kind == "AstName" || node.kind == "AstParam" ||
+       node.kind == "AstPatternParam")) {
     entries.push_back(
         make_map_entry("hygienic", make_bool_literal(true, span), span));
   }

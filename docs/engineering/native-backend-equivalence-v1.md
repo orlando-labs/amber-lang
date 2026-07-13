@@ -10,8 +10,9 @@ Every `corpus/run` fixture is compiled into two executables with
 
 - `--target bytecode-wrapper`: the VM lane (the semantic oracle);
 - `--target native`: the `cpp-bytecode-direct-v1` lane, which runs generated
-  C++ for eligible code objects and falls back to the VM through the
-  whole-program `NativeBailout` restart.
+  C++ for eligible code objects. Coverage-incomplete builds may fall back to
+  the VM through the whole-program `NativeBailout` restart; full-coverage
+  builds emit no VM entry or bailout restart path.
 
 Both executables must produce byte-identical stdout, stderr, and exit codes.
 Fixtures whose `meta.json` entry is a callable are driven by appending an
@@ -21,26 +22,64 @@ compare the full trace output and the nonzero exit code.
 
 ## The bailout/restart soundness invariant
 
+This section applies only when build metadata reports
+`native_bytecode_fallback: true`.
+
 The native lane handles anything it cannot execute (including checked-Int
 overflow, which it detects with `__builtin_*_overflow` helpers) by throwing
 `NativeBailout`; the generated `main()` catches it and re-runs the entire
 program, including module init, under the VM.
 
-This is observably equivalent **only while native-eligible code performs no
-observable side effects before a bailout**. Today that invariant is enforced
-structurally: the eligibility scan in `native_cpp_code_supported`
-(`tools/amberc/main.cpp`) is a strict allowlist of side-effect-free opcodes
-and selectors (scalar/int ops, list construction and access, closures, calls,
-jumps, returns). Output selectors (`print`/`p`/`pp`), IO, channels, ivar
-stores on shared state, and every other effectful operation make the whole
-code object ineligible.
+This is observably equivalent **only while native-eligible code produces no
+effect that survives a bailout**. Most admitted operations are simply
+side-effect-free. Two additional families are safe by reachability:
 
-Rule for widening native coverage: **an opcode or selector may be added to
-the allowlist only if it is observably side-effect-free, or only after the
-whole-program restart is replaced with per-function VM fallback** (see
-`docs/engineering/full-native-implementation-plan-v1.md`). Any violation
-shows up in this bundle as duplicated side effects in the native lane's
-output.
+- user instances, ivars, and mutable collections allocated by the direct lane
+  live only in its private heap; `LOAD_IVAR`, `STORE_IVAR`, user-method
+  dispatch, `copy`/`deep_copy`, and admitted collection mutators may change
+  that heap, because the complete heap is abandoned before the VM restart;
+- discardable samples such as `SecureRandom` results and `Time.monotonic` do
+  not mutate externally visible state. If a later instruction bails, the
+  sampled value and every value derived from it are abandoned too.
+
+The eligibility scan in `native_cpp_code_supported`
+(`tools/amberc/main.cpp`) still rejects output selectors
+(`print`/`p`/`pp`), external IO, database calls, channels, task/synchronization
+state, and every other effect that can escape the native heap. No mutable
+object crosses the scalar VM bridge, so native ivars cannot alias VM state.
+
+Rule for widening native coverage: **an opcode or selector may be added only
+if it is side-effect-free, if all of its mutations are confined to disposable
+native state, or after the whole-program restart is replaced with a resumable
+stateful native/VM boundary** (see
+`docs/engineering/full-native-implementation-plan-v1.md`). Any violation can
+show up in this bundle as duplicated output or external mutation.
+
+`corpus/run/native_object_state` pins the confined-state branch: class-valued
+calls, user dispatch, ivar reads/writes, `present?`/`absent?`, monotonic time,
+shallow/deep collection copy with topology preservation, `init_copy`, and an
+in-place array append all compile with `--require-full-native`.
+
+## Direct native-extension leaves
+
+A code object carrying an `amber.native.bind:<code_id>` attribute is classified
+as `native-extension` when its native package is linked. Generated callers
+marshal arguments through a thread-local runtime host and call
+`RuntimeWorld::invoke_native_extension`, which invokes the registered
+`amber_ext.h` ABI thunk directly. It does not push, step, or execute the bound
+code object's Amber fallback body.
+
+Native-extension code objects count toward `native_graph_native_code_count`,
+while `native_graph_vm_fallback_code_count` remains reserved for bytecode
+execution. The amber-orm SQLite selftest pins this distinction at 916/916
+native code objects: 881 generated C++ bodies, 35 direct SQLite extension
+thunks, 0 VM bridges, and 0 fallback objects. The executable returns `29`.
+The standalone SQLite selftest is 477/477 native and returns `35`.
+
+When every code object is either `direct-native` or `native-extension`, the
+generated source omits `run_vm_entry`, `amber_vm_fallback_call`, and every
+`RuntimeWorld::execute` call. A `NativeBailout` is then a native execution error
+rather than permission to restart the program under bytecode.
 
 ## Per-function VM fallback (step 2, scalar bridge)
 

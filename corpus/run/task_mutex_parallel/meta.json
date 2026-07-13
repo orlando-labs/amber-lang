@@ -1,0 +1,7 @@
+{
+  "format": "amber.corpus.meta.v1",
+  "phase": "run",
+  "source": "source.am",
+  "expect": "expect.run.json",
+  "entry": "main"
+}

@@ -29,6 +29,8 @@ namespace amber::runtime {
 
 namespace {
 
+std::atomic<std::uint64_t> g_runtime_sync_owner_id{1};
+
 struct RuntimeSyncBoundaryError {
   std::string error_name;
   std::string message;
@@ -436,8 +438,8 @@ std::chrono::steady_clock::duration runtime_sync_wait_duration(
 }
 
 std::uint64_t runtime_sync_owner_id() {
-  if (tls_runtime_task_id != 0) {
-    return (tls_runtime_task_id << 2U) | 1U;
+  if (tls_runtime_sync_owner_id != 0) {
+    return (tls_runtime_sync_owner_id << 2U) | 1U;
   }
   if (tls_runtime_strand_id != 0) {
     return (tls_runtime_strand_id << 2U) | 2U;
@@ -2399,6 +2401,7 @@ private:
 
   struct StrandRecord {
     std::uint64_t strand_id = 0;
+    std::uint64_t sync_owner_id = 0;
     RuntimeStrandState state = RuntimeStrandState::New;
     StrandFunction function;
     std::uint64_t worker_id = 0;
@@ -2478,6 +2481,10 @@ private:
 
     StrandRecord strand;
     strand.strand_id = strand_id;
+    strand.sync_owner_id =
+        (g_runtime_sync_owner_id.fetch_add(1, std::memory_order_relaxed)
+         << 1U) |
+        1U;
     strand.parent_task_id = parent_task_id;
     strand.function = std::move(function);
     strand.state = RuntimeStrandState::Runnable;
@@ -2830,6 +2837,7 @@ private:
     RuntimeWorkerScope worker_scope(worker_id);
     while (true) {
       std::uint64_t strand_id = 0;
+      std::uint64_t sync_owner_id = 0;
       StrandFunction function;
       std::shared_ptr<std::atomic<bool>> cancellation_requested;
       {
@@ -2838,6 +2846,7 @@ private:
           strand_id = next_runnable_locked(worker_index);
           if (strand_id != 0) {
             function = strands_[strand_id].function;
+            sync_owner_id = strands_[strand_id].sync_owner_id;
             cancellation_requested = strands_[strand_id].cancellation_requested;
             break;
           }
@@ -2856,7 +2865,8 @@ private:
       completion.state = RuntimeStrandState::Done;
       {
         RuntimeStrandScope strand_scope(strand_id);
-        RuntimeTaskScope task_scope(strand_id, cancellation_requested.get());
+        RuntimeTaskScope task_scope(strand_id, cancellation_requested.get(),
+                                    sync_owner_id);
         try {
           function();
         } catch (const RuntimeTaskCancelled &) {

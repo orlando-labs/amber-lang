@@ -27,6 +27,8 @@
 
 namespace amber::runtime {
 
+bool runtime_keyword_identifier_text(const std::string &text);
+
 // Per-(package,type) descriptor for a `native class`: the dispatch tag plus the
 // ownership and reclaim resolved from the manifest [[native.types]] and the
 // linked extension symbols. The native binary registers one per type at

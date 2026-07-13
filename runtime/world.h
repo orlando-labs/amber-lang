@@ -340,6 +340,11 @@ public:
                           const std::vector<Value> &args = {},
                           Value self = Value::null(),
                           Value block = Value::null());
+  ExecutionResult invoke_native_extension(
+      std::uint32_t code_id, const std::vector<Value> &args = {},
+      Value self = Value::null());
+  Value string_value(std::string text);
+  Value list_value(std::vector<Value> items);
 
   ExecutionResult define_instance_method(std::uint32_t class_index,
                                          bytecode::BcMethod method);

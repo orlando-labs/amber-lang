@@ -14,12 +14,17 @@ namespace {
 using Node = ast::Expr;
 
 struct RefKey {
+  int scope_index = -1;
   std::size_t start_offset = 0;
   std::size_t end_offset = 0;
   std::string name;
+  std::string context;
   std::string ref_kind;
 
   bool operator<(const RefKey &other) const {
+    if (scope_index != other.scope_index) {
+      return scope_index < other.scope_index;
+    }
     if (start_offset != other.start_offset) {
       return start_offset < other.start_offset;
     }
@@ -28,6 +33,9 @@ struct RefKey {
     }
     if (name != other.name) {
       return name < other.name;
+    }
+    if (context != other.context) {
+      return context < other.context;
     }
     return ref_kind < other.ref_kind;
   }
@@ -38,6 +46,30 @@ struct CapturePlan {
   std::string slot;
   std::string source_kind;
   std::string source_slot;
+};
+
+struct ScopeLookupKey {
+  std::string kind;
+  std::string owner;
+  std::string file;
+  std::size_t start_offset = 0;
+  std::size_t end_offset = 0;
+
+  bool operator<(const ScopeLookupKey &other) const {
+    if (kind != other.kind) {
+      return kind < other.kind;
+    }
+    if (owner != other.owner) {
+      return owner < other.owner;
+    }
+    if (file != other.file) {
+      return file < other.file;
+    }
+    if (start_offset != other.start_offset) {
+      return start_offset < other.start_offset;
+    }
+    return end_offset < other.end_offset;
+  }
 };
 
 std::string json_escape(const std::string &value) {
@@ -322,8 +354,12 @@ public:
       bindings_by_id_.emplace(binding.id, &binding);
     }
     for (const binder::Reference &ref : graph_.references) {
-      refs_by_key_.emplace(RefKey{ref.span.start.offset, ref.span.end.offset,
-                                  ref.name, ref.ref_kind},
+      refs_by_key_.emplace(RefKey{ref.scope_index, ref.span.start.offset,
+                                  ref.span.end.offset, ref.name, ref.context,
+                                  ref.ref_kind},
+                           &ref);
+      refs_by_key_.emplace(RefKey{-1, ref.span.start.offset, ref.span.end.offset,
+                                  ref.name, ref.context, ref.ref_kind},
                            &ref);
       refs_by_scope_[ref.scope_index].push_back(&ref);
     }
@@ -393,6 +429,7 @@ private:
   std::map<int, std::vector<int>> block_children_by_scope_;
   std::map<int, std::vector<const binder::Binding *>> capture_bindings_cache_;
   std::map<int, const binder::Signature *> signatures_by_scope_;
+  std::map<ScopeLookupKey, std::size_t> scope_lookup_cursors_;
   ProcedureContext *current_proc_ = nullptr;
   std::string module_procedure_id_;
 
@@ -419,6 +456,25 @@ private:
       }
     }
     return -1;
+  }
+
+  int find_next_scope_index(const std::string &kind, const lexer::Span &span,
+                            const std::string &owner) {
+    ScopeLookupKey key{kind, owner, span.file, span.start.offset,
+                       span.end.offset};
+    std::size_t &cursor = scope_lookup_cursors_[key];
+    std::size_t seen = 0;
+    for (std::size_t i = 0; i < graph_.scopes.size(); ++i) {
+      const binder::Scope &scope = graph_.scopes[i];
+      if (scope.kind == kind && scope.owner == owner && same_span(scope.span, span)) {
+        if (seen == cursor) {
+          ++cursor;
+          return static_cast<int>(i);
+        }
+        ++seen;
+      }
+    }
+    return find_scope_index(kind, span, owner);
   }
 
   const binder::Signature *signature_for_scope(int scope_index) const {
@@ -2100,8 +2156,19 @@ private:
       return make_node("HSelf", expr.span);
     }
     const binder::Reference *ref =
-        find_reference(expr.span, string_value(expr, "name"), ref_kind);
+        find_reference(expr.span, string_value(expr, "name"),
+                       string_value(expr, "syntax_context"), ref_kind);
     if (ref == nullptr || !ref->resolved) {
+      // Pattern matcher expressions are parsed from their preserved source
+      // text after binding, so their synthetic spans have no Reference entry.
+      // The binder has still recorded every local/capture they use on the
+      // enclosing procedure. Recover that binding by hygienic name before
+      // falling back to a constant lookup.
+      if (std::unique_ptr<Node> fallback = lower_procedure_name_fallback(
+              expr, string_value(expr, "name"),
+              string_value(expr, "syntax_context"))) {
+        return fallback;
+      }
       auto node = make_node("HLoadName", expr.span);
       node->string_field("name", string_value(expr, "name"));
       return node;
@@ -2222,7 +2289,8 @@ private:
 
     if (left->kind == "AstName") {
       const binder::Reference *ref =
-          find_reference(left->span, string_value(*left, "name"), "write");
+          find_reference(left->span, string_value(*left, "name"),
+                         string_value(*left, "syntax_context"), "write");
       const std::string slot = ref != nullptr && ref->resolved
                                    ? slot_for_binding(ref->binding_id)
                                    : "";
@@ -2479,6 +2547,13 @@ private:
         continue;
       }
       if (tail.kind == "AstTailBlockSuffix") {
+        const lexer::Span node_span = ast::join_spans(current->span, tail.span);
+        auto node = make_node("HCall", node_span);
+        node->node_field("callable", std::move(current));
+        node->list_field("pos_args", {});
+        node->list_field("kw_args", {});
+        node->node_field("block", lower_block_suffix(tail));
+        current = std::move(node);
         ++i;
         continue;
       }
@@ -2497,7 +2572,9 @@ private:
     if (name == "self") {
       return nullptr;
     }
-    const binder::Reference *ref = find_reference(base.span, name, "name");
+    const binder::Reference *ref =
+        find_reference(base.span, name, string_value(base, "syntax_context"),
+                       "name");
     if (ref == nullptr || !ref->resolved) {
       return nullptr;
     }
@@ -2541,7 +2618,9 @@ private:
     if (base.kind != "AstName" || string_value(base, "name") != "send") {
       return false;
     }
-    const binder::Reference *ref = find_reference(base.span, "send", "name");
+    const binder::Reference *ref =
+        find_reference(base.span, "send", string_value(base, "syntax_context"),
+                       "name");
     return ref == nullptr || !ref->resolved;
   }
 
@@ -2610,7 +2689,8 @@ private:
       return send;
     }
     const binder::Reference *kernel_ref =
-        find_reference(base.span, "Kernel", "name");
+        find_reference(base.span, "Kernel",
+                       string_value(base, "syntax_context"), "name");
     if (kernel_ref != nullptr && kernel_ref->resolved) {
       return send;
     }
@@ -2683,7 +2763,7 @@ private:
 
   std::unique_ptr<Node> lower_block(const ast::Expr &expr) {
     const int scope_index =
-        find_scope_index("block", expr.span, "block_suffix");
+        find_next_scope_index("block", expr.span, "block_suffix");
     auto node = make_node("HClosure", expr.span);
     const binder::Signature *signature = nullptr;
     std::unique_ptr<Node> signature_node;
@@ -2835,9 +2915,18 @@ private:
 
   const binder::Reference *find_reference(const lexer::Span &span,
                                           const std::string &name,
+                                          const std::string &context,
                                           const std::string &ref_kind) const {
+    if (current_proc_ != nullptr) {
+      const auto found = refs_by_key_.find(
+          RefKey{current_proc_->scope_index, span.start.offset, span.end.offset,
+                 name, context, ref_kind});
+      if (found != refs_by_key_.end()) {
+        return found->second;
+      }
+    }
     const auto found = refs_by_key_.find(
-        RefKey{span.start.offset, span.end.offset, name, ref_kind});
+        RefKey{-1, span.start.offset, span.end.offset, name, context, ref_kind});
     return found == refs_by_key_.end() ? nullptr : found->second;
   }
 
@@ -2859,6 +2948,47 @@ private:
     return found == current_proc_->capture_slot_by_binding_id.end()
                ? ""
                : found->second;
+  }
+
+  std::string procedure_slot_for_name(
+      const std::map<std::string, std::string> &slots,
+      const std::string &name, const std::string &context) const {
+    std::string match;
+    for (const auto &[binding_id, slot] : slots) {
+      const binder::Binding *binding = binding_for_id(binding_id);
+      if (binding == nullptr || binding->name != name ||
+          binding->context != context) {
+        continue;
+      }
+      if (!match.empty()) {
+        return "";
+      }
+      match = slot;
+    }
+    return match;
+  }
+
+  std::unique_ptr<Node> lower_procedure_name_fallback(
+      const ast::Expr &expr, const std::string &name,
+      const std::string &context) const {
+    if (current_proc_ == nullptr) {
+      return nullptr;
+    }
+    const std::string local_slot = procedure_slot_for_name(
+        current_proc_->slot_by_binding_id, name, context);
+    if (!local_slot.empty()) {
+      auto node = make_node("HLoadLocal", expr.span);
+      node->string_field("slot", local_slot);
+      return node;
+    }
+    const std::string capture_slot = procedure_slot_for_name(
+        current_proc_->capture_slot_by_binding_id, name, context);
+    if (!capture_slot.empty()) {
+      auto node = make_node("HLoadCapture", expr.span);
+      node->string_field("slot", capture_slot);
+      return node;
+    }
+    return nullptr;
   }
 
   static std::string last_path_segment(const std::string &path) {

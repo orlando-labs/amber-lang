@@ -411,7 +411,7 @@ private:
       node->string_field("head", path_text);
       return node;
     }
-    if (is_ascii_uppercase_identifier(path.front())) {
+    if (is_ascii_uppercase_identifier(path.back())) {
       auto node = make_node("PatConst", span_);
       node->string_field("path", path_text);
       return node;

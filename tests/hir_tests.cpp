@@ -37,6 +37,32 @@ amber::hir::Program lower_ok(const std::string &source,
                                   bind_result.graph);
 }
 
+amber::hir::Program lower_expanded_ok(const std::string &source) {
+  amber::lexer::Lexer lexer(source, "<test>");
+  amber::lexer::LexResult lex_result = lexer.lex();
+  if (!lex_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(lex_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::parser::Parser parser(lex_result.tokens);
+  amber::parser::ParseModuleResult parse_result = parser.parse_module_unit();
+  if (!parse_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(parse_result.diagnostics);
+    std::exit(1);
+  }
+
+  amber::ast::expand_quotes(parse_result.items);
+  amber::binder::BindResult bind_result =
+      amber::binder::bind_module(parse_result.items, parse_result.module_name);
+  if (!bind_result.ok()) {
+    std::cerr << amber::lexer::diagnostics_to_json(bind_result.diagnostics);
+    std::exit(1);
+  }
+  return amber::hir::lower_module(parse_result.items, parse_result.module_name,
+                                  bind_result.graph);
+}
+
 void expect(bool condition, const std::string &message) {
   if (!condition) {
     std::cerr << "hir test failed: " << message << "\n";
@@ -1000,10 +1026,44 @@ void test_case_matcher_expr_lowering() {
              node_field(*matcher_ir, "matcher_expr") != nullptr &&
              contains_kind(*node_field(*matcher_ir, "matcher_expr"), "HSend"),
          "matcher IR carries lowered matcher expr");
+  expect(matcher_ir != nullptr &&
+             node_field(*matcher_ir, "matcher_expr") != nullptr &&
+             contains_kind(*node_field(*matcher_ir, "matcher_expr"),
+                           "HLoadLocal"),
+         "matcher IR resolves a synthetic matcher name to its local slot");
   expect(matcher_prog != nullptr &&
              node_field(*matcher_prog, "matcher_expr") != nullptr &&
              contains_kind(*node_field(*matcher_prog, "matcher_expr"), "HSend"),
          "matcher program carries lowered matcher expr");
+}
+
+void test_qualified_const_pattern_lowering() {
+  const amber::hir::Program program =
+      lower_ok("import provider\n"
+               "def classify(value):\n"
+               "  case value:\n"
+               "    when provider.Entry:\n"
+               "      1\n"
+               "    else:\n"
+               "      0\n");
+  const amber::hir::Procedure *classify =
+      procedure_by_name(program, "classify");
+  expect(classify != nullptr, "qualified matcher procedure exists");
+  const amber::ast::Expr *stmt = list_item(*classify->body, "items", 0);
+  const amber::ast::Expr *dispatch =
+      stmt == nullptr ? nullptr : node_field(*stmt, "expr");
+  const amber::ast::Expr *arm =
+      dispatch == nullptr ? nullptr : list_item(*dispatch, "arms", 0);
+  const amber::ast::Expr *compiled =
+      arm == nullptr ? nullptr : node_field(*arm, "compiled_pattern");
+  const amber::ast::Expr *program_node =
+      compiled == nullptr ? nullptr : node_field(*compiled, "match_program");
+  const amber::ast::Expr *root =
+      program_node == nullptr ? nullptr : node_field(*program_node, "root");
+  expect(root != nullptr && root->kind == "PConstMatch",
+         "lowercase module alias with uppercase leaf is a constant pattern");
+  expect(root != nullptr && string_field(*root, "path") == "provider.Entry",
+         "qualified constant pattern preserves its complete class path");
 }
 
 void test_dynamic_pattern_compilation() {
@@ -1442,6 +1502,24 @@ void test_indented_block_suffix_lowering() {
          "indented block procedure has two statements");
 }
 
+void test_bare_callable_block_suffix_lowering() {
+  const amber::hir::Program program =
+      lower_expanded_ok("package app\n"
+                        "import provider as api\n"
+                        "def invoke():\n"
+                        "  api.with_value |value|:\n"
+                        "    value\n");
+  const amber::hir::Procedure *invoke = procedure_by_name(program, "invoke");
+  expect(invoke != nullptr, "bare callable block owner exists");
+  const amber::ast::Expr *stmt = list_item(*invoke->body, "items", 0);
+  const amber::ast::Expr *call =
+      stmt == nullptr ? nullptr : node_field(*stmt, "expr");
+  expect(call != nullptr && call->kind == "HCall",
+         "leading block suffix lowers to HCall");
+  expect(node_field(*call, "block") != nullptr,
+         "bare callable HCall carries its block");
+}
+
 void test_nested_capture_propagation() {
   const amber::hir::Program program = lower_ok("def nest(xs, α):\n"
                                                "  xs.map: _1.filter: α\n");
@@ -1670,6 +1748,7 @@ int main() {
   test_clause_method_lowering();
   test_case_pattern_lowering();
   test_case_matcher_expr_lowering();
+  test_qualified_const_pattern_lowering();
   test_dynamic_pattern_compilation();
   test_advanced_pattern_lowering();
   test_block_param_pattern_lowering();
@@ -1680,6 +1759,7 @@ int main() {
   test_dynamic_pattern_without_with_lowering();
   test_direct_capture_lowering();
   test_indented_block_suffix_lowering();
+  test_bare_callable_block_suffix_lowering();
   test_nested_capture_propagation();
   test_property_lowering();
   test_bodyless_class_lowering();

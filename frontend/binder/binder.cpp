@@ -701,6 +701,7 @@ private:
          ++position) {
       const std::unique_ptr<ast::Expr> &param = params->values[position];
       const std::string local_name = string_value(*param, "local_name");
+      const std::string context = string_value(*param, "syntax_context");
       const std::string auto_assign_kind =
           string_value(*param, "auto_assign_kind");
 
@@ -728,7 +729,7 @@ private:
       }
       param_positions.emplace(local_name, position);
       declare_binding(function_scope, local_name, "local", "param", param->span,
-                      false, "", DuplicatePolicy::Error);
+                      false, "", DuplicatePolicy::Error, context);
 
       if (auto_assign_kind == "@" || auto_assign_kind == "@@") {
         auto_assign_fields.insert(auto_assign_kind + local_name);
@@ -903,14 +904,15 @@ private:
                                       const std::string &pattern_text,
                                       const lexer::Span &span,
                                       pattern::PatternContext context,
-                                      const std::string &role) {
+                                      const std::string &role,
+                                      const std::string &binding_context = "") {
     const std::unique_ptr<ast::Expr> pattern_node =
         parse_and_validate_pattern(pattern_text, span, context);
     add_pattern_references(scope_index, resolve_scope, *pattern_node);
     for (const std::string &name :
          pattern::collect_binding_names(*pattern_node)) {
       declare_binding(scope_index, name, "local", role, span, false, "",
-                      DuplicatePolicy::Error);
+                      DuplicatePolicy::Error, binding_context);
     }
   }
 
@@ -1111,18 +1113,8 @@ private:
     if (tails == nullptr) {
       return;
     }
-    // A paren-less block-suffix chain (`name:` + INDENT) is a macro trigger
-    // surface only; F1.5 consumes it when `name` is a macro. One that reaches
-    // the binder has no runtime meaning — reject it cleanly.
-    if (!tails->values.empty() && tails->values.front() &&
-        tails->values.front()->kind == "AstTailBlockSuffix") {
-      diagnostic("AMB_MACRO_UNSUPPORTED", "error", "binder",
-                 "a paren-less block suffix (`name:` block) requires `name` "
-                 "to be a macro (macro.v1); no macro with this name is in "
-                 "scope",
-                 expr.span);
-      return;
-    }
+    // F1.5 consumes this shape when the callee resolves to a macro. Otherwise
+    // it remains Amber's ordinary bare-call + block-suffix form.
     if (base != nullptr && base->kind == "AstName" && !tails->values.empty() &&
         tails->values.front()->kind == "AstTailCall") {
       const Binding *binding =
@@ -1279,7 +1271,8 @@ private:
       for (const std::unique_ptr<ast::Expr> &param : params->values) {
         declare_scope_pattern_bindings(
             scope, parent_scope, string_value(*param, "pattern"), param->span,
-            pattern::PatternContext::BlockParam, "block_param");
+            pattern::PatternContext::BlockParam, "block_param",
+            string_value(*param, "syntax_context"));
       }
     }
 

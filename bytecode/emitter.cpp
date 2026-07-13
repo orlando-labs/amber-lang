@@ -1329,8 +1329,13 @@ private:
             const std::string logical = string_field(*member, "native_binding");
             const std::string selector = string_field(*member, "name");
             if (!logical.empty() && !selector.empty()) {
-              native_method_bindings_.push_back(
-                  {native_tag, selector, logical});
+              // A native-class initializer is a free-shaped constructor thunk
+              // that returns the new foreign handle. It is not a method on an
+              // already-created handle.
+              if (selector != "init") {
+                native_method_bindings_.push_back(
+                    {native_tag, selector, logical});
+              }
               if (selector == "destroy!") {
                 native_destructor = logical;
               }
@@ -1524,12 +1529,16 @@ private:
     // Native dispatch metadata (native-packages 5c-ii): a `native def` / native
     // class method records its code object -> logical-symbol binding so the VM
     // can route the call to a registered C thunk in a native build (and fall
-    // back to this very body in a bytecode build). `owner_class` distinguishes
-    // a handle method (has self) from a free function.
+    // back to this very body in a bytecode build). Native-class initializers
+    // use the free constructor ABI; other class-owned bindings are handle
+    // methods and receive self.
     const std::string native_binding = string_field(item, "native_binding");
     if (!native_binding.empty() && method.entry_code_id != 0U) {
-      native_bindings_.push_back(
-          {method.entry_code_id, owner_class.has_value(), native_binding});
+      const bool is_constructor =
+          owner_class.has_value() && string_field(item, "name") == "init";
+      native_bindings_.push_back({method.entry_code_id,
+                                  owner_class.has_value() && !is_constructor,
+                                  native_binding});
     }
     return method;
   }
@@ -4757,7 +4766,15 @@ std::uint32_t CodeEmitter::compile_expr(const ast::Expr &expr) {
     return alloc_temp();
   }
 
-  diag(expr.span, "BC2001", "unsupported HIR expression in bytecode emitter");
+  std::string message =
+      "unsupported HIR expression in bytecode emitter: " + expr.kind;
+  if (expr.kind == "HUnsupported") {
+    const std::string source_kind = string_field(expr, "source_kind");
+    if (!source_kind.empty()) {
+      message += " from " + source_kind;
+    }
+  }
+  diag(expr.span, "BC2001", message);
   return alloc_temp();
 }
 

@@ -561,6 +561,16 @@ void test_builtin_runtime_module_descriptors() {
   RuntimeDispatchRegistry dispatch;
   RuntimeTypeRegistry types;
   amber::runtime::register_builtin_runtime_modules(modules, dispatch, types);
+  amber::runtime::register_core_prelude_bindings(modules);
+
+  expect(modules.has_namespace("task"),
+         "runtime module registry recognizes task namespace");
+  expect(modules.has_namespace("sync"),
+         "runtime module registry recognizes sync namespace");
+  expect(modules.has_namespace("io"),
+         "runtime module registry recognizes io namespace");
+  expect(!modules.has_namespace("not_a_runtime_module"),
+         "runtime module registry rejects unknown namespaces");
 
   const auto expect_path = [&](const std::string &path,
                                RuntimeNativeTypeKind kind) {

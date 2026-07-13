@@ -4,15 +4,17 @@
 Every `corpus/run` fixture is executed through both backends:
 
 - `amberc build --target bytecode-wrapper`: the VM lane (semantic oracle);
-- `amberc build --target native`: the cpp-bytecode-direct lane, which may run
-  generated C++ and fall back to the VM via the whole-program bailout/restart.
+- `amberc build --target native`: the cpp-bytecode-direct lane. Incomplete
+  coverage may use the whole-program bailout/restart; full coverage emits no
+  VM restart path.
 
 Both executables must produce identical stdout, stderr, and exit codes. This
 is the cheap guard for all future native-coverage widening: any divergence
 between the native lane and the VM shows up as a mismatch here.
 
-The bailout/restart model is only sound because native-eligible code performs
-no observable side effects before a bailout (see
+The bailout/restart model is sound because native-eligible code produces no
+effect that survives a bailout: most operations are pure, while admitted ivar
+and collection mutations stay in a disposable native heap (see
 docs/engineering/native-backend-equivalence-v1.md). This harness asserts the
 observable half of that invariant.
 """

@@ -865,6 +865,28 @@ void test_bare_nullary_diagnostics() {
     expect(diagnostic.code != "W_BARE_BANG_CALL",
            "explicit bang call must not warn");
   }
+
+  amber::binder::BindResult module_block =
+      bind_ok("package app\n"
+              "import provider as sqlite3\n"
+              "def probe():\n"
+              "  sqlite3.memory |db|:\n"
+              "    db\n");
+  const amber::binder::Scope *module_block_scope =
+      scope_by_kind_owner(module_block.graph, "block", "block_suffix");
+  expect(module_block_scope != nullptr &&
+             binding_in_scope(module_block.graph, *module_block_scope, "db") !=
+                 nullptr,
+         "bare imported-module call binds its explicit block parameter");
+
+  amber::binder::BindResult parameterless_block =
+      bind_ok("def invoke(&blk):\n"
+              "  blk()\n"
+              "def probe():\n"
+              "  invoke:\n"
+              "    42\n");
+  expect(parameterless_block.ok(),
+         "an unexpanded parameterless block suffix remains a runtime call");
 }
 
 } // namespace

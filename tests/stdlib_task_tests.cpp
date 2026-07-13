@@ -744,6 +744,52 @@ void test_std013_mutex_synchronize_return_and_unwind() {
          "reused mutex should unlock after synchronize exception unwind");
 }
 
+void test_std013_mutex_owner_ids_are_unique_across_schedulers() {
+  amber::runtime::RuntimeTaskModule first_scheduler(1);
+  amber::runtime::RuntimeTaskModule second_scheduler(1);
+  amber::runtime::RuntimeMutex mutex;
+  std::atomic<bool> first_locked{false};
+  std::atomic<bool> second_synchronized{false};
+
+  const amber::runtime::RuntimeTaskHandle first =
+      first_scheduler.spawn([&]() {
+        const amber::runtime::RuntimeMutexResult synchronized =
+            mutex.synchronize(
+                [&]() {
+                  first_locked.store(true, std::memory_order_release);
+                  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                  return amber::runtime::Value::null();
+                },
+                std::chrono::milliseconds(1000));
+        expect(synchronized.ok,
+               "first scheduler should release shared mutex");
+        return amber::runtime::Value::null();
+      });
+
+  expect(wait_for_condition(
+             [&]() { return first_locked.load(std::memory_order_acquire); },
+             std::chrono::milliseconds(1000)),
+         "first scheduler should acquire shared mutex");
+
+  const amber::runtime::RuntimeTaskHandle second =
+      second_scheduler.spawn([&]() {
+        const amber::runtime::RuntimeMutexResult synchronized =
+            mutex.synchronize(
+                []() { return amber::runtime::Value::null(); },
+                std::chrono::milliseconds(1000));
+        second_synchronized.store(synchronized.ok,
+                                  std::memory_order_release);
+        return amber::runtime::Value::null();
+      });
+
+  expect(first.wait(std::chrono::milliseconds(1000)).ok,
+         "first scheduler task should complete");
+  expect(second.wait(std::chrono::milliseconds(1000)).ok,
+         "second scheduler task should complete");
+  expect(second_synchronized.load(std::memory_order_acquire),
+         "mutex ownership must not collide across schedulers");
+}
+
 void test_std013_mutex_lock_wait_cancellation() {
   amber::runtime::RuntimeTaskModule task(2);
   amber::runtime::RuntimeMutex mutex;
@@ -1605,7 +1651,12 @@ void test_layerb_cooperative_socket_read_parks_in_task() {
   const std::uint64_t parks_after =
       amber::runtime::runtime_cooperative_task_park_count();
 
-  expect(exec.ok(), "cooperative socket read: source program should execute");
+  expect(exec.ok(),
+         "cooperative socket read: source program should execute" +
+             (exec.fault.has_value()
+                  ? ": " + exec.fault->error_name + ": " +
+                        exec.fault->message
+                  : std::string{}));
   // Correctness: park -> resume -> retry must have actually completed the read,
   // returning the exact payload the peer wrote.
   expect_bool(
@@ -1776,6 +1827,7 @@ int main() {
   test_std013_mutex_lock_unlock_owned_and_errors();
   test_std013_mutex_waiter_fifo();
   test_std013_mutex_synchronize_return_and_unwind();
+  test_std013_mutex_owner_ids_are_unique_across_schedulers();
   test_std013_mutex_lock_wait_cancellation();
   test_std014_atomic_get_set_compare_and_set_and_guard();
   test_std014_atomic_update_value_retry_and_guard();

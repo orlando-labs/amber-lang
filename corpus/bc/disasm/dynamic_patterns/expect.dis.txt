@@ -1,19 +1,19 @@
-; amber.bc.v1 sha256=72b5c54834c5629463a910a20747c48cac7a81c529c0e9858c93227dd0526c14
+; amber.bc.v1 sha256=74dbf37d5e71e6b427d6f619ba99453c133cd9cdc428198dd828fa33b5ef414b
 .header format=1.0 language=1.0 profile_flags=0 file_flags=0 abi=0000000000000000000000000000000000000000000000000000000000000000
 .sections
   STRS offset=368 size=95 align=1 flags=0
   SYMS offset=463 size=119 align=1 flags=0
-  KONS offset=582 size=62 align=1 flags=0
-  CODE offset=644 size=693 align=1 flags=0
-  METH offset=1337 size=68 align=1 flags=0
-  CLAS offset=1405 size=4 align=1 flags=0
-  DEPS offset=1409 size=4 align=1 flags=0
-  EXPT offset=1413 size=4 align=1 flags=0
-  INIT offset=1417 size=9 align=1 flags=0
-  PATS offset=1426 size=28 align=1 flags=0
-  SPAN offset=1454 size=3075 align=1 flags=0
-  LINE offset=4529 size=448 align=1 flags=0
-  LOCS offset=4977 size=84 align=1 flags=0
+  KONS offset=582 size=53 align=1 flags=0
+  CODE offset=635 size=684 align=1 flags=0
+  METH offset=1319 size=68 align=1 flags=0
+  CLAS offset=1387 size=4 align=1 flags=0
+  DEPS offset=1391 size=4 align=1 flags=0
+  EXPT offset=1395 size=4 align=1 flags=0
+  INIT offset=1399 size=9 align=1 flags=0
+  PATS offset=1408 size=28 align=1 flags=0
+  SPAN offset=1436 size=2992 align=1 flags=0
+  LINE offset=4428 size=436 align=1 flags=0
+  LOCS offset=4864 size=84 align=1 flags=0
 .strs
   s0 "classify"
   s1 "function"
@@ -25,27 +25,26 @@
   s7 "pattern"
   s8 "/users/:id"
 .syms
-  y0 :limit
-  y1 :+
-  y2 :route
-  y3 :<call>
-  y4 :match
-  y5 :success
-  y6 :bindings
-  y7 :id
-  y8 :empty?
-  y9 :TypeError
-  y10 :classify
-  y11 :shape
+  y0 :+
+  y1 :route
+  y2 :<call>
+  y3 :match
+  y4 :success
+  y5 :bindings
+  y6 :id
+  y7 :empty?
+  y8 :TypeError
+  y9 :classify
+  y10 :shape
+  y11 :limit
 .kons
-  k0 path [0]
-  k1 integer 1
-  k2 path [2]
-  k3 string_ref 8
-  k4 key_set [7]
-  k5 path [9]
-  k6 integer 0
-  k7 path [11, 0]
+  k0 integer 1
+  k1 path [1]
+  k2 string_ref 8
+  k3 key_set [6]
+  k4 path [8]
+  k5 integer 0
+  k6 path [10, 11]
 .code
 code c1 kind=module regs=3 flags=0
   local l0 name=s0(classify) role=s1(function) binding=s2(local)
@@ -59,59 +58,58 @@ code c1 kind=module regs=3 flags=0
   span 2..3 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 3..4 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 4..5 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
-code c2 kind=method regs=20 flags=0
+code c2 kind=method regs=19 flags=0
   local l0 name=s3(shape) role=s4(param) binding=s2(local)
   local l1 name=s5(limit) role=s4(param) binding=s2(local)
   local l2 name=s6(id) role=s7(pattern) binding=s2(local)
-  0000 LOOKUP_CONST 5 0
-  0001 LOADK 6 1
-  0002 SEND 4 5 1 1 6 0 4294967295 0
-  0003 P_TRIPLE_EQ 4 0 6
-  0004 MOVE 3 0
-  0005 JUMP 30
-  0006 LOOKUP_CONST 8 2
-  0007 LOADK 9 3
-  0008 CALL 7 8 1 9 0 4294967295 1
-  0009 SEND 10 7 4 1 0 0 -1 2
-  0010 SEND 11 10 5 0 0 -1 3
-  0011 JUMP_IF_FALSE 11 18
-  0012 SEND 12 10 6 0 0 -1 4
-  0013 P_PREP_MAP 13 12 4 1 28
-  0014 P_HAS_KEY 13 7 28
-  0015 P_GET_KEY 14 13 7
-  0016 P_BIND 2 14
-  0017 JUMP 25
-  0018 SEND 15 10 6 0 0 -1 5
-  0019 SEND 16 15 8 0 0 -1 6
-  0020 JUMP_IF_TRUE 16 24
-  0021 LOOKUP_CONST 17 5
-  0022 CALL 18 17 0 0 -1 7
-  0023 RAISE 18
-  0024 JUMP 28
-  0025 P_COMMIT 2 1
-  0026 MOVE 3 2
-  0027 JUMP 30
-  0028 LOADK 19 6
-  0029 MOVE 3 19
-  0030 CLOSE_UPVALUES 0
-  0031 RETURN 3
-  callsite pc=2 slot=0 sym=y1 flags=0
-  callsite pc=8 slot=1 sym=y3 flags=0
-  callsite pc=9 slot=2 sym=y4 flags=0
-  callsite pc=10 slot=3 sym=y5 flags=0
-  callsite pc=12 slot=4 sym=y6 flags=0
-  callsite pc=18 slot=5 sym=y6 flags=0
-  callsite pc=19 slot=6 sym=y8 flags=0
-  callsite pc=22 slot=7 sym=y3 flags=0
-  span 0..1 corpus/bc/disasm/dynamic_patterns/source.am:1:1-1:6
-  span 1..2 corpus/bc/disasm/dynamic_patterns/source.am:1:9-1:10
-  span 2..3 corpus/bc/disasm/dynamic_patterns/source.am:1:1-1:10
-  span 3..4 corpus/bc/disasm/dynamic_patterns/source.am:3:5-4:12
-  span 4..5 corpus/bc/disasm/dynamic_patterns/source.am:4:7-4:12
-  span 5..6 corpus/bc/disasm/dynamic_patterns/source.am:3:5-4:12
-  span 6..7 corpus/bc/disasm/dynamic_patterns/source.am:1:1-1:6
-  span 7..8 corpus/bc/disasm/dynamic_patterns/source.am:1:7-1:19
-  span 8..9 corpus/bc/disasm/dynamic_patterns/source.am:1:1-1:20
+  0000 LOADK 5 0
+  0001 SEND 4 1 0 1 5 0 4294967295 0
+  0002 P_TRIPLE_EQ 4 0 5
+  0003 MOVE 3 0
+  0004 JUMP 29
+  0005 LOOKUP_CONST 7 1
+  0006 LOADK 8 2
+  0007 CALL 6 7 1 8 0 4294967295 1
+  0008 SEND 9 6 3 1 0 0 -1 2
+  0009 SEND 10 9 4 0 0 -1 3
+  0010 JUMP_IF_FALSE 10 17
+  0011 SEND 11 9 5 0 0 -1 4
+  0012 P_PREP_MAP 12 11 3 1 27
+  0013 P_HAS_KEY 12 6 27
+  0014 P_GET_KEY 13 12 6
+  0015 P_BIND 2 13
+  0016 JUMP 24
+  0017 SEND 14 9 5 0 0 -1 5
+  0018 SEND 15 14 7 0 0 -1 6
+  0019 JUMP_IF_TRUE 15 23
+  0020 LOOKUP_CONST 16 4
+  0021 CALL 17 16 0 0 -1 7
+  0022 RAISE 17
+  0023 JUMP 27
+  0024 P_COMMIT 2 1
+  0025 MOVE 3 2
+  0026 JUMP 29
+  0027 LOADK 18 5
+  0028 MOVE 3 18
+  0029 CLOSE_UPVALUES 0
+  0030 RETURN 3
+  callsite pc=1 slot=0 sym=y0 flags=0
+  callsite pc=7 slot=1 sym=y2 flags=0
+  callsite pc=8 slot=2 sym=y3 flags=0
+  callsite pc=9 slot=3 sym=y4 flags=0
+  callsite pc=11 slot=4 sym=y5 flags=0
+  callsite pc=17 slot=5 sym=y5 flags=0
+  callsite pc=18 slot=6 sym=y7 flags=0
+  callsite pc=21 slot=7 sym=y2 flags=0
+  span 0..1 corpus/bc/disasm/dynamic_patterns/source.am:1:9-1:10
+  span 1..2 corpus/bc/disasm/dynamic_patterns/source.am:1:1-1:10
+  span 2..3 corpus/bc/disasm/dynamic_patterns/source.am:3:5-4:12
+  span 3..4 corpus/bc/disasm/dynamic_patterns/source.am:4:7-4:12
+  span 4..5 corpus/bc/disasm/dynamic_patterns/source.am:3:5-4:12
+  span 5..6 corpus/bc/disasm/dynamic_patterns/source.am:1:1-1:6
+  span 6..7 corpus/bc/disasm/dynamic_patterns/source.am:1:7-1:19
+  span 7..8 corpus/bc/disasm/dynamic_patterns/source.am:1:1-1:20
+  span 8..9 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
   span 9..10 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
   span 10..11 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
   span 11..12 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
@@ -128,17 +126,16 @@ code c2 kind=method regs=20 flags=0
   span 22..23 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
   span 23..24 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
   span 24..25 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
-  span 25..26 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
-  span 26..27 corpus/bc/disasm/dynamic_patterns/source.am:6:7-6:9
-  span 27..28 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
+  span 25..26 corpus/bc/disasm/dynamic_patterns/source.am:6:7-6:9
+  span 26..27 corpus/bc/disasm/dynamic_patterns/source.am:5:5-6:9
+  span 27..28 corpus/bc/disasm/dynamic_patterns/source.am:8:7-8:8
   span 28..29 corpus/bc/disasm/dynamic_patterns/source.am:8:7-8:8
-  span 29..30 corpus/bc/disasm/dynamic_patterns/source.am:8:7-8:8
+  span 29..30 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
   span 30..31 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
-  span 31..32 corpus/bc/disasm/dynamic_patterns/source.am:1:1-8:8
 .methods
-  m0 selector=y10(classify) owner=0 signature=k7 entry=c2 flags=0
-    param external=y11(shape) local=s3(shape) flags=0
-    param external=y0(limit) local=s5(limit) flags=0
+  m0 selector=y9(classify) owner=0 signature=k6 entry=c2 flags=0
+    param external=y10(shape) local=s3(shape) flags=0
+    param external=y11(limit) local=s5(limit) flags=0
 .classes
 .deps
 .exports
@@ -155,13 +152,13 @@ code c2 kind=method regs=20 flags=0
   c1 pc=4 line=1
   c2 pc=0 line=1
   c2 pc=1 line=1
-  c2 pc=2 line=1
-  c2 pc=3 line=3
-  c2 pc=4 line=4
-  c2 pc=5 line=3
+  c2 pc=2 line=3
+  c2 pc=3 line=4
+  c2 pc=4 line=3
+  c2 pc=5 line=1
   c2 pc=6 line=1
   c2 pc=7 line=1
-  c2 pc=8 line=1
+  c2 pc=8 line=5
   c2 pc=9 line=5
   c2 pc=10 line=5
   c2 pc=11 line=5
@@ -178,15 +175,14 @@ code c2 kind=method regs=20 flags=0
   c2 pc=22 line=5
   c2 pc=23 line=5
   c2 pc=24 line=5
-  c2 pc=25 line=5
-  c2 pc=26 line=6
-  c2 pc=27 line=5
+  c2 pc=25 line=6
+  c2 pc=26 line=5
+  c2 pc=27 line=8
   c2 pc=28 line=8
-  c2 pc=29 line=8
+  c2 pc=29 line=1
   c2 pc=30 line=1
-  c2 pc=31 line=1
 .locs
   c1 l0 name=s0(classify) 0..5
-  c2 l0 name=s3(shape) 0..32
-  c2 l1 name=s5(limit) 0..32
-  c2 l2 name=s6(id) 0..32
+  c2 l0 name=s3(shape) 0..31
+  c2 l1 name=s5(limit) 0..31
+  c2 l2 name=s6(id) 0..31

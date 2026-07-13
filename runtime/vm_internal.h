@@ -619,6 +619,11 @@ struct RuntimeVmExecutionContext {
   const RuntimeTypeRegistry *type_registry = nullptr;
   const RuntimeDispatchRegistry *dispatch_registry = nullptr;
   const RuntimeErrorRegistry *error_registry = nullptr;
+  // Macro-profile only: invoking an Ast.Block through the ordinary call
+  // opcode recursively expands its nested macro calls and returns the
+  // expanded block. Normal runtime executions leave this empty, so Ast values
+  // are not generally callable.
+  std::function<ExecutionResult(const Value &)> macro_block_executor;
   // Interpreter step budget for this execution; 0 = unlimited. Used by the
   // macro expander so a looping macro is a diagnostic, not a compiler hang.
   std::int64_t step_budget = 0;
@@ -629,6 +634,10 @@ ExecutionResult execute_runtime_vm(const bytecode::BcModule &module,
                                    std::uint32_t code_id,
                                    const std::vector<Value> &args, Value self,
                                    Value block);
+
+ExecutionResult invoke_runtime_native_extension(
+    const bytecode::BcModule &module, RuntimeVmExecutionContext context,
+    std::uint32_t code_id, const std::vector<Value> &args, Value self);
 
 // Keyword-argument entry: `kw_args` pairs the keyword's symbol id (in
 // `module`'s symbol table) with its value. Requires a single-signature method

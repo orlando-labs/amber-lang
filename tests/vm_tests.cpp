@@ -1626,6 +1626,14 @@ void test_runtime_present_absent_predicates() {
 }
 
 void test_runtime_text_output_helpers_and_io_sinks() {
+  amber::bytecode::EmitResult xterm_emit =
+      emit_ok("io.Buffer.new().xterm?\n");
+  amber::runtime::ExecutionResult xterm_exec = amber::runtime::execute_code(
+      xterm_emit.module, xterm_emit.module.init.entry_code_id);
+  expect(xterm_exec.ok() && xterm_exec.value.is_bool() &&
+             !xterm_exec.value.as_bool(),
+         "buffer writers should report that xterm output is unavailable");
+
   amber::bytecode::EmitResult emit_result = emit_ok("print \"hello\"\n"
                                                     "x = p \"debug\"\n"
                                                     "pp([1, 2])\n"
@@ -3862,6 +3870,79 @@ void test_execute_emitted_block_map_suffixes() {
          "explicit param indented map block should execute");
   expect_integer_list(explicit_indented.value, {3, 5},
                       "explicit param indented map block");
+}
+
+void test_execute_emitted_copy_graphs() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "class Box:\n"
+      "  attr value\n"
+      "  attr copied_from\n"
+      "  def init(@value):\n"
+      "    @copied_from = null\n"
+      "  def init_copy(source):\n"
+      "    @copied_from = source\n"
+      "\n"
+      "inner = [1]\n"
+      "source = {items: inner}\n"
+      "shallow = source.copy\n"
+      "shallow[:extra] = 2\n"
+      "shallow[:items].push!(3)\n"
+      "deep = source.deep_copy\n"
+      "deep[:items].push!(4)\n"
+      "shared = []\n"
+      "graph = [shared, shared]\n"
+      "graph_copy = graph.deep_copy\n"
+      "graph_copy[0].push!(5)\n"
+      "cycle = []\n"
+      "cycle.push!(cycle)\n"
+      "cycle_copy = cycle.deep_copy\n"
+      "cycle_copy[0].push!(6)\n"
+      "set_source = Set{1, 2}\n"
+      "set_copy = set_source.copy\n"
+      "set_copy.add!(3)\n"
+      "tuple_inner = []\n"
+      "tuple_copy = (tuple_inner, 1).deep_copy\n"
+      "tuple_copy[0].push!(10)\n"
+      "strict_source = StrictMap{name: 1, \"name\": 2}\n"
+      "strict_copy = strict_source.copy\n"
+      "box = Box([7])\n"
+      "box_copy = box.copy\n"
+      "box_copy.value.push!(8)\n"
+      "box_deep = box.deep_copy\n"
+      "box_deep.value.push!(9)\n"
+      "if source[?:extra].absent? and inner.count == 2 and "
+      "deep[:items].count == 3 and graph_copy[1].count == 1 and "
+      "shared.empty? and cycle.count == 1 and cycle_copy.count == 2 and "
+      "set_source.count == 2 and set_copy.count == 3 and "
+      "tuple_inner.empty? and tuple_copy[0].count == 1 and "
+      "strict_copy.count == 2 and strict_copy[:name] == 1 and "
+      "strict_copy[\"name\"] == 2 and "
+      "box.value.count == 2 and box_deep.value.count == 3 and "
+      "box_copy.copied_from == box and box_deep.copied_from == box:\n"
+      "  42\n"
+      "else:\n"
+      "  0\n");
+  expect(exec.ok(), "copy/deep_copy graph probe should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "copy contracts preserve shallow aliases and deep graph topology");
+}
+
+void test_execute_emitted_user_index_methods() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "class Bag:\n"
+      "  def init():\n"
+      "    @values = {}\n"
+      "  def [](key):\n"
+      "    @values[?key]\n"
+      "  def []=(key, value):\n"
+      "    @values[key] = value\n"
+      "\n"
+      "bag = Bag()\n"
+      "bag[:answer] = 42\n"
+      "bag[:answer]\n");
+  expect(exec.ok(), "user-defined index methods should execute");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+         "user-defined index setter/getter");
 }
 
 void test_execute_emitted_v20_5_array_generation_and_optional_access() {
@@ -8711,6 +8792,16 @@ void test_source_declared_error_ancestry_execution() {
   expect(rich.ok() && rich.value.is_integer() && rich.value.as_integer() == 7,
          "Exception ancestry should classify rich Amber error classes");
 
+  const amber::runtime::ExecutionResult unhandled = execute_emitted_init(
+      "class DetailedError < Exception:\n"
+      "  attr message\n"
+      "  def init(@message)\n"
+      "raise DetailedError(\"query failed\")\n");
+  expect(!unhandled.ok() && unhandled.fault.has_value() &&
+             unhandled.fault->error_name == "DetailedError" &&
+             unhandled.fault->message == "query failed",
+         "unhandled source-declared exceptions preserve their message");
+
   amber::bytecode::EmitResult linked_emit = emit_ok(
       "class PackageError < Exception\n"
       "class ImportedChild < PackageError\n"
@@ -9431,6 +9522,31 @@ amber::macros::ExpandResult expand_source(const std::string &source) {
   return amber::macros::expand_macros(mod.items, "sandbox.test", source);
 }
 
+amber::runtime::ExecutionResult execute_expanded_probe(
+    const std::string &source) {
+  amber::lexer::Lexer lexer(source, "<macro-exec-test>");
+  amber::lexer::LexResult lex = lexer.lex();
+  expect(lex.ok(), "macro exec: lex ok");
+  amber::parser::Parser parser(lex.tokens);
+  amber::parser::ParseModuleResult mod = parser.parse_module_unit();
+  expect(mod.ok(), "macro exec: parse ok");
+  amber::macros::ExpandResult expanded =
+      amber::macros::expand_macros(mod.items, "sandbox.exec", source);
+  expect(expanded.ok, "macro exec: expansion ok, got: " + expanded.error);
+  amber::ast::expand_quotes(mod.items);
+  amber::binder::BindResult bind =
+      amber::binder::bind_module(mod.items, mod.module_name);
+  expect(bind.ok(), "macro exec: bind ok");
+  amber::hir::Program program =
+      amber::hir::lower_module(mod.items, mod.module_name, bind.graph);
+  amber::bytecode::EmitResult emit =
+      amber::bytecode::emit_program(program, mod.module_name);
+  expect(emit.ok(), "macro exec: emit ok");
+  const amber::bytecode::BcMethod *probe = method_by_name(emit.module, "probe");
+  expect(probe != nullptr, "macro exec: probe method exists");
+  return amber::runtime::execute_code(emit.module, probe->entry_code_id);
+}
+
 void test_macro_expander_sandbox() {
   // Positive control: an ordinary macro expands under the sandbox.
   {
@@ -9527,7 +9643,7 @@ void test_macro_call_channels() {
   // block-pass on the same call is a diagnostic.
   {
     const amber::macros::ExpandResult both =
-        expand_source("macro def with_block(x, blk):\n"
+        expand_source("macro def with_block(x, &blk):\n"
                       "  #{x}\n"
                       "\n"
                       "def probe(cb):\n"
@@ -9537,6 +9653,86 @@ void test_macro_call_channels() {
     expect(both.error.find("both a block suffix and a `&name`") !=
                std::string::npos,
            "dual block channel diagnostic, got: " + both.error);
+  }
+
+  // Block suffixes bind only through the ordinary `&blk` channel. Keeping a
+  // positional parameter no longer makes the block disappear into `*args`.
+  {
+    const amber::macros::ExpandResult positional =
+        expand_source("macro def old_shape(blk):\n"
+                      "  return blk\n"
+                      "\n"
+                      "old_shape:\n"
+                      "  1\n");
+    expect(!positional.ok, "a macro block is not a positional argument");
+    expect(positional.error.find("uninitialized local") !=
+               std::string::npos,
+           "positional block parameter remains unbound, got: " +
+               positional.error);
+  }
+
+  // Calling an Ast.Block in a macro recursively expands its nested macros;
+  // `.expressions` exposes the emitted expression nodes without statement
+  // wrapper archaeology.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def emitted(x):\n"
+        "  #{x} * 2\n"
+        "\n"
+        "macro def collect(&blk):\n"
+        "  expressions = blk().expressions\n"
+        "  return quote:\n"
+        "    unquote(expressions[0]) + unquote(expressions[1])\n"
+        "\n"
+        "def probe():\n"
+        "  collect:\n"
+        "    emitted(20)\n"
+        "    emitted(1)\n");
+    expect(exec.ok(), "callable macro block executes nested macros");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "callable macro block returns expanded expressions");
+  }
+
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def substitute(expr):\n"
+        "  replacement = quote:\n"
+        "    21\n"
+        "  return expr.replace_name(\"value\", replacement)\n"
+        "\n"
+        "def probe():\n"
+        "  substitute(value * 2)\n");
+    expect(exec.ok(), "Ast#replace_name expansion executes");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "Ast#replace_name recursively substitutes identifier reads");
+  }
+
+  // A wrapper macro must preserve the syntax context of an expanded block
+  // parameter and the generated references in its body. ORM's `validate`
+  // wrapper exercises this shape after `expect` expands the predicate.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def predicate(expr):\n"
+        "  getter = quote:\n"
+        "    record\n"
+        "  body = expr.replace_name(\"value\", getter)\n"
+        "  return quote:\n"
+        "    [21].map |record|:\n"
+        "      #{body}\n"
+        "\n"
+        "macro def wrap(&blk):\n"
+        "  return blk().expressions[0]\n"
+        "\n"
+        "def probe():\n"
+        "  wrap:\n"
+        "    predicate(value * 2)\n");
+    expect(exec.ok(),
+           "wrapper macro preserves an expanded block parameter context");
+    expect(exec.value.is_list() && exec.value.as_list() != nullptr &&
+               exec.value.as_list()->items.size() == 1U &&
+               exec.value.as_list()->items[0].is_integer() &&
+               exec.value.as_list()->items[0].as_integer() == 42,
+           "wrapped generated block still reads its generated parameter");
   }
 
   // Keyword-rest macros collect extra keywords (`**kwargs` binds a frozen
@@ -9550,6 +9746,169 @@ void test_macro_call_channels() {
     expect(kw_rest.ok,
            "`**kwargs` macro accepts extra keywords, got: " + kw_rest.error);
   }
+
+  // Annotation macros use the full call channel, including keywords.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def named(d, label:):\n"
+        "  q = quote:\n"
+        "    def annotation_label():\n"
+        "      #{label}\n"
+        "  return [d, q]\n"
+        "\n"
+        "named(label: \"ok\")\n"
+        "def base():\n"
+        "  21\n"
+        "\n"
+        "def probe():\n"
+        "  if annotation_label() == \"ok\":\n"
+        "    base() * 2\n"
+        "  else:\n"
+        "    0\n");
+    expect(exec.ok(), "keyword annotation macro executes");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "keyword annotation macro composes with declaration");
+  }
+
+  // `use` injection forwards keyword args and a block, with the enclosing
+  // class as the first macro argument.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def with_model(cls, table: null, &blk):\n"
+        "  expanded = blk()\n"
+        "  q1 = quote:\n"
+        "    class_method def table_name():\n"
+        "      #{table}\n"
+        "  q2 = quote:\n"
+        "    def dsl_count():\n"
+        "      #{expanded.body.size}\n"
+        "  q3 = quote:\n"
+        "    def type_name():\n"
+        "      #{cls.name}\n"
+        "  return [q1, q2, q3]\n"
+        "\n"
+        "class User:\n"
+        "  use with_model(table: :users):\n"
+        "    column(:email)\n"
+        "    validate:\n"
+        "      check(:email)\n"
+        "\n"
+        "def probe():\n"
+        "  user = User()\n"
+        "  if User.table_name() == :users and user.dsl_count() == 2 and "
+        "user.type_name() == \"User\":\n"
+        "    42\n"
+        "  else:\n"
+        "    0\n");
+    expect(exec.ok(), "`use` macro with keywords/block executes");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "`use` macro receives class, keyword options, and block");
+  }
+
+  // A use macro may inject class-only members directly. They remain
+  // declarations during statement splicing instead of being expression-wrapped.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "mixin Shared:\n"
+        "  def value():\n"
+        "    42\n"
+        "\n"
+        "macro def include_shared(cls):\n"
+        "  return quote:\n"
+        "    include Shared\n"
+        "\n"
+        "class Box:\n"
+        "  use include_shared\n"
+        "\n"
+        "def probe():\n"
+        "  Box().value\n");
+    expect(exec.ok(), "use macro can inject an include member");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "injected include participates in instance dispatch");
+  }
+
+  // Quote hygiene must stamp generated parameter binders and their generated
+  // references with the same context. Otherwise `value` below lowers as an
+  // unresolved constant lookup instead of a local load.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def install_echo(cls):\n"
+        "  return quote:\n"
+        "    class_method def echo(value = 0):\n"
+        "      value\n"
+        "\n"
+        "class Box:\n"
+        "  use install_echo\n"
+        "\n"
+        "def probe():\n"
+        "  Box.echo(42)\n");
+    expect(exec.ok(), "quoted generated parameter binds inside generated body");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "generated method reads its generated parameter");
+  }
+
+  // The same hygiene rule applies to block-suffix pattern parameters.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def install_block(cls):\n"
+        "  return quote:\n"
+        "    class_method def doubled():\n"
+        "      [21].map |record|:\n"
+        "        record * 2\n"
+        "\n"
+        "class Box:\n"
+        "  use install_block\n"
+        "\n"
+        "def probe():\n"
+        "  Box.doubled()[0]\n");
+    expect(exec.ok(), "quoted generated block parameter binds in block body");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "generated block reads its generated parameter");
+  }
+
+  // A generated block body can include an Ast subtree built by an earlier quote.
+  // ORM validations use this shape for `record.get(:field)` predicates.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def install_spliced_block(cls):\n"
+        "  getter = quote:\n"
+        "    record\n"
+        "  return quote:\n"
+        "    class_method def doubled():\n"
+        "      [21].map |record|:\n"
+        "        #{getter} * 2\n"
+        "\n"
+        "class Box:\n"
+        "  use install_spliced_block\n"
+        "\n"
+        "def probe():\n"
+        "  Box.doubled()[0]\n");
+    expect(exec.ok(), "quoted generated block binds spliced quoted body names");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "generated block reads its spliced generated parameter reference");
+  }
+
+  // Duplicate generated block spans must map to distinct binder scopes.
+  {
+    const amber::runtime::ExecutionResult exec = execute_expanded_probe(
+        "macro def install_two_blocks(cls):\n"
+        "  return quote:\n"
+        "    class_method def total():\n"
+        "      left = [20].map |record|:\n"
+        "        record\n"
+        "      right = [22].map |record|:\n"
+        "        record\n"
+        "      left[0] + right[0]\n"
+        "\n"
+        "class Box:\n"
+        "  use install_two_blocks\n"
+        "\n"
+        "def probe():\n"
+        "  Box.total()\n");
+    expect(exec.ok(), "duplicate generated block spans choose distinct scopes");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "both generated block params resolve");
+  }
 }
 
 // §11 persisted artifact macro section: the export table round-trips through
@@ -9561,9 +9920,9 @@ void test_macro_exports_artifact_section() {
                                       "export macro run_twice\n"
                                       "export macro sql\n"
                                       "\n"
-                                      "macro def run_twice(blk):\n"
-                                      "  #{blk}\n"
-                                      "  #{blk}\n"
+                                      "macro def run_twice(&blk):\n"
+                                      "  #{blk()}\n"
+                                      "  #{blk()}\n"
                                       "\n"
                                       "string_tag macro def sql(t):\n"
                                       "  return Ast.lift(t.parts.size)\n";
@@ -9580,7 +9939,7 @@ void test_macro_exports_artifact_section() {
 
   const std::string payload =
       amber::macros::serialize_macro_exports(exports, provider_source);
-  expect(payload.rfind("amber.macro.exports.v1\n", 0) == 0,
+  expect(payload.rfind("amber.macro.exports.v2\n", 0) == 0,
          "payload is schema-tagged");
   expect(payload.find("string_tag macro def sql") != std::string::npos,
          "payload persists the definition source slice");
@@ -9590,8 +9949,9 @@ void test_macro_exports_artifact_section() {
       amber::macros::parse_macro_exports(payload, "provider.am", &error);
   expect(error.empty(), "payload parses back, got: " + error);
   expect(reloaded.size() == 2 && reloaded[0].public_name == "run_twice" &&
-             reloaded[1].public_name == "sql",
-         "reloaded table preserves names and order");
+             reloaded[0].public_export &&
+             reloaded[1].public_name == "sql" && reloaded[1].public_export,
+         "reloaded table preserves public names and order");
   expect(reloaded[1].def != nullptr && reloaded[1].def->span.start.line == 9,
          "reloaded definition reports its original source line");
 
@@ -9670,12 +10030,13 @@ void test_cross_module_macro_staging() {
   const std::string provider_source = "package provider.mod\n"
                                       "export macro run_twice\n"
                                       "\n"
-                                      "macro def run_twice(blk):\n"
-                                      "  #{blk}\n"
-                                      "  #{blk}\n"
+                                      "macro def run_twice(&blk):\n"
+                                      "  expanded = blk()\n"
+                                      "  return [private_macro(expanded), "
+                                      "private_macro(expanded)]\n"
                                       "\n"
                                       "macro def private_macro(x):\n"
-                                      "  #{x}\n";
+                                      "  return x\n";
   amber::lexer::Lexer provider_lexer(provider_source, "<provider>");
   amber::lexer::LexResult provider_lex = provider_lexer.lex();
   expect(provider_lex.ok(), "staging: provider lex ok");
@@ -9685,8 +10046,9 @@ void test_cross_module_macro_staging() {
   expect(provider_mod.ok(), "staging: provider parse ok");
   std::vector<amber::macros::MacroExport> exports =
       amber::macros::collect_macro_exports(provider_mod.items);
-  expect(exports.size() == 1 && exports[0].public_name == "run_twice",
-         "only the macro-marked export is harvested (private stays private)");
+  expect(exports.size() == 2 && exports[0].public_name == "run_twice" &&
+             exports[0].public_export && !exports[1].public_export,
+         "public macro and private helper are harvested with visibility");
 
   amber::macros::MacroProviderMap providers;
   providers["provider.mod"] = std::move(exports);
@@ -9739,10 +10101,23 @@ void test_cross_module_macro_staging() {
   const std::string tag_provider_source = "package provider.mod\n"
                                           "export macro run_twice\n"
                                           "export macro sql\n"
+                                          "export macro install_answer\n"
+                                          "export macro scope\n"
+                                          "export macro value\n"
                                           "\n"
-                                          "macro def run_twice(blk):\n"
-                                          "  #{blk}\n"
-                                          "  #{blk}\n"
+                                          "macro def run_twice(&blk):\n"
+                                          "  #{blk()}\n"
+                                          "  #{blk()}\n"
+                                          "\n"
+                                          "macro def install_answer(cls, value):\n"
+                                          "  def answer():\n"
+                                          "    #{value}\n"
+                                          "\n"
+                                          "macro def scope(&blk):\n"
+                                          "  return blk()\n"
+                                          "\n"
+                                          "macro def value(x):\n"
+                                          "  return x\n"
                                           "\n"
                                           "string_tag macro def sql(t):\n"
                                           "  return Ast.lift(t.parts.size)\n";
@@ -9756,20 +10131,55 @@ void test_cross_module_macro_staging() {
   amber::macros::MacroProviderMap alias_providers;
   alias_providers["provider.mod"] =
       amber::macros::collect_macro_exports(tag_provider_mod.items);
-  expect(alias_providers["provider.mod"].size() == 2,
-         "alias staging: both exports harvested");
+  expect(alias_providers["provider.mod"].size() == 5,
+         "alias staging: all macro exports harvested");
+
+  // A macro-providing module remains an ordinary runtime namespace for dotted
+  // members that are not macro exports. The bare block call must survive
+  // staging unchanged.
+  const std::string runtime_alias_source =
+      "package app.runtime_alias\n"
+      "import provider.mod as pg\n"
+      "\n"
+      "def probe():\n"
+      "  pg.each_value |value|:\n"
+      "    value\n";
+  amber::lexer::Lexer runtime_alias_lexer(runtime_alias_source,
+                                          "<runtime-alias-importer>");
+  amber::lexer::LexResult runtime_alias_lex = runtime_alias_lexer.lex();
+  expect(runtime_alias_lex.ok(), "runtime alias importer lexes");
+  amber::parser::Parser runtime_alias_parser(runtime_alias_lex.tokens);
+  amber::parser::ParseModuleResult runtime_alias_mod =
+      runtime_alias_parser.parse_module_unit();
+  expect(runtime_alias_mod.ok(), "runtime alias importer parses");
+  const amber::macros::ExpandResult runtime_alias_expanded =
+      amber::macros::expand_macros(runtime_alias_mod.items,
+                                   runtime_alias_mod.module_name,
+                                   runtime_alias_source, alias_providers);
+  expect(runtime_alias_expanded.ok,
+         "non-macro dotted block call survives staging, got: " +
+             runtime_alias_expanded.error);
+  amber::ast::expand_quotes(runtime_alias_mod.items);
+  const amber::binder::BindResult runtime_alias_bind =
+      amber::binder::bind_module(runtime_alias_mod.items,
+                                 runtime_alias_mod.module_name);
+  expect(runtime_alias_bind.ok(),
+         "non-macro dotted block call binds after macro staging");
 
   const std::string alias_importer_source = "package app.alias\n"
                                             "import provider.mod as pg\n"
                                             "\n"
                                             "def probe():\n"
                                             "  y = 0\n"
+                                            "  z = 0\n"
                                             "  pg.run_twice():\n"
                                             "    y = y + 20\n"
+                                            "  pg.scope:\n"
+                                            "    z = value(1)\n"
                                             "  q = pg.sql\"\"\"\n"
                                             "    SELECT 1\n"
                                             "    \"\"\"\n"
-                                            "  y + q + 1\n";
+                                            "  y + q + z\n";
   amber::lexer::Lexer alias_lexer(alias_importer_source, "<alias-importer>");
   amber::lexer::LexResult alias_lex = alias_lexer.lex();
   expect(alias_lex.ok(), "alias staging: importer lex ok");
@@ -9797,9 +10207,55 @@ void test_cross_module_macro_staging() {
     const amber::runtime::ExecutionResult exec =
         amber::runtime::execute_code(emit.module, probe->entry_code_id);
     expect(exec.ok(), "alias staging: probe executes");
-    // run_twice adds 20 twice; the sql""" template has one static part; +1.
+    // run_twice adds 20 twice; the tag has one part; provider-scoped `value`
+    // emits 1 from inside the callable `scope` block.
     expect(exec.value.is_integer() && exec.value.as_integer() == 42,
            "dotted macro calls expanded at the call site (probe == 42)");
+  }
+
+  // Plain module imports use the binder's default alias (last path segment).
+  // This is the `import orm` / `use orm.model(...)` shape used by packages.
+  const std::string default_alias_source = "package app.default_alias\n"
+                                           "import provider.mod\n"
+                                           "\n"
+                                           "class Box:\n"
+                                           "  use mod.install_answer(42)\n"
+                                           "\n"
+                                           "def probe():\n"
+                                           "  Box().answer()\n";
+  amber::lexer::Lexer default_alias_lexer(default_alias_source,
+                                          "<default-alias-importer>");
+  amber::lexer::LexResult default_alias_lex = default_alias_lexer.lex();
+  expect(default_alias_lex.ok(), "default alias staging: importer lex ok");
+  amber::parser::Parser default_alias_parser(default_alias_lex.tokens);
+  amber::parser::ParseModuleResult default_alias_mod =
+      default_alias_parser.parse_module_unit();
+  expect(default_alias_mod.ok(), "default alias staging: importer parse ok");
+  const amber::macros::ExpandResult default_alias_expanded =
+      amber::macros::expand_macros(default_alias_mod.items,
+                                   default_alias_mod.module_name,
+                                   default_alias_source, alias_providers);
+  expect(default_alias_expanded.ok,
+         "default module-alias expansion succeeds, got: " +
+             default_alias_expanded.error);
+  {
+    amber::ast::expand_quotes(default_alias_mod.items);
+    amber::binder::BindResult bind = amber::binder::bind_module(
+        default_alias_mod.items, default_alias_mod.module_name);
+    expect(bind.ok(), "default alias staging: expanded importer binds");
+    amber::hir::Program program = amber::hir::lower_module(
+        default_alias_mod.items, default_alias_mod.module_name, bind.graph);
+    amber::bytecode::EmitResult emit =
+        amber::bytecode::emit_program(program, default_alias_mod.module_name);
+    expect(emit.ok(), "default alias staging: expanded importer emits");
+    const amber::bytecode::BcMethod *probe =
+        method_by_name(emit.module, "probe");
+    expect(probe != nullptr, "default alias staging: probe method exists");
+    const amber::runtime::ExecutionResult exec =
+        amber::runtime::execute_code(emit.module, probe->entry_code_id);
+    expect(exec.ok(), "default alias staging: probe executes");
+    expect(exec.value.is_integer() && exec.value.as_integer() == 42,
+           "plain import dotted use macro expanded at the call site");
   }
 
   // The spaced form `pg.sql """…"""` is not a tag invocation; reaching a
@@ -10043,6 +10499,8 @@ int main() {
   test_manual_make_map();
   test_execute_emitted_control_condition_assignment();
   test_execute_emitted_block_map_suffixes();
+  test_execute_emitted_copy_graphs();
+  test_execute_emitted_user_index_methods();
   test_execute_emitted_v20_5_array_generation_and_optional_access();
   test_runtime_map_get_or_set();
   test_runtime_watch_local_storage_replacement();

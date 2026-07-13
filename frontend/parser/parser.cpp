@@ -1042,7 +1042,7 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     return parse_def_stmt(false);
   case lexer::TokenKind::KeywordProp:
     if (looks_like_property_declaration()) {
-      if (context == BodyContext::Def) {
+      if (quote_depth_ == 0 && context == BodyContext::Def) {
         error_code(current(), "AMB_PROP_INVALID_CONTEXT",
                    "property declarations are not allowed in function or "
                    "block bodies");
@@ -1052,7 +1052,8 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
     break;
   case lexer::TokenKind::KeywordAttr:
     if (looks_like_attr_declaration()) {
-      if (context != BodyContext::Class && context != BodyContext::Mixin) {
+      if (quote_depth_ == 0 && context != BodyContext::Class &&
+          context != BodyContext::Mixin) {
         error_code(current(), "E_ATTR_INVALID_CONTEXT",
                    "attr declarations are only allowed in class or mixin "
                    "bodies");
@@ -1067,7 +1068,7 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
   }
   case lexer::TokenKind::KeywordClassProp:
     if (looks_like_property_declaration()) {
-      if (context != BodyContext::Class) {
+      if (quote_depth_ == 0 && context != BodyContext::Class) {
         error_code(current(), "AMB_PROP_CLASS_PROP_OUTSIDE_CLASS",
                    "class_prop is only allowed in class body");
       }
@@ -1079,13 +1080,14 @@ std::unique_ptr<ast::Expr> Parser::parse_statement(BodyContext context) {
   case lexer::TokenKind::KeywordMixin:
     return parse_mixin_def();
   case lexer::TokenKind::KeywordInclude:
-    if (context != BodyContext::Class && context != BodyContext::Mixin) {
+    if (quote_depth_ == 0 && context != BodyContext::Class &&
+        context != BodyContext::Mixin) {
       error_code(current(), "E3001",
                  "include is only allowed in class or mixin body");
     }
     return parse_include_stmt(false);
   case lexer::TokenKind::KeywordExtend:
-    if (context != BodyContext::Class) {
+    if (quote_depth_ == 0 && context != BodyContext::Class) {
       error_code(current(), "E3007", "extend is only allowed in class body");
     }
     return parse_include_stmt(true);
@@ -3144,6 +3146,15 @@ std::string Parser::parse_module_path() {
 }
 
 std::string Parser::consume_method_name_text(const std::string &message) {
+  if (check(lexer::TokenKind::LBracket) &&
+      peek(1).kind == lexer::TokenKind::RBracket) {
+    advance();
+    advance();
+    if (match(lexer::TokenKind::Equal)) {
+      return "[]=";
+    }
+    return "[]";
+  }
   if (is_identifier_like_token(current().kind) ||
       is_operator_method_name(current().kind)) {
     return advance().lexeme;

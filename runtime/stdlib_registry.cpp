@@ -58,6 +58,17 @@ RuntimeModuleRegistry::binding_for_path(const std::string &path) const {
   return it->second;
 }
 
+bool RuntimeModuleRegistry::has_namespace(const std::string &path) const {
+  const std::string prefix = path + ".";
+  for (const auto &[registered, binding] : bindings_) {
+    (void)binding;
+    if (registered == path || registered.rfind(prefix, 0) == 0U) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void RuntimeModuleRegistry::import_native_paths(
     const NativeRegistry &registry) {
   for (const auto &[path, kind] : registry.registered_paths()) {

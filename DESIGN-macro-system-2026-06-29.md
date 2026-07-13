@@ -171,6 +171,10 @@ quote:
   corresponding `Ast` value. It is itself lowered by F1.5: the parser produces a
   `quote` node, and expansion turns it into the `Ast.*` builder calls that
   reconstruct the body.
+- Context-only placement checks are deferred inside a quote. A quote may
+  represent members such as `attr`, `prop`, `class_prop`, `include`, or `extend`
+  even when the quote itself is written in a macro function; the expanded node
+  must still be spliced into a class/mixin context where that member is valid.
 - `unquote(expr)` evaluates `expr` (an `Ast` value) at expansion time and
   splices it into the surrounding quote at that position.
 - `unquote_splice(list)` splices a `List[Ast]` as siblings (Elixir
@@ -320,7 +324,11 @@ syntax Amber already has:
    methods) and effect-row syntax, so it is the wrong default marker for macros.
 2. **Block-suffix** — `name: <block>` / `name |args|: <block>`, reusing the
    existing block-suffix surface. This is the most Amber-idiomatic DSL entry and
-   what the web framework (§ web-DSL sketch) leans on.
+   what the web framework (§ web-DSL sketch) leans on. Resolution follows the
+   same rule as an ordinary macro call: F1.5 expands the form when its callee is
+   a macro; otherwise it remains an ordinary runtime call with a block. This
+   also applies to dotted module members such as `sqlite3.memory |db|:` when
+   that member is not a macro export.
 3. **Annotation** — a declaration is annotated by one or more *bare* macro calls
    on their own lines immediately above it, with **no sigil**:
 
@@ -343,11 +351,22 @@ syntax Amber already has:
 
    **Attachment rule.** The parser keeps each such line as an ordinary call node.
    F1.5 attaches a *contiguous run* of lines that resolve in the macro namespace
-   to *attribute macros*, appearing immediately above a declaration with no blank
-   line between, to that declaration in **source (top-to-bottom) order**. A blank
-   line or an intervening non-annotation statement breaks the run; an
-   attribute-macro call with no declaration under it is a diagnostic
+   and are immediately above a declaration with no blank line between to that
+   declaration in **source (top-to-bottom) order**. A blank line or an intervening
+   non-annotation statement breaks the run; a macro call that syntactically looks
+   like an annotation but has no declaration under it is a diagnostic
    (`AMB_MACRO_DANGLING_ANNOTATION`). Non-macro lines stay ordinary statements.
+
+   Annotation macros receive their own positional arguments, keyword arguments,
+   spreads, and optional block channel exactly like ordinary function-like macro
+   calls, then receive the annotated declaration `Ast` as the final positional
+   argument. Keyword-rich annotation calls are therefore first-class:
+
+   ```amber
+   model table: :users, schema_mode: :explicit
+   class User:
+     pass
+   ```
 
    **Cost of no sigil.** A sigil advertises "metadata about the next decl, not
    executable prelude." Without one, `route '/api'` is locally indistinguishable
@@ -370,6 +389,27 @@ syntax Amber already has:
    `skip` / `rename` attribute macros (item 3) for policy — mirroring serde's
    `#[serde(skip)]` and Jason's `only:`. Serialization is therefore a
    two-surface feature, not the one-liner "killer app" it is sometimes sold as.
+
+   `use` uses Amber's ordinary bare-call surface. The macro head may be a plain
+   macro name or a dotted module-alias macro name, and it may carry ordinary
+   call arguments and a block suffix:
+
+   ```amber
+   class User:
+     use orm.model(table: :users):
+       expect_schema:
+         column(:email, type: :text, nullable: false)
+       validate:
+         expect(:email, email.present?, message: "must be present")
+   ```
+
+   F1.5 treats `use <macro-call>` as an injection trigger only when the first
+   argument's head resolves in the macro namespace. The macro receives the
+   enclosing class/mixin declaration `Ast` as its first positional argument,
+   followed by the `use` call's positional/keyword arguments and optional block.
+   Dotted heads use the same module alias rule as the binder: `import orm`
+   exposes `orm.model`, while `import db.postgres` exposes `postgres.sql`
+   unless an explicit `as` alias is provided.
 5. **String tag** — `sql"""…"""` / `html"""…"""`: an identifier immediately
    followed (no whitespace) by a text-block opener invokes a **string-tag
    macro** on the literal (JS tagged templates / Scala interpolators). The
@@ -410,26 +450,46 @@ the invocation with `Ast` returned by the macro body.
   position it must return exactly one expression AST. In statement/declaration
   position it may return one node or a `List[Ast]` only where the surrounding
   grammar accepts sibling statements or declarations.
-- A block-suffix macro receives the callee surface, arguments, and an
-  `Ast.Block` whose params/body are still unevaluated AST. v1 spelling: the
-  block arrives as the macro's trailing `Ast` argument (kind `AstBlock`);
-  splicing it at statement position flattens it into its statements.
+- A block-suffix macro declares the ordinary block channel explicitly with a
+  trailing `&blk` parameter. The block channel binds a callable compile-time
+  `Ast.Block`; it is never hidden among positional `*args`. Calling `blk()`
+  recursively expands macro invocations in that block and returns the expanded
+  `Ast.Block`. Ordinary non-macro expressions are preserved as unevaluated
+  syntax rather than executed at compile time. `blk()` accepts no arguments,
+  keywords, or second block.
+- A callable macro block resolves bare nested macro names in the provider scope
+  of the macro executing it. Thus a block passed to `orm.model` may spell
+  `attribute`, `expect_schema`, and `validate` without repeating `orm.`; a
+  nested block passed to `expect_schema` resolves `column` in that same scope.
+  The scope is lexical to `blk()` expansion and does not import those names into
+  the surrounding runtime module.
+- `Ast.Block#expressions` is the DSL convenience over the raw syntax-faithful
+  `body` field. It returns the block's expression nodes with `AstExprStmt`
+  wrappers removed and reports a macro-shape error if the block contains a
+  declaration or another non-expression statement. Raw `blk.body` remains the
+  escape hatch for macros that intentionally consume arbitrary statements.
+- `node.replace_name(name, replacement)` performs immutable recursive name
+  substitution and returns a fresh `Ast`. It is the small hygienic tree-editing
+  primitive needed by expression macros such as ORM predicates; package macros
+  must not hand-rebuild every binary, unary, call, and postfix node merely to
+  replace an identifier read.
 - An attribute macro receives the annotated declaration AST (and its own call
   arguments) and returns a replacement declaration or a deterministic list of
   declarations. When several stack on one declaration they compose in source
   (top-to-bottom) order per the §8 attachment rule, each macro seeing the
   previous one's output (§17.5, resolved); only the last annotation in a stack
-  may expand to multiple declarations. v1 classification: a call is
-  annotation-shaped when the macro's declared arity is exactly one more than
-  the arguments passed — the extra (final) parameter receives the declaration.
-  Macros with rest/keyword/defaulted params are not annotation-capable in v1
-  (the +1 test would be ambiguous); an explicit `annotation` definition
-  modifier (item 5's slot) is the successor if inference proves too implicit.
+  may expand to multiple declarations. v1 classification: a statement-position
+  call to a macro is annotation-shaped when it is line-adjacent to a following
+  declaration and has no statement-level use other than annotating that
+  declaration. The full macro call channel is preserved, so keyword/default/rest
+  macro signatures are annotation-capable.
 - A string-tag macro receives one `Ast.StringTemplate` (see item 5 and the
   multiline text-block design §7) and must return exactly one expression AST.
-- A `use` macro receives the enclosing class/mixin/module context and returns
-  member declarations. Generated `macro def` declarations are disallowed in v1;
-  macro providers must be known before expansion staging starts (§11).
+- A `use` macro receives the enclosing class/mixin/module context plus the
+  ordinary call arguments supplied to `use`; an attached block is supplied
+  through its declared `&blk` channel. It returns member declarations.
+  Generated `macro def` declarations are disallowed in v1; macro providers must
+  be known before expansion staging starts (§11).
 - Macro diagnostics should be emitted through `Macro.error(...)` /
   `Macro.warn(...)` with explicit spans. Throwing from a macro body is reserved
   for macro implementation failure and is reported as a compiler diagnostic,
@@ -498,9 +558,10 @@ unchanged: it consumes verified post-expansion `.amberbc`.
   in that macro namespace; otherwise it remains an ordinary call for F2.
   Ambiguous macro imports are expansion diagnostics, not runtime dispatch
   choices.
-- A module's `macro def` declarations and ordinary helper functions reachable
-  from them are compiled (parsed → bound → lowered → `.amberbc`) **before** any
-  module that invokes those macros is expanded.
+- A module's exported `macro def` declarations and private macro helper defs
+  reachable from them are staged **before** any module that invokes those macros
+  is expanded. Ordinary runtime helper functions are not part of the first
+  staging model; shared macro helpers should be written as private `macro def`s.
 - Macro definitions may not (transitively) use macros defined in modules that
   depend on them — **cyclic macro use is illegal** (`AMB_MACRO_CYCLE`).
 - A macro body may call ordinary (non-macro) functions, but only ones reachable
@@ -535,21 +596,24 @@ rows = conn.execute(psql"""
   table is what makes §11's "providers known before staging starts" statically
   true. An unexported `macro def` is module-private — exactly the current
   same-module behavior.
-- **Imports are unified.** `from m import sql as psql` and `import m as pg`
-  bring macro names through the same statements and alias table as runtime
-  names. A module's compile-time namespace = its own `macro def`s plus its
-  macro-marked imports. Ambiguous imports (two providers exporting `sql`) are
-  expansion diagnostics; `as`-renaming is the resolution tool.
+- **Imports are unified.** `from m import sql as psql`, `import m as pg`, and
+  plain `import m` bring macro names through the same statements and alias table
+  as runtime names. Plain module imports use the binder's default alias (the
+  last path segment), so `import orm` binds `orm.model` and
+  `import db.postgres` binds `postgres.sql`. A module's compile-time namespace =
+  its own `macro def`s plus its macro-marked imports. Ambiguous imports (two
+  providers exporting `sql`) are expansion diagnostics; `as`-renaming is the
+  resolution tool.
 - **Macros are not values.** F1.5 consumes every macro use before the binder
   runs; a leftover reference to a macro name in value position (e.g. passing
   `psql` as an argument) is a compile-time diagnostic, so the compile-time and
   runtime namespaces sharing one alias never leaks into runtime semantics.
 - **The artifact carries a macro section.** A provider's `.amberbc` gains a
-  table of exported macros: public name, surface kind (call / string-tag /
-  annotation), declared signature/arity, and the compiled expander bytecode
-  together with its reachable helper graph (the §11 closure). The importer's
-  build cache key includes the provider macro-section hash — expansion
-  *output*, not just linkage, depends on it.
+  table of staged macro defs: public/private visibility, public name for exports
+  (helper name for private defs), surface kind (call / string-tag / annotation),
+  declared signature/arity, and the source/bytecode slice needed to rebuild the
+  expander VM. The importer's build cache key includes the provider
+  macro-section hash — expansion *output*, not just linkage, depends on it.
 - **Supply-chain consequence.** An imported macro is third-party code running
   at compile time. The §10 sandbox therefore gates this feature: expander
   capability lockdown ships before cross-module macro imports are enabled.
@@ -699,9 +763,10 @@ build profile**, parallel to how Q4 makes the typed profile opt-in:
 4. **Plain-call macro resolution.** *Resolved — see §11 "Exports and
    imports":* `export macro name` marks macro exports on the existing export
    statement; imports are unified (`from m import sql as psql`, `import m as
-   pg`) with no `import macro` form; the artifact carries a macro section; the
-   sandbox gates cross-module enablement. The invariant stands: `name!(args…)`
-   is rejected; plain calls and explicit dot-calls are the call forms.
+   pg`, and plain `import m` using the binder's default alias) with no
+   `import macro` form; the artifact carries a macro section; the sandbox gates
+   cross-module enablement. The invariant stands: `name!(args…)` is rejected;
+   plain calls and explicit dot-calls are the call forms.
 5. **Attribute-macro ordering.** *Resolved:* source (top-to-bottom) order,
    each macro seeing the previous one's output; only the last annotation in a
    stack may expand to multiple declarations (§8 ABI).

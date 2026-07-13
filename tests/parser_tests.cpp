@@ -218,6 +218,20 @@ void test_new_binary_operators() {
   expect(string_field(*shr, "op") == ">>", "right shift op");
 }
 
+void test_index_method_names() {
+  amber::parser::ParseModuleResult module = parse_module_raw(
+      "class Indexable:\n"
+      "  def [](key): key\n"
+      "  def []=(key, value): value\n");
+  expect(module.ok(), "index getter and setter methods parse");
+  const amber::ast::ListField &body = list_field(*module.items[0], "body");
+  expect(body.values.size() == 2, "index method count");
+  expect(string_field(*body.values[0], "name") == "[]",
+         "index getter selector");
+  expect(string_field(*body.values[1], "name") == "[]=",
+         "index setter selector");
+}
+
 void test_comparison_chains() {
   std::unique_ptr<Expr> ascending = parse_ok("a < x <= b\n");
   expect(ascending->kind == "AstCompareChain",
@@ -1625,6 +1639,24 @@ void test_quote_surface() {
            "quoted body preserves ordinary AST");
   }
 
+  // Quoted syntax is validated where it is spliced, not where the quote is
+  // written. Class-injection macros can therefore quote class-only members.
+  {
+    amber::parser::ParseModuleResult module = parse_module_raw(
+        "quote:\n"
+        "  include Shared\n");
+    expect(module.ok(), "quote can represent a class-only include member");
+    const Expr &quote = node_field(*module.items[0], "expr");
+    const amber::ast::ListField &body = list_field(quote, "body");
+    expect(body.values.size() == 1 &&
+               body.values[0]->kind == "AstIncludeStmt",
+           "quoted include preserves its member AST");
+
+    amber::parser::ParseModuleResult ordinary =
+        parse_module_raw("include Shared\n");
+    expect(!ordinary.ok(), "ordinary module-level include remains invalid");
+  }
+
   // Inside a quote, unquote / unquote_splice are splice holes.
   {
     amber::parser::ParseModuleResult module = parse_module_raw(
@@ -1852,6 +1884,7 @@ int main() {
   test_precedence();
   test_compound_assignment();
   test_new_binary_operators();
+  test_index_method_names();
   test_comparison_chains();
   test_bare_call();
   test_dot_call_segment();

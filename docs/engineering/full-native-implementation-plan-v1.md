@@ -1,7 +1,6 @@
 # amber.full-native.implementation-plan.v1
 
-Status: planning document for replacing the current bytecode-trampoline native
-readiness layer with a real host-native execution path.
+Status: active implementation record for the host-native execution path.
 
 > 2026-06-12 amendments: the shipping backend is `cpp-bytecode-direct-v1`
 > (bytecode-input transpile in `tools/amberc/main.cpp`), not a MIR-input
@@ -11,6 +10,28 @@ readiness layer with a real host-native execution path.
 > VM fallback exists as the per-function scalar bridge (see
 > `docs/engineering/native-backend-equivalence-v1.md`); the prebuilt runtime
 > archive cache makes native links ~1s warm.
+
+> 2026-07-11 progress: the direct lane now has native class constants,
+> class-valued construction calls, user-method dispatch, native instances,
+> `LOAD_IVAR`/`STORE_IVAR`, shallow/deep collection and instance copy
+> (including topology preservation and `init_copy`), presence predicates,
+> monotonic time, and focused collection mutation. The
+> `native_object_state` fixture is `--require-full-native`. On the four-module
+> amber-orm selftest graph this moved direct coverage from 324/916 to 598/916;
+> the next first fallback is an exception handler table in
+> `Instrumentation#instrument`. Full ORM coverage therefore now depends on
+> the exception/unwind phase and, after it, native task/synchronization, IO,
+> and sqlite extension dispatch. Those effectful slices must not be admitted
+> to the current whole-program restart lane merely to raise the counter.
+
+> 2026-07-13 progress: the four-module amber-orm SQLite selftest is now fully
+> native: 916/916 code objects, comprising 881 generated C++ bodies and 35
+> direct `amber_ext.h` extension thunks, with 0 VM bridges and 0 fallback
+> objects. Native-bound leaves use `RuntimeWorld::invoke_native_extension`,
+> which supplies runtime host services without executing their Amber fallback
+> bodies. Full-coverage output omits the VM entry/restart path entirely; the
+> ORM selftest returns `29`. The standalone sqlite3 selftest is likewise
+> 477/477 native with no VM path and returns `35`.
 
 This plan assumes the current repository state:
 

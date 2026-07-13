@@ -1,0 +1,45 @@
+from sync import Mutex, Atomic
+
+class NativeCounter:
+  def init(@count):
+    @copied = false
+
+  def init_copy(source):
+    @copied = true
+
+  def bump!():
+    @count = @count + 1
+
+  def value():
+    @count
+
+  def copied?():
+    @copied
+
+  def apply(&work):
+    work()
+
+def main():
+  counter = NativeCounter(40)
+  counter.bump!
+  values = [counter]
+  deep = values.deep_copy
+  shallow = values.copy
+  shallow[0].bump!
+  deep[0].bump!
+  shallow.push!(deep[0])
+  block_value = counter.apply:
+    1
+  atomic = Atomic.new(0)
+  atomic_value = atomic.update: _1 + 1
+  mutex = Mutex.new()
+  guarded_value = mutex.synchronize:
+    1
+  mark = Time.monotonic
+  if mark.total_nanoseconds >= 0 and null.absent? and deep[0].copied? and shallow.length == 2:
+    if "amber".present?:
+      counter.value + deep[0].value + block_value + atomic_value + guarded_value
+    else:
+      0
+  else:
+    0

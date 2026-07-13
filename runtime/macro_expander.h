@@ -14,11 +14,13 @@ struct ExpandResult {
   std::string error; // diagnostic message when ok == false
 };
 
-// One `export macro` entry of an already-staged provider module: the public
-// name plus an owned clone of the `macro def` AST (still is_macro-tagged).
+// One staged macro definition of an already-staged provider module: public
+// exported macros are triggerable by importers; private macro defs ride along
+// only as compile-time helpers for exported macro bodies.
 struct MacroExport {
   std::string public_name;
   std::shared_ptr<const ast::Expr> def;
+  bool public_export = true;
 };
 
 // Provider table for cross-module macro staging (DESIGN-macro-system §11):
@@ -27,21 +29,23 @@ struct MacroExport {
 // macro definitions already staged.
 using MacroProviderMap = std::map<std::string, std::vector<MacroExport>>;
 
-// Harvest a parsed module's `export macro` table: every AstExportStmt item
-// marked `macro` whose local name matches a `macro def` in `items` yields a
-// MacroExport under its public name. A macro-marked export without a matching
-// definition is skipped (the importer will report the unknown name).
+// Harvest a parsed module's staged macro table. If the module has at least one
+// valid `export macro`, all of its macro defs are returned: exported entries are
+// public trigger surfaces, and private entries are helper definitions available
+// to those public macros. A macro-marked export without a matching definition is
+// skipped (the importer will report the unknown name).
 std::vector<MacroExport>
 collect_macro_exports(const std::vector<std::unique_ptr<ast::Expr>> &items);
 
 // Persisted artifact macro section (§11): a macro-providing module's build
 // artifact embeds its `export macro` table under this module attribute, so a
 // later build can stage against the artifact without re-parsing provider
-// source. The payload is schema-tagged (`amber.macro.exports.v1`) and
-// carries, per export: public name, surface kind (`call` / `string_tag`),
-// the definition's source line, and the `macro def` source slice itself —
-// the parser is the deserializer, so staging from an artifact is exactly
-// staging from source.
+// source. The payload is schema-tagged (`amber.macro.exports.v2`) and
+// carries, per staged macro: public/helper visibility, public name, surface kind
+// (`call` / `string_tag`), the definition's source line, and the `macro def`
+// source slice itself — the parser is the deserializer, so staging from an
+// artifact is exactly staging from source. v1 payloads remain readable as
+// public-only tables.
 inline constexpr const char *kMacroExportsAttrKey = "amber.macro.exports";
 
 // Encode `exports` (harvested from a module whose text is `module_source`)
@@ -73,12 +77,12 @@ std::vector<MacroExport> parse_macro_exports(const std::string &payload,
 // The provider-aware overload additionally resolves imports against
 // `providers` (§11 exports/imports): each `from <module> import name [as
 // alias]` match is cloned under the importer's local alias, and each
-// `import <module> as alias` binds every macro export of the provider under
-// the dotted spelling `alias.name` (usable through the call, string-tag,
+// `import <module> as alias` binds every public macro export of the provider
+// under the dotted spelling `alias.name` (usable through the call, string-tag,
 // block-suffix, annotation, and `use` surfaces). Imported names that are not
-// in the provider table stay ordinary runtime imports. v1 limit: an imported
-// macro body may only call other macros/builtins — provider runtime helpers
-// are not staged with it.
+// in the provider table stay ordinary runtime imports. Private provider macro
+// defs are staged as compile-time helpers, but ordinary runtime helper
+// functions are not.
 ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
                            const std::string &module_name,
                            const std::string &source);

@@ -501,7 +501,7 @@ test: build
 	$(BUILD_DIR)/amberc build tests/fixtures/native_str_bytes_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-str-bytes-core > $(BUILD_DIR)/native-str-bytes-core-build.json
 	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-str-bytes-core-build.json
 	$(BUILD_DIR)/native-str-bytes-core > $(BUILD_DIR)/native-str-bytes-core.out
-	grep -q '^11$$' $(BUILD_DIR)/native-str-bytes-core.out
+	grep -q '^12$$' $(BUILD_DIR)/native-str-bytes-core.out
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_str_bytes_core/main.am > $(BUILD_DIR)/native-str-bytes-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-str-bytes-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-str-bytes-core.dump
@@ -589,6 +589,52 @@ test: build
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_fs_path_core/main.am > $(BUILD_DIR)/native-fs-path-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-fs-path-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-fs-path-core.dump
+	$(BUILD_DIR)/amberc build corpus/run/native_object_state/source.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-object-state > $(BUILD_DIR)/native-object-state-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-object-state-build.json
+	$(BUILD_DIR)/native-object-state > $(BUILD_DIR)/native-object-state.out
+	grep -q '^87$$' $(BUILD_DIR)/native-object-state.out
+	$(BUILD_DIR)/amberc build corpus/run/native_exception_state/source.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-exception-state > $(BUILD_DIR)/native-exception-state-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-exception-state-build.json
+	$(BUILD_DIR)/native-exception-state > $(BUILD_DIR)/native-exception-state.out
+	grep -q '^74$$' $(BUILD_DIR)/native-exception-state.out
+	$(BUILD_DIR)/amberc build corpus/run/native_io_state/source.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-io-state > $(BUILD_DIR)/native-io-state-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-io-state-build.json
+	$(BUILD_DIR)/native-io-state > $(BUILD_DIR)/native-io-state.out
+	grep -q '^5$$' $(BUILD_DIR)/native-io-state.out
+	$(BUILD_DIR)/amberc build corpus/run/native_task_state/source.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-task-state > $(BUILD_DIR)/native-task-state-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-task-state-build.json
+	$(BUILD_DIR)/native-task-state > $(BUILD_DIR)/native-task-state.out
+	grep -q '^4$$' $(BUILD_DIR)/native-task-state.out
+	$(BUILD_DIR)/amberc build corpus/run/native_map_get_or_set/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-map-get-or-set > $(BUILD_DIR)/native-map-get-or-set-build.json
+	$(BUILD_DIR)/native-map-get-or-set > $(BUILD_DIR)/native-map-get-or-set.out
+	grep -q '^64$$' $(BUILD_DIR)/native-map-get-or-set.out
+	$(BUILD_DIR)/amberc build corpus/run/native_pattern_triple_eq/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-pattern-triple-eq > $(BUILD_DIR)/native-pattern-triple-eq-build.json
+	$(BUILD_DIR)/native-pattern-triple-eq > $(BUILD_DIR)/native-pattern-triple-eq.out
+	grep -q '^21$$' $(BUILD_DIR)/native-pattern-triple-eq.out
+	$(BUILD_DIR)/amberc build corpus/run/native_user_exception_state/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-user-exception-state > $(BUILD_DIR)/native-user-exception-state-build.json
+	$(BUILD_DIR)/native-user-exception-state > $(BUILD_DIR)/native-user-exception-state.out
+	grep -q '^21$$' $(BUILD_DIR)/native-user-exception-state.out
+	$(BUILD_DIR)/amberc build corpus/run/native_collection_type_matchers/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-collection-type-matchers > $(BUILD_DIR)/native-collection-type-matchers-build.json
+	$(BUILD_DIR)/native-collection-type-matchers > $(BUILD_DIR)/native-collection-type-matchers.out
+	grep -q '^95$$' $(BUILD_DIR)/native-collection-type-matchers.out
+	$(BUILD_DIR)/amberc build corpus/run/native_call_shape/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-call-shape > $(BUILD_DIR)/native-call-shape-build.json
+	$(BUILD_DIR)/native-call-shape > $(BUILD_DIR)/native-call-shape.out
+	grep -q '^115$$' $(BUILD_DIR)/native-call-shape.out
+	$(BUILD_DIR)/amberc build corpus/run/task_mutex_parallel/source.am --entry main --require-full-native -o $(BUILD_DIR)/task-mutex-parallel > $(BUILD_DIR)/task-mutex-parallel-build.json
+	$(BUILD_DIR)/task-mutex-parallel > $(BUILD_DIR)/task-mutex-parallel.out
+	grep -q '^0$$' $(BUILD_DIR)/task-mutex-parallel.out
+	$(BUILD_DIR)/amberc build corpus/run/native_clause_method/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-clause-method > $(BUILD_DIR)/native-clause-method-build.json
+	$(BUILD_DIR)/native-clause-method > $(BUILD_DIR)/native-clause-method.out
+	grep -q '^3$$' $(BUILD_DIR)/native-clause-method.out
+	$(BUILD_DIR)/amberc build corpus/run/native_sequence_zip_to_map/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-sequence-zip-to-map > $(BUILD_DIR)/native-sequence-zip-to-map-build.json
+	$(BUILD_DIR)/native-sequence-zip-to-map > $(BUILD_DIR)/native-sequence-zip-to-map.out
+	grep -q '^35$$' $(BUILD_DIR)/native-sequence-zip-to-map.out
+	$(BUILD_DIR)/amberc build corpus/run/native_class_variables/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-class-variables > $(BUILD_DIR)/native-class-variables-build.json
+	$(BUILD_DIR)/native-class-variables > $(BUILD_DIR)/native-class-variables.out
+	grep -q '^5$$' $(BUILD_DIR)/native-class-variables.out
+	$(BUILD_DIR)/amberc build corpus/run/native_callable_instance/source.am --entry main --require-full-native -o $(BUILD_DIR)/native-callable-instance > $(BUILD_DIR)/native-callable-instance-build.json
+	$(BUILD_DIR)/native-callable-instance > $(BUILD_DIR)/native-callable-instance.out
+	grep -q '^18$$' $(BUILD_DIR)/native-callable-instance.out
 	$(BUILD_DIR)/amberc build tests/fixtures/native_benchmark_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-benchmark-core > $(BUILD_DIR)/native-benchmark-core-build.json
 	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-benchmark-core-build.json
 	$(BUILD_DIR)/native-benchmark-core > $(BUILD_DIR)/native-benchmark-core.out
@@ -641,8 +687,9 @@ test: build
 	$(BUILD_DIR)/native_graph_pure/out/nat.graph.main > $(BUILD_DIR)/native-graph-pure.out
 	grep -q '^42$$' $(BUILD_DIR)/native-graph-pure.out
 	rm -rf $(BUILD_DIR)/native_ext_dep
-	$(BUILD_DIR)/amberc build tests/fixtures/native_ext_dep/amber.build.json --target native --out-dir $(BUILD_DIR)/native_ext_dep/out --cache-dir $(BUILD_DIR)/native_ext_dep/cache > $(BUILD_DIR)/native-ext-dep-build.json
-	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "ok" and result["native_graph_module_count"] == 2 and result["native_graph_vm_fallback_code_count"] == 1 and result["native_extensions"] and result["native_extensions"][0]["native_source_sha256"].startswith("sha256:"), result' $(BUILD_DIR)/native-ext-dep-build.json
+	$(BUILD_DIR)/amberc build tests/fixtures/native_ext_dep/amber.build.json --target native --require-full-native --out-dir $(BUILD_DIR)/native_ext_dep/out --cache-dir $(BUILD_DIR)/native_ext_dep/cache > $(BUILD_DIR)/native-ext-dep-build.json
+	python3 -c 'import json, sys; result = json.load(open(sys.argv[1])); assert result["status"] == "ok" and result["native_graph_module_count"] == 2 and result["native_graph_native_code_count"] == result["native_graph_code_count"] and result["native_graph_vm_fallback_code_count"] == 0 and not result["native_bytecode_fallback"] and result["native_extensions"] and result["native_extensions"][0]["native_source_sha256"].startswith("sha256:"), result' $(BUILD_DIR)/native-ext-dep-build.json
+	! grep -Eq 'run_vm_entry|amber_vm_fallback|\.execute\(' $(BUILD_DIR)/native_ext_dep/out/nat.dep.main.native.cpp
 	$(BUILD_DIR)/native_ext_dep/out/nat.dep.main > $(BUILD_DIR)/native-ext-dep-native.out
 	grep -q '^42$$' $(BUILD_DIR)/native-ext-dep-native.out
 	rm -rf $(BUILD_DIR)/native_class_demo

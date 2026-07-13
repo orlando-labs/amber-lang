@@ -22,6 +22,8 @@ def main():
     score = score + 1
   if "axbxc".replace("x", "-").ends_with?("-c"):
     score = score + 1
+  if "héllo".slice(1...5) == "éllo" and "héllo"[0 - 1] == "o":
+    score = score + 1
   bytes = "Aé".bytes()
   if bytes.count() == 3 and bytes[-1] == 169:
     score = score + 1

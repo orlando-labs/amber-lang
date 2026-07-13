@@ -1,0 +1,13 @@
+def main():
+  buffer = io.Buffer.new()
+  stderr = io.stderr()
+  buffer.write_str("a")
+  buffer.write_line("b")
+  buffer.flush()
+  params = Amber.stringify({id: 1}, mode: :inspect)
+  if buffer.xterm?:
+    0
+  elif buffer.to_str == "ab\n" and params == "{:id: 1}" and Bool === stderr.xterm?:
+    5
+  else:
+    0

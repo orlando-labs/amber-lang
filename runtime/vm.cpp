@@ -342,6 +342,10 @@ Value unwrap_watch_value(const Value &value);
 
 } // namespace
 
+bool runtime_keyword_identifier_text(const std::string &text) {
+  return keyword_identifier_text(text);
+}
+
 namespace {
 
 std::shared_ptr<RuntimeWatchCell> watch_cell_from_value(const Value &value) {
@@ -1020,7 +1024,9 @@ public:
               const RuntimeModuleRegistry *module_registry = nullptr,
               const RuntimeTypeRegistry *type_registry = nullptr,
               const RuntimeDispatchRegistry *dispatch_registry = nullptr,
-              const RuntimeErrorRegistry *error_registry = nullptr)
+              const RuntimeErrorRegistry *error_registry = nullptr,
+              std::function<ExecutionResult(const Value &)>
+                  macro_block_executor = {})
       : module_(module), initial_string_count_(module.strings.size()),
         initial_symbol_count_(module.symbols.size()),
         state_(state == nullptr ? std::make_shared<RuntimeState>()
@@ -1030,7 +1036,8 @@ public:
         trace_recorder_(std::move(trace_recorder)),
         native_registry_(native_registry), module_registry_(module_registry),
         type_registry_(type_registry), dispatch_registry_(dispatch_registry),
-        error_registry_(error_registry) {
+        error_registry_(error_registry),
+        macro_block_executor_(std::move(macro_block_executor)) {
     state_->initialize_for_module(module_);
     resolve_numeric_policy();
     if (native_registry_ == nullptr) {
@@ -1737,6 +1744,34 @@ public:
                                std::move(watch_events), state_->watch_epoch});
   }
 
+  ExecutionResult invoke_native_extension(std::uint32_t code_id,
+                                          const std::vector<Value> &args,
+                                          Value self) {
+    const BcCode *entry = find_code(module_, code_id);
+    if (entry == nullptr) {
+      return with_runtime_names(
+          fail("VMError", "unknown native-extension code id", code_id, 0));
+    }
+    Frame caller;
+    caller.code = entry;
+    caller.self = std::move(self);
+    initialize_frame_register_file(caller, *entry);
+
+    Value native_out = Value::null();
+    bool native_faulted = false;
+    if (!try_dispatch_native_extension_code(caller, code_id, args, caller.self,
+                                            &native_out, &native_faulted)) {
+      return with_runtime_names(fail(
+          "NativeRequiredError", "native-extension thunk is unavailable",
+          code_id, 0));
+    }
+    state_->heap.drain_remote_frees();
+    if (native_faulted || fault_.has_value()) {
+      return with_runtime_names({Value::null(), fault_});
+    }
+    return with_runtime_names({std::move(native_out), std::nullopt});
+  }
+
   // Arm the compile-time step budget on this VM's (shared) runtime state.
   void enable_step_budget(std::int64_t steps) {
     state_->step_budget_enabled = true;
@@ -1915,7 +1950,10 @@ private:
     if (!state_->module_init_completed && module_.init.has_entry_code_id &&
         module_.init.entry_code_id != code_id) {
       Vm init_vm(module_, state_, module_id_, world_options_, capabilities_,
-                 effects_, trace_recorder_);
+                 effects_, trace_recorder_, child_native_registry(),
+                 child_module_registry(), child_type_registry(),
+                 child_dispatch_registry(), child_error_registry(),
+                 macro_block_executor_);
       ExecutionResult init_result = init_vm.execute(
           module_.init.entry_code_id, {}, Value::null(), Value::null());
       if (!init_result.ok()) {
@@ -2291,6 +2329,178 @@ private:
 
   IntrusivePtr<InstanceValue> make_instance_value(std::uint32_t class_index) {
     return state_->heap.make_instance_value(class_index);
+  }
+
+  using CopyMemo = std::unordered_map<const ObjHeader *, Value>;
+
+  std::optional<Value> copy_runtime_value(Frame &frame, const Value &source,
+                                          bool deep, CopyMemo *memo) {
+    if (!ensure_lifecycle_access(frame, source)) {
+      return std::nullopt;
+    }
+
+    const ObjHeader *header = heap_header_from_value(source);
+    if (deep && header != nullptr) {
+      const auto found = memo->find(header);
+      if (found != memo->end()) {
+        return found->second;
+      }
+    }
+
+    if (source.is_list()) {
+      const IntrusivePtr<ListValue> list = source.as_list();
+      Value copied = make_list_value({});
+      const IntrusivePtr<ListValue> target = copied.as_list();
+      if (!deep) {
+        target->items = list->items;
+        return copied;
+      }
+      (*memo)[header] = copied;
+      target->items.reserve(list->items.size());
+      for (const Value &item : list->items) {
+        const std::optional<Value> next =
+            copy_runtime_value(frame, item, true, memo);
+        if (!next.has_value()) {
+          return std::nullopt;
+        }
+        target->items.push_back(*next);
+      }
+      return copied;
+    }
+
+    if (source.is_tuple()) {
+      const IntrusivePtr<TupleValue> tuple = source.as_tuple();
+      Value copied = make_tuple_value({});
+      const IntrusivePtr<TupleValue> target = copied.as_tuple();
+      if (!deep) {
+        target->items = tuple->items;
+        return copied;
+      }
+      (*memo)[header] = copied;
+      target->items.reserve(tuple->items.size());
+      for (const Value &item : tuple->items) {
+        const std::optional<Value> next =
+            copy_runtime_value(frame, item, true, memo);
+        if (!next.has_value()) {
+          return std::nullopt;
+        }
+        target->items.push_back(*next);
+      }
+      return copied;
+    }
+
+    if (source.is_set()) {
+      const IntrusivePtr<SetValue> set = source.as_set();
+      Value copied = make_set_value({});
+      const IntrusivePtr<SetValue> target = copied.as_set();
+      if (!deep) {
+        target->items = set->items;
+        return copied;
+      }
+      (*memo)[header] = copied;
+      for (const Value &item : set->items) {
+        const std::optional<Value> next =
+            copy_runtime_value(frame, item, true, memo);
+        if (!next.has_value()) {
+          return std::nullopt;
+        }
+        CollectionKeyError error;
+        const std::optional<Value> normalized =
+            normalize_set_element(*next, &error);
+        if (!normalized.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return std::nullopt;
+        }
+        append_unique_value(&target->items, *normalized);
+      }
+      return copied;
+    }
+
+    if (source.is_map()) {
+      const IntrusivePtr<MapValue> map = source.as_map();
+      Value copied = make_symbol_map_value({}, false, map->strict);
+      const IntrusivePtr<MapValue> target = copied.as_map();
+      if (!deep) {
+        map_value_assign_entries(target.get(), map->entries);
+        return copied;
+      }
+      (*memo)[header] = copied;
+      for (const MapEntry &entry : map->entries) {
+        const std::optional<Value> key =
+            copy_runtime_value(frame, entry.key, true, memo);
+        const std::optional<Value> value =
+            copy_runtime_value(frame, entry.value, true, memo);
+        if (!key.has_value() || !value.has_value()) {
+          return std::nullopt;
+        }
+        CollectionKeyError error;
+        const std::optional<Value> normalized =
+            normalize_map_key(*key, &error);
+        if (!normalized.has_value()) {
+          set_fault(frame, error.error_name, error.message);
+          return std::nullopt;
+        }
+        map_value_upsert_entry(
+            target.get(),
+            make_canonical_map_entry(*normalized, *value, target->strict));
+      }
+      return copied;
+    }
+
+    if (!source.is_instance_object() ||
+        instance_is_native_range(source.as_instance_object()) ||
+        value_is_lazy_seq_instance(source)) {
+      return source;
+    }
+
+    const IntrusivePtr<InstanceValue> instance = source.as_instance_object();
+    auto duplicate = make_instance_value(instance->class_index);
+    if (!ensure_instance_layout(frame, duplicate)) {
+      return std::nullopt;
+    }
+    duplicate->header.shape = instance->header.shape;
+    duplicate->ivar_shape_version = instance->ivar_shape_version;
+    const Value copied = Value::instance(duplicate);
+    if (deep) {
+      (*memo)[header] = copied;
+      duplicate->ivar_storage.clear();
+      duplicate->ivars.clear();
+      duplicate->ivar_storage.reserve(instance->ivar_storage.size());
+      for (const Value &value : instance->ivar_storage) {
+        const std::optional<Value> next =
+            copy_runtime_value(frame, value, true, memo);
+        if (!next.has_value()) {
+          return std::nullopt;
+        }
+        duplicate->ivar_storage.push_back(*next);
+      }
+      for (const auto &[name, value] : instance->ivars) {
+        const std::optional<Value> next =
+            copy_runtime_value(frame, value, true, memo);
+        if (!next.has_value()) {
+          return std::nullopt;
+        }
+        duplicate->ivars[name] = *next;
+      }
+    } else {
+      duplicate->ivar_storage = instance->ivar_storage;
+      duplicate->ivars = instance->ivars;
+    }
+
+    const bytecode::BcMethod *init_copy = find_method_for_dispatch(
+        frame, instance->class_index, "init_copy", kMethodFlagInstance);
+    if (fault_.has_value()) {
+      return std::nullopt;
+    }
+    if (init_copy != nullptr) {
+      const std::vector<std::pair<std::uint32_t, Value>> no_keywords;
+      const std::optional<Value> initialized = execute_method_to_value(
+          frame, *init_copy, {source}, no_keywords, copied, Value::null());
+      if (!initialized.has_value()) {
+        return std::nullopt;
+      }
+    }
+    return copied;
   }
 
   std::optional<Value> call_block_to_value(const Frame &frame,
@@ -2931,7 +3141,7 @@ private:
           module_, state_, module_id_, world_options_, capabilities_, effects_,
           trace_recorder_, child_native_registry(), child_module_registry(),
           child_type_registry(), child_dispatch_registry(),
-          child_error_registry());
+          child_error_registry(), macro_block_executor_);
       // Block results flow through final_value_; nobody reads the completed
       // register snapshot, so skip the per-return register copy.
       lease.vm->capture_completed_frames_ = false;
@@ -10142,6 +10352,27 @@ private:
     return "Exception";
   }
 
+  std::string exception_message(const Value &exception) {
+    if (exception.is_error_instance() &&
+        exception.as_error_instance() != nullptr) {
+      return exception.as_error_instance()->message;
+    }
+    if (exception.is_instance_object() &&
+        exception.as_instance_object() != nullptr) {
+      const Value message =
+          instance_ivar_value_or_null(exception.as_instance_object(), "message");
+      if (message.is_string()) {
+        const std::optional<std::string> text =
+            string_text_from_id(message.as_string().string_id);
+        if (text.has_value()) {
+          return *text;
+        }
+      }
+    }
+    return "unhandled exception " +
+           value_to_debug_string(exception, &module_);
+  }
+
   Value
   selector_value_for_method_missing(const std::string &selector_text,
                                     const std::optional<Value> &original) {
@@ -10870,7 +11101,10 @@ private:
           return false;
         }
         Vm nested(module_, state_, module_id_, world_options_, capabilities_,
-                  effects_, trace_recorder_);
+                  effects_, trace_recorder_, child_native_registry(),
+                  child_module_registry(), child_type_registry(),
+                  child_dispatch_registry(), child_error_registry(),
+                  macro_block_executor_);
         const ExecutionResult result =
             nested.execute(method.default_thunk_ids[thunk_index], frame.regs,
                            frame.self, frame.block);
@@ -10932,7 +11166,10 @@ private:
     }
 
     Vm nested(module_, state_, module_id_, world_options_, capabilities_,
-              effects_, trace_recorder_);
+              effects_, trace_recorder_, child_native_registry(),
+              child_module_registry(), child_type_registry(),
+              child_dispatch_registry(), child_error_registry(),
+              macro_block_executor_);
     if (const std::string *label = active_no_suspend_label()) {
       nested.inherited_no_suspend_label_ = *label;
     }
@@ -10966,7 +11203,10 @@ private:
   NestedExecution execute_prepared_frame(Frame frame) {
     NestedExecution out;
     Vm nested(module_, state_, module_id_, world_options_, capabilities_,
-              effects_, trace_recorder_);
+              effects_, trace_recorder_, child_native_registry(),
+              child_module_registry(), child_type_registry(),
+              child_dispatch_registry(), child_error_registry(),
+              macro_block_executor_);
     if (const std::string *label = active_no_suspend_label()) {
       nested.inherited_no_suspend_label_ = *label;
     }
@@ -11053,10 +11293,9 @@ private:
                                               pos_args, self, out, faulted);
   }
 
-  // Same dispatch keyed directly on an entry code object, used by the
-  // public execute() entry so the native lane's per-function VM bridge
-  // (amber_vm_fallback_call -> execute(code_id, args)) routes native-bound code
-  // objects to their thunk too.
+  // Same dispatch keyed directly on an entry code object. RuntimeWorld's
+  // native-extension entry uses this path without pushing or stepping an Amber
+  // bytecode frame; execute() also uses it before considering a fallback body.
   bool try_dispatch_native_extension_code(Frame &caller, std::uint32_t code_id,
                                           const std::vector<Value> &pos_args,
                                           const Value &self, Value *out,
@@ -11452,6 +11691,38 @@ private:
     return SendStatus::Matched;
   }
 
+  SendStatus call_macro_ast_block(
+      Frame &frame, const Value &callee, const std::vector<Value> &pos_args,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      const Value &block, std::uint32_t dst) {
+    if (!callee.is_ast_node() || !macro_block_executor_) {
+      return SendStatus::NotHandled;
+    }
+    const std::shared_ptr<RuntimeAstNode> ast_block = callee.as_ast_node();
+    if (ast_block == nullptr || ast_block->node == nullptr ||
+        runtime_ast_node_kind(*ast_block) != "AstBlock") {
+      set_fault(frame, "TypeError",
+                "only Ast.Block is callable in a macro body");
+      return SendStatus::Faulted;
+    }
+    if (!pos_args.empty() || !kw_args.empty() || !block.is_null()) {
+      set_fault(frame, "TypeError",
+                "a macro block call accepts no arguments, keywords, or "
+                "nested block");
+      return SendStatus::Faulted;
+    }
+    ExecutionResult expanded = macro_block_executor_(callee);
+    if (!expanded.ok()) {
+      fault_ = std::move(expanded.fault);
+      return SendStatus::Faulted;
+    }
+    if (!write_reg(frame, dst, std::move(expanded.value))) {
+      return SendStatus::Faulted;
+    }
+    ++frame.pc;
+    return SendStatus::Matched;
+  }
+
   bool invoke_callable_value(
       Frame &frame, const Value &callee, const std::vector<Value> &pos_args,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
@@ -11512,6 +11783,17 @@ private:
       frame.active_call_pc = call_pc;
       push_frame(*code, pos_args, closure->captures, closure->self, block, dst);
       return true;
+    }
+
+    {
+      const SendStatus status =
+          call_macro_ast_block(frame, callee, pos_args, kw_args, block, dst);
+      if (status == SendStatus::Faulted) {
+        return false;
+      }
+      if (status == SendStatus::Matched) {
+        return true;
+      }
     }
 
     if (callee.is_native_function()) {
@@ -12295,13 +12577,8 @@ private:
       if (pending_exception.has_value()) {
         escaped_exception_ = *pending_exception;
         const std::string error_name = exception_error_name(*pending_exception);
-        fault_ = make_fault(
-            completed_frame, error_name,
-            pending_exception->is_error_instance() &&
-                    pending_exception->as_error_instance() != nullptr
-                ? pending_exception->as_error_instance()->message
-                : "unhandled exception " +
-                      value_to_debug_string(*pending_exception, &module_));
+        fault_ = make_fault(completed_frame, error_name,
+                            exception_message(*pending_exception));
       } else if (pending_throw.has_value()) {
         escaped_throw_ = *pending_throw;
         fault_ =
@@ -12354,12 +12631,7 @@ private:
       // child Vm can re-raise it into the parent (call_block_to_value).
       escaped_exception_ = active_exception;
       const std::string error_name = exception_error_name(active_exception);
-      const std::string message =
-          active_exception.is_error_instance() &&
-                  active_exception.as_error_instance() != nullptr
-              ? active_exception.as_error_instance()->message
-              : "unhandled exception " +
-                    value_to_debug_string(active_exception, &module_);
+      const std::string message = exception_message(active_exception);
       fault_ = make_fault(raising_frame, error_name, message);
       return false;
     }
@@ -13215,6 +13487,32 @@ private:
     node->node = root.get();
     node->source = nullptr;
     return Value::ast_node(node);
+  }
+
+  static std::unique_ptr<ast::Expr>
+  replace_ast_name(const ast::Expr &node, const std::string &name,
+                   const ast::Expr &replacement) {
+    if (node.kind == "AstName") {
+      for (const ast::StringField &field : node.string_fields) {
+        if (field.name == "name" && field.value == name) {
+          return ast::clone_expr(replacement);
+        }
+      }
+    }
+    std::unique_ptr<ast::Expr> copy = ast::clone_expr(node);
+    for (ast::NodeField &field : copy->node_fields) {
+      if (field.value) {
+        field.value = replace_ast_name(*field.value, name, replacement);
+      }
+    }
+    for (ast::ListField &field : copy->list_fields) {
+      for (std::unique_ptr<ast::Expr> &child : field.values) {
+        if (child) {
+          child = replace_ast_name(*child, name, replacement);
+        }
+      }
+    }
+    return copy;
   }
 
   static Value ast_value_from_expr(std::unique_ptr<ast::Expr> expr) {
@@ -18110,6 +18408,86 @@ private:
         *out = string_value_from_text(runtime_ast_node_source(*node));
         return SendStatus::Matched;
       }
+      if (selector == "replace_name") {
+        if (args.size() != 2U || !kw_args.empty() || !block.is_null()) {
+          set_fault(frame, "TypeError",
+                    "Ast#replace_name expects a name and replacement Ast");
+          return SendStatus::Faulted;
+        }
+        std::string name;
+        if (args[0].is_string()) {
+          name = string_text_from_id(args[0].as_string().string_id).value_or("");
+        } else if (args[0].is_symbol()) {
+          const std::uint32_t id = args[0].as_symbol().symbol_id;
+          if (id < module_.symbols.size()) {
+            name = module_.symbols[id];
+          }
+        } else {
+          set_fault(frame, "TypeError",
+                    "Ast#replace_name name must be Str or Symbol");
+          return SendStatus::Faulted;
+        }
+        if (!args[1].is_ast_node() || args[1].as_ast_node() == nullptr ||
+            args[1].as_ast_node()->node == nullptr) {
+          set_fault(frame, "TypeError",
+                    "Ast#replace_name replacement must be Ast");
+          return SendStatus::Faulted;
+        }
+        std::unique_ptr<ast::Expr> replaced = replace_ast_name(
+            *node->node, name, *args[1].as_ast_node()->node);
+        *out = ast_value_from_expr(std::move(replaced));
+        return SendStatus::Matched;
+      }
+      if (selector == "expressions") {
+        if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+          set_fault(frame, "TypeError",
+                    "Ast.Block#expressions accepts no arguments");
+          return SendStatus::Faulted;
+        }
+        if (node->node->kind != "AstBlock") {
+          set_fault(frame, "TypeError",
+                    "Ast#expressions is only available on Ast.Block");
+          return SendStatus::Faulted;
+        }
+        const ast::ListField *body = nullptr;
+        for (const ast::ListField &field : node->node->list_fields) {
+          if (field.name == "body") {
+            body = &field;
+            break;
+          }
+        }
+        std::vector<Value> expressions;
+        if (body != nullptr) {
+          expressions.reserve(body->values.size());
+          for (const std::unique_ptr<ast::Expr> &statement : body->values) {
+            if (!statement || statement->kind != "AstExprStmt") {
+              set_fault(frame, "TypeError",
+                        "Ast.Block#expressions requires expression-only "
+                        "statements");
+              return SendStatus::Faulted;
+            }
+            const ast::Expr *expr = nullptr;
+            for (const ast::NodeField &field : statement->node_fields) {
+              if (field.name == "expr") {
+                expr = field.value.get();
+                break;
+              }
+            }
+            if (expr == nullptr) {
+              set_fault(frame, "TypeError",
+                        "Ast.Block contains a malformed expression statement");
+              return SendStatus::Faulted;
+            }
+            auto value = std::make_shared<RuntimeAstNode>();
+            value->root = node->root;
+            value->node = expr;
+            value->source = node->source;
+            expressions.push_back(Value::ast_node(std::move(value)));
+          }
+        }
+        *out = make_list_value(std::move(expressions));
+        return SendStatus::Matched;
+      }
       // Generic Ast introspection (DESIGN-macro-system §17 Q6): a nullary
       // selector reads the node's amber.ast.v1 field of that name — Str for
       // string fields, Bool for bool fields, Ast for child nodes, List[Ast]
@@ -21410,7 +21788,7 @@ private:
   }
 
   SendStatus try_apply_scalar_send(
-      const Frame &frame, const Value &receiver, const std::string &selector,
+      Frame &frame, const Value &receiver, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
     if (!ensure_lifecycle_access(frame, receiver)) {
@@ -22807,13 +23185,17 @@ private:
                                 "filter_map!", "clear!", "replace!"});
     const bool data_path_selector = (receiver.is_list() || receiver.is_map()) &&
                                     collection_selector_in({"path", "paths"});
+    const bool collection_copy_selector =
+        (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
+         receiver.is_map()) &&
+        collection_selector_in({"copy", "deep_copy"});
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
          sequence_collection_selector) ||
         (receiver.is_list() && collection_selector == "[]=") ||
         list_mutation_selector || map_mutation_selector ||
-        set_mutation_selector || data_path_selector ||
+        set_mutation_selector || data_path_selector || collection_copy_selector ||
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() && collection_selector_in({"empty?",
@@ -22949,6 +23331,20 @@ private:
       *out = Value::boolean(
           args[0].is_class_object() &&
           args[0].as_class_object().class_index == target_class_index);
+      return SendStatus::Matched;
+    }
+
+    if (collection_copy_selector) {
+      if (!require_arity(0) || !require_no_block()) {
+        return SendStatus::Faulted;
+      }
+      CopyMemo memo;
+      const std::optional<Value> copied = copy_runtime_value(
+          frame, receiver, collection_selector == "deep_copy", &memo);
+      if (!copied.has_value()) {
+        return SendStatus::Faulted;
+      }
+      *out = *copied;
       return SendStatus::Matched;
     }
 
@@ -27097,6 +27493,33 @@ private:
       return false;
     }
     if (method == nullptr) {
+      if ((*selector == "copy" || *selector == "deep_copy") &&
+          receiver.is_instance_object() && !property_assignment) {
+        if (!args.empty()) {
+          set_fault(frame, "TypeError", *selector + " accepts no arguments");
+          return false;
+        }
+        if (!kw_args.empty()) {
+          set_fault(frame, "TypeError",
+                    *selector + " does not accept keyword arguments");
+          return false;
+        }
+        if (!block.is_null()) {
+          set_fault(frame, "TypeError", *selector + " does not accept a block");
+          return false;
+        }
+        CopyMemo memo;
+        const std::optional<Value> copied =
+            copy_runtime_value(frame, receiver, *selector == "deep_copy", &memo);
+        if (!copied.has_value()) {
+          return false;
+        }
+        if (!write_reg(frame, dst, *copied)) {
+          return false;
+        }
+        ++frame.pc;
+        return true;
+      }
       if ((*selector == "==" || *selector == "!=") && !property_access &&
           !property_assignment) {
         if (args.size() != 1U) {
@@ -28457,6 +28880,15 @@ private:
         return;
       }
 
+      {
+        const SendStatus status = call_macro_ast_block(
+            frame, packet.callee, packet.pos_args, packet.kw_args,
+            packet.block, packet.dst);
+        if (status == SendStatus::Faulted || status == SendStatus::Matched) {
+          return;
+        }
+      }
+
       if (packet.callee.is_native_function()) {
         Value result = Value::null();
         const SendStatus status = apply_kernel_output_helper(
@@ -29294,6 +29726,7 @@ private:
   // World-owned error registry, or `owned_error_registry_` for direct VM entry
   // points.
   const RuntimeErrorRegistry *error_registry_ = nullptr;
+  std::function<ExecutionResult(const Value &)> macro_block_executor_;
 };
 
 } // namespace
@@ -29318,11 +29751,24 @@ execute_runtime_vm(const bytecode::BcModule &module,
         context.world_options, context.capabilities, context.effects,
         std::move(context.trace_recorder), context.native_registry,
         context.module_registry, context.type_registry,
-        context.dispatch_registry, context.error_registry);
+        context.dispatch_registry, context.error_registry,
+        std::move(context.macro_block_executor));
   if (context.step_budget > 0) {
     vm.enable_step_budget(context.step_budget);
   }
   return vm.execute(code_id, args, kw_args, std::move(self), std::move(block));
+}
+
+ExecutionResult invoke_runtime_native_extension(
+    const bytecode::BcModule &module, RuntimeVmExecutionContext context,
+    std::uint32_t code_id, const std::vector<Value> &args, Value self) {
+  Vm vm(module, std::move(context.state), std::move(context.module_id),
+        context.world_options, context.capabilities, context.effects,
+        std::move(context.trace_recorder), context.native_registry,
+        context.module_registry, context.type_registry,
+        context.dispatch_registry, context.error_registry,
+        std::move(context.macro_block_executor));
+  return vm.invoke_native_extension(code_id, args, std::move(self));
 }
 
 ExecutionResult execute_code(const bytecode::BcModule &module,

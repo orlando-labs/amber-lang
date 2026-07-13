@@ -160,6 +160,17 @@ void strip_control_marker(ast::Expr &expr) {
                          expr.bool_fields.end());
 }
 
+void set_string_field(ast::Expr &expr, const std::string &name,
+                      const std::string &value) {
+  for (ast::StringField &field : expr.string_fields) {
+    if (field.name == name) {
+      field.value = value;
+      return;
+    }
+  }
+  expr.string_field(name, value);
+}
+
 bool body_has_control_lines(
     const std::vector<std::unique_ptr<ast::Expr>> &body) {
   for (const std::unique_ptr<ast::Expr> &stmt : body) {
@@ -354,6 +365,12 @@ struct MacroCall {
   lexer::Span span;                     // invocation site, for diagnostics
 };
 
+struct ImportedMacroDef {
+  std::unique_ptr<ast::Expr> def;
+  std::string spelling;
+  bool invokable = false;
+};
+
 // The invocation spelling of a chain head: the base name, extended to
 // `base.member` when the first tail is a dot member (module-alias macro
 // calls). Returns the number of tails the head consumed via `head_tails`.
@@ -425,19 +442,12 @@ std::optional<MacroCall> match_macro_call(const ast::Expr &expr,
   return call;
 }
 
-// `use m` — the injection-macro trigger (§8.4): a bare call whose callee is
-// the literal name `use` and whose single argument names a macro. The macro
-// receives the enclosing class/mixin declaration Ast and expands to member
-// declarations spliced in place of the `use` statement. When the argument
-// does not resolve to a macro the statement is left alone (`use` stays an
-// ordinary identifier).
-struct UseTrigger {
-  std::string name;
-  lexer::Span span;
-};
-
-std::optional<UseTrigger> match_use_trigger(const ast::Expr &expr,
-                                            const MacroNameTable &macro_names) {
+// `use m(...)` — the injection-macro trigger (§8.4): a bare call whose callee
+// is the literal name `use` and whose single argument is a plain or dotted
+// macro call head. The macro receives the enclosing class/mixin declaration
+// Ast first, then the ordinary call arguments/block from the argument.
+std::optional<MacroCall> match_use_trigger(const ast::Expr &expr,
+                                           const MacroNameTable &macro_names) {
   if (expr.kind != "AstPostfixChain") {
     return std::nullopt;
   }
@@ -457,30 +467,56 @@ std::optional<UseTrigger> match_use_trigger(const ast::Expr &expr,
     return std::nullopt;
   }
   // The argument names the macro: a plain name, or a dotted `alias.name`
-  // head (a bare chain of one dot member) for module-alias imports.
-  std::string spelling;
+  // head (possibly followed by a call tail and/or block suffix) for
+  // module-alias imports.
   const ast::Expr &arg = *args->values[0];
   if (arg.kind == "AstName") {
     if (const std::string *macro = string_field(arg, "name")) {
-      spelling = *macro;
-    }
-  } else if (arg.kind == "AstPostfixChain") {
-    const ast::Expr *arg_base = node_field(arg, "base");
-    const ast::ListField *arg_tails = list_field(arg, "tails");
-    if (arg_base != nullptr && arg_base->kind == "AstName" &&
-        arg_tails != nullptr && arg_tails->values.size() == 1) {
-      std::size_t head_tails = 0;
-      const std::string dotted =
-          chain_head_spelling(*arg_base, *arg_tails, &head_tails);
-      if (head_tails == 1) {
-        spelling = dotted;
+      if (macro_names.find(*macro) != macro_names.end()) {
+        return MacroCall{*macro, nullptr, nullptr, expr.span};
       }
     }
+    return std::nullopt;
   }
+
+  if (arg.kind != "AstPostfixChain") {
+    return std::nullopt;
+  }
+  const ast::Expr *arg_base = node_field(arg, "base");
+  const ast::ListField *arg_tails = list_field(arg, "tails");
+  if (arg_base == nullptr || arg_base->kind != "AstName" ||
+      arg_tails == nullptr || arg_tails->values.empty() ||
+      arg_tails->values.size() > 3) {
+    return std::nullopt;
+  }
+  std::size_t index = 0;
+  const std::string spelling =
+      chain_head_spelling(*arg_base, *arg_tails, &index);
   if (spelling.empty() || macro_names.find(spelling) == macro_names.end()) {
     return std::nullopt;
   }
-  return UseTrigger{spelling, expr.span};
+  MacroCall call{spelling, nullptr, nullptr, expr.span};
+  if (index < arg_tails->values.size() && arg_tails->values[index] &&
+      (arg_tails->values[index]->kind == "AstTailCall" ||
+       arg_tails->values[index]->kind == "AstTailDotCall")) {
+    call.call_tail = arg_tails->values[index].get();
+    ++index;
+  }
+  if (index < arg_tails->values.size()) {
+    if (!arg_tails->values[index] ||
+        arg_tails->values[index]->kind != "AstTailBlockSuffix") {
+      return std::nullopt;
+    }
+    call.block = node_field(*arg_tails->values[index], "block");
+    if (call.block == nullptr) {
+      return std::nullopt;
+    }
+    ++index;
+  }
+  if (index != arg_tails->values.size()) {
+    return std::nullopt;
+  }
+  return call;
 }
 
 // `name"""…"""` — the string-tag trigger (§8.5): a bare call whose single
@@ -671,8 +707,10 @@ bool is_declaration(const ast::Expr &expr) {
 bool is_statement_kind(const std::string &kind) {
   return kind == "AstExprStmt" || kind == "AstDefStmt" ||
          kind == "AstClauseDef" || kind == "AstClassDef" ||
-         kind == "AstClassMethodDef" || kind == "AstPropDef" ||
-         kind == "AstClassPropDef" || kind == "AstReturn";
+         kind == "AstMixinDef" || kind == "AstClassMethodDef" ||
+         kind == "AstPropDef" || kind == "AstClassPropDef" ||
+         kind == "AstAttrDef" || kind == "AstIncludeStmt" ||
+         kind == "AstExtendStmt" || kind == "AstReturn";
 }
 
 // List fields that hold sibling statements/declarations — the positions where
@@ -696,12 +734,10 @@ bool lines_adjacent(const ast::Expr &above, const ast::Expr &below) {
 class Expander {
 public:
   Expander(bytecode::BcModule macro_module, MacroNameTable macro_names,
-           std::map<std::string, int> annotation_arity,
            std::set<std::string> string_tag_names,
            std::shared_ptr<const std::string> source)
       : macro_module_(std::move(macro_module)),
         macro_names_(std::move(macro_names)),
-        annotation_arity_(std::move(annotation_arity)),
         string_tag_names_(std::move(string_tag_names)),
         source_(std::move(source)) {}
 
@@ -784,7 +820,7 @@ public:
     std::vector<std::unique_ptr<ast::Expr>> out;
     out.reserve(list.size());
     for (std::size_t i = 0; i < list.size() && result_.ok;) {
-      // Annotation run: contiguous annotation-shaped macro calls attached to
+      // Annotation run: contiguous statement-position macro calls attached to
       // the adjacent declaration below, composed in source order.
       const std::size_t run = annotation_run_at(list, i);
       if (run > 0) {
@@ -810,37 +846,39 @@ public:
         ++i;
         continue;
       }
-      // `use m`: run the injection macro with the enclosing class/mixin
+      // `use m(...)`: run the injection macro with the enclosing class/mixin
       // declaration and splice the returned members in place.
       if (const ast::Expr *call_expr = statement_call_expr(elem.get())) {
-        if (std::optional<UseTrigger> trigger =
+        if (std::optional<MacroCall> use_call =
                 match_use_trigger(*call_expr, macro_names_)) {
-          if (string_tag_names_.count(trigger->name) != 0) {
-            fail("macro `" + trigger->name +
+          if (!check_call_surface(*use_call)) {
+            return;
+          }
+          if (string_tag_names_.count(use_call->name) != 0) {
+            fail("macro `" + use_call->name +
                  "` is a string_tag macro and cannot be used with `use`" +
-                 at_location(trigger->span));
+                 at_location(use_call->span));
             return;
           }
           if (enclosing == nullptr || (enclosing->kind != "AstClassDef" &&
                                        enclosing->kind != "AstMixinDef")) {
-            fail("`use " + trigger->name +
+            fail("`use " + use_call->name +
                  "` is only supported inside a class or mixin body (v1)" +
-                 at_location(trigger->span));
+                 at_location(use_call->span));
             return;
           }
-          const MacroCall call{trigger->name, nullptr, nullptr, trigger->span};
           const std::optional<runtime::Value> value =
-              run_macro(call, depth, enclosing);
+              run_macro(*use_call, depth, enclosing, ExtraArgPosition::First);
           if (!value.has_value()) {
             return;
           }
           std::vector<std::unique_ptr<ast::Expr>> results;
-          if (!splice_statement_result(*value, call.name, call.span,
+          if (!splice_statement_result(*value, use_call->name, use_call->span,
                                        &results)) {
             return;
           }
           {
-            const ExpansionScope scope(*this, call.name, call.span);
+            const ExpansionScope scope(*this, use_call->name, use_call->span);
             expand_statements(results, depth + 1, enclosing);
           }
           for (std::unique_ptr<ast::Expr> &node : results) {
@@ -860,16 +898,6 @@ public:
                 : match_macro_call(*call_expr, macro_names_);
         if (call.has_value()) {
           if (!check_call_surface(*call)) {
-            return;
-          }
-          // An annotation-shaped call (declared arity = args + 1) that did not
-          // form a run has no declaration under it.
-          if (annotation_shape_arity(*call)) {
-            fail("AMB_MACRO_DANGLING_ANNOTATION: annotation macro `" +
-                 call->name +
-                 "` has no declaration immediately below it (a blank line or "
-                 "intervening statement breaks the annotation run)" +
-                 at_location(call->span));
             return;
           }
           const std::optional<runtime::Value> value = run_macro(*call, depth);
@@ -902,6 +930,8 @@ public:
   }
 
 private:
+  enum class ExtraArgPosition { Last, First };
+
   // One frame of the expansion backtrace (§12): a macro whose spliced output
   // is currently being re-expanded. Diagnostics raised while walking that
   // output chain through here, innermost expansion first.
@@ -924,6 +954,87 @@ private:
   private:
     Expander &expander_;
   };
+
+  // A callable macro block is a lexical DSL scope. For an imported invocation
+  // such as `orm.model`, exported siblings from that same module alias are
+  // temporarily available by their bare names while the block expands.
+  class BlockNamespaceScope {
+  public:
+    BlockNamespaceScope(Expander &expander, std::string block_namespace)
+        : expander_(expander), saved_names_(expander.macro_names_),
+          saved_tags_(expander.string_tag_names_),
+          saved_namespace_(expander.active_block_namespace_) {
+      expander_.active_block_namespace_ = std::move(block_namespace);
+      if (expander_.active_block_namespace_.empty()) {
+        return;
+      }
+      const std::string prefix = expander_.active_block_namespace_ + ".";
+      for (const auto &[spelling, selector] : saved_names_) {
+        if (spelling.rfind(prefix, 0) != 0) {
+          continue;
+        }
+        const std::string bare = spelling.substr(prefix.size());
+        if (bare.empty() || bare.find('.') != std::string::npos) {
+          continue;
+        }
+        expander_.macro_names_[bare] = selector;
+        if (saved_tags_.find(spelling) != saved_tags_.end()) {
+          expander_.string_tag_names_.insert(bare);
+        }
+      }
+    }
+
+    ~BlockNamespaceScope() {
+      expander_.macro_names_ = std::move(saved_names_);
+      expander_.string_tag_names_ = std::move(saved_tags_);
+      expander_.active_block_namespace_ = std::move(saved_namespace_);
+    }
+
+    BlockNamespaceScope(const BlockNamespaceScope &) = delete;
+    BlockNamespaceScope &operator=(const BlockNamespaceScope &) = delete;
+
+  private:
+    Expander &expander_;
+    MacroNameTable saved_names_;
+    std::set<std::string> saved_tags_;
+    std::string saved_namespace_;
+  };
+
+  std::string block_namespace_for(const std::string &macro_name) const {
+    const std::size_t dot = macro_name.find_last_of('.');
+    if (dot != std::string::npos) {
+      return macro_name.substr(0, dot);
+    }
+    return active_block_namespace_;
+  }
+
+  runtime::ExecutionResult
+  expand_callable_block(const runtime::Value &value, int depth,
+                        const std::string &block_namespace) {
+    if (!value.is_ast_node()) {
+      return {runtime::Value::null(),
+              runtime::Fault{"TypeError", "macro block is not Ast.Block", 0,
+                             0}};
+    }
+    const std::shared_ptr<runtime::RuntimeAstNode> block = value.as_ast_node();
+    if (block == nullptr || block->node == nullptr ||
+        block->node->kind != "AstBlock") {
+      return {runtime::Value::null(),
+              runtime::Fault{"TypeError", "macro block is not Ast.Block", 0,
+                             0}};
+    }
+
+    std::unique_ptr<ast::Expr> expanded = ast::clone_expr(*block->node);
+    {
+      BlockNamespaceScope scope(*this, block_namespace);
+      expand(expanded, depth);
+    }
+    if (!result_.ok) {
+      return {runtime::Value::null(),
+              runtime::Fault{"MacroExpansionError", result_.error, 0, 0}};
+    }
+    return {make_ast_value(*expanded, source_), std::nullopt};
+  }
 
   // "expanded from macro `x` (at …)" lines, innermost expansion first. A
   // runaway recursion would produce a depth-limit chain of up to 128 frames;
@@ -970,44 +1081,10 @@ private:
     return elem;
   }
 
-  // Annotation classification (v1): a call is annotation-shaped when the
-  // macro's declared arity is exactly one more than the arguments passed —
-  // the extra slot receives the annotated declaration's Ast. Macros with
-  // rest/keyword/defaulted params are not annotation-capable in v1, and only
-  // plain positional call arguments count (a keyword, spread, or block-pass
-  // argument makes the +1 arity test meaningless for a positional-only
-  // macro).
-  bool annotation_shape_arity(const MacroCall &call) const {
-    if (call.block != nullptr) {
-      return false;
-    }
-    const auto it = annotation_arity_.find(call.name);
-    if (it == annotation_arity_.end() || it->second < 0) {
-      return false;
-    }
-    std::size_t arg_count = 0;
-    if (call.call_tail != nullptr) {
-      if (const ast::ListField *args = list_field(*call.call_tail, "args")) {
-        for (const std::unique_ptr<ast::Expr> &arg : args->values) {
-          if (!arg) {
-            continue;
-          }
-          if (arg->kind == "AstKeywordArg" ||
-              arg->kind == "AstKeywordSpreadArg" ||
-              arg->kind == "AstSpreadArg" || arg->kind == "AstBlockPass") {
-            return false;
-          }
-          ++arg_count;
-        }
-      }
-    }
-    return static_cast<std::size_t>(it->second) == arg_count + 1;
-  }
-
   // Length of the annotation run starting at `i`: one or more line-adjacent
-  // annotation-shaped statements followed by an adjacent declaration. Returns
-  // 0 when there is no properly attached run (a lone annotation-shaped call
-  // then reports AMB_MACRO_DANGLING_ANNOTATION from the statement path).
+  // macro-call statements followed by an adjacent declaration. Returns 0 when
+  // there is no properly attached run; non-attached statement macros remain
+  // ordinary statement-position macro calls.
   std::size_t
   annotation_run_at(const std::vector<std::unique_ptr<ast::Expr>> &list,
                     std::size_t i) const {
@@ -1019,7 +1096,7 @@ private:
       }
       const std::optional<MacroCall> call =
           match_macro_call(*call_expr, macro_names_);
-      if (!call.has_value() || !annotation_shape_arity(*call)) {
+      if (!call.has_value() || string_tag_names_.count(call->name) != 0) {
         break;
       }
       if (end > i && !lines_adjacent(*list[end - 1], *list[end])) {
@@ -1254,10 +1331,14 @@ private:
 
   std::optional<runtime::Value>
   run_macro(const MacroCall &call, int depth,
-            const ast::Expr *extra_decl = nullptr) {
+            const ast::Expr *extra_decl = nullptr,
+            ExtraArgPosition extra_position = ExtraArgPosition::Last) {
     std::vector<runtime::Value> arg_values;
     std::vector<std::pair<std::string, runtime::Value>> kw_values;
     const ast::Expr *block_pass = nullptr;
+    if (extra_decl != nullptr && extra_position == ExtraArgPosition::First) {
+      arg_values.push_back(make_ast_value(*extra_decl, source_));
+    }
     if (call.call_tail != nullptr) {
       if (const ast::ListField *args = list_field(*call.call_tail, "args")) {
         for (const std::unique_ptr<ast::Expr> &arg : args->values) {
@@ -1271,10 +1352,10 @@ private:
         }
       }
     }
-    // Block channel (§8 macro ABI, v1 spelling): the unevaluated block of a
-    // block-suffix trigger — or the named local of a `&name` block-pass —
-    // arrives as the trailing Ast argument (an AstBlock or an AstName; the
-    // macro can distinguish them by `.kind`).
+    // Block channel (§8 macro ABI): the unevaluated block of a block-suffix
+    // trigger — or the named local of a `&name` block-pass — binds the macro's
+    // ordinary `&blk` parameter. It is never mixed into positional `*args`.
+    runtime::Value block_value = runtime::Value::null();
     if (call.block != nullptr && block_pass != nullptr) {
       fail("macro `" + call.name +
            "` received both a block suffix and a `&name` block-pass argument" +
@@ -1282,15 +1363,15 @@ private:
       return std::nullopt;
     }
     if (call.block != nullptr) {
-      arg_values.push_back(make_ast_value(*call.block, source_));
+      block_value = make_ast_value(*call.block, source_);
     } else if (block_pass != nullptr) {
-      arg_values.push_back(make_ast_value(*block_pass, source_));
+      block_value = make_ast_value(*block_pass, source_);
     }
-    if (extra_decl != nullptr) {
+    if (extra_decl != nullptr && extra_position == ExtraArgPosition::Last) {
       arg_values.push_back(make_ast_value(*extra_decl, source_));
     }
     return execute_macro(call.name, call.span, std::move(arg_values),
-                         std::move(kw_values), depth);
+                         std::move(kw_values), depth, std::move(block_value));
   }
 
   // The symbol id for a keyword name in the macro module's symbol table,
@@ -1312,7 +1393,8 @@ private:
   execute_macro(const std::string &name, const lexer::Span &span,
                 std::vector<runtime::Value> arg_values,
                 std::vector<std::pair<std::string, runtime::Value>> kw_values,
-                int depth) {
+                int depth,
+                runtime::Value block_value = runtime::Value::null()) {
     if (depth >= kExpansionDepthLimit) {
       fail("AMB_MACRO_EXPANSION_LIMIT: macro expansion exceeded depth limit at "
            "`" +
@@ -1342,9 +1424,14 @@ private:
     context.world_options = &sandbox_world_options();
     context.capabilities = &sandbox_no_capabilities();
     context.step_budget = kExpansionStepBudget;
+    const std::string block_namespace = block_namespace_for(call.name);
+    context.macro_block_executor =
+        [this, depth, block_namespace](const runtime::Value &block) {
+          return expand_callable_block(block, depth + 1, block_namespace);
+        };
     const runtime::ExecutionResult exec = runtime::execute_runtime_vm(
         macro_module_, std::move(context), method->entry_code_id, arg_values,
-        kw_args, runtime::Value::null(), runtime::Value::null());
+        kw_args, runtime::Value::null(), std::move(block_value));
     if (exec.fault.has_value()) {
       if (exec.fault->error_name == "BudgetError") {
         fail("AMB_MACRO_BUDGET: macro `" + call.name +
@@ -1357,9 +1444,14 @@ private:
              "no capabilities (" +
              exec.fault->message + ")" + at_location(call.span));
       } else {
-        fail("macro `" + call.name +
-             "` raised during expansion: " + exec.fault->error_name + ": " +
-             exec.fault->message + at_location(call.span));
+        std::string detail = "macro `" + call.name +
+                             "` raised during expansion: " +
+                             exec.fault->error_name + ": " +
+                             exec.fault->message + at_location(call.span);
+        if (!exec.fault->trace_text.empty()) {
+          detail += "\n" + exec.fault->trace_text;
+        }
+        fail(detail);
       }
       return std::nullopt;
     }
@@ -1444,9 +1536,9 @@ private:
     out->push_back(std::move(copy));
   }
 
-  // Rewrite quote-introduced (hygienic-marked) identifiers to carry `mark` as
-  // their syntax context, and drop the transient marker. Spliced/unquoted
-  // subtrees carry no marker and are left untouched.
+  // Rewrite quote-introduced (hygienic-marked) identifiers and parameters to
+  // carry `mark` as their syntax context, and drop the transient marker.
+  // Spliced/unquoted subtrees carry no marker and are left untouched.
   void apply_hygiene(ast::Expr &node, const std::string &mark,
                      const lexer::Span &call_span) {
     // Macrotrace v1: macro-built nodes carry no source span (empty file);
@@ -1456,7 +1548,8 @@ private:
     if (node.span.file.empty()) {
       node.span = call_span;
     }
-    if (node.kind == "AstName") {
+    if (node.kind == "AstName" || node.kind == "AstParam" ||
+        node.kind == "AstPatternParam") {
       bool hygienic = false;
       node.bool_fields.erase(
           std::remove_if(node.bool_fields.begin(), node.bool_fields.end(),
@@ -1469,7 +1562,7 @@ private:
                          }),
           node.bool_fields.end());
       if (hygienic) {
-        node.string_field("syntax_context", mark);
+        set_string_field(node, "syntax_context", mark);
       }
     }
     for (ast::NodeField &field : node.node_fields) {
@@ -1489,11 +1582,11 @@ private:
   bytecode::BcModule macro_module_;
   // Invocation spelling (plain or dotted) -> compiled selector name.
   MacroNameTable macro_names_;
-  // Declared fixed arity per macro (annotation eligibility); -1 when the
-  // macro has rest/keyword/defaulted params and cannot be an annotation (v1).
-  std::map<std::string, int> annotation_arity_;
   // Macros declared `string_tag` — invocable only via `name"""…"""`.
   std::set<std::string> string_tag_names_;
+  // Provider alias currently supplying bare nested DSL macro names while a
+  // callable macro block expands (for example `orm` inside `orm.model`).
+  std::string active_block_namespace_;
   std::shared_ptr<const std::string> source_;
   ExpandResult result_;
   int hygiene_counter_ = 0;
@@ -1501,33 +1594,6 @@ private:
   // expansion backtraces).
   std::vector<ExpansionFrame> expansion_stack_;
 };
-
-// Declared arity for annotation classification: the count of plain positional
-// params, or -1 when any param is rest/keyword/defaulted (those shapes make
-// the +1 arity test ambiguous, so such macros are not annotation-capable v1).
-int annotation_arity_of(const ast::Expr &def) {
-  const ast::Expr *signature = node_field(def, "signature");
-  if (signature == nullptr) {
-    return -1;
-  }
-  const ast::ListField *params = list_field(*signature, "params");
-  if (params == nullptr) {
-    return 0;
-  }
-  int arity = 0;
-  for (const std::unique_ptr<ast::Expr> &param : params->values) {
-    if (!param) {
-      continue;
-    }
-    const std::string *kind = string_field(*param, "param_kind");
-    if (kind == nullptr || *kind != "positional" ||
-        node_field(*param, "default_expr") != nullptr) {
-      return -1;
-    }
-    ++arity;
-  }
-  return arity;
-}
 
 // Compile the macro definitions as ordinary functions on their own module, so
 // their bodies can run on the expander VM. `is_macro` is stripped (the macro
@@ -1599,14 +1665,35 @@ bool tree_references_name(const ast::Expr &node, const std::string &name) {
   return false;
 }
 
+std::string default_module_alias(const std::string &module_path) {
+  const std::size_t dot = module_path.find_last_of('.');
+  if (dot == std::string::npos) {
+    return module_path;
+  }
+  return module_path.substr(dot + 1U);
+}
+
+std::string module_import_alias(const ast::Expr &item) {
+  const std::string *module_path = string_field(item, "module_path");
+  if (module_path == nullptr) {
+    return {};
+  }
+  const std::string *alias = string_field(item, "alias");
+  if (alias != nullptr && !alias->empty()) {
+    return *alias;
+  }
+  return default_module_alias(*module_path);
+}
+
 // Resolve the importer's `from <module> import name [as alias]` items against
-// the staged provider table (§11). Every match yields an owned clone of the
-// provider's macro def, renamed to the importer's local alias, ready to join
-// the macro module alongside local defs.
-std::vector<std::unique_ptr<ast::Expr>>
+// the staged provider table (§11). Public matches become invokable under the
+// importer's local alias; private provider macro defs ride along as helpers
+// compiled into the macro module but never registered as trigger names.
+std::vector<ImportedMacroDef>
 imported_macro_defs(const std::vector<std::unique_ptr<ast::Expr>> &items,
                     const MacroProviderMap &providers) {
-  std::vector<std::unique_ptr<ast::Expr>> imported;
+  std::vector<ImportedMacroDef> imported;
+  std::set<std::string> helper_keys;
   for (const std::unique_ptr<ast::Expr> &item : items) {
     if (!item || item->kind != "AstImportStmt") {
       continue;
@@ -1625,6 +1712,7 @@ imported_macro_defs(const std::vector<std::unique_ptr<ast::Expr>> &items,
     if (names == nullptr) {
       continue;
     }
+    bool imported_from_provider = false;
     for (const std::unique_ptr<ast::Expr> &name : names->values) {
       if (!name || name->kind != "AstImportName") {
         continue;
@@ -1635,7 +1723,8 @@ imported_macro_defs(const std::vector<std::unique_ptr<ast::Expr>> &items,
         continue;
       }
       for (const MacroExport &entry : provider->second) {
-        if (entry.public_name != *source_name || entry.def == nullptr) {
+        if (!entry.public_export || entry.public_name != *source_name ||
+            entry.def == nullptr) {
           continue;
         }
         std::unique_ptr<ast::Expr> def = ast::clone_expr(*entry.def);
@@ -1644,9 +1733,29 @@ imported_macro_defs(const std::vector<std::unique_ptr<ast::Expr>> &items,
             field.value = *local_name;
           }
         }
-        imported.push_back(std::move(def));
+        imported.push_back(ImportedMacroDef{std::move(def), *local_name, true});
+        imported_from_provider = true;
         break;
       }
+    }
+    if (!imported_from_provider) {
+      continue;
+    }
+    for (const MacroExport &entry : provider->second) {
+      if (entry.public_export || entry.def == nullptr) {
+        continue;
+      }
+      const std::string *name = string_field(*entry.def, "name");
+      if (name == nullptr) {
+        continue;
+      }
+      const std::string key = *module_path + "\n" + *name;
+      if (helper_keys.find(key) != helper_keys.end()) {
+        continue;
+      }
+      helper_keys.insert(key);
+      imported.push_back(
+          ImportedMacroDef{ast::clone_expr(*entry.def), *name, false});
     }
   }
   return imported;
@@ -1657,6 +1766,7 @@ imported_macro_defs(const std::vector<std::unique_ptr<ast::Expr>> &items,
 std::vector<MacroExport>
 collect_macro_exports(const std::vector<std::unique_ptr<ast::Expr>> &items) {
   std::vector<MacroExport> exports;
+  std::map<std::string, std::string> public_names;
   for (const std::unique_ptr<ast::Expr> &item : items) {
     if (!item || item->kind != "AstExportStmt") {
       continue;
@@ -1683,15 +1793,30 @@ collect_macro_exports(const std::vector<std::unique_ptr<ast::Expr>> &items) {
       if (local_name == nullptr || public_name == nullptr) {
         continue;
       }
-      for (const std::unique_ptr<ast::Expr> &def : items) {
-        if (def && is_macro_def(*def) &&
-            string_field(*def, "name") != nullptr &&
-            *string_field(*def, "name") == *local_name) {
-          exports.push_back(MacroExport{*public_name, ast::clone_expr(*def)});
-          break;
-        }
-      }
+      public_names[*local_name] = *public_name;
     }
+  }
+  if (public_names.empty()) {
+    return exports;
+  }
+  bool has_public_def = false;
+  for (const std::unique_ptr<ast::Expr> &def : items) {
+    if (!def || !is_macro_def(*def)) {
+      continue;
+    }
+    const std::string *name = string_field(*def, "name");
+    if (name == nullptr) {
+      continue;
+    }
+    const auto public_name = public_names.find(*name);
+    const bool public_export = public_name != public_names.end();
+    has_public_def = has_public_def || public_export;
+    exports.push_back(MacroExport{
+        public_export ? public_name->second : *name, ast::clone_expr(*def),
+        public_export});
+  }
+  if (!has_public_def) {
+    exports.clear();
   }
   return exports;
 }
@@ -1704,7 +1829,7 @@ std::string serialize_macro_exports(const std::vector<MacroExport> &exports,
       valid.push_back(&entry);
     }
   }
-  std::string out = "amber.macro.exports.v1\n";
+  std::string out = "amber.macro.exports.v2\n";
   out += std::to_string(valid.size()) + "\n";
   for (const MacroExport *entry : valid) {
     const lexer::Span &span = entry->def->span;
@@ -1713,7 +1838,8 @@ std::string serialize_macro_exports(const std::vector<MacroExport> &exports,
     const std::size_t end = std::min<std::size_t>(
         std::max<std::size_t>(span.end.offset, begin), module_source.size());
     const std::string slice = module_source.substr(begin, end - begin);
-    out += entry->public_name + "\t" +
+    out += std::string(entry->public_export ? "public" : "private") + "\t" +
+           entry->public_name + "\t" +
            (is_string_tag_def(*entry->def) ? "string_tag" : "call") + "\t" +
            std::to_string(span.start.line) + "\t" +
            std::to_string(slice.size()) + "\n";
@@ -1808,9 +1934,11 @@ std::vector<MacroExport> parse_macro_exports(const std::string &payload,
   std::size_t cursor = 0;
   std::string line;
   if (!read_payload_line(payload, &cursor, &line) ||
-      line != "amber.macro.exports.v1") {
+      (line != "amber.macro.exports.v1" &&
+       line != "amber.macro.exports.v2")) {
     return malformed("unknown schema");
   }
+  const bool v2 = line == "amber.macro.exports.v2";
   std::size_t count = 0;
   if (!read_payload_line(payload, &cursor, &line) ||
       !parse_payload_number(line, &count)) {
@@ -1825,12 +1953,21 @@ std::vector<MacroExport> parse_macro_exports(const std::string &payload,
     const std::vector<std::string> fields = split_fields(line);
     std::size_t start_line = 0;
     std::size_t length = 0;
-    if (fields.size() != 4 || fields[0].empty() ||
-        (fields[1] != "call" && fields[1] != "string_tag") ||
-        !parse_payload_number(fields[2], &start_line) ||
-        !parse_payload_number(fields[3], &length)) {
+    const std::size_t visibility_index = v2 ? 0U : 0U;
+    const std::size_t name_index = v2 ? 1U : 0U;
+    const std::size_t kind_index = v2 ? 2U : 1U;
+    const std::size_t line_index = v2 ? 3U : 2U;
+    const std::size_t length_index = v2 ? 4U : 3U;
+    if ((v2 && (fields.size() != 5 ||
+                (fields[visibility_index] != "public" &&
+                 fields[visibility_index] != "private"))) ||
+        (!v2 && fields.size() != 4) || fields[name_index].empty() ||
+        (fields[kind_index] != "call" && fields[kind_index] != "string_tag") ||
+        !parse_payload_number(fields[line_index], &start_line) ||
+        !parse_payload_number(fields[length_index], &length)) {
       return malformed("invalid export header");
     }
+    const bool public_export = !v2 || fields[visibility_index] == "public";
     if (cursor + length > payload.size()) {
       return malformed("truncated definition source");
     }
@@ -1846,36 +1983,41 @@ std::vector<MacroExport> parse_macro_exports(const std::string &payload,
     lexer::Lexer snippet_lexer(snippet, provider_path);
     lexer::LexResult lex = snippet_lexer.lex();
     if (!lex.ok()) {
-      return malformed("definition for `" + fields[0] + "` no longer lexes");
+      return malformed("definition for `" + fields[name_index] +
+                       "` no longer lexes");
     }
     parser::Parser snippet_parser(lex.tokens);
     parser::ParseModuleResult mod = snippet_parser.parse_module_unit();
     if (!mod.ok()) {
-      return malformed("definition for `" + fields[0] + "` no longer parses");
+      return malformed("definition for `" + fields[name_index] +
+                       "` no longer parses");
     }
     std::unique_ptr<ast::Expr> def;
     for (std::unique_ptr<ast::Expr> &item : mod.items) {
       if (item && is_macro_def(*item)) {
         if (def != nullptr) {
-          return malformed("definition for `" + fields[0] +
+          return malformed("definition for `" + fields[name_index] +
                            "` contains more than one macro def");
         }
         def = std::move(item);
       }
     }
     if (def == nullptr) {
-      return malformed("definition for `" + fields[0] + "` is not a macro def");
+      return malformed("definition for `" + fields[name_index] +
+                       "` is not a macro def");
     }
     const bool is_tag = is_string_tag_def(*def);
-    if (is_tag != (fields[1] == "string_tag")) {
-      return malformed("definition for `" + fields[0] +
+    if (is_tag != (fields[kind_index] == "string_tag")) {
+      return malformed("definition for `" + fields[name_index] +
                        "` does not match its declared surface kind");
     }
     if (start_line > 0) {
       shift_expr_lines(*def, static_cast<int>(start_line) - 1);
     }
-    exports.push_back(MacroExport{
-        fields[0], std::shared_ptr<const ast::Expr>(std::move(def))});
+    exports.push_back(MacroExport{fields[name_index],
+                                  std::shared_ptr<const ast::Expr>(
+                                      std::move(def)),
+                                  public_export});
   }
   if (cursor != payload.size()) {
     return malformed("trailing bytes after the export table");
@@ -1896,16 +2038,12 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
                            const MacroProviderMap &providers) {
   std::vector<const ast::Expr *> macro_defs;
   MacroNameTable macro_names;
-  std::map<std::string, int> annotation_arity;
-  // string_tag macros are invocable only via `name"""…"""` and never
-  // annotation-shaped, whatever their declared arity.
+  // string_tag macros are invocable only via `name"""…"""`.
   std::set<std::string> string_tag_names;
   const auto register_macro = [&](const std::string &spelling,
                                   const std::string &selector,
                                   const ast::Expr &def) {
     macro_names[spelling] = selector;
-    annotation_arity[spelling] =
-        is_string_tag_def(def) ? -1 : annotation_arity_of(def);
     if (is_string_tag_def(def)) {
       string_tag_names.insert(spelling);
     }
@@ -1918,60 +2056,74 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
       }
     }
   }
-  // Imported macros (cloned under their local aliases) join the compile-time
-  // namespace next to local defs; `imported` owns them for this call.
-  const std::vector<std::unique_ptr<ast::Expr>> imported =
+  // From-imported public macros (cloned under their local aliases) join the
+  // compile-time namespace next to local defs. Private provider macro helpers
+  // are compiled too, but are not registered as trigger names.
+  const std::vector<ImportedMacroDef> imported =
       imported_macro_defs(items, providers);
-  for (const std::unique_ptr<ast::Expr> &def : imported) {
-    const std::string *name = string_field(*def, "name");
+  for (const ImportedMacroDef &entry : imported) {
+    const std::string *name = string_field(*entry.def, "name");
     if (name == nullptr) {
       continue;
     }
-    if (macro_names.find(*name) != macro_names.end()) {
+    if (entry.invokable &&
+        macro_names.find(entry.spelling) != macro_names.end()) {
       return ExpandResult{false,
-                          "macro import `" + *name +
+                          "macro import `" + entry.spelling +
                               "` collides with a macro definition of the same "
                               "name in this module"};
     }
-    macro_defs.push_back(def.get());
-    register_macro(*name, *name, *def);
+    macro_defs.push_back(entry.def.get());
+    if (entry.invokable) {
+      register_macro(entry.spelling, *name, *entry.def);
+    }
   }
-  // Module-alias imports (§11): `import m as pg` binds every macro export of
-  // a staged provider under the dotted spelling `pg.name`. The cloned
+  // Module imports (§11): `import m as pg` or plain `import m` binds every macro
+  // export of a staged provider under the dotted spelling `alias.name`. Plain
+  // imports use the same default alias as the binder (the last path segment).
+  // The cloned
   // definition compiles under a mangled selector (dotted spellings are not
   // identifiers); `alias_imported` owns the clones for this call.
   std::vector<std::unique_ptr<ast::Expr>> alias_imported;
   std::set<std::string> macro_bound_aliases;
+  std::set<std::string> alias_helper_keys;
   for (const std::unique_ptr<ast::Expr> &item : items) {
     if (!item || item->kind != "AstImportStmt") {
       continue;
     }
     const std::string *import_kind = string_field(*item, "import_kind");
     const std::string *module_path = string_field(*item, "module_path");
-    const std::string *alias = string_field(*item, "alias");
     if (import_kind == nullptr || *import_kind != "module" ||
-        module_path == nullptr || alias == nullptr || alias->empty()) {
+        module_path == nullptr) {
+      continue;
+    }
+    const std::string alias = module_import_alias(*item);
+    if (alias.empty()) {
       continue;
     }
     const auto provider = providers.find(*module_path);
     if (provider == providers.end()) {
       continue;
     }
-    if (!provider->second.empty()) {
-      macro_bound_aliases.insert(*alias);
+    bool has_public_export = false;
+    for (const MacroExport &entry : provider->second) {
+      has_public_export = has_public_export || entry.public_export;
+    }
+    if (has_public_export) {
+      macro_bound_aliases.insert(alias);
     }
     for (const MacroExport &entry : provider->second) {
-      if (entry.def == nullptr) {
+      if (!entry.public_export || entry.def == nullptr) {
         continue;
       }
-      const std::string spelling = *alias + "." + entry.public_name;
+      const std::string spelling = alias + "." + entry.public_name;
       if (macro_names.find(spelling) != macro_names.end()) {
         return ExpandResult{false, "macro import `" + spelling +
                                        "` is bound more than once through "
                                        "module-alias imports in this module"};
       }
       const std::string selector =
-          "__macro_alias__" + *alias + "__" + entry.public_name;
+          "__macro_alias__" + alias + "__" + entry.public_name;
       std::unique_ptr<ast::Expr> def = ast::clone_expr(*entry.def);
       for (ast::StringField &field : def->string_fields) {
         if (field.name == "name") {
@@ -1979,6 +2131,23 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
         }
       }
       register_macro(spelling, selector, *def);
+      macro_defs.push_back(def.get());
+      alias_imported.push_back(std::move(def));
+    }
+    for (const MacroExport &entry : provider->second) {
+      if (entry.public_export || entry.def == nullptr) {
+        continue;
+      }
+      const std::string *name = string_field(*entry.def, "name");
+      if (name == nullptr) {
+        continue;
+      }
+      const std::string key = *module_path + "\n" + *name;
+      if (alias_helper_keys.find(key) != alias_helper_keys.end()) {
+        continue;
+      }
+      alias_helper_keys.insert(key);
+      std::unique_ptr<ast::Expr> def = ast::clone_expr(*entry.def);
       macro_defs.push_back(def.get());
       alias_imported.push_back(std::move(def));
     }
@@ -1993,7 +2162,7 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
   }
 
   Expander expander(std::move(macro_module), std::move(macro_names),
-                    std::move(annotation_arity), std::move(string_tag_names),
+                    std::move(string_tag_names),
                     std::make_shared<const std::string>(source));
   // The module item list is itself a statement/declaration context, so
   // annotation runs and multi-node expansions apply at top level.
@@ -2050,7 +2219,8 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
                            return false;
                          }
                          for (const MacroExport &entry : provider->second) {
-                           if (entry.public_name == *source_name) {
+                           if (entry.public_export &&
+                               entry.public_name == *source_name) {
                              return true;
                            }
                          }
@@ -2068,15 +2238,17 @@ ExpandResult expand_macros(std::vector<std::unique_ptr<ast::Expr>> &items,
       continue;
     }
     const std::string *import_kind = string_field(*item, "import_kind");
-    const std::string *alias = string_field(*item, "alias");
-    if (import_kind == nullptr || *import_kind != "module" ||
-        alias == nullptr || macro_bound_aliases.count(*alias) == 0) {
+    if (import_kind == nullptr || *import_kind != "module") {
+      continue;
+    }
+    const std::string alias = module_import_alias(*item);
+    if (alias.empty() || macro_bound_aliases.count(alias) == 0) {
       continue;
     }
     bool referenced = false;
     for (const std::unique_ptr<ast::Expr> &other : items) {
       if (other && other.get() != item.get() &&
-          tree_references_name(*other, *alias)) {
+          tree_references_name(*other, alias)) {
         referenced = true;
         break;
       }

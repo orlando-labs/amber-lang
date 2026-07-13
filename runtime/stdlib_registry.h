@@ -722,6 +722,8 @@ public:
   std::optional<RuntimeBindingRef>
   binding_for_path(const std::string &path) const;
 
+  bool has_namespace(const std::string &path) const;
+
   void import_native_paths(const NativeRegistry &registry);
 
 private:
