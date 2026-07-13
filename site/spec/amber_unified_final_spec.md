@@ -374,6 +374,17 @@ klass = Point
 klass(args)
 ```
 
+Пользовательские классы могут определить индексные селекторы напрямую:
+
+```amber
+def [](key): ...
+def []=(key, value): ...
+```
+
+`obj[key]` отправляет `[]`, а `obj[key] = value` отправляет `[]=` и передаёт
+`value` последним аргументом. Индексное присваивание возвращает присвоенное
+значение согласно обычной семантике assignment.
+
 ### 4.2. Block suffix
 
 У блока есть две формы:
@@ -2884,6 +2895,8 @@ Detached / orphan task в v1 не вводятся.
 - `combination`
 - `group_by`
 - `to_a`
+- `copy`
+- `deep_copy`
 - `lazy`
 
 Нормативно:
@@ -2911,6 +2924,27 @@ Detached / orphan task в v1 не вводятся.
  конечной границы;
 - `.lazy` переводит дальнейшую цепочку в lazy-profile;
 - `to_a` материализует `LazySeq`.
+
+`copy` и `deep_copy` обязательны для concrete `Array`, `Tuple`, `Set`, `Map`
+и `StrictMap`. Для `Range` и `LazySeq` оба метода возвращают receiver: они не
+материализуют range и не дублируют состояние lazy pipeline. Для concrete
+collection `copy` создаёт новый внешний контейнер и сохраняет ссылки на
+вложенные значения. `deep_copy` рекурсивно
+копирует concrete collections и экземпляры пользовательских классов, сохраняя
+циклы и topology повторных ссылок: если два пути указывали на один исходный
+объект, в результате они указывают на один и тот же скопированный объект.
+
+Immutable scalar values, callable values и opaque/native resources являются
+atomic leaves и сохраняют identity даже при `deep_copy`. Для mutable collection
+результат `copy` / `deep_copy` является новым mutable контейнером, независимо от
+frozen-state receiver'а. `clone` и `deep_clone` не вводятся как алиасы: у Amber
+нет отдельного clone-контракта, который оправдывал бы вторую пару имён.
+
+Пользовательский instance поддерживает те же `copy` / `deep_copy`. Runtime
+сначала выделяет instance того же класса и копирует его ivars в выбранном
+режиме, затем, если класс определяет `init_copy(source)`, вызывает этот hook на
+новом instance. Возвращаемое hook'ом значение игнорируется; observable result
+всегда новый instance. `init` при копировании не вызывается.
 
 `reduce` поддерживает две формы:
 
@@ -2940,6 +2974,8 @@ xs.reduce |acc, x|:...
 - `entries`
 - `contains?`
 - `include?`
+- `copy`
+- `deep_copy`
 
 Нормативно:
 
@@ -14273,6 +14309,8 @@ collection.none? |x|:...
 collection.first()
 collection.count()
 collection.to_a()
+collection.copy()
+collection.deep_copy()
 collection.lazy()
 ```
 
@@ -14297,6 +14335,8 @@ map.transform_values |v, k|:...
 map.keys()
 map.values()
 map.entries()
+map.copy()
+map.deep_copy()
 ```
 
 ### Error classes
@@ -14871,7 +14911,14 @@ writer.write_line(str as Str = "")
 writer.flush()
 writer.closed?()
 writer.close()
+writer.xterm?()
 ```
+
+`xterm?` возвращает `true`, только когда writer направлен в совместимый
+интерактивный terminal и xterm control/color output не отключён окружением.
+Буферные, notebook и перенаправленные writer'ы возвращают `false`. Метод нужен
+динамическим renderer'ам для выбора между cursor-updating и обычным линейным
+выводом; он не является разрешением писать в raw host stream.
 
 ### 3.2. Byte writer adaptation
 
@@ -17369,8 +17416,12 @@ Rules:
 Owner identity:
 
 ```text
-(task_id, strand_id)
+(scheduler identity, task_id, strand_id)
 ```
+
+Public task/strand ids may be scheduler-local. Synchronization internals must
+therefore use a scheduler-qualified or otherwise process-unique owner token;
+equal local task ids from two schedulers must never be treated as reentrancy.
 
 #### 15.4. `unlock()`
 
