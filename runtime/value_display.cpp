@@ -1,6 +1,7 @@
 #include "runtime/value_display.h"
 
 #include "bytecode/format.h"
+#include "runtime/concurrency.h"
 #include "runtime/errors.h"
 #include "runtime/io.h"
 #include "runtime/objects.h"
@@ -298,6 +299,14 @@ std::string runtime_stringify_value_impl(RuntimeStringifyContext *context,
   if (value.is_big_int()) {
     const std::shared_ptr<BigIntValue> big = value.as_big_int();
     return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
+  }
+  if (value.is_task_local()) {
+    const std::shared_ptr<RuntimeTaskLocal> local = value.as_task_local();
+    if (local == nullptr) {
+      return "<TaskLocal null>";
+    }
+    return "<TaskLocal #" + std::to_string(local->slot_id()) +
+           (local->inherit() ? " inherit>" : ">");
   }
   if (value.is_arg_parser()) {
     return value.as_arg_parser() == nullptr ? "<ArgParser null>"
@@ -699,6 +708,14 @@ value_to_debug_string(const Value &value, const bytecode::BcModule *module,
   if (value.is_big_int()) {
     const std::shared_ptr<BigIntValue> big = value.as_big_int();
     return big == nullptr ? "<bigint null>" : big_int_to_decimal_string(*big);
+  }
+  if (value.is_task_local()) {
+    const std::shared_ptr<RuntimeTaskLocal> local = value.as_task_local();
+    if (local == nullptr) {
+      return "<TaskLocal null>";
+    }
+    return "<TaskLocal #" + std::to_string(local->slot_id()) +
+           (local->inherit() ? " inherit>" : ">");
   }
   if (value.is_arg_parser()) {
     return value.as_arg_parser() == nullptr ? "<ArgParser null>"

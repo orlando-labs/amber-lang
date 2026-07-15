@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -27,9 +28,83 @@
 
 namespace amber::runtime {
 
+struct RuntimeTaskContext::State {
+  struct ScopeRestore {
+    std::uint64_t token = 0;
+    std::uint64_t slot_id = 0;
+    std::optional<RuntimeTaskLocalBinding> previous;
+  };
+
+  std::unordered_map<std::uint64_t, RuntimeTaskLocalBinding> bindings;
+  std::vector<ScopeRestore> scopes;
+};
+
 namespace {
 
 std::atomic<std::uint64_t> g_runtime_sync_owner_id{1};
+std::atomic<std::uint64_t> g_runtime_task_local_slot_id{1};
+std::atomic<std::uint64_t> g_runtime_task_local_live_contexts{0};
+std::atomic<std::uint64_t> g_runtime_task_local_retained_values{0};
+
+std::uint64_t allocate_runtime_task_local_slot_id() {
+  std::uint64_t candidate =
+      g_runtime_task_local_slot_id.load(std::memory_order_relaxed);
+  while (candidate != 0 &&
+         candidate != std::numeric_limits<std::uint64_t>::max()) {
+    if (g_runtime_task_local_slot_id.compare_exchange_weak(
+            candidate, candidate + 1U, std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
+      return candidate;
+    }
+  }
+  throw RuntimeTaskFailure("TaskLocalError",
+                           "task-local slot identity space is exhausted");
+}
+
+struct RuntimeTaskContextRegistry {
+  std::mutex mutex;
+  std::vector<RuntimeTaskContext *> contexts;
+  std::vector<std::size_t> free_slots;
+};
+
+RuntimeTaskContextRegistry &runtime_task_context_registry() {
+  static auto *registry = new RuntimeTaskContextRegistry();
+  return *registry;
+}
+
+std::size_t task_context_retained_count(const RuntimeTaskContext::State &state) {
+  std::size_t count = state.bindings.size();
+  for (const RuntimeTaskContext::State::ScopeRestore &scope : state.scopes) {
+    if (scope.previous.has_value()) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+void adjust_task_context_retained_count(std::size_t before,
+                                        std::size_t after) {
+  if (after > before) {
+    g_runtime_task_local_retained_values.fetch_add(
+        static_cast<std::uint64_t>(after - before),
+        std::memory_order_relaxed);
+  } else if (before > after) {
+    g_runtime_task_local_retained_values.fetch_sub(
+        static_cast<std::uint64_t>(before - after),
+        std::memory_order_relaxed);
+  }
+}
+
+std::shared_ptr<RuntimeTaskContext> require_runtime_task_context() {
+  std::shared_ptr<RuntimeTaskContext> context =
+      current_runtime_task_context();
+  if (context == nullptr) {
+    throw RuntimeTaskFailure(
+        "TaskLocalError",
+        "task-local access requires an active logical Amber task");
+  }
+  return context;
+}
 
 struct RuntimeSyncBoundaryError {
   std::string error_name;
@@ -493,6 +568,309 @@ RuntimeMutexResult runtime_mutex_cancelled_result() {
 }
 
 } // namespace
+
+RuntimeTaskLocalKey::RuntimeTaskLocalKey(bool inherit)
+    : slot_id_(allocate_runtime_task_local_slot_id()), inherit_(inherit) {}
+
+std::uint64_t RuntimeTaskLocalKey::slot_id() const { return slot_id_; }
+
+bool RuntimeTaskLocalKey::inherit() const { return inherit_; }
+
+RuntimeTaskContext::RuntimeTaskContext()
+    : state_(std::make_shared<State>()) {
+  register_gc_roots();
+}
+
+RuntimeTaskContext::RuntimeTaskContext(
+    std::shared_ptr<const RuntimeTaskContext::State> initial_state)
+    : state_(initial_state == nullptr ? std::make_shared<State>()
+                                     : std::move(initial_state)) {
+  g_runtime_task_local_retained_values.fetch_add(
+      static_cast<std::uint64_t>(task_context_retained_count(*state_)),
+      std::memory_order_relaxed);
+  register_gc_roots();
+}
+
+std::shared_ptr<RuntimeTaskContext> RuntimeTaskContext::create() {
+  return std::shared_ptr<RuntimeTaskContext>(new RuntimeTaskContext());
+}
+
+RuntimeTaskContext::~RuntimeTaskContext() {
+  clear();
+  unregister_gc_roots();
+}
+
+void RuntimeTaskContext::register_gc_roots() {
+  RuntimeTaskContextRegistry &registry = runtime_task_context_registry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  if (!registry.free_slots.empty()) {
+    registry_slot_ = registry.free_slots.back();
+    registry.free_slots.pop_back();
+    registry.contexts[registry_slot_] = this;
+  } else {
+    registry_slot_ = registry.contexts.size();
+    registry.contexts.push_back(this);
+  }
+  g_runtime_task_local_live_contexts.fetch_add(1, std::memory_order_relaxed);
+}
+
+void RuntimeTaskContext::unregister_gc_roots() {
+  if (registry_slot_ == static_cast<std::size_t>(-1)) {
+    return;
+  }
+  RuntimeTaskContextRegistry &registry = runtime_task_context_registry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  if (registry_slot_ < registry.contexts.size() &&
+      registry.contexts[registry_slot_] == this) {
+    registry.contexts[registry_slot_] = nullptr;
+    registry.free_slots.push_back(registry_slot_);
+    g_runtime_task_local_live_contexts.fetch_sub(1,
+                                                  std::memory_order_relaxed);
+  }
+  registry_slot_ = static_cast<std::size_t>(-1);
+}
+
+std::optional<RuntimeTaskLocalBinding>
+RuntimeTaskContext::binding(std::uint64_t slot_id) const {
+  const std::shared_ptr<const State> snapshot =
+      std::atomic_load_explicit(&state_, std::memory_order_acquire);
+  const auto found = snapshot->bindings.find(slot_id);
+  if (found == snapshot->bindings.end()) {
+    return std::nullopt;
+  }
+  return found->second;
+}
+
+void RuntimeTaskContext::set(
+    const RuntimeTaskLocalKey &key,
+    std::shared_ptr<RuntimeTaskLocalStoredValueBase> value) {
+  if (value == nullptr) {
+    throw RuntimeTaskFailure("TaskLocalError",
+                             "task-local binding holder is null");
+  }
+  const std::shared_ptr<const State> before =
+      std::atomic_load_explicit(&state_, std::memory_order_acquire);
+  auto after = std::make_shared<State>(*before);
+  after->bindings[key.slot_id()] =
+      RuntimeTaskLocalBinding{key.inherit(), std::move(value)};
+  adjust_task_context_retained_count(task_context_retained_count(*before),
+                                     task_context_retained_count(*after));
+  std::atomic_store_explicit(
+      &state_, std::shared_ptr<const State>(std::move(after)),
+      std::memory_order_release);
+}
+
+bool RuntimeTaskContext::erase(std::uint64_t slot_id) {
+  const std::shared_ptr<const State> before =
+      std::atomic_load_explicit(&state_, std::memory_order_acquire);
+  if (before->bindings.find(slot_id) == before->bindings.end()) {
+    return false;
+  }
+  auto after = std::make_shared<State>(*before);
+  after->bindings.erase(slot_id);
+  adjust_task_context_retained_count(task_context_retained_count(*before),
+                                     task_context_retained_count(*after));
+  std::atomic_store_explicit(
+      &state_, std::shared_ptr<const State>(std::move(after)),
+      std::memory_order_release);
+  return true;
+}
+
+std::uint64_t RuntimeTaskContext::push_scope(
+    const RuntimeTaskLocalKey &key,
+    std::shared_ptr<RuntimeTaskLocalStoredValueBase> value) {
+  if (value == nullptr) {
+    throw RuntimeTaskFailure("TaskLocalError",
+                             "task-local scoped binding holder is null");
+  }
+  std::uint64_t token = next_scope_token_.load(std::memory_order_relaxed);
+  while (token != 0 && token != std::numeric_limits<std::uint64_t>::max() &&
+         !next_scope_token_.compare_exchange_weak(
+             token, token + 1U, std::memory_order_relaxed,
+             std::memory_order_relaxed)) {
+  }
+  if (token == 0 || token == std::numeric_limits<std::uint64_t>::max()) {
+    throw RuntimeTaskFailure("TaskLocalError",
+                             "task-local scope identity space is exhausted");
+  }
+  const std::shared_ptr<const State> before =
+      std::atomic_load_explicit(&state_, std::memory_order_acquire);
+  auto after = std::make_shared<State>(*before);
+  State::ScopeRestore restore;
+  restore.token = token;
+  restore.slot_id = key.slot_id();
+  const auto previous = before->bindings.find(key.slot_id());
+  if (previous != before->bindings.end()) {
+    restore.previous = previous->second;
+  }
+  after->scopes.push_back(std::move(restore));
+  after->bindings[key.slot_id()] =
+      RuntimeTaskLocalBinding{key.inherit(), std::move(value)};
+  adjust_task_context_retained_count(task_context_retained_count(*before),
+                                     task_context_retained_count(*after));
+  std::atomic_store_explicit(
+      &state_, std::shared_ptr<const State>(std::move(after)),
+      std::memory_order_release);
+  return token;
+}
+
+bool RuntimeTaskContext::pop_scope(std::uint64_t token) {
+  const std::shared_ptr<const State> before =
+      std::atomic_load_explicit(&state_, std::memory_order_acquire);
+  if (before->scopes.empty() || before->scopes.back().token != token) {
+    return false;
+  }
+  auto after = std::make_shared<State>(*before);
+  State::ScopeRestore restore = std::move(after->scopes.back());
+  after->scopes.pop_back();
+  if (restore.previous.has_value()) {
+    after->bindings[restore.slot_id] = std::move(*restore.previous);
+  } else {
+    after->bindings.erase(restore.slot_id);
+  }
+  adjust_task_context_retained_count(task_context_retained_count(*before),
+                                     task_context_retained_count(*after));
+  std::atomic_store_explicit(
+      &state_, std::shared_ptr<const State>(std::move(after)),
+      std::memory_order_release);
+  return true;
+}
+
+std::shared_ptr<RuntimeTaskContext>
+RuntimeTaskContext::inherited_snapshot() const {
+  const std::shared_ptr<const State> parent =
+      std::atomic_load_explicit(&state_, std::memory_order_acquire);
+  auto child = std::make_shared<State>();
+  for (const auto &[slot_id, binding_value] : parent->bindings) {
+    if (binding_value.inherit) {
+      child->bindings.emplace(slot_id, binding_value);
+    }
+  }
+  return std::shared_ptr<RuntimeTaskContext>(
+      new RuntimeTaskContext(std::shared_ptr<const State>(std::move(child))));
+}
+
+void RuntimeTaskContext::clear() {
+  const std::shared_ptr<const State> before =
+      std::atomic_load_explicit(&state_, std::memory_order_acquire);
+  const std::size_t retained = task_context_retained_count(*before);
+  if (retained == 0 && before->scopes.empty()) {
+    return;
+  }
+  std::atomic_store_explicit(
+      &state_, std::shared_ptr<const State>(std::make_shared<State>()),
+      std::memory_order_release);
+  adjust_task_context_retained_count(retained, 0);
+}
+
+void RuntimeTaskContext::append_runtime_roots(
+    std::vector<Value> *roots) const {
+  if (roots == nullptr) {
+    return;
+  }
+  const std::shared_ptr<const State> snapshot =
+      std::atomic_load_explicit(&state_, std::memory_order_acquire);
+  for (const auto &[slot_id, binding_value] : snapshot->bindings) {
+    (void)slot_id;
+    if (binding_value.value != nullptr) {
+      binding_value.value->append_runtime_roots(roots);
+    }
+  }
+  for (const State::ScopeRestore &scope : snapshot->scopes) {
+    if (scope.previous.has_value() && scope.previous->value != nullptr) {
+      scope.previous->value->append_runtime_roots(roots);
+    }
+  }
+}
+
+std::size_t RuntimeTaskContext::binding_count() const {
+  return std::atomic_load_explicit(&state_, std::memory_order_acquire)
+      ->bindings.size();
+}
+
+std::size_t RuntimeTaskContext::retained_value_count() const {
+  return task_context_retained_count(
+      *std::atomic_load_explicit(&state_, std::memory_order_acquire));
+}
+
+void runtime_append_task_local_gc_roots(std::vector<Value> *roots) {
+  if (roots == nullptr) {
+    return;
+  }
+  RuntimeTaskContextRegistry &registry = runtime_task_context_registry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  for (RuntimeTaskContext *context : registry.contexts) {
+    if (context != nullptr) {
+      context->append_runtime_roots(roots);
+    }
+  }
+}
+
+std::uint64_t runtime_task_local_live_context_count() {
+  return g_runtime_task_local_live_contexts.load(std::memory_order_relaxed);
+}
+
+std::uint64_t runtime_task_local_retained_value_count() {
+  return g_runtime_task_local_retained_values.load(std::memory_order_relaxed);
+}
+
+std::uint64_t runtime_task_local_registry_capacity() {
+  RuntimeTaskContextRegistry &registry = runtime_task_context_registry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  return static_cast<std::uint64_t>(registry.contexts.size());
+}
+
+RuntimeTaskLocal::RuntimeTaskLocal(bool inherit) : key_(inherit) {}
+
+RuntimeTaskLocal::RuntimeTaskLocal(RuntimeTaskLocalKey key)
+    : key_(std::move(key)) {}
+
+std::uint64_t RuntimeTaskLocal::slot_id() const { return key_.slot_id(); }
+
+bool RuntimeTaskLocal::inherit() const { return key_.inherit(); }
+
+RuntimeTaskLocalKey RuntimeTaskLocal::key() const { return key_; }
+
+bool RuntimeTaskLocal::bound() const {
+  return require_runtime_task_context()->binding(key_.slot_id()).has_value();
+}
+
+Value RuntimeTaskLocal::get(Value default_value) const {
+  const std::optional<RuntimeTaskLocalBinding> found =
+      require_runtime_task_context()->binding(key_.slot_id());
+  if (!found.has_value()) {
+    return default_value;
+  }
+  Value stored = Value::null();
+  if (found->value == nullptr ||
+      !found->value->copy_runtime_value(&stored)) {
+    throw RuntimeTaskFailure("TaskLocalError",
+                             "task-local value belongs to another backend");
+  }
+  return stored;
+}
+
+Value RuntimeTaskLocal::set(Value value) const {
+  Value result = value;
+  require_runtime_task_context()->set(
+      key_, std::make_shared<RuntimeTaskLocalStoredValue<Value>>(
+                std::move(value)));
+  return result;
+}
+
+bool RuntimeTaskLocal::clear() const {
+  return require_runtime_task_context()->erase(key_.slot_id());
+}
+
+std::uint64_t RuntimeTaskLocal::push_scope(Value value) const {
+  return require_runtime_task_context()->push_scope(
+      key_, std::make_shared<RuntimeTaskLocalStoredValue<Value>>(
+                std::move(value)));
+}
+
+bool RuntimeTaskLocal::pop_scope(std::uint64_t token) const {
+  return require_runtime_task_context()->pop_scope(token);
+}
 
 bool runtime_value_is_shareable(const Value &value) {
   return !runtime_value_shareability_error(value).has_value();
@@ -1806,6 +2184,9 @@ private:
     if (lhs.is_task_handle()) {
       return lhs.as_task_handle() == rhs.as_task_handle();
     }
+    if (lhs.is_task_local()) {
+      return lhs.as_task_local() == rhs.as_task_local();
+    }
     if (lhs.is_channel()) {
       return lhs.as_channel() == rhs.as_channel();
     }
@@ -2157,6 +2538,22 @@ public:
   }
 
   bool wake_strand(std::uint64_t strand_id) {
+    return wake_strand_impl(strand_id, std::nullopt);
+  }
+
+  bool wake_strand_on_worker_for_test(std::uint64_t strand_id,
+                                      std::uint64_t worker_id) {
+    if (worker_id < first_worker_id_ ||
+        worker_id >= first_worker_id_ + worker_count_) {
+      return false;
+    }
+    return wake_strand_impl(
+        strand_id,
+        static_cast<std::size_t>(worker_id - first_worker_id_));
+  }
+
+  bool wake_strand_impl(std::uint64_t strand_id,
+                        std::optional<std::size_t> worker_index) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto found = strands_.find(strand_id);
     if (found == strands_.end()) {
@@ -2172,6 +2569,7 @@ public:
       // re-enqueue it immediately rather than sleeping. mutex_ serializes this
       // against the park transition, so the wake cannot be lost either way.
       strand.park_wake_pending = true;
+      strand.park_wake_worker_index = worker_index;
       return true;
     }
     if (strand.state != RuntimeStrandState::Sleeping || strand.wake_pending ||
@@ -2185,13 +2583,22 @@ public:
     strand.state = RuntimeStrandState::Runnable;
     ++strand.explicit_wakes;
     ++stats_.explicit_wakes;
-    enqueue_runnable_locked(strand_id, std::nullopt);
-    cv_.notify_one();
+    enqueue_runnable_locked(strand_id, worker_index);
+    if (worker_index.has_value()) {
+      // A targeted test wake is consumable only by that worker. Waking an
+      // arbitrary waiter can otherwise leave the selected worker asleep.
+      cv_.notify_all();
+    } else {
+      cv_.notify_one();
+    }
     return true;
   }
 
   bool park_current(std::optional<std::chrono::milliseconds> wake_after) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (current_runtime_scheduler_identity() != this) {
+      return false;
+    }
     const std::uint64_t id = current_runtime_task_id();
     if (id == 0) {
       return false;
@@ -2419,6 +2826,7 @@ private:
     // external wake (e.g. a reactor IO-readiness completion) racing the park
     // is never lost.
     bool park_wake_pending = false;
+    std::optional<std::size_t> park_wake_worker_index;
     bool parked_once = false;
     std::uint64_t explicit_wakes = 0;
     std::uint64_t timer_wakes = 0;
@@ -2427,6 +2835,7 @@ private:
     std::vector<std::uint64_t> child_task_order;
     std::shared_ptr<std::atomic<bool>> cancellation_requested =
         std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<RuntimeTaskContext> task_context;
     RuntimeStrandState pending_completion_state = RuntimeStrandState::New;
     TaskError pending_error;
     TaskError error;
@@ -2471,9 +2880,17 @@ private:
     if (!function) {
       function = []() {};
     }
+    const std::shared_ptr<RuntimeTaskContext> parent_context =
+        current_runtime_task_context();
+    std::shared_ptr<RuntimeTaskContext> task_context =
+        parent_context == nullptr ? RuntimeTaskContext::create()
+                                  : parent_context->inherited_snapshot();
     std::lock_guard<std::mutex> lock(mutex_);
     const std::uint64_t strand_id = next_strand_id_++;
-    std::uint64_t parent_task_id = current_runtime_task_id();
+    std::uint64_t parent_task_id =
+        current_runtime_scheduler_identity() == this
+            ? current_runtime_task_id()
+            : 0;
     auto parent = strands_.find(parent_task_id);
     if (parent == strands_.end() || is_terminal_state(parent->second.state)) {
       parent_task_id = 0;
@@ -2486,6 +2903,7 @@ private:
          << 1U) |
         1U;
     strand.parent_task_id = parent_task_id;
+    strand.task_context = std::move(task_context);
     strand.function = std::move(function);
     strand.state = RuntimeStrandState::Runnable;
     strand.supervisor_policy = options.policy;
@@ -2743,6 +3161,10 @@ private:
     task.worker_id = 0;
     task.queued = false;
     task.wake_pending = false;
+    if (task.task_context != nullptr) {
+      task.task_context->clear();
+    }
+    task.task_context.reset();
 
     if (final_state == RuntimeStrandState::Done) {
       ++stats_.strands_completed;
@@ -2840,6 +3262,7 @@ private:
       std::uint64_t sync_owner_id = 0;
       StrandFunction function;
       std::shared_ptr<std::atomic<bool>> cancellation_requested;
+      std::shared_ptr<RuntimeTaskContext> task_context;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         while (!shutdown_requested_) {
@@ -2848,6 +3271,7 @@ private:
             function = strands_[strand_id].function;
             sync_owner_id = strands_[strand_id].sync_owner_id;
             cancellation_requested = strands_[strand_id].cancellation_requested;
+            task_context = strands_[strand_id].task_context;
             break;
           }
           if (timers_.empty()) {
@@ -2866,7 +3290,8 @@ private:
       {
         RuntimeStrandScope strand_scope(strand_id);
         RuntimeTaskScope task_scope(strand_id, cancellation_requested.get(),
-                                    sync_owner_id);
+                                    sync_owner_id, std::move(task_context),
+                                    this);
         try {
           function();
         } catch (const RuntimeTaskCancelled &) {
@@ -2883,6 +3308,14 @@ private:
           completion.error = TaskError{"RuntimeError", "task failed"};
         }
       }
+
+      // Release the worker's invocation copy before publishing completion.
+      // A completed resumable VM can contain TaskHandle values that retain the
+      // scheduler; letting this copy die after notify_all() permits a waiter to
+      // release the last external scheduler owner first, which would attempt
+      // to join this worker from itself. The strand record remains the owner
+      // across a park, so doing this here is also safe for suspension.
+      function = {};
 
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -2907,7 +3340,10 @@ private:
             // A wake raced the park (e.g. reactor IO readiness fired before we
             // got here). Resume immediately instead of sleeping.
             strand.park_wake_pending = false;
-            enqueue_runnable_locked(strand_id, std::nullopt);
+            const std::optional<std::size_t> worker_index =
+                strand.park_wake_worker_index;
+            strand.park_wake_worker_index.reset();
+            enqueue_runnable_locked(strand_id, worker_index);
           } else if (strand.park_wake_deadline.has_value()) {
             timers_.push(TimerEntry{*strand.park_wake_deadline, strand_id,
                                     strand.wake_generation});
@@ -2997,6 +3433,11 @@ RuntimeScheduler::spawn_sleeping_strand(std::chrono::milliseconds delay,
 
 bool RuntimeScheduler::wake_strand(std::uint64_t strand_id) {
   return impl_->wake_strand(strand_id);
+}
+
+bool RuntimeScheduler::wake_strand_on_worker_for_test(
+    std::uint64_t strand_id, std::uint64_t worker_id) {
+  return impl_->wake_strand_on_worker_for_test(strand_id, worker_id);
 }
 
 bool RuntimeScheduler::park_current(

@@ -1650,6 +1650,11 @@ public:
   execute(std::uint32_t code_id, const std::vector<Value> &args,
           const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
           Value self, Value block) {
+    if (current_runtime_task_context() == nullptr &&
+        root_task_context_ == nullptr) {
+      root_task_context_ = RuntimeTaskContext::create();
+    }
+    RuntimeTaskContextScope task_context_scope(root_task_context_, true, true);
     const std::size_t watch_event_start = state_->watch_events.size();
     if (!numeric_profile_error_.empty()) {
       return with_runtime_names(
@@ -1733,6 +1738,7 @@ public:
                           state_->watch_events.end());
     }
     if (fault_.has_value()) {
+      unwind_all_frame_scopes();
       return with_runtime_names({Value::null(),
                                  fault_,
                                  {},
@@ -1747,6 +1753,11 @@ public:
   ExecutionResult invoke_native_extension(std::uint32_t code_id,
                                           const std::vector<Value> &args,
                                           Value self) {
+    if (current_runtime_task_context() == nullptr &&
+        root_task_context_ == nullptr) {
+      root_task_context_ = RuntimeTaskContext::create();
+    }
+    RuntimeTaskContextScope task_context_scope(root_task_context_, true, true);
     const BcCode *entry = find_code(module_, code_id);
     if (entry == nullptr) {
       return with_runtime_names(
@@ -3120,6 +3131,7 @@ private:
       }
       // A task-cancellation exception can unwind through the step loop and
       // leave frames behind; drop them so the next lease starts clean.
+      vm->unwind_all_frame_scopes();
       vm->frames_.clear();
       vm->fault_ = std::nullopt;
       vm->escaped_exception_ = std::nullopt;
@@ -3283,6 +3295,7 @@ private:
         append_value_root(&roots, value);
       }
     }
+    runtime_append_task_local_gc_roots(&roots);
     return roots;
   }
 
@@ -5135,6 +5148,7 @@ private:
     frame.pending_exception_on_return.reset();
     frame.pending_throw_on_return.reset();
     frame.preserved_registers_on_return.clear();
+    frame.scope_exit = {};
     frame.prepared_seq_regs.clear();
     frame.prepared_map_regs.clear();
     frame.pending_pattern_bindings.clear();
@@ -5163,6 +5177,7 @@ private:
     frame.pending_exception_on_return.reset();
     frame.pending_throw_on_return.reset();
     frame.preserved_registers_on_return.clear();
+    frame.scope_exit = {};
     frame.prepared_seq_regs.clear();
     frame.prepared_map_regs.clear();
     frame.pending_pattern_bindings.clear();
@@ -8693,6 +8708,8 @@ private:
       return value.is_time_zone();
     case RuntimeNativeTypeKind::TaskModule:
       return value.is_task_module();
+    case RuntimeNativeTypeKind::TaskLocal:
+      return value.is_task_local();
     case RuntimeNativeTypeKind::Channel:
       return value.is_channel();
     case RuntimeNativeTypeKind::Mutex:
@@ -12474,9 +12491,25 @@ private:
     return true;
   }
 
+  void run_frame_scope_exit(Frame &frame) {
+    if (!frame.scope_exit) {
+      return;
+    }
+    std::function<void()> cleanup = std::move(frame.scope_exit);
+    frame.scope_exit = {};
+    cleanup();
+  }
+
+  void unwind_all_frame_scopes() {
+    for (auto frame = frames_.rbegin(); frame != frames_.rend(); ++frame) {
+      run_frame_scope_exit(*frame);
+    }
+  }
+
   bool pop_frames_above_unwind_target(std::size_t target_index,
                                       Value *exception) {
     while (frames_.size() > target_index + 1U) {
+      run_frame_scope_exit(frames_.back());
       Frame completed_frame = std::move(frames_.back());
       frames_.pop_back();
       if (exception != nullptr &&
@@ -12563,6 +12596,7 @@ private:
         frame.pending_exception_on_return;
     const std::optional<PendingThrow> pending_throw =
         frame.pending_throw_on_return;
+    run_frame_scope_exit(frame);
     Frame completed_frame = std::move(frames_.back());
     frames_.pop_back();
     if (capture_completed_frame) {
@@ -12957,6 +12991,7 @@ private:
           vm->step();
         }
         if (vm->fault_.has_value()) {
+          vm->unwind_all_frame_scopes();
           throw RuntimeTaskFailure(vm->fault_->error_name, vm->fault_->message);
         }
         if (vm->park_request_.has_value()) {
@@ -19998,6 +20033,8 @@ private:
         task_runtime_kind = RuntimeNativeTypeKind::TaskModule;
       } else if (receiver.is_task_handle()) {
         task_runtime_kind = RuntimeNativeTypeKind::TaskModule;
+      } else if (receiver.is_task_local()) {
+        task_runtime_kind = RuntimeNativeTypeKind::TaskLocal;
       } else if (receiver.is_mutex()) {
         task_runtime_kind = RuntimeNativeTypeKind::Mutex;
       } else if (receiver.is_atomic()) {
@@ -20028,11 +20065,103 @@ private:
     }
 
     if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
+        receiver.is_task_local()) {
+      const std::shared_ptr<RuntimeTaskLocal> local = receiver.as_task_local();
+      if (local == nullptr) {
+        set_fault(frame, "TypeError", "task-local key is null");
+        return SendStatus::Faulted;
+      }
+      try {
+        if (selector == "bound?") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "TaskLocal.bound? does not accept keywords");
+            }
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(local->bound());
+          return SendStatus::Matched;
+        }
+        if (selector == "get") {
+          if (!require_arity(0) ||
+              !reject_unknown_keywords(frame, kw_args, {"default"}) ||
+              !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = local->get(
+              keyword_arg_value(kw_args, "default").value_or(Value::null()));
+          return SendStatus::Matched;
+        }
+        if (selector == "set!") {
+          if (!require_arity(1) || !kw_args.empty() || !require_no_block()) {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "TaskLocal.set! does not accept keywords");
+            }
+            return SendStatus::Faulted;
+          }
+          *out = local->set(args[0]);
+          return SendStatus::Matched;
+        }
+        if (selector == "clear!") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            if (!kw_args.empty()) {
+              set_fault(frame, "TypeError",
+                        "TaskLocal.clear! does not accept keywords");
+            }
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(local->clear());
+          return SendStatus::Matched;
+        }
+        if (selector == "inherit?") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::boolean(local->inherit());
+          return SendStatus::Matched;
+        }
+        if (selector == "slot_id") {
+          if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
+            return SendStatus::Faulted;
+          }
+          *out = Value::integer(
+              static_cast<std::int64_t>(local->slot_id()));
+          return SendStatus::Matched;
+        }
+      } catch (const RuntimeTaskFailure &failure) {
+        set_fault(frame, failure.error_name(), failure.message());
+        return SendStatus::Faulted;
+      }
+      return SendStatus::NotHandled;
+    }
+
+    if (mode == NativeStdlibSendMode::TaskRuntimeIntrinsic &&
         receiver.is_task_module()) {
       const std::shared_ptr<RuntimeTaskModule> task = receiver.as_task_module();
       if (task == nullptr) {
         set_fault(frame, "TypeError", "task module is null");
         return SendStatus::Faulted;
+      }
+      if (selector == "local") {
+        if (!require_arity(0) ||
+            !reject_unknown_keywords(frame, kw_args, {"inherit"}) ||
+            !require_no_block()) {
+          return SendStatus::Faulted;
+        }
+        bool inherit = false;
+        if (const std::optional<Value> value =
+                keyword_arg_value(kw_args, "inherit")) {
+          if (!value->is_bool()) {
+            set_fault(frame, "TypeError",
+                      "task.local inherit must be Bool");
+            return SendStatus::Faulted;
+          }
+          inherit = value->as_bool();
+        }
+        *out = Value::task_local(std::make_shared<RuntimeTaskLocal>(inherit));
+        return SendStatus::Matched;
       }
       if (selector == "annotation" || selector == "current_annotation") {
         if (!require_arity(0) || !kw_args.empty() || !require_no_block()) {
@@ -26997,6 +27126,52 @@ private:
                 "send cannot be both property access and assignment");
       return false;
     }
+    // TaskLocal.with must execute its block on this same persistent VM frame
+    // stack. The ordinary stdlib block helper is one-shot and cannot preserve
+    // dynamic scope across a cooperative park. The restoration token lives in
+    // the logical task context; the callee frame carries only its exit action.
+    if (!property_access && !property_assignment && receiver.is_task_local() &&
+        *selector == "with") {
+      if (args.size() != 1U || !kw_args.empty() || block.is_null()) {
+        set_fault(frame, "TypeError",
+                  "TaskLocal.with expects one value and a block");
+        return false;
+      }
+      if (!block.is_closure()) {
+        set_fault(frame, "TypeError", "TaskLocal.with block must be closure");
+        return false;
+      }
+      const std::shared_ptr<RuntimeTaskLocal> local = receiver.as_task_local();
+      const std::shared_ptr<RuntimeTaskContext> context =
+          current_runtime_task_context();
+      if (local == nullptr || context == nullptr) {
+        set_fault(frame, "TaskLocalError",
+                  "TaskLocal.with requires an active logical Amber task");
+        return false;
+      }
+      std::uint64_t token = 0;
+      try {
+        token = local->push_scope(args[0]);
+      } catch (const RuntimeTaskFailure &failure) {
+        set_fault(frame, failure.error_name(), failure.message());
+        return false;
+      }
+      const std::size_t frame_count = frames_.size();
+      if (!invoke_callable_value(frame, block, {}, {}, Value::null(), dst)) {
+        (void)context->pop_scope(token);
+        return false;
+      }
+      if (frames_.size() != frame_count + 1U) {
+        (void)context->pop_scope(token);
+        set_fault(frames_[frame_count - 1U], "VMError",
+                  "TaskLocal.with block did not create a resumable frame");
+        return false;
+      }
+      frames_.back().scope_exit = [context, token]() {
+        (void)context->pop_scope(token);
+      };
+      return true;
+    }
     if (!property_access && !property_assignment && *selector == "destroy!") {
       if (!args.empty() || !kw_args.empty() || !block.is_null()) {
         set_fault(frame, "TypeError", "destroy! accepts no arguments");
@@ -29727,6 +29902,9 @@ private:
   // points.
   const RuntimeErrorRegistry *error_registry_ = nullptr;
   std::function<ExecutionResult(const Value &)> macro_block_executor_;
+  // Lazily created for top-level execution. Scheduler-driven/persistent VMs
+  // use the context installed from their StrandRecord instead.
+  std::shared_ptr<RuntimeTaskContext> root_task_context_;
 };
 
 } // namespace

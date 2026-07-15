@@ -63,6 +63,7 @@ class RuntimeIoValue;
 class RuntimeLogger;
 class RuntimeMutex;
 class RuntimeTaskHandle;
+class RuntimeTaskLocal;
 class RuntimeTaskModule;
 class RuntimeTextWriter;
 class RuntimeThreadedCollection;
@@ -191,6 +192,7 @@ struct ClassObjectValue {
 
 enum class RuntimeNativeTypeKind {
   TaskModule,
+  TaskLocal,
   Channel,
   Mutex,
   Atomic,
@@ -411,6 +413,7 @@ struct RuntimeForeignHandle {
     TaskModule)                                                                \
   X(task_handle, is_task_handle, as_task_handle, RuntimeTaskHandle,            \
     TaskHandle)                                                                \
+  X(task_local, is_task_local, as_task_local, RuntimeTaskLocal, TaskLocal)      \
   X(channel, is_channel, as_channel, RuntimeChannel, Channel)                  \
   X(mutex, is_mutex, as_mutex, RuntimeMutex, Mutex)                            \
   X(atomic, is_atomic, as_atomic, RuntimeAtomic, Atomic)                       \
@@ -452,6 +455,7 @@ struct Value {
       NativeErrorClassValue, std::shared_ptr<ErrorInstanceValue>,
       std::shared_ptr<NativeErrorNamespaceValue>, std::shared_ptr<BigIntValue>,
       std::shared_ptr<RuntimeTaskModule>, std::shared_ptr<RuntimeTaskHandle>,
+      std::shared_ptr<RuntimeTaskLocal>,
       std::shared_ptr<RuntimeChannel>, std::shared_ptr<RuntimeMutex>,
       std::shared_ptr<RuntimeAtomic>, std::shared_ptr<RuntimeBarrier>,
       std::shared_ptr<RuntimeFlowModule>,
@@ -491,6 +495,7 @@ struct Value {
   static Value big_int(std::shared_ptr<BigIntValue> value);
   static Value task_module(std::shared_ptr<RuntimeTaskModule> value);
   static Value task_handle(std::shared_ptr<RuntimeTaskHandle> value);
+  static Value task_local(std::shared_ptr<RuntimeTaskLocal> value);
   static Value channel(std::shared_ptr<RuntimeChannel> value);
   static Value mutex(std::shared_ptr<RuntimeMutex> value);
   static Value atomic(std::shared_ptr<RuntimeAtomic> value);
@@ -535,6 +540,7 @@ struct Value {
   bool is_big_int() const;
   bool is_task_module() const;
   bool is_task_handle() const;
+  bool is_task_local() const;
   bool is_channel() const;
   bool is_mutex() const;
   bool is_atomic() const;
@@ -577,6 +583,7 @@ struct Value {
   std::shared_ptr<BigIntValue> as_big_int() const;
   std::shared_ptr<RuntimeTaskModule> as_task_module() const;
   std::shared_ptr<RuntimeTaskHandle> as_task_handle() const;
+  std::shared_ptr<RuntimeTaskLocal> as_task_local() const;
   std::shared_ptr<RuntimeChannel> as_channel() const;
   std::shared_ptr<RuntimeMutex> as_mutex() const;
   std::shared_ptr<RuntimeAtomic> as_atomic() const;
@@ -643,6 +650,7 @@ enum class ValueTailKind : std::uint8_t {
   BigInt,
   TaskModule,
   TaskHandle,
+  TaskLocal,
   Channel,
   Mutex,
   Atomic,
@@ -698,6 +706,7 @@ struct Value {
   static Value big_int(std::shared_ptr<BigIntValue> value);
   static Value task_module(std::shared_ptr<RuntimeTaskModule> value);
   static Value task_handle(std::shared_ptr<RuntimeTaskHandle> value);
+  static Value task_local(std::shared_ptr<RuntimeTaskLocal> value);
   static Value channel(std::shared_ptr<RuntimeChannel> value);
   static Value mutex(std::shared_ptr<RuntimeMutex> value);
   static Value atomic(std::shared_ptr<RuntimeAtomic> value);
@@ -742,6 +751,7 @@ struct Value {
   bool is_big_int() const;
   bool is_task_module() const;
   bool is_task_handle() const;
+  bool is_task_local() const;
   bool is_channel() const;
   bool is_mutex() const;
   bool is_atomic() const;
@@ -784,6 +794,7 @@ struct Value {
   std::shared_ptr<BigIntValue> as_big_int() const;
   std::shared_ptr<RuntimeTaskModule> as_task_module() const;
   std::shared_ptr<RuntimeTaskHandle> as_task_handle() const;
+  std::shared_ptr<RuntimeTaskLocal> as_task_local() const;
   std::shared_ptr<RuntimeChannel> as_channel() const;
   std::shared_ptr<RuntimeMutex> as_mutex() const;
   std::shared_ptr<RuntimeAtomic> as_atomic() const;

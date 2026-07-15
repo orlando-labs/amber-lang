@@ -291,6 +291,9 @@ struct Frame {
   std::optional<Value> pending_exception_on_return;
   std::optional<PendingThrow> pending_throw_on_return;
   std::vector<PreservedRegister> preserved_registers_on_return;
+  // Dynamic runtime scope cleanup (currently TaskLocal.with). The cleanup is
+  // kept on the resumable frame so it survives cooperative park/migration.
+  std::function<void()> scope_exit;
   FlatRegMap<PreparedSeqState> prepared_seq_regs;
   FlatRegMap<PreparedMapState> prepared_map_regs;
   FlatRegMap<Value> pending_pattern_bindings;

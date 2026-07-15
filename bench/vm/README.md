@@ -13,3 +13,5 @@ Prepare that fixture with:
 python3 bench/polyglot/run_benchmark.py --workload json --repeats 1
 ```
 
+`task_local_get.am` exercises the hot lookup path after one slot allocation and
+one binding write. It deliberately excludes spawn/snapshot cost.

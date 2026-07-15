@@ -679,6 +679,7 @@ void test_builtin_runtime_module_descriptors() {
   expect_handler(RuntimeNativeTypeKind::NetEndpoint, "net.Endpoint");
   expect_handler(RuntimeNativeTypeKind::NetHttp, "net.http");
   expect_handler(RuntimeNativeTypeKind::TaskModule, "task");
+  expect_handler(RuntimeNativeTypeKind::TaskLocal, "TaskLocal");
   expect_handler(RuntimeNativeTypeKind::Channel, "Channel");
   expect_handler(RuntimeNativeTypeKind::Mutex, "Mutex");
   expect_handler(RuntimeNativeTypeKind::Atomic, "Atomic");

@@ -386,6 +386,9 @@ bool value_equals(const Value &lhs, const Value &rhs) {
   if (lhs.is_task_handle()) {
     return lhs.as_task_handle() == rhs.as_task_handle();
   }
+  if (lhs.is_task_local()) {
+    return lhs.as_task_local() == rhs.as_task_local();
+  }
   if (lhs.is_channel()) {
     return lhs.as_channel() == rhs.as_channel();
   }

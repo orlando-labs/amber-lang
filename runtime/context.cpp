@@ -7,8 +7,10 @@ namespace amber::runtime {
 thread_local std::uint64_t tls_runtime_worker_id = 0;
 thread_local std::uint64_t tls_runtime_strand_id = 0;
 thread_local std::uint64_t tls_runtime_task_id = 0;
+thread_local const void *tls_runtime_scheduler_identity = nullptr;
 thread_local std::uint64_t tls_runtime_sync_owner_id = 0;
 thread_local const std::atomic<bool> *tls_runtime_task_cancel_flag = nullptr;
+thread_local std::shared_ptr<RuntimeTaskContext> tls_runtime_task_context;
 thread_local std::uint32_t tls_runtime_task_sync_depth = 0;
 thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stdout;
 thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stderr;
@@ -70,20 +72,58 @@ RuntimeTextSourceLocation resolve_runtime_text_source_location() {
 
 RuntimeTaskScope::RuntimeTaskScope(std::uint64_t task_id,
                                    const std::atomic<bool> *cancel_flag,
-                                   std::uint64_t sync_owner_id)
+                                   std::uint64_t sync_owner_id,
+                                   std::shared_ptr<RuntimeTaskContext> task_context,
+                                   const void *scheduler_identity)
     : previous_task_id_(tls_runtime_task_id),
+      previous_scheduler_identity_(tls_runtime_scheduler_identity),
       previous_sync_owner_id_(tls_runtime_sync_owner_id),
-      previous_cancel_flag_(tls_runtime_task_cancel_flag) {
+      previous_cancel_flag_(tls_runtime_task_cancel_flag),
+      previous_task_context_(std::move(tls_runtime_task_context)) {
   tls_runtime_task_id = task_id;
+  tls_runtime_scheduler_identity = scheduler_identity;
   tls_runtime_sync_owner_id =
       sync_owner_id == 0 ? (task_id << 1U) : sync_owner_id;
   tls_runtime_task_cancel_flag = cancel_flag;
+  tls_runtime_task_context = std::move(task_context);
 }
 
 RuntimeTaskScope::~RuntimeTaskScope() {
   tls_runtime_task_id = previous_task_id_;
+  tls_runtime_scheduler_identity = previous_scheduler_identity_;
   tls_runtime_sync_owner_id = previous_sync_owner_id_;
   tls_runtime_task_cancel_flag = previous_cancel_flag_;
+  tls_runtime_task_context = std::move(previous_task_context_);
+}
+
+std::shared_ptr<RuntimeTaskContext> current_runtime_task_context() {
+  return tls_runtime_task_context;
+}
+
+const void *current_runtime_scheduler_identity() {
+  return tls_runtime_scheduler_identity;
+}
+
+RuntimeTaskContextScope::RuntimeTaskContextScope(
+    std::shared_ptr<RuntimeTaskContext> context, bool only_if_unbound,
+    bool clear_on_exit)
+    : previous_(tls_runtime_task_context), clear_on_exit_(clear_on_exit) {
+  if (context == nullptr || (only_if_unbound && previous_ != nullptr)) {
+    return;
+  }
+  installed_context_ = std::move(context);
+  tls_runtime_task_context = installed_context_;
+  installed_ = true;
+}
+
+RuntimeTaskContextScope::~RuntimeTaskContextScope() {
+  if (!installed_) {
+    return;
+  }
+  if (clear_on_exit_ && installed_context_ != nullptr) {
+    installed_context_->clear();
+  }
+  tls_runtime_task_context = std::move(previous_);
 }
 
 RuntimeTaskSyncScope::RuntimeTaskSyncScope() { ++tls_runtime_task_sync_depth; }

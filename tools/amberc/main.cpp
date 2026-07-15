@@ -2493,15 +2493,23 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
            (selector == "write_str" && pos_count == 1U) ||
            (selector == "write_line" && pos_count <= 1U));
       const bool task_send =
-          kw_count == 0U &&
-          (((selector == "spawn" || selector == "async") &&
-            pos_count == 0U && !no_block) ||
-           (selector == "sleep" && pos_count == 1U && no_block) ||
-           ((selector == "cancel" || selector == "cancelled?" ||
-             selector == "done?" || selector == "running?" ||
-             selector == "failed?" || selector == "wait" ||
-             selector == "result") &&
-            pos_count == 0U && no_block));
+          (kw_count == 0U &&
+           (((selector == "spawn" || selector == "async") &&
+             pos_count == 0U && !no_block) ||
+            (selector == "sleep" && pos_count == 1U && no_block) ||
+            ((selector == "cancel" || selector == "cancelled?" ||
+              selector == "done?" || selector == "running?" ||
+              selector == "failed?" || selector == "wait" ||
+              selector == "result" || selector == "bound?" ||
+              selector == "clear!" || selector == "inherit?" ||
+              selector == "slot_id") &&
+             pos_count == 0U && no_block) ||
+            (selector == "set!" && pos_count == 1U && no_block) ||
+            (selector == "with" && pos_count == 1U && !no_block))) ||
+          (selector == "local" && pos_count == 0U && no_block &&
+           kw_count <= 1U && kw_allowed({"inherit"})) ||
+          (selector == "get" && pos_count == 0U && no_block &&
+           kw_count <= 1U && kw_allowed({"default"}));
       bool amber_send =
           selector == "stringify" && pos_count == 1U && kw_count <= 1U &&
           no_block;
@@ -4855,7 +4863,7 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
           dst, "native_task_send(" + read_reg_expr(recv) +
                    ", native_hex_to_string(\"" +
                    string_to_hex_text(selector) + "\"), " +
-                   pos_args_expr(0U) + ", " +
+                   pos_args_expr(0U) + ", " + call_kw_args_expr() + ", " +
                    (has_block
                         ? read_reg_expr(
                               static_cast<std::uint32_t>(block_reg))
@@ -6777,6 +6785,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeRegexpMatch;\n";
   out << "struct NativeTextWriter;\n";
   out << "struct NativeTask;\n";
+  out << "struct NativeTaskLocal;\n";
   out << "struct NativeTaskState;\n";
   out << "struct NativeResult;\n";
   out << "struct NativeMutex;\n";
@@ -6807,7 +6816,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "Map, Range, "
          "ArgParser, "
          "FsPath, Regexp, RegexpMatch, Uuid, Time, TimePeriod, HeapString, "
-         "ErrorNamespace, TextWriter, Task, Result, Mutex, Atomic, "
+         "ErrorNamespace, TextWriter, Task, TaskLocal, Result, Mutex, Atomic, "
          "ErrorInstance, ForeignHandle, Instance, "
          "Closure };\n";
   out << "  Tag tag;\n";
@@ -6946,6 +6955,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "std::shared_ptr<amber::runtime::RuntimeTextWriter> value);\n";
   out << "  static NativeValue task(amber::runtime::RuntimeTaskHandle handle, "
          "std::shared_ptr<NativeTaskState> state);\n";
+  out << "  static NativeValue task_local(bool inherit);\n";
+  out << "  static NativeValue task_local("
+         "amber::runtime::RuntimeTaskLocalKey key);\n";
   out << "  static NativeValue result(bool is_ok, NativeValue payload);\n";
   out << "  static NativeValue uuid(amber::runtime::RuntimeUuidValue value);\n";
   out << "  static NativeValue time(amber::runtime::RuntimeTimeValue value);\n";
@@ -7064,6 +7076,12 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "std::shared_ptr<NativeTaskState> task_state)\n";
   out << "      : handle(std::move(task_handle)), "
          "state(std::move(task_state)) {}\n";
+  out << "};\n";
+  out << "struct NativeTaskLocal : NativeRcHeader {\n";
+  out << "  amber::runtime::RuntimeTaskLocalKey key;\n";
+  out << "  explicit NativeTaskLocal(bool inherit) : key(inherit) {}\n";
+  out << "  explicit NativeTaskLocal(amber::runtime::RuntimeTaskLocalKey value) "
+         ": key(std::move(value)) {}\n";
   out << "};\n";
   out << "struct NativeResult : NativeRcHeader {\n";
   out << "  bool is_ok = false;\n";
@@ -7223,6 +7241,8 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
       delete static_cast<NativeTextWriter *>(payload); return;
     case NativeValue::Tag::Task:
       delete static_cast<NativeTask *>(payload); return;
+    case NativeValue::Tag::TaskLocal:
+      delete static_cast<NativeTaskLocal *>(payload); return;
     case NativeValue::Tag::Result:
       delete static_cast<NativeResult *>(payload); return;
     case NativeValue::Tag::Uuid:
@@ -7429,6 +7449,17 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  out.heap_value = new NativeTask(std::move(handle), "
          "std::move(state));\n";
   out << "  out.tag = Tag::Task; return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::task_local(bool inherit) {\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeTaskLocal(inherit);\n";
+  out << "  out.tag = Tag::TaskLocal; return out;\n";
+  out << "}\n";
+  out << "NativeValue NativeValue::task_local("
+         "amber::runtime::RuntimeTaskLocalKey key) {\n";
+  out << "  NativeValue out;\n";
+  out << "  out.heap_value = new NativeTaskLocal(std::move(key));\n";
+  out << "  out.tag = Tag::TaskLocal; return out;\n";
   out << "}\n";
   out << "NativeValue NativeValue::result(bool is_ok, NativeValue payload) {\n";
   out << "  NativeValue out; auto *result = new NativeResult();\n";
@@ -7687,7 +7718,8 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "static bool native_value_is_task_receiver("
          "const NativeValue &value) {\n";
   out << "  return value.tag == NativeValue::Tag::TaskModule || "
-         "value.tag == NativeValue::Tag::Task;\n";
+         "value.tag == NativeValue::Tag::Task || "
+         "value.tag == NativeValue::Tag::TaskLocal;\n";
   out << "}\n";
   out << "static bool native_value_is_result_receiver("
          "const NativeValue &value) {\n";
@@ -7814,9 +7846,38 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "static NativeValue native_io_send("
          "const NativeValue &receiver, const std::string &selector, "
          "std::initializer_list<NativeValue> args, NativeValue block);\n\n";
+  if (!plan.vm_callable_code_ids.empty() ||
+      !plan.native_extension_code_ids.empty()) {
+    out << "static amber::runtime::Value amber_native_bridge_argument("
+           "const NativeValue &arg);\n";
+    out << "static NativeValue amber_native_bridge_result_current("
+           "const amber::runtime::Value &value);\n";
+    out << "struct NativeTaskLocalStoredValueHolder final : "
+           "amber::runtime::RuntimeTaskLocalStoredValueBase {\n";
+    out << "  NativeValue value;\n";
+    out << "  std::optional<amber::runtime::Value> runtime_value;\n";
+    out << "  explicit NativeTaskLocalStoredValueHolder(NativeValue stored) "
+           ": value(std::move(stored)) {\n";
+    out << "    try { runtime_value = amber_native_bridge_argument(value); } "
+           "catch (const NativeBailout &) {}\n";
+    out << "  }\n";
+    out << "  bool copy_runtime_value(amber::runtime::Value *out) const "
+           "override {\n";
+    out << "    if (out == nullptr || !runtime_value.has_value()) return false;\n";
+    out << "    *out = *runtime_value; return true;\n";
+    out << "  }\n";
+    out << "  void append_runtime_roots("
+           "std::vector<amber::runtime::Value> *roots) const override {\n";
+    out << "    if (roots != nullptr && runtime_value.has_value()) "
+           "roots->push_back(*runtime_value);\n";
+    out << "  }\n";
+    out << "};\n\n";
+  }
   out << "static NativeValue native_task_send("
          "const NativeValue &receiver, const std::string &selector, "
-         "std::initializer_list<NativeValue> args, NativeValue block);\n\n";
+         "std::initializer_list<NativeValue> args, "
+         "const std::vector<NativeCallKeyword> &kwargs, "
+         "NativeValue block);\n\n";
   out << "static NativeValue native_result_send("
          "const NativeValue &receiver, const std::string &selector, "
          "std::initializer_list<NativeValue> args, NativeValue block);\n\n";
@@ -7927,6 +7988,12 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  if (value.tag != NativeValue::Tag::Task || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeTask *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static NativeTaskLocal &as_native_task_local("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::TaskLocal || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return *static_cast<NativeTaskLocal *>(value.heap_value);\n";
   out << "}\n";
   out << "static NativeResult &as_native_result(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Result || "
@@ -16043,10 +16110,26 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "}\n";
   out << "static NativeValue native_task_send("
          "const NativeValue &receiver, const std::string &selector, "
-         "std::initializer_list<NativeValue> args, NativeValue block) {\n";
+         "std::initializer_list<NativeValue> args, "
+         "const std::vector<NativeCallKeyword> &kwargs, "
+         "NativeValue block) {\n";
   out << "  if (receiver.tag == NativeValue::Tag::TaskModule) {\n";
+  out << "    if (selector == \"local\" && args.size() == 0U && "
+         "block.tag == NativeValue::Tag::Null) {\n";
+  out << "      bool inherit = false;\n";
+  out << "      if (kwargs.size() > 1U) throw NativeBailout();\n";
+  out << "      if (kwargs.size() == 1U) {\n";
+  out << "        if (kwargs.front().name != \"inherit\" || "
+         "kwargs.front().value.tag != NativeValue::Tag::Bool) "
+         "throw NativeRaised{native_named_error("
+         "\"TypeError\", \"task.local inherit: expects Bool\")};\n";
+  out << "        inherit = kwargs.front().value.scalar_value != 0;\n";
+  out << "      }\n";
+  out << "      return NativeValue::task_local(inherit);\n";
+  out << "    }\n";
   out << "    if ((selector == \"spawn\" || selector == \"async\") && "
-         "args.size() == 0U && block.tag != NativeValue::Tag::Null) {\n";
+         "args.size() == 0U && kwargs.empty() && "
+         "block.tag != NativeValue::Tag::Null) {\n";
   out << "      native_commit_effect();\n";
   out << "      auto state = std::make_shared<NativeTaskState>();\n";
   out << "      auto function = [state, block]() mutable {\n";
@@ -16077,7 +16160,7 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
          "std::move(handle), std::move(state));\n";
   out << "    }\n";
   out << "    if (selector == \"sleep\" && args.size() == 1U && "
-         "block.tag == NativeValue::Tag::Null) {\n";
+         "kwargs.empty() && block.tag == NativeValue::Tag::Null) {\n";
   out << "      native_commit_effect();\n";
   out << "      try {\n";
   out << "        native_task_runtime().sleep("
@@ -16090,6 +16173,95 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "    }\n";
   out << "    throw NativeBailout();\n";
   out << "  }\n";
+  out << "  if (receiver.tag == NativeValue::Tag::TaskLocal) {\n";
+  out << "    NativeTaskLocal &local = as_native_task_local(receiver);\n";
+  out << "    std::shared_ptr<amber::runtime::RuntimeTaskContext> context = "
+         "amber::runtime::current_runtime_task_context();\n";
+  out << "    if (context == nullptr) throw NativeRaised{native_named_error("
+         "\"TaskLocalError\", \"task-local access requires an active logical Amber task\")};\n";
+  out << "    const auto stored_binding = context->binding(local.key.slot_id());\n";
+  out << "    const auto stored_value = [&]() -> std::optional<NativeValue> {\n";
+  out << "      if (!stored_binding.has_value() || "
+         "stored_binding->value == nullptr) return std::nullopt;\n";
+  out << "      const auto typed = std::dynamic_pointer_cast<"
+         "amber::runtime::RuntimeTaskLocalStoredValue<NativeValue>>("
+         "stored_binding->value);\n";
+  out << "      if (typed != nullptr) return typed->value;\n";
+  if (!plan.vm_callable_code_ids.empty() ||
+      !plan.native_extension_code_ids.empty()) {
+    out << "      const auto native_holder = std::dynamic_pointer_cast<"
+           "NativeTaskLocalStoredValueHolder>(stored_binding->value);\n";
+    out << "      if (native_holder != nullptr) return native_holder->value;\n";
+    out << "      amber::runtime::Value runtime_value = "
+           "amber::runtime::Value::null();\n";
+    out << "      if (stored_binding->value->copy_runtime_value("
+           "&runtime_value)) return "
+           "amber_native_bridge_result_current(runtime_value);\n";
+  }
+  out << "      throw NativeRaised{native_named_error("
+         "\"TaskLocalError\", \"task-local value belongs to an incompatible execution backend\")};\n";
+  out << "    };\n";
+  out << "    if (selector == \"bound?\" && args.size() == 0U && "
+         "kwargs.empty() && block.tag == NativeValue::Tag::Null) "
+         "return NativeValue::boolean(stored_binding.has_value());\n";
+  out << "    if (selector == \"get\" && args.size() == 0U && "
+         "block.tag == NativeValue::Tag::Null) {\n";
+  out << "      if (kwargs.size() > 1U || "
+         "(kwargs.size() == 1U && kwargs.front().name != \"default\")) "
+         "throw NativeBailout();\n";
+  out << "      const std::optional<NativeValue> value = stored_value();\n";
+  out << "      if (value.has_value()) return *value;\n";
+  out << "      return kwargs.empty() ? NativeValue::nullv() "
+         ": kwargs.front().value;\n";
+  out << "    }\n";
+  out << "    if (selector == \"set!\" && args.size() == 1U && "
+         "kwargs.empty() && block.tag == NativeValue::Tag::Null) {\n";
+  out << "      NativeValue value = *args.begin();\n";
+  if (!plan.vm_callable_code_ids.empty() ||
+      !plan.native_extension_code_ids.empty()) {
+    out << "      context->set(local.key, std::make_shared<"
+           "NativeTaskLocalStoredValueHolder>(value));\n";
+  } else {
+    out << "      context->set(local.key, std::make_shared<"
+           "amber::runtime::RuntimeTaskLocalStoredValue<NativeValue>>(value));\n";
+  }
+  out << "      return value;\n";
+  out << "    }\n";
+  out << "    if (selector == \"clear!\" && args.size() == 0U && "
+         "kwargs.empty() && block.tag == NativeValue::Tag::Null) "
+         "return NativeValue::boolean(context->erase(local.key.slot_id()));\n";
+  out << "    if (selector == \"inherit?\" && args.size() == 0U && "
+         "kwargs.empty() && block.tag == NativeValue::Tag::Null) "
+         "return NativeValue::boolean(local.key.inherit());\n";
+  out << "    if (selector == \"slot_id\" && args.size() == 0U && "
+         "kwargs.empty() && block.tag == NativeValue::Tag::Null) "
+         "return NativeValue::integer(static_cast<std::int64_t>("
+         "local.key.slot_id()));\n";
+  out << "    if (selector == \"with\" && args.size() == 1U && "
+         "kwargs.empty() && block.tag != NativeValue::Tag::Null) {\n";
+  if (!plan.vm_callable_code_ids.empty() ||
+      !plan.native_extension_code_ids.empty()) {
+    out << "      const std::uint64_t token = context->push_scope("
+           "local.key, std::make_shared<NativeTaskLocalStoredValueHolder>("
+           "*args.begin()));\n";
+  } else {
+    out << "      const std::uint64_t token = context->push_scope("
+           "local.key, std::make_shared<"
+           "amber::runtime::RuntimeTaskLocalStoredValue<NativeValue>>("
+           "*args.begin()));\n";
+  }
+  out << "      try {\n";
+  out << "        NativeValue result = amber_native_call_closure(block, {});\n";
+  out << "        (void)context->pop_scope(token);\n";
+  out << "        return result;\n";
+  out << "      } catch (...) {\n";
+  out << "        (void)context->pop_scope(token);\n";
+  out << "        throw;\n";
+  out << "      }\n";
+  out << "    }\n";
+  out << "    throw NativeBailout();\n";
+  out << "  }\n";
+  out << "  if (!kwargs.empty()) throw NativeBailout();\n";
   out << "  if (block.tag != NativeValue::Tag::Null || "
          "args.size() != 0U) throw NativeBailout();\n";
   out << "  NativeTask &task = as_native_task(receiver);\n";
@@ -16693,6 +16865,8 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "struct AmberNativeBridgeState {\n";
     out << "  amber::bytecode::DecodeResult decoded;\n";
     out << "  std::unique_ptr<amber::runtime::RuntimeWorld> world;\n";
+    out << "  std::vector<std::string> runtime_strings;\n";
+    out << "  std::vector<std::string> runtime_symbols;\n";
     out << "};\n\n";
     out << "static AmberNativeBridgeState &amber_native_bridge_state() {\n";
     out << "  static thread_local AmberNativeBridgeState *state = [] {\n";
@@ -16700,6 +16874,10 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "    out_state->decoded = "
            "amber::bytecode::deserialize_module(embedded_bytecode());\n";
     out << "    if (!out_state->decoded.ok()) throw NativeBailout();\n";
+    out << "    out_state->runtime_strings = "
+           "out_state->decoded.module.strings;\n";
+    out << "    out_state->runtime_symbols = "
+           "out_state->decoded.module.symbols;\n";
     out << "    out_state->world = "
            "std::make_unique<amber::runtime::RuntimeWorld>("
            "out_state->decoded.module);\n";
@@ -16752,6 +16930,11 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "    const auto uuid = value.as_uuid();\n";
     out << "    if (uuid == nullptr) throw NativeBailout();\n";
     out << "    return NativeValue::uuid(*uuid);\n";
+    out << "  }\n";
+    out << "  if (value.is_task_local()) {\n";
+    out << "    const auto local = value.as_task_local();\n";
+    out << "    if (local == nullptr) throw NativeBailout();\n";
+    out << "    return NativeValue::task_local(local->key());\n";
     out << "  }\n";
     out << "  if (value.is_foreign_handle()) {\n";
     out << "    return NativeValue::foreign_handle("
@@ -16814,6 +16997,12 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "  throw NativeBailout("
            "\"native-extension result is not representable\");\n";
     out << "}\n\n";
+    out << "static NativeValue amber_native_bridge_result_current("
+           "const amber::runtime::Value &value) {\n";
+    out << "  AmberNativeBridgeState &state = amber_native_bridge_state();\n";
+    out << "  return amber_native_bridge_result(value, state.runtime_strings, "
+           "state.runtime_symbols);\n";
+    out << "}\n\n";
     out << "static amber::runtime::Value amber_native_bridge_argument("
            "const NativeValue &arg) {\n";
     out << "  switch (arg.tag) {\n";
@@ -16837,6 +17026,10 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
            "return amber::runtime::Value::uuid("
            "std::make_shared<amber::runtime::RuntimeUuidValue>("
            "as_uuid(arg)));\n";
+    out << "  case NativeValue::Tag::TaskLocal: "
+           "return amber::runtime::Value::task_local("
+           "std::make_shared<amber::runtime::RuntimeTaskLocal>("
+           "as_native_task_local(arg).key));\n";
     out << "  case NativeValue::Tag::ForeignHandle: "
            "return as_native_foreign_handle(arg)->value;\n";
     out << "  case NativeValue::Tag::List: {\n";
@@ -16868,6 +17061,12 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
       out << "  const amber::runtime::ExecutionResult result = "
              "amber_native_bridge_world().execute(code_id, vm_args, "
              "vm_self);\n";
+      out << "  AmberNativeBridgeState &bridge_state = "
+             "amber_native_bridge_state();\n";
+      out << "  if (!result.runtime_strings.empty()) "
+             "bridge_state.runtime_strings = result.runtime_strings;\n";
+      out << "  if (!result.runtime_symbols.empty()) "
+             "bridge_state.runtime_symbols = result.runtime_symbols;\n";
       out << "  if (!result.ok()) {\n";
       out << "    if (!result.fault.has_value()) throw NativeBailout();\n";
       out << "    throw NativeRaised{native_named_error("
@@ -16897,6 +17096,12 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
       out << "  const amber::runtime::ExecutionResult result = "
              "amber_native_bridge_world().invoke_native_extension("
              "code_id, extension_args, extension_self);\n";
+      out << "  AmberNativeBridgeState &bridge_state = "
+             "amber_native_bridge_state();\n";
+      out << "  if (!result.runtime_strings.empty()) "
+             "bridge_state.runtime_strings = result.runtime_strings;\n";
+      out << "  if (!result.runtime_symbols.empty()) "
+             "bridge_state.runtime_symbols = result.runtime_symbols;\n";
       out << "  if (!result.ok()) {\n";
       out << "    if (!result.fault.has_value()) throw NativeBailout();\n";
       out << "    throw NativeRaised{native_named_error("
@@ -17004,6 +17209,7 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "  case NativeValue::Tag::TextWriter: return "
          "\"<instance io.TextWriter>\";\n";
   out << "  case NativeValue::Tag::Task: return \"<instance TaskHandle>\";\n";
+  out << "  case NativeValue::Tag::TaskLocal: return \"<instance TaskLocal>\";\n";
   out << "  case NativeValue::Tag::Result: {\n";
   out << "    NativeResult &result = as_native_result(value);\n";
   out << "    return std::string(result.is_ok ? \"Ok(\" : \"Err(\") + "
@@ -17214,6 +17420,10 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
 
   out << "} // namespace\n\n";
   out << "int main() {\n";
+  out << "  const std::shared_ptr<amber::runtime::RuntimeTaskContext> "
+         "root_task_context = amber::runtime::RuntimeTaskContext::create();\n";
+  out << "  amber::runtime::RuntimeTaskContextScope root_task_scope("
+         "root_task_context, true, true);\n";
   if (has_native_extensions) {
     out << "  amber_register_native_extensions();\n";
   }

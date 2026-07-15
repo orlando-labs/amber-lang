@@ -2,6 +2,7 @@
 
 #include "runtime/value.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -189,6 +190,164 @@ enum class RuntimeSupervisorPolicy {
 
 struct RuntimeTaskOptions {
   RuntimeSupervisorPolicy policy = RuntimeSupervisorPolicy::CancelScope;
+};
+
+// Process-wide identity for a task-local slot. Keys are immutable and do not
+// depend on a scheduler/task id, which keeps a slot stable across separate
+// resumable VMs and direct-native/VM runtime components.
+class RuntimeTaskLocalKey {
+public:
+  explicit RuntimeTaskLocalKey(bool inherit = false);
+
+  std::uint64_t slot_id() const;
+  bool inherit() const;
+
+private:
+  std::uint64_t slot_id_ = 0;
+  bool inherit_ = false;
+};
+
+// Type-erased binding holder shared by the bytecode Value lane and generated
+// direct-native NativeValue lane. Runtime Value holders expose their payload to
+// the collector; other backend value types retain through their own lifecycle.
+class RuntimeTaskLocalStoredValueBase {
+public:
+  virtual ~RuntimeTaskLocalStoredValueBase() = default;
+  virtual bool copy_runtime_value(Value *out) const {
+    (void)out;
+    return false;
+  }
+  virtual void append_runtime_roots(std::vector<Value> *roots) const {
+    (void)roots;
+  }
+};
+
+template <typename T>
+class RuntimeTaskLocalStoredValue final
+    : public RuntimeTaskLocalStoredValueBase {
+public:
+  explicit RuntimeTaskLocalStoredValue(T stored) : value(std::move(stored)) {}
+  T value;
+};
+
+template <>
+class RuntimeTaskLocalStoredValue<Value> final
+    : public RuntimeTaskLocalStoredValueBase {
+public:
+  explicit RuntimeTaskLocalStoredValue(Value stored)
+      : value(std::move(stored)) {}
+  bool copy_runtime_value(Value *out) const override {
+    if (out == nullptr) {
+      return false;
+    }
+    *out = value;
+    return true;
+  }
+  void append_runtime_roots(std::vector<Value> *roots) const override {
+    if (roots != nullptr) {
+      roots->push_back(value);
+    }
+  }
+  Value value;
+};
+
+struct RuntimeTaskLocalBinding {
+  bool inherit = false;
+  std::shared_ptr<RuntimeTaskLocalStoredValueBase> value;
+};
+
+// Logical-task-owned binding state. Reads take an immutable task-local map
+// snapshot; mutations copy that normally-small map. This avoids a global lock
+// on get while making concurrent GC root enumeration race-free.
+class RuntimeTaskContext {
+public:
+  struct State;
+
+  static std::shared_ptr<RuntimeTaskContext> create();
+  ~RuntimeTaskContext();
+
+  RuntimeTaskContext(const RuntimeTaskContext &) = delete;
+  RuntimeTaskContext &operator=(const RuntimeTaskContext &) = delete;
+
+  std::optional<RuntimeTaskLocalBinding>
+  binding(std::uint64_t slot_id) const;
+  void set(const RuntimeTaskLocalKey &key,
+           std::shared_ptr<RuntimeTaskLocalStoredValueBase> value);
+  bool erase(std::uint64_t slot_id);
+
+  // Push/pop are the suspend-safe dynamic scope used by TaskLocal.with. The
+  // previous binding stays in the context's shadow stack and is thus retained
+  // and visible to GC even while the block is parked on another worker.
+  std::uint64_t
+  push_scope(const RuntimeTaskLocalKey &key,
+             std::shared_ptr<RuntimeTaskLocalStoredValueBase> value);
+  bool pop_scope(std::uint64_t token);
+
+  std::shared_ptr<RuntimeTaskContext> inherited_snapshot() const;
+  void clear();
+  void append_runtime_roots(std::vector<Value> *roots) const;
+  std::size_t binding_count() const;
+  std::size_t retained_value_count() const;
+
+private:
+  RuntimeTaskContext();
+  explicit RuntimeTaskContext(std::shared_ptr<const State> initial_state);
+
+  void register_gc_roots();
+  void unregister_gc_roots();
+
+  std::shared_ptr<const State> state_;
+  std::atomic<std::uint64_t> next_scope_token_{1};
+  std::size_t registry_slot_ = static_cast<std::size_t>(-1);
+};
+
+std::shared_ptr<RuntimeTaskContext> current_runtime_task_context();
+const void *current_runtime_scheduler_identity();
+
+// Installs a logical context for a root execution or other non-scheduler
+// boundary. With only_if_unbound, a VM fallback entered from a scheduler task
+// preserves the already-active task context. clear_on_exit gives root
+// executions task-completion cleanup semantics.
+class RuntimeTaskContextScope {
+public:
+  RuntimeTaskContextScope(std::shared_ptr<RuntimeTaskContext> context,
+                          bool only_if_unbound = false,
+                          bool clear_on_exit = false);
+  RuntimeTaskContextScope(const RuntimeTaskContextScope &) = delete;
+  RuntimeTaskContextScope &operator=(const RuntimeTaskContextScope &) = delete;
+  ~RuntimeTaskContextScope();
+
+private:
+  std::shared_ptr<RuntimeTaskContext> previous_;
+  std::shared_ptr<RuntimeTaskContext> installed_context_;
+  bool installed_ = false;
+  bool clear_on_exit_ = false;
+};
+
+// Appends roots from every live logical task. The compact registry is touched
+// only by context create/destroy and GC, never by task-local lookup.
+void runtime_append_task_local_gc_roots(std::vector<Value> *roots);
+std::uint64_t runtime_task_local_live_context_count();
+std::uint64_t runtime_task_local_retained_value_count();
+std::uint64_t runtime_task_local_registry_capacity();
+
+class RuntimeTaskLocal {
+public:
+  explicit RuntimeTaskLocal(bool inherit = false);
+  explicit RuntimeTaskLocal(RuntimeTaskLocalKey key);
+
+  std::uint64_t slot_id() const;
+  bool inherit() const;
+  RuntimeTaskLocalKey key() const;
+  bool bound() const;
+  Value get(Value default_value = Value::null()) const;
+  Value set(Value value) const;
+  bool clear() const;
+  std::uint64_t push_scope(Value value) const;
+  bool pop_scope(std::uint64_t token) const;
+
+private:
+  RuntimeTaskLocalKey key_;
 };
 
 struct RuntimeChannelResult {
@@ -525,6 +684,11 @@ public:
                                     RuntimeTaskOptions options,
                                     StrandFunction function);
   bool wake_strand(std::uint64_t strand_id);
+
+  // Deterministic runtime-test hook: wake a parked strand onto the selected
+  // worker for its next dispatch. This does not pin subsequent resumptions.
+  bool wake_strand_on_worker_for_test(std::uint64_t strand_id,
+                                      std::uint64_t worker_id);
 
   // Layer B cooperative suspension. Called by the currently-running strand
   // (from within its strand function) to request that, when the function

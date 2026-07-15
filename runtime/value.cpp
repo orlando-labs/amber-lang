@@ -29,6 +29,8 @@ const char *native_type_name(RuntimeNativeTypeKind kind) {
   switch (kind) {
   case RuntimeNativeTypeKind::TaskModule:
     return "TaskModule";
+  case RuntimeNativeTypeKind::TaskLocal:
+    return "TaskLocal";
   case RuntimeNativeTypeKind::Channel:
     return "Channel";
   case RuntimeNativeTypeKind::Mutex:
@@ -292,6 +294,10 @@ Value Value::task_handle(std::shared_ptr<RuntimeTaskHandle> value) {
   return {std::move(value)};
 }
 
+Value Value::task_local(std::shared_ptr<RuntimeTaskLocal> value) {
+  return {std::move(value)};
+}
+
 Value Value::channel(std::shared_ptr<RuntimeChannel> value) {
   return {std::move(value)};
 }
@@ -458,6 +464,10 @@ bool Value::is_task_handle() const {
   return std::holds_alternative<std::shared_ptr<RuntimeTaskHandle>>(payload);
 }
 
+bool Value::is_task_local() const {
+  return std::holds_alternative<std::shared_ptr<RuntimeTaskLocal>>(payload);
+}
+
 bool Value::is_channel() const {
   return std::holds_alternative<std::shared_ptr<RuntimeChannel>>(payload);
 }
@@ -618,6 +628,10 @@ std::shared_ptr<RuntimeTaskModule> Value::as_task_module() const {
 
 std::shared_ptr<RuntimeTaskHandle> Value::as_task_handle() const {
   return std::get<std::shared_ptr<RuntimeTaskHandle>>(payload);
+}
+
+std::shared_ptr<RuntimeTaskLocal> Value::as_task_local() const {
+  return std::get<std::shared_ptr<RuntimeTaskLocal>>(payload);
 }
 
 std::shared_ptr<RuntimeChannel> Value::as_channel() const {

@@ -1,0 +1,39 @@
+package conformance.run
+
+import task
+
+# `deconstruct_keys` is intentionally handled by the captureless per-function VM bridge in
+# the native executable. Calling it inside a task-local scope verifies that the
+# fallback reuses the active logical context instead of installing a new one.
+def vm_probe():
+  {x: 1, y: 2, z: 3}.deconstruct_keys([:x]).count()
+
+def main():
+  private_local = task.local(inherit: false)
+  request_local = task.local(inherit: true)
+
+  initial = [private_local.bound?(), private_local.get(default: 9)]
+  private_local.set!(10)
+  scoped = private_local.with(20):
+    task.sleep(1)
+    nested = private_local.with(30):
+      private_local.get()
+    current = private_local.get()
+    bridge_count = vm_probe()
+    [current, nested, bridge_count, private_local.get()]
+
+  request_local.set!(40)
+  child = task.spawn:
+    inherited = request_local.get()
+    request_local.set!(41)
+    [private_local.bound?(), inherited, request_local.get()]
+  child_value = child.wait()
+
+  restored = [private_local.get(), request_local.get()]
+  rescued = try:
+    private_local.with(50):
+      raise "task-local-scope"
+  rescue:
+    private_local.get()
+  cleared = private_local.clear!()
+  [initial, scoped, restored, child_value, rescued, cleared, private_local.bound?()]

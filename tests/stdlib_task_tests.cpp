@@ -1516,6 +1516,339 @@ void test_std017_source_level_flow_and_threaded_collection_compile_and_run() {
                              "source-level threaded combination");
 }
 
+void test_std018_task_local_basic_nested_exception_and_sleep() {
+  const amber::runtime::ExecutionResult exec = execute_source_or_die(
+      "import task\n"
+      "local = task.local()\n"
+      "before_bound = local.bound?()\n"
+      "before_default = local.get(default: 90)\n"
+      "assigned = local.set!(10)\n"
+      "outer = local.with(20):\n"
+      "  task.sleep(5)\n"
+      "  inner = local.with(30): local.get()\n"
+      "  [local.get(), inner]\n"
+      "after_nested = local.get()\n"
+      "rescued = try:\n"
+      "  local.with(40):\n"
+      "    1 / 0\n"
+      "rescue:\n"
+      "  local.get()\n"
+      "cleared = local.clear!()\n"
+      "[before_bound, before_default, assigned, outer, after_nested, rescued, "
+      "cleared, local.bound?()]\n");
+
+  expect(exec.ok(), "task-local basic/nested source should execute");
+  expect(exec.value.is_list() && exec.value.as_list() != nullptr,
+         "task-local basic result should be list");
+  const std::vector<amber::runtime::Value> &items = exec.value.as_list()->items;
+  expect(items.size() == 8, "task-local basic result shape");
+  expect_bool(items[0], false, "task-local initially unbound");
+  expect_integer(items[1], 90, "task-local default");
+  expect_integer(items[2], 10, "task-local set return");
+  expect_integer_list_value(items[3], {20, 30},
+                            "task-local nested with values");
+  expect_integer(items[4], 10, "task-local nested restoration");
+  expect_integer(items[5], 10, "task-local exception restoration");
+  expect_bool(items[6], true, "task-local clear return");
+  expect_bool(items[7], false, "task-local clear removes binding");
+}
+
+void test_std018_task_local_spawn_inheritance_and_isolation() {
+  const amber::runtime::ExecutionResult exec = execute_source_or_die(
+      "import task\n"
+      "private_local = task.local(inherit: false)\n"
+      "request_local = task.local(inherit: true)\n"
+      "private_local.set!(11)\n"
+      "request_local.set!(22)\n"
+      "child = task.spawn:\n"
+      "  observed = [private_local.bound?(), request_local.get()]\n"
+      "  request_local.set!(33)\n"
+      "  [observed, request_local.get()]\n"
+      "child_value = child.wait()\n"
+      "[private_local.get(), request_local.get(), child_value]\n");
+
+  expect(exec.ok(), "task-local inheritance source should execute");
+  expect(exec.value.is_list() && exec.value.as_list() != nullptr,
+         "task-local inheritance result should be list");
+  const std::vector<amber::runtime::Value> &items = exec.value.as_list()->items;
+  expect(items.size() == 3, "task-local inheritance result shape");
+  expect_integer(items[0], 11, "non-inherited parent value remains");
+  expect_integer(items[1], 22, "inherited parent value remains snapshot");
+  expect(items[2].is_list() && items[2].as_list() != nullptr,
+         "task-local child result shape");
+  const std::vector<amber::runtime::Value> &child = items[2].as_list()->items;
+  expect(child.size() == 2 && child[0].is_list() &&
+             child[0].as_list() != nullptr,
+         "task-local child observations shape");
+  expect_bool(child[0].as_list()->items[0], false,
+              "inherit false is absent in child");
+  expect_integer(child[0].as_list()->items[1], 22,
+                 "inherit true snapshots parent");
+  expect_integer(child[1], 33, "child can replace its own binding");
+}
+
+void test_std018_task_local_distinct_tasks_and_parallel_stress() {
+  amber::runtime::RuntimeTaskModule task(4);
+  amber::runtime::RuntimeTaskLocal local(false);
+  constexpr std::size_t count = 1024;
+  constexpr std::size_t batch_size = 32;
+  for (std::size_t base = 0; base < count; base += batch_size) {
+    std::vector<amber::runtime::RuntimeTaskHandle> handles;
+    handles.reserve(batch_size);
+    for (std::size_t offset = 0; offset < batch_size; ++offset) {
+      const std::size_t index = base + offset;
+      handles.push_back(task.spawn([&task, &local, index]() {
+        local.set(amber::runtime::Value::integer(
+            static_cast<std::int64_t>(index)));
+        task.yield_current();
+        return local.get(amber::runtime::Value::integer(-1));
+      }));
+    }
+    for (std::size_t offset = 0; offset < handles.size(); ++offset) {
+      const amber::runtime::RuntimeTaskPublicResult result =
+          handles[offset].wait(std::chrono::milliseconds(5000));
+      expect(result.ok, "task-local parallel stress task should complete");
+      expect_integer(result.value,
+                     static_cast<std::int64_t>(base + offset),
+                     "task-local parallel stress isolation");
+    }
+  }
+
+  amber::runtime::RuntimeTaskModule single_worker(1);
+  amber::runtime::RuntimeTaskLocal same_worker_local(false);
+  const amber::runtime::RuntimeTaskHandle first =
+      single_worker.spawn([&same_worker_local]() {
+        same_worker_local.set(amber::runtime::Value::integer(101));
+        return same_worker_local.get();
+      });
+  const amber::runtime::RuntimeTaskHandle second =
+      single_worker.spawn([&same_worker_local]() {
+        expect(!same_worker_local.bound(),
+               "second task on same worker must start unbound");
+        same_worker_local.set(amber::runtime::Value::integer(202));
+        return same_worker_local.get();
+      });
+  expect_integer(first.wait().value, 101, "first same-worker task local");
+  expect_integer(second.wait().value, 202, "second same-worker task local");
+}
+
+void test_std018_task_local_deterministic_worker_migration() {
+  amber::runtime::RuntimeScheduler scheduler(
+      amber::runtime::RuntimeSchedulerConfig{2, 700});
+  amber::runtime::RuntimeTaskLocal local(false);
+  std::atomic<int> phase{0};
+  std::atomic<std::uint64_t> before_worker{0};
+  std::atomic<std::uint64_t> after_worker{0};
+  std::atomic<std::int64_t> observed{-1};
+
+  const std::uint64_t strand_id = scheduler.spawn_strand(
+      [&scheduler, &local, &phase, &before_worker, &after_worker, &observed]() {
+        if (phase.load(std::memory_order_acquire) == 0) {
+          local.set(amber::runtime::Value::integer(777));
+          before_worker.store(amber::runtime::current_runtime_worker_id(),
+                              std::memory_order_release);
+          phase.store(1, std::memory_order_release);
+          expect(scheduler.park_current(std::nullopt),
+                 "migration probe should park its logical task");
+          return;
+        }
+        after_worker.store(amber::runtime::current_runtime_worker_id(),
+                           std::memory_order_release);
+        observed.store(local.get().as_integer(), std::memory_order_release);
+        phase.store(2, std::memory_order_release);
+      });
+
+  expect(wait_for_condition(
+             [&scheduler, strand_id]() {
+               const std::optional<amber::runtime::RuntimeStrandSnapshot>
+                   snapshot = scheduler.strand_snapshot(strand_id);
+               return snapshot.has_value() &&
+                      snapshot->state ==
+                          amber::runtime::RuntimeStrandState::Sleeping;
+             },
+             std::chrono::milliseconds(2000)),
+         "migration probe should reach deterministic parked state");
+  const std::uint64_t target_worker =
+      before_worker.load(std::memory_order_acquire) == 700 ? 701 : 700;
+  expect(scheduler.wake_strand_on_worker_for_test(strand_id, target_worker),
+         "migration hook should target the other worker");
+  const bool migration_idle =
+      scheduler.wait_until_idle(std::chrono::milliseconds(2000));
+  if (!migration_idle) {
+    const amber::runtime::RuntimeSchedulerStats stats = scheduler.stats();
+    const std::optional<amber::runtime::RuntimeStrandSnapshot> snapshot =
+        scheduler.strand_snapshot(strand_id);
+    std::cerr << "migration debug: phase=" << phase.load()
+              << " state="
+              << (snapshot.has_value()
+                      ? static_cast<int>(snapshot->state)
+                      : -1)
+              << " running/queue/sleeping=" << stats.worker_dequeues << "/"
+              << stats.runnable_queue_depth << "/" << stats.sleeping_strands
+              << " created/done/failed/cancelled=" << stats.strands_created
+              << "/" << stats.strands_completed << "/"
+              << stats.strands_failed << "/" << stats.tasks_cancelled << "\n";
+  }
+  expect(migration_idle,
+         "migration probe should complete");
+  expect(phase.load(std::memory_order_acquire) == 2,
+         "migration probe should resume");
+  expect(after_worker.load(std::memory_order_acquire) == target_worker &&
+             after_worker.load(std::memory_order_acquire) !=
+                 before_worker.load(std::memory_order_acquire),
+         "migration probe must resume on a different native worker");
+  expect(observed.load(std::memory_order_acquire) == 777,
+         "task-local binding must survive forced worker migration");
+}
+
+void test_std018_task_local_lifecycle_cleanup_and_registry_reuse() {
+  const std::uint64_t baseline_values =
+      amber::runtime::runtime_task_local_retained_value_count();
+  const std::uint64_t baseline_capacity =
+      amber::runtime::runtime_task_local_registry_capacity();
+
+  amber::runtime::RuntimeTaskLocal local(false);
+  {
+    const std::shared_ptr<amber::runtime::RuntimeTaskContext> context =
+        amber::runtime::RuntimeTaskContext::create();
+    amber::runtime::RuntimeTaskContextScope scope(context);
+    auto first = std::make_shared<amber::runtime::RuntimeTaskLocal>();
+    std::weak_ptr<amber::runtime::RuntimeTaskLocal> first_weak = first;
+    local.set(amber::runtime::Value::task_local(first));
+    first.reset();
+    expect(!first_weak.expired(), "task-local set must retain value");
+
+    auto second = std::make_shared<amber::runtime::RuntimeTaskLocal>();
+    std::weak_ptr<amber::runtime::RuntimeTaskLocal> second_weak = second;
+    local.set(amber::runtime::Value::task_local(second));
+    second.reset();
+    expect(first_weak.expired(), "task-local overwrite must release old value");
+    expect(!second_weak.expired(), "task-local overwrite retains new value");
+    expect(local.clear(), "task-local clear reports existing value");
+    expect(second_weak.expired(), "task-local clear must release value");
+  }
+
+  amber::runtime::RuntimeTaskModule task(2);
+  std::weak_ptr<amber::runtime::RuntimeTaskLocal> completed_weak;
+  const amber::runtime::RuntimeTaskHandle completed =
+      task.spawn([&local, &completed_weak]() {
+        auto retained = std::make_shared<amber::runtime::RuntimeTaskLocal>();
+        completed_weak = retained;
+        local.set(amber::runtime::Value::task_local(std::move(retained)));
+        return amber::runtime::Value::null();
+      });
+  expect(completed.wait(std::chrono::milliseconds(2000)).ok,
+         "task-local lifecycle completion task should finish");
+  expect(completed_weak.expired(),
+         "normal task completion must release task-local values");
+
+  std::atomic<bool> parked{false};
+  std::weak_ptr<amber::runtime::RuntimeTaskLocal> cancelled_outer_weak;
+  std::weak_ptr<amber::runtime::RuntimeTaskLocal> cancelled_scoped_weak;
+  const amber::runtime::RuntimeTaskHandle cancelled =
+      task.spawn([&task, &local, &parked, &cancelled_outer_weak,
+                  &cancelled_scoped_weak]() {
+        auto outer = std::make_shared<amber::runtime::RuntimeTaskLocal>();
+        cancelled_outer_weak = outer;
+        local.set(amber::runtime::Value::task_local(std::move(outer)));
+        auto scoped = std::make_shared<amber::runtime::RuntimeTaskLocal>();
+        cancelled_scoped_weak = scoped;
+        (void)local.push_scope(
+            amber::runtime::Value::task_local(std::move(scoped)));
+        parked.store(true, std::memory_order_release);
+        expect(task.scheduler().park_current(std::nullopt),
+               "task-local cancellation probe should park");
+        amber::runtime::runtime_mark_task_parked();
+        return amber::runtime::Value::null();
+      });
+  expect(wait_for_condition([&parked]() { return parked.load(); },
+                            std::chrono::milliseconds(2000)),
+         "task-local cancellation probe should enter");
+  expect(wait_for_condition(
+             [&cancelled]() {
+               return cancelled.state() ==
+                      amber::runtime::RuntimeTaskHandleState::Sleeping;
+             },
+             std::chrono::milliseconds(2000)),
+         "task-local cancellation probe should park");
+  expect(cancelled.cancel(), "task-local cancellation should be requested");
+  const amber::runtime::RuntimeTaskPublicResult cancelled_result =
+      cancelled.wait(std::chrono::milliseconds(2000));
+  expect(cancelled_result.cancelled,
+         "task-local cancellation probe should report cancellation");
+  expect(cancelled_outer_weak.expired(),
+         "cancelled task must release shadowed task-local values");
+  expect(cancelled_scoped_weak.expired(),
+         "cancelled task must release active scoped task-local values");
+
+  amber::runtime::RuntimeTaskLocal inherited_local(true);
+  std::atomic<bool> inherited_parked{false};
+  std::weak_ptr<amber::runtime::RuntimeTaskLocal> inherited_weak;
+  amber::runtime::RuntimeTaskHandle inherited_child;
+  {
+    const std::shared_ptr<amber::runtime::RuntimeTaskContext> parent_context =
+        amber::runtime::RuntimeTaskContext::create();
+    amber::runtime::RuntimeTaskContextScope parent_scope(parent_context);
+    auto retained = std::make_shared<amber::runtime::RuntimeTaskLocal>();
+    inherited_weak = retained;
+    inherited_local.set(
+        amber::runtime::Value::task_local(std::move(retained)));
+    inherited_child = task.spawn([&task, &inherited_local,
+                                  &inherited_parked]() {
+      expect(inherited_local.bound(),
+             "inherit true child must retain the snapshotted binding");
+      (void)inherited_local.get();
+      inherited_parked.store(true, std::memory_order_release);
+      expect(task.scheduler().park_current(std::nullopt),
+             "inherited lifecycle child should park");
+      amber::runtime::runtime_mark_task_parked();
+      return amber::runtime::Value::null();
+    });
+    expect(inherited_local.clear(),
+           "parent should clear its inherited lifecycle binding");
+    expect(!inherited_weak.expired(),
+           "child snapshot must independently retain inherited value");
+  }
+  expect(wait_for_condition([&inherited_parked]() {
+           return inherited_parked.load(std::memory_order_acquire);
+         }, std::chrono::milliseconds(2000)),
+         "inherited lifecycle child should enter");
+  expect(wait_for_condition(
+             [&inherited_child]() {
+               return inherited_child.state() ==
+                      amber::runtime::RuntimeTaskHandleState::Sleeping;
+             },
+             std::chrono::milliseconds(2000)),
+         "inherited lifecycle child should park");
+  expect(inherited_child.cancel(),
+         "inherited lifecycle child cancellation should be requested");
+  expect(inherited_child.wait(std::chrono::milliseconds(2000)).cancelled,
+         "inherited lifecycle child should cancel");
+  expect(inherited_weak.expired(),
+         "child cancellation must release inherited snapshot value");
+
+  for (int wave = 0; wave < 250; ++wave) {
+    std::vector<amber::runtime::RuntimeTaskHandle> short_tasks;
+    short_tasks.reserve(4);
+    for (int index = 0; index < 4; ++index) {
+      short_tasks.push_back(task.spawn([&local, index]() {
+        local.set(amber::runtime::Value::integer(index));
+        return amber::runtime::Value::null();
+      }));
+    }
+    for (const amber::runtime::RuntimeTaskHandle &handle : short_tasks) {
+      expect(handle.wait(std::chrono::milliseconds(2000)).ok,
+             "short task-local task should finish");
+    }
+  }
+  expect(amber::runtime::runtime_task_local_retained_value_count() ==
+             baseline_values,
+         "short tasks must not leave retained task-local values");
+  expect(amber::runtime::runtime_task_local_registry_capacity() <=
+             baseline_capacity + 8,
+         "short tasks must reuse bounded task-context registry slots");
+}
+
 } // namespace
 
 // Layer B: a running strand can park itself, releasing its worker to run other
@@ -1842,6 +2175,11 @@ int main() {
   test_std016_threaded_collection_failure_and_isolation();
   test_std017_source_level_task_sync_stack_compiles_and_runs();
   test_std017_source_level_flow_and_threaded_collection_compile_and_run();
+  test_std018_task_local_basic_nested_exception_and_sleep();
+  test_std018_task_local_spawn_inheritance_and_isolation();
+  test_std018_task_local_distinct_tasks_and_parallel_stress();
+  test_std018_task_local_deterministic_worker_migration();
+  test_std018_task_local_lifecycle_cleanup_and_registry_reuse();
   std::cout << "stdlib_task_tests: ok\n";
   return 0;
 }

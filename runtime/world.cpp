@@ -2166,6 +2166,7 @@ RuntimeGcResult RuntimeWorld::collect_garbage(const std::vector<Value> &roots,
       }
     }
   }
+  runtime_append_task_local_gc_roots(&all_roots);
   return impl_->state->heap.collect_garbage(all_roots, cycle);
 }
 

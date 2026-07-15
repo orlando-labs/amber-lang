@@ -15,8 +15,11 @@ namespace amber::runtime {
 extern thread_local std::uint64_t tls_runtime_worker_id;
 extern thread_local std::uint64_t tls_runtime_strand_id;
 extern thread_local std::uint64_t tls_runtime_task_id;
+extern thread_local const void *tls_runtime_scheduler_identity;
 extern thread_local std::uint64_t tls_runtime_sync_owner_id;
 extern thread_local const std::atomic<bool> *tls_runtime_task_cancel_flag;
+extern thread_local std::shared_ptr<RuntimeTaskContext>
+    tls_runtime_task_context;
 extern thread_local std::uint32_t tls_runtime_task_sync_depth;
 extern thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stdout;
 extern thread_local std::shared_ptr<RuntimeTextWriter> tls_runtime_stderr;
@@ -91,15 +94,19 @@ private:
 class RuntimeTaskScope {
 public:
   RuntimeTaskScope(std::uint64_t task_id, const std::atomic<bool> *cancel_flag,
-                   std::uint64_t sync_owner_id = 0);
+                   std::uint64_t sync_owner_id = 0,
+                   std::shared_ptr<RuntimeTaskContext> task_context = nullptr,
+                   const void *scheduler_identity = nullptr);
   RuntimeTaskScope(const RuntimeTaskScope &) = delete;
   RuntimeTaskScope &operator=(const RuntimeTaskScope &) = delete;
   ~RuntimeTaskScope();
 
 private:
   std::uint64_t previous_task_id_ = 0;
+  const void *previous_scheduler_identity_ = nullptr;
   std::uint64_t previous_sync_owner_id_ = 0;
   const std::atomic<bool> *previous_cancel_flag_ = nullptr;
+  std::shared_ptr<RuntimeTaskContext> previous_task_context_;
 };
 
 class RuntimeTaskSyncScope {
