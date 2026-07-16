@@ -2406,6 +2406,19 @@ void test_bare_nullary_member_implicit_call() {
   expect(exec.value.is_integer() && exec.value.as_integer() == 1,
          "bare access should implicitly call syntactically nullary def");
 
+  emit_result = emit_ok("class Counter:\n"
+                        "  attr value\n"
+                        "  def init(): @value = 0\n"
+                        "  def increment!(): @value += 1\n"
+                        "counter = Counter()\n"
+                        "counter.increment!\n"
+                        "counter.value\n");
+  exec = amber::runtime::execute_code(emit_result.module,
+                                      emit_result.module.init.entry_code_id);
+  expect(exec.ok(), "bare bang nullary member execution failed");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 1,
+         "bare bang access should invoke syntactically nullary def");
+
   emit_result = emit_ok("class Box:\n"
                         "  def value(): 1\n"
                         "Box().value() + Box().value\n");

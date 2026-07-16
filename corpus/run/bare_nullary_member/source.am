@@ -10,6 +10,17 @@ class Build:
   class_method def version():
     20
 
+class Counter:
+  attr value
+
+  def init():
+    @value = 0
+
+  def increment!():
+    @value += 1
+
 def probe():
   items = Collection(40)
-  items.size + items.size() + Build.version + Build.version()
+  counter = Counter()
+  counter.increment!
+  items.size + items.size() + Build.version + Build.version() + counter.value

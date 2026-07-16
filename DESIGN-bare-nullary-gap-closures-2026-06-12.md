@@ -61,8 +61,8 @@ Mechanisms:
    fix-it "use `obj.prop` or `obj.prop.()` if the value is callable". This
    subsumes and retires the existing `AMB_PROP_CALL_ARGS_FORBIDDEN`.
 2. Normative formatter rule: `x.name?()` with zero arguments is rewritten to
-   `x.name?`. Predicates only — other explicit nullary calls are a legitimate
-   style for effectful operations (RFC §13.4) and are left alone.
+   `x.name?`. Other explicit nullary calls may remain unchanged, but the bare
+   form is legal for every syntactically nullary method, including `!` methods.
 3. Style guide (§14 amendment): paren-calling a documented query member is a
    style deviation that a later `def → prop` migration is permitted to break.
 
@@ -262,7 +262,6 @@ method-kind.**
    | `AMB_PROP_BLOCK_SUFFIX` | binder | block suffix attached to a property member access |
    | `AMB_NOT_CALLABLE` | binder | dot-call target statically known not to be callable |
    | `AMB_DOT_CALL_TARGET` | parser | `.()` segment without a preceding postfix expression |
-   | `W_BARE_BANG_CALL` | binder, warning | bare access invokes a `!`-suffixed method (default-on; strict profile may promote to error — answers RFC open Q6) |
    | `W_MEMBER_KIND_OVERRIDE` | binder, warning | optional, strict profile; override changes member kind across linearization |
 
 4. Runtime registry additions: `ReadOnlyPropertyError`,
@@ -270,7 +269,8 @@ method-kind.**
    arity (`ArgumentError`) or dot-call (`TypeError`).
 
 Open-question answers folded in: Q4 (formatter) → yes, predicates only
-(Gap 1). Q6 (`!` bare-call) → warning, strict-promotable. Q7 (block after
+(Gap 1). Q6 (`!` bare-call) → ordinary bare-nullary send, without a warning.
+Q7 (block after
 `.()`) → defer; the grammar simply omits it, no reserved diagnostic needed.
 Q1/Q2 (bound refs, property getter refs) → unchanged; property getter
 references remain the top follow-up RFC, since `&User#name` is still the one

@@ -1129,8 +1129,7 @@ private:
                    tails->values.front()->span);
       }
     }
-    for (std::size_t i = 0; i < tails->values.size(); ++i) {
-      const std::unique_ptr<ast::Expr> &tail = tails->values[i];
+    for (const std::unique_ptr<ast::Expr> &tail : tails->values) {
       if (tail->kind == "AstTailCall" || tail->kind == "AstTailSafeCall" ||
           tail->kind == "AstTailDotCall") {
         if (const ast::ListField *args = list_field(*tail, "args")) {
@@ -1146,20 +1145,6 @@ private:
       } else if (tail->kind == "AstTailBlockSuffix") {
         if (const ast::Expr *block = node_field(*tail, "block")) {
           visit_expr(scope_index, *block);
-        }
-      } else if (tail->kind == "AstTailDotMember" ||
-                 tail->kind == "AstTailSafeMember") {
-        const std::string member_name = string_value(*tail, "name");
-        const bool followed_by_invocation =
-            i + 1 < tails->values.size() &&
-            (tails->values[i + 1]->kind == "AstTailCall" ||
-             tails->values[i + 1]->kind == "AstTailBlockSuffix");
-        if (!member_name.empty() && member_name.back() == '!' &&
-            !followed_by_invocation) {
-          diagnostic("W_BARE_BANG_CALL", "warning", "binder",
-                     "bare access invokes mutating-looking method `" +
-                         member_name + "`; prefer `" + member_name + "()`",
-                     tail->span);
         }
       }
     }

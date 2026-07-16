@@ -50,7 +50,6 @@ diagnostics:
   - { code: AMB_BARE_NON_NULLARY, severity: error, phase: runtime, condition: bare member access resolves to a method whose signature is not syntactically nullary }
   - { code: AMB_DOT_CALL_TARGET, severity: error, phase: parser, condition: dot-call segment without a preceding postfix expression }
   - { code: AMB_PROP_SUSPEND, severity: error, phase: runtime, condition: suspension attempted inside a non-suspendable property arm }
-  - { code: W_BARE_BANG_CALL, severity: warning, phase: binder, condition: bare member access invokes a bang-suffixed method }
   - { code: AMB_PROP_IMPORT_CONFLICT, severity: error, phase: binder, condition: imported property conflicts with local binding }
   - { code: AMB_PROP_EXPORT_CONFLICT, severity: error, phase: binder, condition: exported property conflicts with export alias }
   - { code: E_ATTR_EXPECTED_NAME, severity: error, phase: parser, condition: attribute declaration is missing its external member name }

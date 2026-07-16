@@ -696,10 +696,9 @@ E_DOT_CALL_TARGET_REQUIRED
 
 ### 9.2. Recommended warnings
 
-```text
-W_BARE_BANG_CALL
-bare call of mutating-looking method `clear!`; prefer `clear!()`
-```
+Bare calls of syntactically nullary `!` methods are ordinary sends and do not
+produce a dedicated warning. The suffix communicates mutation convention, not
+an alternate call grammar.
 
 ```text
 W_EXPENSIVE_BARE_CALL
@@ -740,11 +739,8 @@ For:
 cache.clear!
 ```
 
-if warnings are enabled:
-
-```text
-Prefer `cache.clear!()` for mutating-looking methods.
-```
+when `clear!` is syntactically nullary, the expression is an ordinary send and
+produces no diagnostic.
 
 ---
 
@@ -1051,18 +1047,19 @@ node.parent
 path.dirname
 ```
 
-Recommended explicit-call style:
+Recommended action style:
 
 ```amber
-cache.clear!()
-user.save!()
-db.connect()
-socket.read()
-random.next()
-clock.now()
+cache.clear!
+user.save!
+db.connect
+socket.read
+random.next
+clock.now
 ```
 
-Borderline cases should prefer explicit `()` when the operation is:
+For a syntactically nullary member, the bare form is idiomatic even when the
+operation is:
 
 1. mutating;
 2. effectful;
@@ -1079,11 +1076,12 @@ config.valid?
 connection.open?
 ```
 
-`!` methods should generally use explicit `()`:
+`!` methods should generally use the bare form; the suffix already makes the
+mutation convention visible:
 
 ```amber
-cache.clear!()
-record.save!()
+cache.clear!
+record.save!
 ```
 
 ---
@@ -1257,14 +1255,15 @@ class Box:
 
 ---
 
-## 17. Open questions / future RFCs
+## 17. Open questions / resolved decisions
 
 1. Whether instance-bound method reference should receive a dedicated spelling such as `obj.&method`.
 2. Whether property getter/setter callable references should become first-class and what spelling they should use.
 3. Whether effect annotations should influence bare-call diagnostics.
 4. Whether formatter should normalize query-like explicit calls `obj.empty?()` to `obj.empty?`.
 5. Whether top-level nullary functions should ever receive bare-call syntax. This RFC says no.
-6. Whether `!` bare-call should be warning-only or forbidden in strict profiles.
+6. Resolved: a syntactically nullary `!` method accepts ordinary bare-call
+   syntax without a dedicated warning or strict-profile error.
 7. Whether `expr.()` should support block suffix directly:
 
 ```amber

@@ -845,26 +845,10 @@ void test_bare_nullary_diagnostics() {
                "answer()\n");
   expect_diagnostic_code(prop_called, "AMB_PROP_CALLED_AS_METHOD");
 
-  amber::binder::BindResult bang_warning = bind_any("cache.clear!\n"
-                                                    "cache = 1\n");
-  bool found_warning = false;
-  for (const amber::lexer::Diagnostic &diagnostic :
-       bang_warning.diagnostics) {
-    if (diagnostic.code == "W_BARE_BANG_CALL") {
-      found_warning = true;
-      expect(diagnostic.severity == "warning",
-             "bare bang access diagnostic is warning severity");
-    }
-  }
-  expect(found_warning, "bare bang member access warns");
-
-  amber::binder::BindResult bang_called = bind_ok("cache = 1\n"
-                                                  "cache.clear!()\n");
-  for (const amber::lexer::Diagnostic &diagnostic :
-       bang_called.diagnostics) {
-    expect(diagnostic.code != "W_BARE_BANG_CALL",
-           "explicit bang call must not warn");
-  }
+  amber::binder::BindResult bare_bang = bind_ok("cache = 1\n"
+                                                "cache.clear!\n");
+  expect(bare_bang.diagnostics.empty(),
+         "bare bang member access is an ordinary nullary send");
 
   amber::binder::BindResult module_block =
       bind_ok("package app\n"
