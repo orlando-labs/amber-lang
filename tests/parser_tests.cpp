@@ -294,6 +294,19 @@ void test_bare_call() {
   expect(string_field(node_field(*same_name_args.values[1], "value"), "name") ==
              "x",
          "same-name bare keyword value name");
+
+  std::unique_ptr<Expr> array_arg = parse_ok("before [&auth, &audit]\n");
+  const amber::ast::ListField &array_tails = list_field(*array_arg, "tails");
+  expect(array_tails.values.size() == 1 &&
+             array_tails.values[0]->kind == "AstTailCall" &&
+             string_field(*array_tails.values[0], "call_style") == "bare",
+         "spaced bracket starts a bare Array argument");
+  const amber::ast::ListField &array_args =
+      list_field(*array_tails.values[0], "args");
+  expect(array_args.values.size() == 1 &&
+             array_args.values[0]->kind == "AstListLiteral" &&
+             list_field(*array_args.values[0], "elements").values.size() == 2,
+         "bare Array argument retains callable references");
 }
 
 void test_dot_call_segment() {
@@ -324,6 +337,42 @@ void test_dot_call_segment() {
   amber::parser::ParseResult orphan = parse_raw(".()\n");
   expect(has_diagnostic(orphan, "AMB_DOT_CALL_TARGET"),
          "dot-call without target diagnostic");
+}
+
+void test_callable_references() {
+  std::unique_ptr<Expr> binding = parse_ok("&handler\n");
+  expect(binding->kind == "AstCallableRef", "binding callable ref node");
+  expect(string_field(*binding, "ref_kind") == "binding",
+         "binding callable ref kind");
+  expect(node_field(*binding, "target").kind == "AstName" &&
+             string_field(node_field(*binding, "target"), "name") ==
+                 "handler",
+         "binding callable ref target");
+
+  std::unique_ptr<Expr> class_side = parse_ok("&Admin.User.build\n");
+  expect(class_side->kind == "AstCallableRef",
+         "class-side callable ref node");
+  expect(string_field(*class_side, "ref_kind") == "class_side" &&
+             string_field(*class_side, "selector") == "build",
+         "class-side callable ref metadata");
+  expect(node_field(*class_side, "receiver").kind == "AstPostfixChain",
+         "qualified class-side callable receiver");
+
+  std::unique_ptr<Expr> instance = parse_ok("&User#show\n");
+  expect(instance->kind == "AstCallableRef",
+         "unbound instance callable ref node");
+  expect(string_field(*instance, "ref_kind") == "unbound_instance" &&
+             string_field(*instance, "selector") == "show",
+         "unbound instance callable ref metadata");
+  const Expr &closure = node_field(*instance, "closure");
+  const amber::ast::ListField &params = list_field(closure, "params");
+  expect(params.values.size() == 2 &&
+             string_field(*params.values[1], "param_kind") == "rest",
+         "unbound callable forwards surplus arguments through rest param");
+
+  amber::parser::ParseResult called = parse_raw("&handler()\n");
+  expect(has_diagnostic(called, "AMB_CALLABLE_REF_TARGET"),
+         "callable ref rejects an immediate call target");
 }
 
 void test_safe_nav_and_index() {
@@ -1888,6 +1937,7 @@ int main() {
   test_comparison_chains();
   test_bare_call();
   test_dot_call_segment();
+  test_callable_references();
   test_safe_nav_and_index();
   test_optional_bracket_access();
   test_inline_block_chain_boundary();

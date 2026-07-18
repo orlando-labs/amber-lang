@@ -123,12 +123,31 @@ std::string http_serialize_request_head(const std::string &method,
                                         const HttpHeaders &headers,
                                         int minor_version = 1);
 
+struct HttpChunkExtension {
+  std::string name;
+  std::optional<std::string> value;
+};
+
+// Parse the part of a chunk-size line following the hexadecimal size. `text`
+// is empty or begins with `;`. Names and token/quoted-string values are decoded
+// while order and duplicate extension names are preserved.
+bool http_parse_chunk_extensions(
+    const std::string &text, std::vector<HttpChunkExtension> *out,
+    std::string *error, std::size_t max_count = 128,
+    std::size_t max_bytes = 8192);
+
 // chunked transfer-coding (§18.1). `http_encode_chunk` frames one non-empty
 // data chunk; an empty `data` produces no output (a zero-length data chunk is
-// reserved for the terminator). `http_encode_last_chunk` emits the terminating
-// zero-length chunk; v1 sends no request trailers.
+// reserved for the terminator). Extension values are emitted as tokens where
+// possible and otherwise as escaped quoted-strings. The validating overloads
+// return false instead of producing an injectable wire representation.
 std::string http_encode_chunk(const std::string &data);
 std::string http_encode_last_chunk();
+bool http_encode_chunk(const std::string &data,
+                       const std::vector<HttpChunkExtension> &extensions,
+                       std::string *out, std::string *error);
+bool http_encode_last_chunk(const HttpHeaders &trailers, std::string *out,
+                            std::string *error);
 
 // --- Response parsing (§18.2) ----------------------------------------------
 

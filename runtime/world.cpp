@@ -363,6 +363,7 @@ struct RuntimeWorld::Impl {
   RuntimeReplayValidation replay_validation;
   std::size_t replay_cursor = 0;
   std::mutex value_mutex;
+  std::mutex execution_mutex;
 };
 
 RuntimeWorld::RuntimeWorld(const bytecode::BcModule &module)
@@ -394,6 +395,7 @@ Value RuntimeWorld::string_value(std::string text) {
   if (impl_ == nullptr || impl_->owned_module == nullptr) {
     return Value::null();
   }
+  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
   std::lock_guard<std::mutex> guard(impl_->value_mutex);
   std::vector<std::string> &strings = impl_->owned_module->strings;
   const auto found = std::find(strings.begin(), strings.end(), text);
@@ -420,6 +422,7 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
     return {Value::null(),
             Fault{"VMError", "runtime world is not bound", 0, 0}};
   }
+  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
   impl_->state->initialize_for_module(*impl_->module);
   impl_->record_event(replay::make_event(
       "task.started", {{"code_id", std::to_string(code_id)}}));
@@ -489,6 +492,17 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
   ExecutionResult result =
       execute_runtime_vm(*impl_->module, std::move(vm_context), code_id, args,
                          std::move(self), std::move(block));
+  if (!result.runtime_strings.empty()) {
+    impl_->owned_module->strings = result.runtime_strings;
+  }
+  if (!result.runtime_symbols.empty()) {
+    impl_->owned_module->symbols = result.runtime_symbols;
+  }
+  // Values stored in the persistent world may refer to names interned by an
+  // earlier execute call. Always return the world's current tables so callers
+  // can decode such values even when this particular call added no names.
+  result.runtime_strings = impl_->owned_module->strings;
+  result.runtime_symbols = impl_->owned_module->symbols;
   if (result.ok()) {
     impl_->record_event(replay::make_event(
         "task.completed", {{"code_id", std::to_string(code_id)}}));
@@ -506,6 +520,7 @@ ExecutionResult RuntimeWorld::invoke_native_extension(
     return {Value::null(),
             Fault{"VMError", "runtime world is not bound", 0, 0}};
   }
+  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
   impl_->state->initialize_for_module(*impl_->module);
   impl_->record_event(replay::make_event(
       "native_extension.started", {{"code_id", std::to_string(code_id)}}));
@@ -528,6 +543,14 @@ ExecutionResult RuntimeWorld::invoke_native_extension(
 
   ExecutionResult result = invoke_runtime_native_extension(
       *impl_->module, std::move(context), code_id, args, std::move(self));
+  if (!result.runtime_strings.empty()) {
+    impl_->owned_module->strings = result.runtime_strings;
+  }
+  if (!result.runtime_symbols.empty()) {
+    impl_->owned_module->symbols = result.runtime_symbols;
+  }
+  result.runtime_strings = impl_->owned_module->strings;
+  result.runtime_symbols = impl_->owned_module->symbols;
   impl_->record_event(replay::make_event(
       result.ok() ? "native_extension.completed" : "native_extension.failed",
       {{"code_id", std::to_string(code_id)}}));

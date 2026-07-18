@@ -88,7 +88,8 @@ void usage(std::ostream &out) {
   out << "  amberc bc <file>\n";
   out << "  amberc bc-disasm <file>\n";
   out << "  amberc build <amber.build.yaml|amber.build.json> [--out-dir <dir>] "
-         "[--cache-dir <dir>] [--target both|native|bytecode] [--no-cache]\n";
+         "[--cache-dir <dir>] [--target both|native|bytecode] [--no-cache] "
+         "[--grant <cap[=target]>...]\n";
   out << "  amberc metadata <file.amberbc> --json\n";
   out << "  amberc verify <file.amberbc> --json\n";
   out << "  amberc amberbc-dump <file>\n";
@@ -3839,16 +3840,44 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
     out << "  NativeFrame frame(regs.data(), nullptr, regs.size(), "
            "current_closure);\n";
   }
-  out << "  std::size_t arg_index = 0;\n";
-  out << "  for (const NativeValue &arg : args) {\n";
-  out << "    if (arg_index >= frame.reg_count) break;\n";
-  if (uses_local_capture_cells) {
-    out << "    write_reg(frame, static_cast<std::uint32_t>(arg_index++), "
-           "arg);\n";
+  if ((code.flags & amber::bytecode::kCodeFlagRestParam) != 0U) {
+    const std::uint32_t rest_index =
+        code.flags >> amber::bytecode::kCodeRestParamIndexShift;
+    out << "  if (args.size() < " << rest_index
+        << "U) throw NativeRaised{native_named_error("
+           "\"ArgumentError\", \"block received too few positional "
+           "arguments\")};\n";
+    out << "  for (std::size_t arg_index = 0; arg_index < " << rest_index
+        << "U; ++arg_index) {\n";
+    if (uses_local_capture_cells) {
+      out << "    write_reg(frame, static_cast<std::uint32_t>(arg_index), "
+             "args[arg_index]);\n";
+    } else {
+      out << "    frame.regs[arg_index] = args[arg_index];\n";
+    }
+    out << "  }\n";
+    out << "  std::vector<NativeValue> rest_args("
+           "args.begin() + static_cast<std::ptrdiff_t>("
+        << rest_index << "U), args.end());\n";
+    if (uses_local_capture_cells) {
+      out << "  write_reg(frame, " << rest_index
+          << "U, NativeValue::tuple(std::move(rest_args)));\n";
+    } else {
+      out << "  frame.regs[" << rest_index
+          << "U] = NativeValue::tuple(std::move(rest_args));\n";
+    }
   } else {
-    out << "    frame.regs[arg_index++] = arg;\n";
+    out << "  std::size_t arg_index = 0;\n";
+    out << "  for (const NativeValue &arg : args) {\n";
+    out << "    if (arg_index >= frame.reg_count) break;\n";
+    if (uses_local_capture_cells) {
+      out << "    write_reg(frame, static_cast<std::uint32_t>(arg_index++), "
+             "arg);\n";
+    } else {
+      out << "    frame.regs[arg_index++] = arg;\n";
+    }
+    out << "  }\n";
   }
-  out << "  }\n";
   out << "  if (handler_seed != nullptr) "
          "native_seed_handler_frame(frame, *handler_seed);\n";
   if (uses_scalar_lanes) {
@@ -18475,6 +18504,7 @@ struct BuildCliOptions {
   std::string out_dir;
   std::string cache_dir;
   std::string target = "both";
+  std::vector<amber::capability::CapabilityRequest> capability_grants;
   bool cache_enabled = true;
   bool require_full_native = false;
 };
@@ -18495,6 +18525,14 @@ BuildCliOptions parse_build_options(int argc, char **argv, int start_index) {
       }
     } else if (arg == "--no-cache") {
       options.cache_enabled = false;
+    } else if (arg == "--grant" && i + 1 < argc) {
+      amber::capability::CapabilityRequest grant;
+      amber::capability::CapabilityDiagnostic diagnostic;
+      if (!amber::capability::parse_cli_grant(argv[++i], &grant,
+                                               &diagnostic)) {
+        throw std::runtime_error(diagnostic.message);
+      }
+      options.capability_grants.push_back(std::move(grant));
     } else if (arg == "--require-full-native") {
       options.require_full_native = true;
     } else {
@@ -18918,6 +18956,12 @@ public:
     }
 
     synthesize_merged_init();
+    // Manifest builds use the same explicit host-policy surface as source
+    // builds: a CLI grant is both the package's requested capability and the
+    // capability embedded into the generated executable. Without copying the
+    // requests into the merged module, RuntimeWorld resolves an empty
+    // effective set even though the executable carries the host grants.
+    out_.capabilities = capability_grants;
     add_module_attr(&out_, "amber.build.graph", "merged-native-v1");
     add_module_attr(&out_, "amber.build.graph.root", root_module);
     add_module_attr(&out_, "amber.build.graph.modules",
@@ -20070,7 +20114,8 @@ int run_build_command(int argc, char **argv) {
           default_entry_mode_for(true, decoded.module);
       const NativeGraphLinkResult linked_graph =
           link_native_graph(decode_native_graph_modules(summary),
-                            parsed.manifest.root_module, entry_mode, {});
+                            parsed.manifest.root_module, entry_mode,
+                            options.capability_grants);
       if (!linked_graph.ok) {
         for (const amber::build::BuildDiagnostic &diagnostic :
              linked_graph.diagnostics) {

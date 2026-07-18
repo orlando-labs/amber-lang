@@ -157,6 +157,13 @@ LexResult Lexer::lex() {
       }
       emit(TokenKind::RBrace, start, "}");
       break;
+    case '#':
+      // A `#` without leading whitespace is the unbound callable-reference
+      // separator in `&Class#method`. Comment-shaped `#` tokens have already
+      // been consumed above, so the two surfaces remain unambiguous.
+      advance();
+      emit(TokenKind::Hash, start, "#");
+      break;
     case '|':
       advance();
       emit(TokenKind::Pipe, start, "|");

@@ -483,6 +483,16 @@ struct RuntimeState {
         }
       }
     }
+    for (const bytecode::BcCode &code : module.code_objects) {
+      if ((code.flags & bytecode::kCodeFlagRestParam) == 0U) {
+        continue;
+      }
+      rest_param_index_by_code[code.code_id] =
+          code.flags >> bytecode::kCodeRestParamIndexShift;
+      codes_needing_param_shaping.insert(code.code_id);
+      has_any_rest_params = true;
+      has_any_shaped_params = true;
+    }
     for (std::uint32_t index = 0; index < module.classes.size(); ++index) {
       ClassRuntimeState &runtime = classes[index];
       const bytecode::BcClass &owner = module.classes[index];

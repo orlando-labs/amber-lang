@@ -161,6 +161,8 @@ private:
                          StopMode stop_mode);
   std::unique_ptr<ast::Expr> parse_prefix(StopMode stop_mode);
   std::unique_ptr<ast::Expr>
+  parse_callable_reference(const lexer::Token &ampersand);
+  std::unique_ptr<ast::Expr>
   parse_paren_or_tuple_literal(const lexer::Token &open, StopMode stop_mode);
   std::unique_ptr<ast::Expr>
   parse_brace_collection_literal(const lexer::Token &open, StopMode stop_mode);

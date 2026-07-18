@@ -1619,7 +1619,8 @@ bool compile_macro_module(const std::vector<const ast::Expr *> &macro_defs,
 
   binder::BindResult bind = binder::bind_module(items, module_name);
   if (!bind.ok()) {
-    *error = "macro definitions failed to bind";
+    *error = "macro definitions failed to bind: " +
+             lexer::diagnostics_to_json(bind.diagnostics);
     return false;
   }
   hir::Program program = hir::lower_module(items, module_name, bind.graph);

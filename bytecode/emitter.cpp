@@ -1657,6 +1657,19 @@ CodeEmitter::CodeEmitter(Emitter *owner, const hir::Procedure *procedure,
          owner_->intern_string(capture.source_name)});
   }
 
+  if (code_.kind == CodeKind::Block && procedure_->signature != nullptr) {
+    if (const ast::ListField *params =
+            list_field(*procedure_->signature, "params")) {
+      for (std::uint32_t index = 0; index < params->values.size(); ++index) {
+        if (string_field(*params->values[index], "kind") == "rest") {
+          code_.flags |= kCodeFlagRestParam |
+                         (index << kCodeRestParamIndexShift);
+          break;
+        }
+      }
+    }
+  }
+
   next_temp_ = static_cast<std::uint32_t>(procedure_->locals.size());
   const ast::Expr *body =
       body_override_ != nullptr ? body_override_ : procedure_->body.get();

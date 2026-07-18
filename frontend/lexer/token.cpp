@@ -115,6 +115,8 @@ const char *token_kind_name(TokenKind kind) {
     return "RBRACE";
   case TokenKind::HashLBrace:
     return "HASH_LBRACE";
+  case TokenKind::Hash:
+    return "HASH";
   case TokenKind::Pipe:
     return "PIPE";
   case TokenKind::Ampersand:

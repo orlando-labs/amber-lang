@@ -995,6 +995,43 @@ void test_top_level_function_closure_captures_sibling_function() {
          "top-level function should call captured sibling function");
 }
 
+void test_execute_emitted_callable_references() {
+  amber::bytecode::EmitResult emitted = emit_ok(
+      "def handler(value):\n"
+      "  value * 2\n"
+      "\n"
+      "class User:\n"
+      "  attr value\n"
+      "  def init(@value)\n"
+      "  def scale(factor): @value * factor\n"
+      "  class_method def build(value): User(value)\n"
+      "\n"
+      "target = &handler\n"
+      "class_target = &User.build\n"
+      "instance_target = &User#scale\n"
+      "user = class_target(6)\n"
+      "target(10) + instance_target(user, 3) + user.value\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emitted.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  const amber::runtime::ExecutionResult exec = amber::runtime::execute_code(
+      decoded.module, decoded.module.init.entry_code_id);
+  expect(exec.ok(), "callable references should execute after serialization");
+  expect(exec.value.is_integer() && exec.value.as_integer() == 44,
+         "binding, class-side, and unbound instance refs preserve calls");
+
+  const amber::runtime::ExecutionResult wrong_receiver = execute_emitted_init(
+      "class User:\n"
+      "  def value(): 1\n"
+      "class Other\n"
+      "target = &User#value\n"
+      "target(Other())\n");
+  expect(!wrong_receiver.ok() && wrong_receiver.fault.has_value() &&
+             wrong_receiver.fault->error_name == "TypeError",
+         "unbound instance callable rejects a receiver of another class");
+}
+
 void test_direct_top_level_method_entry_materializes_module_captures() {
   amber::bytecode::EmitResult emit_result = emit_ok("def helper(value):\n"
                                                     "  value + 1\n"
@@ -2006,6 +2043,22 @@ void test_execute_emitted_implicit_receiver_method_call() {
   expect(exec.ok(), "implicit receiver method call execution failed");
   expect(exec.value.is_integer() && exec.value.as_integer() == 13,
          "bare method calls inside methods should dispatch on the receiver");
+}
+
+void test_execute_emitted_inherited_implicit_receiver_method_call() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "class Base:\n"
+      "  def render(text:, status: 200):\n"
+      "    text + status.to_str\n"
+      "class Child < Base:\n"
+      "  def call():\n"
+      "    render(text: \"ok\", status: 201)\n"
+      "Child().call()\n");
+  expect(exec.ok(), "inherited implicit receiver method call failed");
+  expect(string_value_text_or_die(exec.value, amber::bytecode::BcModule{},
+                                  exec) == "ok201",
+         "unresolved bare call in an instance method should dispatch through "
+         "the receiver ancestry");
 }
 
 void test_execute_emitted_exclusive_slice_end_boundary() {
@@ -3885,6 +3938,69 @@ void test_execute_emitted_block_map_suffixes() {
                       "explicit param indented map block");
 }
 
+void test_pooled_block_vm_refreshes_equal_sized_runtime_string_tables() {
+  const amber::runtime::ExecutionResult exec = execute_emitted_init(
+      "class Box:\n"
+      "  attr value\n"
+      "  def init(@value)\n"
+      "\n"
+      "def decode_all(values):\n"
+      "  boxes = []\n"
+      "  values.each |value|:\n"
+      "    [value].each |piece|:\n"
+      "      boxes.push!(Box(Url.percent_decode(piece)))\n"
+      "  boxes\n"
+      "\n"
+      "first = decode_all([\"people\", \"posts\"])\n"
+      "second = [\"posts\", \"amber\"].map |value|:\n"
+      "  Url.percent_decode(value)\n"
+      "first_people = first[0].value\n"
+      "first_posts = first[1].value\n"
+      "[first_people, first_posts, second[0], second[1]].join(\"|\")\n");
+  expect(exec.ok(),
+         "pooled block VM runtime string synchronization should execute");
+  const std::string text = string_value_text_or_die(
+      exec.value, amber::bytecode::BcModule{}, exec);
+  expect(text == "people|posts|posts|amber",
+         "pooled block VM keeps runtime string ids content-stable");
+}
+
+void test_runtime_world_persists_runtime_strings_between_execute_calls() {
+  const amber::bytecode::EmitResult emitted = emit_ok(
+      "stored = []\n"
+      "[\"people\", \"posts\"].each |value|:\n"
+      "  stored.push!(Url.percent_decode(value))\n"
+      "\n"
+      "def main():\n"
+      "  current = [\"posts\", \"amber\"].map |value|:\n"
+      "    Url.percent_decode(value)\n"
+      "  stored_people = stored[0]\n"
+      "  stored_posts = stored[1]\n"
+      "  current_posts = current[0]\n"
+      "  current_amber = current[1]\n"
+      "  [stored_people, stored_posts, current_posts, current_amber].join(\"|\")\n");
+  const amber::bytecode::DecodeResult decoded =
+      amber::bytecode::deserialize_module(
+          amber::bytecode::serialize_module(emitted.module));
+  expect(decoded.ok(), amber::bytecode::verify_errors_to_json(decoded.errors));
+  expect(decoded.module.init.has_entry_code_id,
+         "runtime world string persistence init exists");
+  const amber::bytecode::BcMethod *main_method =
+      method_by_name(decoded.module, "main");
+  expect(main_method != nullptr, "runtime world string persistence main exists");
+
+  amber::runtime::RuntimeWorld world(decoded.module);
+  const amber::runtime::ExecutionResult initialized =
+      world.execute(decoded.module.init.entry_code_id);
+  expect(initialized.ok(), "runtime world string persistence init executes");
+  const amber::runtime::ExecutionResult executed =
+      world.execute(main_method->entry_code_id);
+  expect(executed.ok(), "runtime world string persistence main executes");
+  expect(string_value_text_or_die(executed.value, decoded.module, executed) ==
+             "people|posts|posts|amber",
+         "runtime world keeps dynamic string ids stable across execute calls");
+}
+
 void test_execute_emitted_copy_graphs() {
   const amber::runtime::ExecutionResult exec = execute_emitted_init(
       "class Box:\n"
@@ -4896,6 +5012,38 @@ void test_runtime_map_collections_contract() {
   expect(each.ok() && each.value.is_map() &&
              each.value.as_map() == map.as_map(),
          "Map#each should return the receiver after visiting entries");
+}
+
+void test_runtime_collection_freeze_surface() {
+  const amber::runtime::ExecutionResult map = execute_emitted_init(
+      "value = {a: 1}\n"
+      "value.freeze()\n"
+      "value.store!(:b, 2)\n");
+  expect(!map.ok() && map.fault.has_value() &&
+             map.fault->error_name == "FrozenError",
+         "Map#freeze should reject mutation");
+
+  const amber::runtime::ExecutionResult list = execute_emitted_init(
+      "value = [1]\n"
+      "value.freeze()\n"
+      "value.push!(2)\n");
+  expect(!list.ok() && list.fault.has_value() &&
+             list.fault->error_name == "FrozenError",
+         "List#freeze should reject mutation");
+
+  const amber::runtime::ExecutionResult set = execute_emitted_init(
+      "value = {1}\n"
+      "value.freeze()\n"
+      "value.add!(2)\n");
+  expect(!set.ok() && set.fault.has_value() &&
+             set.fault->error_name == "FrozenError",
+         "Set#freeze should reject mutation");
+
+  const amber::runtime::ExecutionResult tuple = execute_emitted_init(
+      "value = (1, 2)\n"
+      "value.freeze() == value\n");
+  expect(tuple.ok() && tuple.value.is_bool() && tuple.value.as_bool(),
+         "Tuple#freeze should return the immutable receiver");
 }
 
 void test_manual_instance_send_dispatch() {
@@ -10442,6 +10590,7 @@ int main() {
   test_runtime_io_v2_replay_provider_file_surface();
   test_runtime_io_v2_low_level_wait_trace();
   test_top_level_function_closure_captures_sibling_function();
+  test_execute_emitted_callable_references();
   test_direct_top_level_method_entry_materializes_module_captures();
   test_top_level_function_self_recursion();
   test_top_level_clause_function_self_recursion();
@@ -10456,6 +10605,7 @@ int main() {
   test_execute_emitted_send_method();
   test_execute_emitted_class_matcher();
   test_execute_emitted_implicit_receiver_method_call();
+  test_execute_emitted_inherited_implicit_receiver_method_call();
   test_execute_emitted_exclusive_slice_end_boundary();
   test_execute_emitted_integer_specialized_ops();
   test_execute_emitted_numeric_equality_and_new_ops();
@@ -10512,6 +10662,8 @@ int main() {
   test_manual_make_map();
   test_execute_emitted_control_condition_assignment();
   test_execute_emitted_block_map_suffixes();
+  test_pooled_block_vm_refreshes_equal_sized_runtime_string_tables();
+  test_runtime_world_persists_runtime_strings_between_execute_calls();
   test_execute_emitted_copy_graphs();
   test_execute_emitted_user_index_methods();
   test_execute_emitted_v20_5_array_generation_and_optional_access();
@@ -10526,6 +10678,7 @@ int main() {
   test_runtime_dependency_capture_records_nested_ivar_reads();
   test_runtime_sequence_collections_contract();
   test_runtime_map_collections_contract();
+  test_runtime_collection_freeze_surface();
   test_manual_instance_send_dispatch();
   test_manual_store_and_load_ivar();
   test_manual_store_and_load_cvar();

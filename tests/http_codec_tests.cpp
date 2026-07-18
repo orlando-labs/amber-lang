@@ -14,6 +14,7 @@
 namespace {
 
 using amber::runtime::http::HttpErrorKind;
+using amber::runtime::http::HttpChunkExtension;
 using amber::runtime::http::HttpHeaders;
 using amber::runtime::http::HttpResponseParser;
 using amber::runtime::http::HttpResponseParserLimits;
@@ -439,6 +440,44 @@ void test_encode_chunks() {
          "16-byte chunk uses hex size 10");
 }
 
+void test_chunk_extensions_and_trailers() {
+  std::vector<HttpChunkExtension> extensions = {
+      {"trace", std::string("abc")},
+      {"flag", std::nullopt},
+      {"trace", std::string("quoted value\\\"")}};
+  std::string wire;
+  std::string error;
+  expect(amber::runtime::http::http_encode_chunk("data", extensions, &wire,
+                                                 &error),
+         "chunk with extensions encodes");
+  expect(wire ==
+             "4;trace=abc;flag;trace=\"quoted value\\\\\\\"\"\r\ndata\r\n",
+         "chunk extensions preserve order, duplicates, and quoting");
+
+  const std::size_t crlf = wire.find("\r\n");
+  const std::size_t semi = wire.find(';');
+  std::vector<HttpChunkExtension> parsed;
+  expect(amber::runtime::http::http_parse_chunk_extensions(
+             wire.substr(semi, crlf - semi), &parsed, &error),
+         "encoded extensions parse");
+  expect(parsed.size() == 3U && parsed[0].name == "trace" &&
+             parsed[0].value == "abc" && parsed[1].name == "flag" &&
+             !parsed[1].value.has_value() && parsed[2].name == "trace" &&
+             parsed[2].value == "quoted value\\\"",
+         "extension parser decodes ordered values");
+  expect(!amber::runtime::http::http_parse_chunk_extensions(
+             ";bad=\"x\r\ny\"", &parsed, &error),
+         "extension parser rejects CRLF injection");
+
+  HttpHeaders trailers;
+  expect(trailers.add("Digest", "sha-256=xyz", &error),
+         "valid trailer added");
+  expect(amber::runtime::http::http_encode_last_chunk(trailers, &wire, &error),
+         "last chunk with trailers encodes");
+  expect(wire == "0\r\ndigest: sha-256=xyz\r\n\r\n",
+         "trailer wire follows terminating chunk");
+}
+
 void test_roundtrip_serialize_then_parse_chunked() {
   // Build a chunked request body and feed it back through the parser as if it
   // were a chunked response body, proving the encoder/decoder agree.
@@ -489,6 +528,7 @@ int main() {
   test_serialize_request_head();
   test_normalize_method();
   test_encode_chunks();
+  test_chunk_extensions_and_trailers();
   test_roundtrip_serialize_then_parse_chunked();
 
   std::cout << "http codec tests passed (" << g_checks << " checks)\n";

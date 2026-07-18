@@ -415,6 +415,7 @@ private:
     std::size_t procedure_index = 0;
     int next_slot = 0;
     int next_temp_id = 0;
+    bool has_object_receiver = false;
     std::map<std::string, std::string> slot_by_binding_id;
     std::map<std::string, std::string> capture_slot_by_binding_id;
   };
@@ -489,6 +490,20 @@ private:
         return true;
       }
       current = graph_.scopes[current].parent_index;
+    }
+    return false;
+  }
+
+  bool scope_has_object_receiver(int scope_index) const {
+    for (int current = scope_index; current >= 0;
+         current = graph_.scopes[current].parent_index) {
+      const std::string &kind = graph_.scopes[current].kind;
+      if (kind == "class" || kind == "mixin") {
+        return true;
+      }
+      if (kind == "module") {
+        return false;
+      }
     }
     return false;
   }
@@ -1175,6 +1190,7 @@ private:
 
       context.scope_index = scope_index;
       context.procedure_index = procedures_.size() - 1;
+      context.has_object_receiver = scope_has_object_receiver(scope_index);
       initialize_locals(&context);
       initialize_captures(&context, capture_plans);
       current_proc_ = &context;
@@ -1410,6 +1426,7 @@ private:
     ProcedureContext context;
     context.scope_index = scope_index;
     context.procedure_index = procedure_index;
+    context.has_object_receiver = scope_has_object_receiver(scope_index);
     initialize_locals(&context);
     initialize_captures(&context, capture_plans);
 
@@ -2092,6 +2109,17 @@ private:
     if (expr.kind == "AstBlock") {
       return lower_block(expr);
     }
+    if (expr.kind == "AstCallableRef") {
+      const std::string ref_kind = string_value(expr, "ref_kind");
+      const ast::Expr *value = node_field(
+          expr, ref_kind == "binding" ? "target" : "closure");
+      if (value != nullptr) {
+        return lower_expr(*value);
+      }
+      auto node = make_node("HUnsupported", expr.span);
+      node->string_field("source_kind", "AstCallableRef");
+      return node;
+    }
     if (expr.kind == "AstKeywordArg") {
       auto node = make_node("HKeywordArg", expr.span);
       node->string_field("name", string_value(expr, "name"));
@@ -2479,7 +2507,7 @@ private:
         std::vector<std::unique_ptr<Node>> kw_args;
         std::unique_ptr<Node> block;
         if (!safe && tail.kind == "AstTailCall" && i == 0 &&
-            implicit_receiver_member_binding(*base) != nullptr) {
+            is_implicit_receiver_call(*base)) {
           if (i + 1 < tail_count &&
               tails->values[i + 1]->kind == "AstTailBlockSuffix") {
             block = lower_block_suffix(*tails->values[i + 1]);
@@ -2583,6 +2611,25 @@ private:
                                                                     : nullptr;
   }
 
+  bool is_implicit_receiver_call(const ast::Expr &base) const {
+    if (implicit_receiver_member_binding(base) != nullptr) {
+      return true;
+    }
+    if (current_proc_ == nullptr || !current_proc_->has_object_receiver ||
+        base.kind != "AstName") {
+      return false;
+    }
+    const std::string name = string_value(base, "name");
+    if (name.empty() || name == "self" ||
+        (name.front() >= 'A' && name.front() <= 'Z')) {
+      return false;
+    }
+    const binder::Reference *ref =
+        find_reference(base.span, name, string_value(base, "syntax_context"),
+                       "name");
+    return ref == nullptr || !ref->resolved;
+  }
+
   bool binding_is_object_member(const binder::Binding &binding) const {
     if (!binding_is_member(binding) || binding.scope_index < 0 ||
         static_cast<std::size_t>(binding.scope_index) >=
@@ -2597,15 +2644,14 @@ private:
       const ast::Expr &base, const ast::Expr &tail,
       std::unique_ptr<Node> block = nullptr) {
     const binder::Binding *binding = implicit_receiver_member_binding(base);
-    if (binding == nullptr) {
-      return nullptr;
-    }
     std::vector<std::unique_ptr<Node>> pos_args;
     std::vector<std::unique_ptr<Node>> kw_args;
     collect_call_args(tail, &pos_args, &kw_args, &block);
     auto node = make_node("HSend", ast::join_spans(base.span, tail.span));
     node->node_field("receiver", make_node("HSelf", base.span));
-    node->string_field("selector", binding->name);
+    node->string_field("selector",
+                       binding != nullptr ? binding->name
+                                          : string_value(base, "name"));
     node->list_field("pos_args", std::move(pos_args));
     node->list_field("kw_args", std::move(kw_args));
     if (block) {
@@ -2870,7 +2916,10 @@ private:
         auto param = make_node("HParam", param_pattern.span);
         param->string_field("external_name", local_name);
         param->string_field("local_name", local_name);
-        param->string_field("kind", "positional");
+        const std::string param_kind =
+            string_value(param_pattern, "param_kind");
+        param->string_field("kind",
+                            param_kind.empty() ? "positional" : param_kind);
         param->string_field("auto_assign_kind", "none");
         param->string_field("auto_assign_target", "");
         param->string_field("type_expr", "");

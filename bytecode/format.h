@@ -309,6 +309,13 @@ inline constexpr std::uint32_t kMethodParamFlagRest = 0x8U;
 // indifferent Map. At most one per signature.
 inline constexpr std::uint32_t kMethodParamFlagKwRest = 0x10U;
 
+// Block/lambda procedures do not have a BcMethod parameter descriptor. Their
+// compact calling-convention metadata therefore lives on BcCode::flags. The
+// rest index is a local/register index; bit zero distinguishes index zero from
+// a code object without a rest parameter.
+inline constexpr std::uint32_t kCodeFlagRestParam = 0x1U;
+inline constexpr std::uint32_t kCodeRestParamIndexShift = 8U;
+
 // Sequence-pattern `PGetIndex`: when this bit is set on the index operand, the
 // element is addressed from the END of the sequence (offset 0 = last element),
 // which is how the fixed patterns AFTER a mid-position rest (`[a, *b, c]`) are

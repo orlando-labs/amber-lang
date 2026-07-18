@@ -3472,6 +3472,9 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
     }
     return node;
   }
+  if (token.kind == lexer::TokenKind::Ampersand) {
+    return parse_callable_reference(token);
+  }
   if (is_identifier_like_token(token.kind)) {
     // Macro quasiquote surface (macro.v1 profile). `quote:` in block form
     // (a newline must follow the colon) yields an AstQuote whose body is
@@ -3714,6 +3717,182 @@ std::unique_ptr<ast::Expr> Parser::parse_prefix(StopMode stop_mode) {
   auto expr = ast::make_expr("AstError", token.span);
   expr->string_field("token", token.lexeme);
   return expr;
+}
+
+std::unique_ptr<ast::Expr>
+Parser::parse_callable_reference(const lexer::Token &ampersand) {
+  if (!is_identifier_like_token(current().kind)) {
+    error_code(current(), "AMB_CALLABLE_REF_TARGET",
+               "callable reference expects a static name, class-side member, "
+               "or unbound instance member");
+    auto error_expr = ast::make_expr("AstError", ampersand.span);
+    error_expr->string_field("token", ampersand.lexeme);
+    return error_expr;
+  }
+
+  std::vector<lexer::Token> path;
+  path.push_back(advance());
+  while (match(lexer::TokenKind::Dot)) {
+    path.push_back(consume_member_name(
+        "expected callable member name after '.'"));
+  }
+
+  auto make_name = [](const lexer::Token &token) {
+    auto name = ast::make_expr("AstName", token.span);
+    name->string_field("name", token.lexeme);
+    return name;
+  };
+  auto make_path = [&](std::size_t count) {
+    std::unique_ptr<ast::Expr> value = make_name(path.front());
+    if (count == 1U) {
+      return value;
+    }
+    auto chain = ast::make_expr(
+        "AstPostfixChain",
+        ast::join_spans(path.front().span, path[count - 1U].span));
+    chain->node_field("base", std::move(value));
+    std::vector<std::unique_ptr<ast::Expr>> tails;
+    for (std::size_t index = 1; index < count; ++index) {
+      auto member = ast::make_expr("AstTailDotMember", path[index].span);
+      member->string_field("name", path[index].lexeme);
+      member->bool_field("chain_boundary", false);
+      tails.push_back(std::move(member));
+    }
+    chain->list_field("tails", std::move(tails));
+    return chain;
+  };
+
+  bool unbound = false;
+  lexer::Token selector;
+  std::unique_ptr<ast::Expr> receiver;
+  if (match(lexer::TokenKind::Hash)) {
+    unbound = true;
+    selector = consume_member_name(
+        "expected instance method name after '#' in callable reference");
+    receiver = make_path(path.size());
+  } else if (path.size() > 1U) {
+    selector = path.back();
+    receiver = make_path(path.size() - 1U);
+  } else {
+    auto reference = ast::make_expr(
+        "AstCallableRef", ast::join_spans(ampersand.span, path.front().span));
+    reference->string_field("ref_kind", "binding");
+    reference->node_field("target", make_name(path.front()));
+    if (check(lexer::TokenKind::LParen)) {
+      error_code(current(), "AMB_CALLABLE_REF_TARGET",
+                 "callable reference target cannot be a call; bind the "
+                 "reference and invoke it separately");
+    }
+    return reference;
+  }
+
+  const lexer::Span span = ast::join_spans(ampersand.span, selector.span);
+  const std::string receiver_name = "__amber_callable_receiver";
+  const std::string args_name = "__amber_callable_args";
+
+  auto make_pattern_param = [&](const std::string &pattern,
+                                const std::string &param_kind =
+                                    "positional") {
+    auto param = ast::make_expr("AstPatternParam", span);
+    param->string_field("pattern", pattern);
+    param->string_field("param_kind", param_kind);
+    return param;
+  };
+  auto make_generated_name = [&](const std::string &name) {
+    auto value = ast::make_expr("AstName", span);
+    value->string_field("name", name);
+    return value;
+  };
+
+  auto call = ast::make_expr("AstPostfixChain", span);
+  call->node_field("base", unbound ? make_generated_name(receiver_name)
+                                    : ast::clone_expr(*receiver));
+  std::vector<std::unique_ptr<ast::Expr>> call_tails;
+  auto member = ast::make_expr("AstTailDotMember", selector.span);
+  member->string_field("name", selector.lexeme);
+  member->bool_field("chain_boundary", false);
+  call_tails.push_back(std::move(member));
+  auto invocation = ast::make_expr("AstTailCall", span);
+  invocation->string_field("call_style", "paren");
+  std::vector<std::unique_ptr<ast::Expr>> call_args;
+  auto spread = ast::make_expr("AstSpreadArg", span);
+  spread->node_field("expr", make_generated_name(args_name));
+  call_args.push_back(std::move(spread));
+  invocation->list_field("args", std::move(call_args));
+  call_tails.push_back(std::move(invocation));
+  call->list_field("tails", std::move(call_tails));
+  auto call_stmt = ast::make_expr("AstExprStmt", span);
+  call_stmt->node_field("expr", std::move(call));
+
+  std::vector<std::unique_ptr<ast::Expr>> body;
+  if (unbound) {
+    auto type_check = ast::make_expr("AstBinary", span);
+    type_check->string_field("op", "===");
+    type_check->node_field("left", ast::clone_expr(*receiver));
+    type_check->node_field("right", make_generated_name(receiver_name));
+
+    auto type_error_name = ast::make_expr("AstName", span);
+    type_error_name->string_field("name", "TypeError");
+    auto type_error_call = ast::make_expr("AstPostfixChain", span);
+    type_error_call->node_field("base", std::move(type_error_name));
+    auto type_error_tail = ast::make_expr("AstTailCall", span);
+    type_error_tail->string_field("call_style", "paren");
+    auto message = ast::make_expr("AstStringLiteral", span);
+    message->string_field("quote_kind", "double");
+    message->bool_field("interpolation", false);
+    auto message_text = ast::make_expr("AstStringText", span);
+    message_text->string_field(
+        "value", "unbound callable receiver does not match its owner class");
+    std::vector<std::unique_ptr<ast::Expr>> message_parts;
+    message_parts.push_back(std::move(message_text));
+    message->list_field("parts", std::move(message_parts));
+    std::vector<std::unique_ptr<ast::Expr>> error_args;
+    error_args.push_back(std::move(message));
+    type_error_tail->list_field("args", std::move(error_args));
+    std::vector<std::unique_ptr<ast::Expr>> error_tails;
+    error_tails.push_back(std::move(type_error_tail));
+    type_error_call->list_field("tails", std::move(error_tails));
+    auto raise = ast::make_expr("AstRaise", span);
+    raise->node_field("expr", std::move(type_error_call));
+    auto raise_stmt = ast::make_expr("AstExprStmt", span);
+    raise_stmt->node_field("expr", std::move(raise));
+    std::vector<std::unique_ptr<ast::Expr>> then_body;
+    then_body.push_back(std::move(raise_stmt));
+
+    auto guard = ast::make_expr("AstUnless", span);
+    guard->node_field("cond", std::move(type_check));
+    guard->list_field("then_body", std::move(then_body));
+    guard->list_field("else_body", {});
+    auto guard_stmt = ast::make_expr("AstExprStmt", span);
+    guard_stmt->node_field("expr", std::move(guard));
+    body.push_back(std::move(guard_stmt));
+  }
+  body.push_back(std::move(call_stmt));
+
+  auto closure = ast::make_expr("AstBlock", span);
+  std::vector<std::unique_ptr<ast::Expr>> params;
+  if (unbound) {
+    params.push_back(make_pattern_param(receiver_name));
+  }
+  // Keep the binder-facing pattern a normal name. `param_kind` carries the
+  // variadic calling convention through HIR/bytecode without teaching the
+  // pattern language that a block parameter is a method signature.
+  params.push_back(make_pattern_param(args_name, "rest"));
+  closure->list_field("params", std::move(params));
+  closure->list_field("body", std::move(body));
+
+  auto reference = ast::make_expr("AstCallableRef", span);
+  reference->string_field("ref_kind",
+                          unbound ? "unbound_instance" : "class_side");
+  reference->string_field("selector", selector.lexeme);
+  reference->node_field("receiver", std::move(receiver));
+  reference->node_field("closure", std::move(closure));
+  if (check(lexer::TokenKind::LParen)) {
+    error_code(current(), "AMB_CALLABLE_REF_TARGET",
+               "callable reference target cannot be a call; bind the "
+               "reference and invoke it separately");
+  }
+  return reference;
 }
 
 std::unique_ptr<ast::Expr>
@@ -4260,8 +4439,13 @@ Parser::parse_postfix(std::unique_ptr<ast::Expr> expr, StopMode stop_mode) {
     }
     return chain;
   }
-  if (match(lexer::TokenKind::LBracket)) {
-    const lexer::Token open = previous();
+  // Bracket indexing is adjacency-sensitive. With whitespace, `fn [a, b]`
+  // is Amber's bare-call form with one Array argument; without whitespace,
+  // `value[a]` remains an index send. This also keeps annotation calls such
+  // as `before [&auth, &audit]` unambiguous.
+  if (check(lexer::TokenKind::LBracket) &&
+      expr->span.end.offset == current().span.start.offset) {
+    const lexer::Token open = advance();
     const bool optional = match(lexer::TokenKind::Question);
     std::unique_ptr<ast::Expr> index = parse_expression(1, stop_mode);
     const lexer::Token close =

@@ -103,6 +103,66 @@ int hex_digit_value(char c) {
   return -1;
 }
 
+bool is_valid_extension_value_byte(unsigned char c) {
+  // quoted-string allows HTAB / SP / visible ASCII / obs-text. CR, LF, NUL and
+  // the remaining controls are deliberately rejected at the public boundary.
+  return c == '\t' || c == ' ' || (c >= 0x21U && c <= 0x7eU) || c >= 0x80U;
+}
+
+void append_chunk_size(std::size_t size, std::string *out) {
+  std::array<char, 2U * sizeof(std::size_t)> digits{};
+  std::size_t count = 0;
+  do {
+    digits[count++] = kHexDigits[size & 0xFU];
+    size >>= 4U;
+  } while (size > 0);
+  for (std::size_t i = count; i > 0; --i) {
+    out->push_back(digits[i - 1U]);
+  }
+}
+
+bool append_chunk_extensions(
+    const std::vector<HttpChunkExtension> &extensions, std::string *out,
+    std::string *error) {
+  for (const HttpChunkExtension &extension : extensions) {
+    if (!http_valid_field_name(extension.name)) {
+      if (error != nullptr) {
+        *error = "invalid chunk extension name";
+      }
+      return false;
+    }
+    out->push_back(';');
+    *out += extension.name;
+    if (!extension.value.has_value()) {
+      continue;
+    }
+    out->push_back('=');
+    bool token = !extension.value->empty();
+    for (const unsigned char c : *extension.value) {
+      token = token && is_tchar(c);
+      if (!is_valid_extension_value_byte(c)) {
+        if (error != nullptr) {
+          *error = "invalid byte in chunk extension value";
+        }
+        return false;
+      }
+    }
+    if (token) {
+      *out += *extension.value;
+      continue;
+    }
+    out->push_back('"');
+    for (const char c : *extension.value) {
+      if (c == '"' || c == '\\') {
+        out->push_back('\\');
+      }
+      out->push_back(c);
+    }
+    out->push_back('"');
+  }
+  return true;
+}
+
 } // namespace
 
 const char *http_error_class_name(HttpErrorKind kind) {
@@ -353,6 +413,179 @@ std::string http_encode_chunk(const std::string &data) {
   out += data;
   out += "\r\n";
   return out;
+}
+
+bool http_parse_chunk_extensions(const std::string &text,
+                                 std::vector<HttpChunkExtension> *out,
+                                 std::string *error, std::size_t max_count,
+                                 std::size_t max_bytes) {
+  if (out == nullptr) {
+    return false;
+  }
+  out->clear();
+  if (text.size() > max_bytes) {
+    if (error != nullptr) {
+      *error = "chunk extensions exceed limit";
+    }
+    return false;
+  }
+  std::size_t i = 0;
+  auto skip_bws = [&]() {
+    while (i < text.size() && is_ows(text[i])) {
+      ++i;
+    }
+  };
+  while (i < text.size()) {
+    skip_bws();
+    if (i >= text.size() || text[i] != ';') {
+      if (error != nullptr) {
+        *error = "malformed chunk extension";
+      }
+      return false;
+    }
+    ++i;
+    skip_bws();
+    const std::size_t name_start = i;
+    while (i < text.size() && is_tchar(static_cast<unsigned char>(text[i]))) {
+      ++i;
+    }
+    if (i == name_start) {
+      if (error != nullptr) {
+        *error = "missing chunk extension name";
+      }
+      return false;
+    }
+    if (out->size() >= max_count) {
+      if (error != nullptr) {
+        *error = "too many chunk extensions";
+      }
+      return false;
+    }
+    HttpChunkExtension extension;
+    extension.name = text.substr(name_start, i - name_start);
+    skip_bws();
+    if (i < text.size() && text[i] == '=') {
+      ++i;
+      skip_bws();
+      if (i >= text.size()) {
+        if (error != nullptr) {
+          *error = "missing chunk extension value";
+        }
+        return false;
+      }
+      if (text[i] == '"') {
+        ++i;
+        std::string value;
+        bool closed = false;
+        while (i < text.size()) {
+          unsigned char c = static_cast<unsigned char>(text[i++]);
+          if (c == '"') {
+            closed = true;
+            break;
+          }
+          if (c == '\\') {
+            if (i >= text.size()) {
+              if (error != nullptr) {
+                *error = "unterminated quoted chunk extension";
+              }
+              return false;
+            }
+            c = static_cast<unsigned char>(text[i++]);
+            if (c != '\t' && c != ' ' && c < 0x21U) {
+              if (error != nullptr) {
+                *error = "invalid quoted-pair in chunk extension";
+              }
+              return false;
+            }
+          }
+          if (!is_valid_extension_value_byte(c)) {
+            if (error != nullptr) {
+              *error = "invalid byte in chunk extension value";
+            }
+            return false;
+          }
+          value.push_back(static_cast<char>(c));
+        }
+        if (!closed) {
+          if (error != nullptr) {
+            *error = "unterminated quoted chunk extension";
+          }
+          return false;
+        }
+        extension.value = std::move(value);
+      } else {
+        const std::size_t value_start = i;
+        while (i < text.size() &&
+               is_tchar(static_cast<unsigned char>(text[i]))) {
+          ++i;
+        }
+        if (i == value_start) {
+          if (error != nullptr) {
+            *error = "invalid chunk extension value";
+          }
+          return false;
+        }
+        extension.value = text.substr(value_start, i - value_start);
+      }
+      skip_bws();
+    }
+    if (i < text.size() && text[i] != ';') {
+      if (error != nullptr) {
+        *error = "malformed chunk extension separator";
+      }
+      return false;
+    }
+    out->push_back(std::move(extension));
+  }
+  return true;
+}
+
+bool http_encode_chunk(const std::string &data,
+                       const std::vector<HttpChunkExtension> &extensions,
+                       std::string *out, std::string *error) {
+  if (out == nullptr) {
+    return false;
+  }
+  out->clear();
+  if (data.empty()) {
+    if (error != nullptr) {
+      *error = "stream chunk data must not be empty";
+    }
+    return false;
+  }
+  append_chunk_size(data.size(), out);
+  if (!append_chunk_extensions(extensions, out, error)) {
+    out->clear();
+    return false;
+  }
+  *out += "\r\n";
+  *out += data;
+  *out += "\r\n";
+  return true;
+}
+
+bool http_encode_last_chunk(const HttpHeaders &trailers, std::string *out,
+                            std::string *error) {
+  if (out == nullptr) {
+    return false;
+  }
+  *out = "0\r\n";
+  for (const auto &entry : trailers.pairs()) {
+    if (!http_valid_field_name(entry.first) ||
+        !http_valid_field_value(entry.second)) {
+      if (error != nullptr) {
+        *error = "invalid HTTP trailer";
+      }
+      out->clear();
+      return false;
+    }
+    *out += entry.first;
+    *out += ": ";
+    *out += entry.second;
+    *out += "\r\n";
+  }
+  *out += "\r\n";
+  return true;
 }
 
 std::string http_encode_last_chunk() { return "0\r\n\r\n"; }

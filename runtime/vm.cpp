@@ -988,16 +988,92 @@ private:
 class RuntimeHttpServerRequest final : public RuntimeIoValue {
 public:
   const char *type_name() const override { return "net.http.ServerRequest"; }
-  bool shareable() const override { return true; }
+  bool shareable() const override { return false; }
 
   std::string method;
   std::string target;
   std::string path;
   std::string query;
   http::HttpHeaders headers;
-  std::string body;
+  std::shared_ptr<class RuntimeHttpServerRequestBody> body_stream;
   RuntimeEndpoint local_endpoint;
   RuntimeEndpoint remote_endpoint;
+};
+
+enum class RuntimeHttpServerRequestFraming {
+  Empty,
+  ContentLength,
+  Chunked,
+};
+
+class RuntimeHttpServerRequestChunk final : public RuntimeIoValue {
+public:
+  const char *type_name() const override {
+    return "net.http.ServerRequestChunk";
+  }
+  bool shareable() const override { return false; }
+
+  std::string data;
+  std::vector<http::HttpChunkExtension> extensions;
+};
+
+class RuntimeHttpServerRequestBody final : public RuntimeIoValue {
+public:
+  const char *type_name() const override {
+    return "net.http.ServerRequestBody";
+  }
+  bool shareable() const override { return false; }
+
+  enum class ChunkState { Size, Data, Trailers, Complete };
+  enum class Consumption { Unset, Chunks, Whole };
+
+  std::shared_ptr<RuntimeTcpStream> stream;
+  RuntimeHttpServerRequestFraming framing =
+      RuntimeHttpServerRequestFraming::Empty;
+  std::string buffered;
+  std::uint64_t content_remaining = 0;
+  std::uint64_t chunk_remaining = 0;
+  std::uint64_t decoded_bytes = 0;
+  std::size_t trailer_bytes = 0;
+  std::size_t max_body_bytes = 0;
+  std::size_t max_header_bytes = 65536;
+  std::chrono::milliseconds read_timeout =
+      std::chrono::milliseconds::max();
+  std::optional<std::chrono::steady_clock::time_point> read_deadline;
+  ChunkState chunk_state = ChunkState::Size;
+  Consumption consumption = Consumption::Unset;
+  std::vector<http::HttpChunkExtension> current_extensions;
+  http::HttpHeaders trailers;
+  std::string whole_body;
+  bool whole_complete = false;
+  bool closed = false;
+  bool expect_continue = false;
+  bool continue_sent = false;
+  std::shared_ptr<std::atomic<bool>> final_response_started =
+      std::make_shared<std::atomic<bool>>(false);
+};
+
+class RuntimeHttpServerResponseWriter final : public RuntimeIoValue {
+public:
+  const char *type_name() const override {
+    return "net.http.ServerResponseWriter";
+  }
+  bool shareable() const override { return false; }
+
+  enum class Pending { None, Head, Chunk, Close, Trailer, Finish };
+
+  std::shared_ptr<RuntimeTcpStream> stream;
+  std::chrono::milliseconds write_timeout =
+      std::chrono::milliseconds::max();
+  std::optional<std::chrono::steady_clock::time_point> write_deadline;
+  std::vector<std::string> declared_trailers;
+  std::shared_ptr<std::atomic<bool>> final_response_started;
+  std::string pending_bytes;
+  std::size_t pending_offset = 0;
+  Pending pending = Pending::None;
+  bool head_sent = false;
+  bool body_closed = false;
+  bool finished = false;
 };
 
 class RuntimeHttpServerResponse final : public RuntimeIoValue {
@@ -1009,6 +1085,10 @@ public:
   std::string reason;
   http::HttpHeaders headers;
   std::string body;
+  std::vector<std::string> trailer_names;
+  std::function<std::function<Value()>(std::vector<Value>)> producer_factory;
+
+  bool streaming() const { return static_cast<bool>(producer_factory); }
 };
 
 class Vm : public StdlibHost {
@@ -3162,19 +3242,20 @@ private:
   }
 
   void sync_runtime_names_to(Vm &nested) const {
-    if (nested.module_.strings.size() < module_.strings.size()) {
-      nested.module_.strings.insert(
-          nested.module_.strings.end(),
-          module_.strings.begin() +
-              static_cast<std::ptrdiff_t>(nested.module_.strings.size()),
-          module_.strings.end());
+    // A pooled child may have the same table size as its parent but different
+    // runtime-interned content. Size-only synchronization lets equal numeric
+    // ids name unrelated strings after the child is reused. The parent is the
+    // canonical table at lease time, so refresh a divergent child in full and
+    // rebuild its lazy interning index.
+    if (nested.module_.strings != module_.strings) {
+      nested.module_.strings = module_.strings;
+      nested.string_index_.clear();
+      nested.string_index_folded_ = 0;
     }
-    if (nested.module_.symbols.size() < module_.symbols.size()) {
-      nested.module_.symbols.insert(
-          nested.module_.symbols.end(),
-          module_.symbols.begin() +
-              static_cast<std::ptrdiff_t>(nested.module_.symbols.size()),
-          module_.symbols.end());
+    if (nested.module_.symbols != module_.symbols) {
+      nested.module_.symbols = module_.symbols;
+      nested.symbol_index_.clear();
+      nested.symbol_index_folded_ = 0;
     }
   }
 
@@ -4980,7 +5061,11 @@ private:
     if (code.kind != bytecode::CodeKind::Block) {
       return true;
     }
-    const std::uint32_t required = declared_closure_param_count(code);
+    const std::optional<std::uint32_t> rest_index =
+        rest_param_index_for_code(code.code_id);
+    const std::uint32_t required =
+        rest_index.has_value() ? *rest_index
+                               : declared_closure_param_count(code);
     if (arg_count < required) {
       raise_runtime_error(caller, "ArgumentError",
                           "block expects " + std::to_string(required) +
@@ -5926,7 +6011,8 @@ private:
       // it must be fixed (route through full send dispatch) before the
       // emitter may speculate parameters as integer candidates (§5.8).
       set_fault(frame, "NoMethodError",
-                "selector is not implemented in current runtime baseline");
+                "selector `" + selector_text +
+                    "` is not implemented in current runtime baseline");
       return false;
     }
 
@@ -12974,6 +13060,7 @@ private:
                  capabilities, effects, trace_recorder, child_registry,
                  child_modules, child_types, child_dispatch, child_errors));
       vm->parkable_ = true;
+      vm->task_module_ = task;
       const BcCode *code = find_code(vm->module_, code_id);
       if (code == nullptr) {
         return []() -> Value {
@@ -15467,6 +15554,8 @@ private:
       return "Not Found";
     case 413:
       return "Payload Too Large";
+    case 417:
+      return "Expectation Failed";
     case 431:
       return "Request Header Fields Too Large";
     case 500:
@@ -15523,6 +15612,65 @@ private:
     wire += "\r\n";
     wire += body;
     return wire;
+  }
+
+  std::string http_server_streaming_response_head(
+      const RuntimeHttpServerResponse &response) {
+    const std::string reason = response.reason.empty()
+                                   ? http_server_reason_phrase(response.status)
+                                   : response.reason;
+    std::string wire = "HTTP/1.1 " + std::to_string(response.status);
+    if (!reason.empty()) {
+      wire += " ";
+      wire += reason;
+    }
+    wire += "\r\n";
+    for (const auto &entry : response.headers.pairs()) {
+      wire += entry.first;
+      wire += ": ";
+      wire += entry.second;
+      wire += "\r\n";
+    }
+    wire += "\r\n";
+    return wire;
+  }
+
+  bool http_server_finish_streaming_response(
+      const std::shared_ptr<RuntimeHttpServerResponseWriter> &writer) {
+    if (writer == nullptr || writer->stream == nullptr || writer->finished) {
+      return writer != nullptr && writer->finished;
+    }
+    if (writer->pending == RuntimeHttpServerResponseWriter::Pending::Head) {
+      const RuntimeIoStatus head = writer->stream->write_all(
+          writer->pending_bytes.substr(writer->pending_offset),
+          writer->write_timeout);
+      if (!head.ok) {
+        return false;
+      }
+      writer->pending = RuntimeHttpServerResponseWriter::Pending::None;
+      writer->pending_bytes.clear();
+      writer->pending_offset = 0;
+      writer->head_sent = true;
+      if (writer->final_response_started != nullptr) {
+        writer->final_response_started->store(true,
+                                              std::memory_order_release);
+      }
+    } else if (writer->pending !=
+               RuntimeHttpServerResponseWriter::Pending::None) {
+      return false;
+    }
+    if (!writer->body_closed) {
+      const RuntimeIoStatus closed =
+          writer->stream->write_all("0\r\n", writer->write_timeout);
+      if (!closed.ok) {
+        return false;
+      }
+      writer->body_closed = true;
+    }
+    const RuntimeIoStatus finished =
+        writer->stream->write_all("\r\n", writer->write_timeout);
+    writer->finished = finished.ok;
+    return finished.ok;
   }
 
   RuntimeHttpServerResponse http_server_error_response(int status,
@@ -15739,42 +15887,90 @@ private:
       line_start = line_end + 2U;
     }
 
-    if (headers.contains("transfer-encoding")) {
-      result.error_status = 501;
-      result.message = "request Transfer-Encoding is unsupported";
+    const bool has_transfer_encoding = headers.contains("transfer-encoding");
+    const bool has_content_length = headers.contains("content-length");
+    if (has_transfer_encoding && has_content_length) {
+      result.message =
+          "Transfer-Encoding and Content-Length cannot be combined";
       return result;
     }
 
-    std::string length_error;
-    const std::optional<std::uint64_t> content_length =
-        http_server_content_length(headers, &length_error);
-    if (!content_length.has_value()) {
-      result.message = length_error;
-      return result;
-    }
-    if (*content_length > server->max_body_bytes) {
-      result.error_status = 413;
-      result.message = "request body exceeds limit";
-      return result;
-    }
-
-    std::string body = bytes.substr(header_end + 4U);
-    while (body.size() < *content_length) {
-      RuntimeByteBuffer buffer(4096);
-      RuntimeIoStatus read = stream->read(buffer, server->read_timeout);
-      if (read.eof) {
-        result.message = "connection closed before request body";
-        return result;
+    RuntimeHttpServerRequestFraming framing =
+        RuntimeHttpServerRequestFraming::Empty;
+    std::uint64_t content_length_value = 0;
+    if (has_transfer_encoding) {
+      std::vector<std::string> codings;
+      for (const std::string &line : headers.all("transfer-encoding")) {
+        std::size_t start = 0;
+        while (start <= line.size()) {
+          const std::size_t comma = line.find(',', start);
+          std::size_t end = comma == std::string::npos ? line.size() : comma;
+          while (start < end && (line[start] == ' ' || line[start] == '\t')) {
+            ++start;
+          }
+          while (end > start &&
+                 (line[end - 1U] == ' ' || line[end - 1U] == '\t')) {
+            --end;
+          }
+          if (start == end) {
+            result.message = "invalid Transfer-Encoding";
+            return result;
+          }
+          codings.push_back(http::ascii_lower_copy(
+              line.substr(start, end - start)));
+          if (comma == std::string::npos) {
+            break;
+          }
+          start = comma + 1U;
+        }
       }
-      if (!read.ok) {
+      if (codings.size() != 1U || codings[0] != "chunked") {
+        result.error_status = 501;
         result.message =
-            read.message.empty() ? "failed to read request body" : read.message;
+            "only request Transfer-Encoding: chunked is supported";
         return result;
       }
-      body += buffer.bytes();
+      framing = RuntimeHttpServerRequestFraming::Chunked;
+    } else if (has_content_length) {
+      std::string length_error;
+      const std::optional<std::uint64_t> content_length =
+          http_server_content_length(headers, &length_error);
+      if (!content_length.has_value()) {
+        result.message = length_error;
+        return result;
+      }
+      if (*content_length > server->max_body_bytes) {
+        result.error_status = 413;
+        result.message = "request body exceeds limit";
+        return result;
+      }
+      content_length_value = *content_length;
+      if (content_length_value > 0) {
+        framing = RuntimeHttpServerRequestFraming::ContentLength;
+      }
     }
-    if (body.size() > *content_length) {
-      body.resize(static_cast<std::size_t>(*content_length));
+
+    auto body = std::make_shared<RuntimeHttpServerRequestBody>();
+    body->stream = stream;
+    body->framing = framing;
+    body->buffered = bytes.substr(header_end + 4U);
+    body->content_remaining = content_length_value;
+    body->max_body_bytes = server->max_body_bytes;
+    body->max_header_bytes = server->max_header_bytes;
+    body->read_timeout = server->read_timeout;
+    body->closed = framing == RuntimeHttpServerRequestFraming::Empty;
+    if (headers.contains("expect")) {
+      const std::vector<std::string> expectations = headers.all("expect");
+      if (expectations.size() != 1U ||
+          http::ascii_lower_copy(expectations[0]) != "100-continue") {
+        result.error_status = 417;
+        result.message = "unsupported HTTP expectation";
+        return result;
+      }
+      body->expect_continue = !body->closed;
+    }
+    if (body->closed) {
+      body->chunk_state = RuntimeHttpServerRequestBody::ChunkState::Complete;
     }
 
     auto request = std::make_shared<RuntimeHttpServerRequest>();
@@ -15787,7 +15983,7 @@ private:
                          ? std::string{}
                          : target.substr(query_pos + 1U);
     request->headers = std::move(headers);
-    request->body = std::move(body);
+    request->body_stream = std::move(body);
     request->local_endpoint = stream->local_endpoint();
     request->remote_endpoint = stream->remote_endpoint();
     result.ok = true;
@@ -15866,12 +16062,145 @@ private:
     return SendStatus::Matched;
   }
 
+  bool http_forbidden_trailer_name(const std::string &name) const {
+    const std::string lower = http::ascii_lower_copy(name);
+    return lower == "content-length" || lower == "transfer-encoding" ||
+           lower == "trailer" || lower == "host" ||
+           lower == "connection" || lower == "keep-alive" ||
+           lower == "upgrade" || lower == "authorization" ||
+           lower == "proxy-authorization" || lower == "content-type" ||
+           lower == "content-encoding" || lower == "content-range";
+  }
+
+  bool http_trailer_names_from_value(const Frame &frame, const Value &value,
+                                     std::vector<std::string> *out) {
+    if (value.is_null()) {
+      return true;
+    }
+    bool was_tuple = false;
+    const std::optional<std::vector<Value>> items =
+        extract_sequence_items(frame, value, &was_tuple);
+    if (!items.has_value()) {
+      set_fault(frame, "TypeError", "trailers must be an Array or Tuple");
+      return false;
+    }
+    for (const Value &item : *items) {
+      const std::optional<std::string> name = text_from_symbol_or_string(item);
+      if (!name.has_value() || !http::http_valid_field_name(*name)) {
+        set_fault(frame, "InvalidHeaderError",
+                  "trailer names must be valid Str or Symbol field names");
+        return false;
+      }
+      const std::string lower = http::ascii_lower_copy(*name);
+      if (http_forbidden_trailer_name(lower)) {
+        set_fault(frame, "InvalidHeaderError",
+                  "field is forbidden in HTTP trailers: " + lower);
+        return false;
+      }
+      if (std::find(out->begin(), out->end(), lower) == out->end()) {
+        out->push_back(lower);
+      }
+    }
+    return true;
+  }
+
+  SendStatus construct_http_streaming_server_response(
+      const Frame &frame, const std::vector<Value> &args, const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) {
+    if (!args.empty() ||
+        !reject_unknown_keywords(frame, kw_args,
+                                 {"status", "reason", "headers", "trailers"})) {
+      return SendStatus::Faulted;
+    }
+    if (task_module_ == nullptr) {
+      set_fault(frame, "RequestStateError",
+                "ServerResponse.stream must be selected by a server task");
+      return SendStatus::Faulted;
+    }
+    std::optional<ResumableTaskFactory> producer_factory =
+        make_resumable_task_factory(frame, block, task_module_,
+                                    "net.http.ServerResponse.stream");
+    if (!producer_factory.has_value()) {
+      return SendStatus::Faulted;
+    }
+    auto response = std::make_shared<RuntimeHttpServerResponse>();
+    if (const std::optional<Value> value =
+            keyword_arg_value(kw_args, "status")) {
+      if (!http_status_from_value(frame, *value, &response->status)) {
+        return SendStatus::Faulted;
+      }
+    }
+    if ((response->status >= 100 && response->status < 200) ||
+        response->status == 204 || response->status == 304) {
+      set_fault(frame, "ArgumentError",
+                "streaming response status must permit a response body");
+      return SendStatus::Faulted;
+    }
+    if (const std::optional<Value> value =
+            keyword_arg_value(kw_args, "reason")) {
+      const std::optional<std::string> reason =
+          text_from_symbol_or_string(*value);
+      if (!reason.has_value()) {
+        set_fault(frame, "TypeError", "reason must be Str or Symbol");
+        return SendStatus::Faulted;
+      }
+      response->reason = *reason;
+    }
+    if (const std::optional<Value> value =
+            keyword_arg_value(kw_args, "headers")) {
+      if (!http_headers_from_value(frame, *value, &response->headers)) {
+        return SendStatus::Faulted;
+      }
+    }
+    if (response->headers.contains("content-length") ||
+        response->headers.contains("transfer-encoding")) {
+      set_fault(frame, "InvalidHeaderError",
+                "streaming response owns Content-Length/Transfer-Encoding");
+      return SendStatus::Faulted;
+    }
+    if (const std::optional<Value> value =
+            keyword_arg_value(kw_args, "trailers")) {
+      if (!http_trailer_names_from_value(frame, *value,
+                                         &response->trailer_names)) {
+        return SendStatus::Faulted;
+      }
+    }
+    std::string error;
+    if (!response->headers.set("transfer-encoding", "chunked", &error) ||
+        (!response->headers.contains("connection") &&
+         !response->headers.set("connection", "close", &error))) {
+      set_fault(frame, "InvalidHeaderError", error);
+      return SendStatus::Faulted;
+    }
+    if (!response->trailer_names.empty()) {
+      std::string names;
+      for (const std::string &name : response->trailer_names) {
+        if (!names.empty()) {
+          names += ", ";
+        }
+        names += name;
+      }
+      if (!response->headers.set("trailer", names, &error)) {
+        set_fault(frame, "InvalidHeaderError", error);
+        return SendStatus::Faulted;
+      }
+    }
+    response->producer_factory = std::move(*producer_factory);
+    *out = Value::io_value(std::move(response));
+    return SendStatus::Matched;
+  }
+
   SendStatus apply_http_server_response_type_send(
       const Frame &frame, const std::string &selector,
       const std::vector<Value> &args, const Value &block,
       const std::vector<std::pair<std::uint32_t, Value>> &kw_args, Value *out) {
     if (selector == "new" || selector == "__call__") {
       return construct_http_server_response(frame, args, block, kw_args, out);
+    }
+    if (selector == "stream") {
+      return construct_http_streaming_server_response(frame, args, block,
+                                                      kw_args, out);
     }
     if (selector == "text") {
       if (args.size() != 1U ||
@@ -16064,6 +16393,11 @@ private:
     struct RequestTaskState {
       std::shared_ptr<RuntimeTcpStream> stream;
       std::function<Value()> handler;
+      std::function<Value()> producer;
+      std::shared_ptr<RuntimeHttpServerResponseWriter> writer;
+      std::shared_ptr<RuntimeHttpServerRequestBody> request_body;
+      bool request_started = false;
+      bool headers_sent = false;
       bool released = false;
       bool failed = false;
     };
@@ -16114,7 +16448,7 @@ private:
                            finish_task]() mutable {
         RuntimeTaskAnnotationScope annotation("net.http.server.request");
         state->stream->adopt_to_current_owner();
-        if (!state->handler) {
+        if (!state->request_started) {
           RuntimeHttpServerReadResult read =
               read_http_server_request(server, state->stream);
           if (!read.ok) {
@@ -16128,10 +16462,26 @@ private:
             finish_task(state, !read.eof);
             return Value::null();
           }
+          state->request_body = read.request->body_stream;
           state->handler = factory({Value::io_value(std::move(read.request))});
+          state->request_started = true;
         }
 
         try {
+          if (state->producer) {
+            (void)state->producer();
+            if (runtime_task_is_parked()) {
+              return Value::null();
+            }
+            if (!http_server_finish_streaming_response(state->writer)) {
+              throw RuntimeTaskFailure(
+                  "ConnectionError",
+                  "failed to finish streaming HTTP response");
+            }
+            finish_task(state, false);
+            return Value::null();
+          }
+
           Value result = state->handler();
           if (runtime_task_is_parked()) {
             return Value::null();
@@ -16142,15 +16492,60 @@ private:
                                      "HTTP server handler must return "
                                      "ServerResponse, Str, Bytes, or null");
           }
+          if (response.streaming()) {
+            // Selecting a streaming body is the logical response commitment
+            // point. The wire head remains deferred until the producer first
+            // writes, closes, finishes, or declares a trailer so an incoming
+            // Expect: 100-continue request can still be acknowledged first.
+            state->headers_sent = true;
+            state->writer =
+                std::make_shared<RuntimeHttpServerResponseWriter>();
+            state->writer->stream = state->stream;
+            state->writer->write_timeout = server->write_timeout;
+            state->writer->declared_trailers = response.trailer_names;
+            state->writer->final_response_started =
+                state->request_body->final_response_started;
+            state->writer->pending_bytes =
+                http_server_streaming_response_head(response);
+            state->writer->pending =
+                RuntimeHttpServerResponseWriter::Pending::Head;
+            state->producer = response.producer_factory(
+                {Value::io_value(state->writer)});
+            state->handler = {};
+
+            (void)state->producer();
+            if (runtime_task_is_parked()) {
+              return Value::null();
+            }
+            if (!http_server_finish_streaming_response(state->writer)) {
+              throw RuntimeTaskFailure(
+                  "ConnectionError",
+                  "failed to finish streaming HTTP response");
+            }
+            finish_task(state, false);
+            return Value::null();
+          }
+          state->request_body->final_response_started->store(
+              true, std::memory_order_release);
           (void)write_http_server_response(state->stream, std::move(response),
                                            server->write_timeout);
           finish_task(state, false);
         } catch (const RuntimeTaskFailure &failure) {
-          RuntimeHttpServerResponse response = http_server_error_response(
-              500,
-              failure.message().empty() ? "handler failed" : failure.message());
-          (void)write_http_server_response(state->stream, std::move(response),
-                                           server->write_timeout);
+          const bool headers_sent =
+              state->headers_sent ||
+              (state->writer != nullptr && state->writer->head_sent);
+          if (!headers_sent) {
+            if (state->request_body != nullptr) {
+              state->request_body->final_response_started->store(
+                  true, std::memory_order_release);
+            }
+            RuntimeHttpServerResponse response = http_server_error_response(
+                500, failure.message().empty() ? "handler failed"
+                                               : failure.message());
+            (void)write_http_server_response(state->stream,
+                                             std::move(response),
+                                             server->write_timeout);
+          }
           finish_task(state, true);
         }
         return Value::null();
@@ -18223,6 +18618,445 @@ private:
     return SendStatus::Faulted;
   }
 
+  enum class HttpServerBodyReadStatus { Chunk, Eof, Parked, Faulted };
+
+  HttpServerBodyReadStatus http_server_body_read_more(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerRequestBody> &body) {
+    if (body == nullptr || body->stream == nullptr) {
+      set_fault(frame, "ClosedResourceError", "request body stream is closed");
+      return HttpServerBodyReadStatus::Faulted;
+    }
+    if (!body->read_deadline.has_value() &&
+        body->read_timeout != std::chrono::milliseconds::max()) {
+      body->read_deadline =
+          std::chrono::steady_clock::now() + body->read_timeout;
+    }
+    std::chrono::milliseconds remaining = std::chrono::milliseconds::max();
+    if (body->read_deadline.has_value()) {
+      const auto now = std::chrono::steady_clock::now();
+      remaining = now >= *body->read_deadline
+                      ? std::chrono::milliseconds(0)
+                      : std::chrono::duration_cast<std::chrono::milliseconds>(
+                            *body->read_deadline - now);
+    }
+    RuntimeByteBuffer buffer(4096);
+    RuntimeIoStatus read;
+    {
+      IoParkGuard park_guard(parkable_);
+      read = body->stream->read(buffer, remaining);
+    }
+    if (read.park) {
+      return begin_io_park(frame) ? HttpServerBodyReadStatus::Parked
+                                  : HttpServerBodyReadStatus::Faulted;
+    }
+    body->read_deadline.reset();
+    if (read.eof) {
+      set_fault(frame, "UnexpectedEofError",
+                "connection closed before request body completed");
+      return HttpServerBodyReadStatus::Faulted;
+    }
+    if (!set_fault_from_io_status(frame, read)) {
+      return HttpServerBodyReadStatus::Faulted;
+    }
+    if (read.count == 0) {
+      set_fault(frame, "IOError", "request body reader made no progress");
+      return HttpServerBodyReadStatus::Faulted;
+    }
+    body->buffered += buffer.bytes();
+    return HttpServerBodyReadStatus::Chunk;
+  }
+
+  bool http_server_take_crlf_line(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerRequestBody> &body,
+      std::string *line, bool *need_more) {
+    *need_more = false;
+    const std::size_t lf = body->buffered.find('\n');
+    if (lf == std::string::npos) {
+      if (body->buffered.size() > body->max_header_bytes) {
+        set_fault(frame, "HeaderLimitError",
+                  "request chunk line exceeds limit");
+        return false;
+      }
+      *need_more = true;
+      return true;
+    }
+    if (lf == 0 || body->buffered[lf - 1U] != '\r' ||
+        body->buffered.find('\r') != lf - 1U) {
+      set_fault(frame, "ChunkError", "request chunk uses malformed CRLF");
+      return false;
+    }
+    *line = body->buffered.substr(0, lf - 1U);
+    body->buffered.erase(0, lf + 1U);
+    return true;
+  }
+
+  HttpServerBodyReadStatus http_server_read_content_length_chunk(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerRequestBody> &body,
+      std::size_t max_part,
+      std::shared_ptr<RuntimeHttpServerRequestChunk> *out) {
+    while (body->buffered.empty()) {
+      const HttpServerBodyReadStatus status =
+          http_server_body_read_more(frame, body);
+      if (status != HttpServerBodyReadStatus::Chunk) {
+        return status;
+      }
+    }
+    const std::size_t take = static_cast<std::size_t>(std::min<std::uint64_t>(
+        body->content_remaining,
+        std::min<std::uint64_t>(body->buffered.size(), max_part)));
+    auto chunk = std::make_shared<RuntimeHttpServerRequestChunk>();
+    chunk->data = body->buffered.substr(0, take);
+    body->buffered.erase(0, take);
+    body->content_remaining -= take;
+    body->decoded_bytes += take;
+    if (body->content_remaining == 0) {
+      body->closed = true;
+      body->chunk_state = RuntimeHttpServerRequestBody::ChunkState::Complete;
+    }
+    *out = std::move(chunk);
+    return HttpServerBodyReadStatus::Chunk;
+  }
+
+  HttpServerBodyReadStatus http_server_read_chunked_chunk(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerRequestBody> &body,
+      std::size_t max_part,
+      std::shared_ptr<RuntimeHttpServerRequestChunk> *out) {
+    while (true) {
+      if (body->chunk_state ==
+          RuntimeHttpServerRequestBody::ChunkState::Size) {
+        std::string line;
+        bool need_more = false;
+        if (!http_server_take_crlf_line(frame, body, &line, &need_more)) {
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        if (need_more) {
+          const HttpServerBodyReadStatus status =
+              http_server_body_read_more(frame, body);
+          if (status != HttpServerBodyReadStatus::Chunk) {
+            return status;
+          }
+          continue;
+        }
+        const std::size_t semi = line.find(';');
+        const std::string size_text = line.substr(0, semi);
+        if (size_text.empty()) {
+          set_fault(frame, "ChunkError", "request chunk size is missing");
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        std::uint64_t size = 0;
+        for (const char c : size_text) {
+          int digit = -1;
+          if (c >= '0' && c <= '9') {
+            digit = c - '0';
+          } else if (c >= 'a' && c <= 'f') {
+            digit = 10 + c - 'a';
+          } else if (c >= 'A' && c <= 'F') {
+            digit = 10 + c - 'A';
+          }
+          if (digit < 0 ||
+              size > (std::numeric_limits<std::uint64_t>::max() >> 4U)) {
+            set_fault(frame, "ChunkError", "invalid request chunk size");
+            return HttpServerBodyReadStatus::Faulted;
+          }
+          size = (size << 4U) | static_cast<std::uint64_t>(digit);
+        }
+        std::string extension_error;
+        if (!http::http_parse_chunk_extensions(
+                semi == std::string::npos ? std::string{} : line.substr(semi),
+                &body->current_extensions, &extension_error,
+                /*max_count=*/128, body->max_header_bytes)) {
+          set_fault(frame, "ChunkError", extension_error);
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        if (size == 0) {
+          body->chunk_state =
+              RuntimeHttpServerRequestBody::ChunkState::Trailers;
+          continue;
+        }
+        const std::uint64_t remaining_limit =
+            body->decoded_bytes >= body->max_body_bytes
+                ? 0
+                : static_cast<std::uint64_t>(body->max_body_bytes) -
+                      body->decoded_bytes;
+        if (size > max_part || size > remaining_limit) {
+          set_fault(frame, "BodyLimitError", "request body exceeds limit");
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        body->chunk_remaining = size;
+        body->chunk_state =
+            RuntimeHttpServerRequestBody::ChunkState::Data;
+      }
+
+      if (body->chunk_state ==
+          RuntimeHttpServerRequestBody::ChunkState::Data) {
+        const std::uint64_t needed = body->chunk_remaining + 2U;
+        while (body->buffered.size() < needed) {
+          const HttpServerBodyReadStatus status =
+              http_server_body_read_more(frame, body);
+          if (status != HttpServerBodyReadStatus::Chunk) {
+            return status;
+          }
+        }
+        const std::size_t count =
+            static_cast<std::size_t>(body->chunk_remaining);
+        if (body->buffered[count] != '\r' ||
+            body->buffered[count + 1U] != '\n') {
+          set_fault(frame, "ChunkError",
+                    "request chunk data is not followed by CRLF");
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        auto chunk = std::make_shared<RuntimeHttpServerRequestChunk>();
+        chunk->data = body->buffered.substr(0, count);
+        chunk->extensions = std::move(body->current_extensions);
+        body->buffered.erase(0, count + 2U);
+        body->decoded_bytes += count;
+        body->chunk_remaining = 0;
+        body->chunk_state =
+            RuntimeHttpServerRequestBody::ChunkState::Size;
+        *out = std::move(chunk);
+        return HttpServerBodyReadStatus::Chunk;
+      }
+
+      if (body->chunk_state ==
+          RuntimeHttpServerRequestBody::ChunkState::Trailers) {
+        std::string line;
+        bool need_more = false;
+        if (!http_server_take_crlf_line(frame, body, &line, &need_more)) {
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        if (need_more) {
+          const HttpServerBodyReadStatus status =
+              http_server_body_read_more(frame, body);
+          if (status != HttpServerBodyReadStatus::Chunk) {
+            return status;
+          }
+          continue;
+        }
+        body->trailer_bytes += line.size() + 2U;
+        if (body->trailer_bytes > body->max_header_bytes) {
+          set_fault(frame, "HeaderLimitError",
+                    "request trailers exceed limit");
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        if (line.empty()) {
+          body->closed = true;
+          body->chunk_state =
+              RuntimeHttpServerRequestBody::ChunkState::Complete;
+          return HttpServerBodyReadStatus::Eof;
+        }
+        const std::size_t colon = line.find(':');
+        if (colon == std::string::npos) {
+          set_fault(frame, "ChunkError", "malformed request trailer");
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        const std::string trailer_name = line.substr(0, colon);
+        if (http_forbidden_trailer_name(trailer_name)) {
+          set_fault(frame, "ChunkError",
+                    "field is forbidden in request trailers: " +
+                        http::ascii_lower_copy(trailer_name));
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        std::string error;
+        if (!body->trailers.add(trailer_name, line.substr(colon + 1U),
+                                &error)) {
+          set_fault(frame, "ChunkError", error);
+          return HttpServerBodyReadStatus::Faulted;
+        }
+        continue;
+      }
+      return HttpServerBodyReadStatus::Eof;
+    }
+  }
+
+  HttpServerBodyReadStatus http_server_read_body_chunk(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerRequestBody> &body,
+      std::size_t max_part,
+      std::shared_ptr<RuntimeHttpServerRequestChunk> *out) {
+    if (body == nullptr) {
+      set_fault(frame, "ClosedResourceError", "request body stream is closed");
+      return HttpServerBodyReadStatus::Faulted;
+    }
+    if (body->closed) {
+      return HttpServerBodyReadStatus::Eof;
+    }
+    if (body->expect_continue && !body->continue_sent &&
+        !body->final_response_started->load(std::memory_order_acquire)) {
+      const RuntimeIoStatus continued = body->stream->write_all(
+          "HTTP/1.1 100 Continue\r\n\r\n", body->read_timeout);
+      if (!set_fault_from_io_status(frame, continued)) {
+        return HttpServerBodyReadStatus::Faulted;
+      }
+      body->continue_sent = true;
+    }
+    if (body->framing == RuntimeHttpServerRequestFraming::Empty) {
+      body->closed = true;
+      return HttpServerBodyReadStatus::Eof;
+    }
+    if (body->framing == RuntimeHttpServerRequestFraming::ContentLength) {
+      return http_server_read_content_length_chunk(frame, body, max_part, out);
+    }
+    return http_server_read_chunked_chunk(frame, body, max_part, out);
+  }
+
+  Value http_chunk_extensions_value(
+      const std::vector<http::HttpChunkExtension> &extensions) {
+    std::vector<Value> values;
+    values.reserve(extensions.size());
+    for (const auto &extension : extensions) {
+      values.push_back(make_tuple_value(
+          {string_value_from_text(extension.name),
+           extension.value.has_value()
+               ? string_value_from_text(*extension.value)
+               : Value::null()}));
+    }
+    return make_list_value(std::move(values), /*frozen=*/true);
+  }
+
+  SendStatus apply_http_server_request_chunk_send(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerRequestChunk> &chunk,
+      const std::string &selector, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) {
+    if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+      set_fault(frame, "ArgumentError",
+                "net.http.ServerRequestChunk#" + selector +
+                    " takes no arguments");
+      return SendStatus::Faulted;
+    }
+    if (selector == "data" || selector == "bytes") {
+      *out = io_bytes_value(chunk->data);
+      return SendStatus::Matched;
+    }
+    if (selector == "text") {
+      *out = string_value_from_text(chunk->data);
+      return SendStatus::Matched;
+    }
+    if (selector == "extensions") {
+      *out = http_chunk_extensions_value(chunk->extensions);
+      return SendStatus::Matched;
+    }
+    set_fault(frame, "NoMethodError",
+              "net.http.ServerRequestChunk has no method " + selector);
+    return SendStatus::Faulted;
+  }
+
+  SendStatus apply_http_server_request_body_send(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerRequestBody> &body,
+      const std::string &selector, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) {
+    if (selector == "read_chunk") {
+      if (!args.empty() || !block.is_null() ||
+          !reject_unknown_keywords(frame, kw_args, {"max_bytes"})) {
+        return SendStatus::Faulted;
+      }
+      std::size_t max_part = std::max<std::size_t>(body->max_body_bytes, 1U);
+      if (const std::optional<Value> value =
+              keyword_arg_value(kw_args, "max_bytes")) {
+        if (!value->is_integer() || value->as_integer() <= 0) {
+          set_fault(frame, "ArgumentError", "max_bytes must be positive Int");
+          return SendStatus::Faulted;
+        }
+        max_part = static_cast<std::size_t>(value->as_integer());
+      }
+      if (body->consumption ==
+          RuntimeHttpServerRequestBody::Consumption::Whole) {
+        set_fault(frame, "BodyConsumedError",
+                  "request body is already being consumed as a whole");
+        return SendStatus::Faulted;
+      }
+      body->consumption = RuntimeHttpServerRequestBody::Consumption::Chunks;
+      std::shared_ptr<RuntimeHttpServerRequestChunk> chunk;
+      const HttpServerBodyReadStatus status =
+          http_server_read_body_chunk(frame, body, max_part, &chunk);
+      if (status == HttpServerBodyReadStatus::Parked) {
+        return SendStatus::Matched;
+      }
+      if (status == HttpServerBodyReadStatus::Faulted) {
+        return SendStatus::Faulted;
+      }
+      *out = status == HttpServerBodyReadStatus::Eof
+                 ? Value::null()
+                 : Value::io_value(std::move(chunk));
+      return SendStatus::Matched;
+    }
+
+    if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+      set_fault(frame, "ArgumentError",
+                "net.http.ServerRequestBody#" + selector +
+                    " takes no arguments");
+      return SendStatus::Faulted;
+    }
+    if (selector == "framing") {
+      const char *name =
+          body->framing == RuntimeHttpServerRequestFraming::Chunked
+              ? "chunked"
+              : (body->framing ==
+                         RuntimeHttpServerRequestFraming::ContentLength
+                     ? "content_length"
+                     : "empty");
+      *out = Value::symbol(intern_runtime_symbol(name));
+      return SendStatus::Matched;
+    }
+    if (selector == "closed?") {
+      *out = Value::boolean(body->closed);
+      return SendStatus::Matched;
+    }
+    if (selector == "trailers") {
+      if (!body->closed) {
+        set_fault(frame, "RequestStateError",
+                  "request trailers are available after body completion");
+        return SendStatus::Faulted;
+      }
+      *out = make_http_headers_value(body->trailers, /*read_only=*/true);
+      return SendStatus::Matched;
+    }
+    set_fault(frame, "NoMethodError",
+              "net.http.ServerRequestBody has no method " + selector);
+    return SendStatus::Faulted;
+  }
+
+  SendStatus http_server_request_whole_body(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerRequestBody> &body, bool text,
+      Value *out) {
+    if (body->consumption ==
+        RuntimeHttpServerRequestBody::Consumption::Chunks) {
+      set_fault(frame, "BodyConsumedError",
+                "request body is already being consumed chunk by chunk");
+      return SendStatus::Faulted;
+    }
+    body->consumption = RuntimeHttpServerRequestBody::Consumption::Whole;
+    while (!body->whole_complete) {
+      std::shared_ptr<RuntimeHttpServerRequestChunk> chunk;
+      const HttpServerBodyReadStatus status = http_server_read_body_chunk(
+          frame, body, std::max<std::size_t>(body->max_body_bytes, 1U), &chunk);
+      if (status == HttpServerBodyReadStatus::Parked) {
+        return SendStatus::Matched;
+      }
+      if (status == HttpServerBodyReadStatus::Faulted) {
+        return SendStatus::Faulted;
+      }
+      if (status == HttpServerBodyReadStatus::Eof) {
+        body->whole_complete = true;
+        break;
+      }
+      body->whole_body += chunk->data;
+    }
+    *out = text ? string_value_from_text(body->whole_body)
+                : io_bytes_value(body->whole_body);
+    return SendStatus::Matched;
+  }
+
   SendStatus apply_http_server_request_send(
       const Frame &frame,
       const std::shared_ptr<RuntimeHttpServerRequest> &request,
@@ -18278,14 +19112,21 @@ private:
       if (!bare("body_text")) {
         return SendStatus::Faulted;
       }
-      *out = string_value_from_text(request->body);
-      return SendStatus::Matched;
+      return http_server_request_whole_body(frame, request->body_stream,
+                                            /*text=*/true, out);
     }
     if (selector == "body_bytes") {
       if (!bare("body_bytes")) {
         return SendStatus::Faulted;
       }
-      *out = io_bytes_value(request->body);
+      return http_server_request_whole_body(frame, request->body_stream,
+                                            /*text=*/false, out);
+    }
+    if (selector == "body_stream") {
+      if (!bare("body_stream")) {
+        return SendStatus::Faulted;
+      }
+      *out = Value::io_value(request->body_stream);
       return SendStatus::Matched;
     }
     if (selector == "local_endpoint") {
@@ -18304,6 +19145,281 @@ private:
     }
     set_fault(frame, "NoMethodError",
               "net.http.ServerRequest has no method " + selector);
+    return SendStatus::Faulted;
+  }
+
+  bool http_chunk_extensions_from_value(
+      const Frame &frame, const Value &value,
+      std::vector<http::HttpChunkExtension> *out) {
+    if (value.is_null()) {
+      return true;
+    }
+    auto append = [&](const Value &key, const Value &raw_value) -> bool {
+      const std::optional<std::string> name = text_from_symbol_or_string(key);
+      if (!name.has_value()) {
+        set_fault(frame, "TypeError",
+                  "chunk extension names must be Str or Symbol");
+        return false;
+      }
+      http::HttpChunkExtension extension;
+      extension.name = *name;
+      if (!raw_value.is_null()) {
+        const std::optional<std::string> text =
+            text_from_symbol_or_string(raw_value);
+        if (!text.has_value()) {
+          set_fault(frame, "TypeError",
+                    "chunk extension values must be Str, Symbol, or null");
+          return false;
+        }
+        extension.value = *text;
+      }
+      out->push_back(std::move(extension));
+      return true;
+    };
+    if (value.is_map()) {
+      const std::optional<std::vector<MapEntry>> entries =
+          extract_map_entries(frame, value);
+      if (!entries.has_value()) {
+        return false;
+      }
+      for (const MapEntry &entry : *entries) {
+        if (!append(entry.key, entry.value)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    bool was_tuple = false;
+    const std::optional<std::vector<Value>> pairs =
+        extract_sequence_items(frame, value, &was_tuple);
+    if (!pairs.has_value()) {
+      set_fault(frame, "TypeError",
+                "extensions must be a Map or an Array of pairs");
+      return false;
+    }
+    for (const Value &pair : *pairs) {
+      bool pair_was_tuple = false;
+      const std::optional<std::vector<Value>> items =
+          extract_sequence_items(frame, pair, &pair_was_tuple);
+      if (!items.has_value() || items->size() != 2U) {
+        set_fault(frame, "TypeError",
+                  "each chunk extension must be a two-item pair");
+        return false;
+      }
+      if (!append((*items)[0], (*items)[1])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  enum class HttpServerWriterFlushStatus { Complete, Parked, Faulted };
+
+  HttpServerWriterFlushStatus http_server_writer_flush(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerResponseWriter> &writer) {
+    while (writer->pending_offset < writer->pending_bytes.size()) {
+      if (!writer->write_deadline.has_value() &&
+          writer->write_timeout != std::chrono::milliseconds::max()) {
+        writer->write_deadline =
+            std::chrono::steady_clock::now() + writer->write_timeout;
+      }
+      std::chrono::milliseconds remaining = std::chrono::milliseconds::max();
+      if (writer->write_deadline.has_value()) {
+        const auto now = std::chrono::steady_clock::now();
+        remaining =
+            now >= *writer->write_deadline
+                ? std::chrono::milliseconds(0)
+                : std::chrono::duration_cast<std::chrono::milliseconds>(
+                      *writer->write_deadline - now);
+      }
+      RuntimeIoStatus written;
+      {
+        IoParkGuard park_guard(parkable_);
+        written = writer->stream->write(
+            writer->pending_bytes.substr(writer->pending_offset), remaining);
+      }
+      if (written.park) {
+        return begin_io_park(frame) ? HttpServerWriterFlushStatus::Parked
+                                    : HttpServerWriterFlushStatus::Faulted;
+      }
+      writer->write_deadline.reset();
+      if (!set_fault_from_io_status(frame, written)) {
+        return HttpServerWriterFlushStatus::Faulted;
+      }
+      if (written.count == 0) {
+        set_fault(frame, "IOError", "stream writer made no progress");
+        return HttpServerWriterFlushStatus::Faulted;
+      }
+      writer->pending_offset += written.count;
+    }
+    const RuntimeHttpServerResponseWriter::Pending completed = writer->pending;
+    writer->pending = RuntimeHttpServerResponseWriter::Pending::None;
+    writer->pending_bytes.clear();
+    writer->pending_offset = 0;
+    if (completed == RuntimeHttpServerResponseWriter::Pending::Head) {
+      writer->head_sent = true;
+      if (writer->final_response_started != nullptr) {
+        writer->final_response_started->store(true,
+                                              std::memory_order_release);
+      }
+    } else if (completed == RuntimeHttpServerResponseWriter::Pending::Close) {
+      writer->body_closed = true;
+    } else if (completed ==
+               RuntimeHttpServerResponseWriter::Pending::Finish) {
+      writer->finished = true;
+    }
+    return HttpServerWriterFlushStatus::Complete;
+  }
+
+  SendStatus apply_http_server_response_writer_send(
+      const Frame &frame,
+      const std::shared_ptr<RuntimeHttpServerResponseWriter> &writer,
+      const std::string &selector, const std::vector<Value> &args,
+      const Value &block,
+      const std::vector<std::pair<std::uint32_t, Value>> &kw_args,
+      Value *out) {
+    auto flush_pending = [&]() -> std::optional<SendStatus> {
+      if (writer->pending == RuntimeHttpServerResponseWriter::Pending::None) {
+        return std::nullopt;
+      }
+      const RuntimeHttpServerResponseWriter::Pending pending = writer->pending;
+      const HttpServerWriterFlushStatus status =
+          http_server_writer_flush(frame, writer);
+      if (status == HttpServerWriterFlushStatus::Parked) {
+        return SendStatus::Matched;
+      }
+      if (status == HttpServerWriterFlushStatus::Faulted) {
+        return SendStatus::Faulted;
+      }
+      if (pending == RuntimeHttpServerResponseWriter::Pending::Head) {
+        return std::nullopt;
+      }
+      *out = Value::null();
+      return SendStatus::Matched;
+    };
+
+    if (selector == "write") {
+      if (args.size() != 1U || !block.is_null() ||
+          !reject_unknown_keywords(frame, kw_args, {"extensions"})) {
+        return SendStatus::Faulted;
+      }
+      if (const std::optional<SendStatus> status = flush_pending()) {
+        return *status;
+      }
+      if (writer->body_closed || writer->finished) {
+        set_fault(frame, "RequestStateError",
+                  "cannot write after streaming body is closed");
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::string> data =
+          io_bytes_from_value(frame, args[0]);
+      if (!data.has_value()) {
+        return SendStatus::Faulted;
+      }
+      std::vector<http::HttpChunkExtension> extensions;
+      if (const std::optional<Value> value =
+              keyword_arg_value(kw_args, "extensions")) {
+        if (!http_chunk_extensions_from_value(frame, *value, &extensions)) {
+          return SendStatus::Faulted;
+        }
+      }
+      std::string error;
+      if (!http::http_encode_chunk(*data, extensions, &writer->pending_bytes,
+                                   &error)) {
+        set_fault(frame, "ChunkError", error);
+        return SendStatus::Faulted;
+      }
+      writer->pending = RuntimeHttpServerResponseWriter::Pending::Chunk;
+      return *flush_pending();
+    }
+
+    if (selector == "close") {
+      if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+        set_fault(frame, "ArgumentError", "stream body close takes no arguments");
+        return SendStatus::Faulted;
+      }
+      if (const std::optional<SendStatus> status = flush_pending()) {
+        return *status;
+      }
+      if (writer->body_closed) {
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      writer->pending_bytes = "0\r\n";
+      writer->pending = RuntimeHttpServerResponseWriter::Pending::Close;
+      return *flush_pending();
+    }
+
+    if (selector == "trailer") {
+      if (args.size() != 2U || !kw_args.empty() || !block.is_null()) {
+        set_fault(frame, "ArgumentError",
+                  "stream body trailer expects name and value");
+        return SendStatus::Faulted;
+      }
+      if (const std::optional<SendStatus> status = flush_pending()) {
+        return *status;
+      }
+      if (!writer->body_closed || writer->finished) {
+        set_fault(frame, "RequestStateError",
+                  "trailers are written after close and before finish");
+        return SendStatus::Faulted;
+      }
+      const std::optional<std::string> name =
+          text_from_symbol_or_string(args[0]);
+      const std::optional<std::string> value =
+          text_from_symbol_or_string(args[1]);
+      if (!name.has_value() || !value.has_value() ||
+          !http::http_valid_field_name(*name) ||
+          !http::http_valid_field_value(*value)) {
+        set_fault(frame, "InvalidHeaderError", "invalid response trailer");
+        return SendStatus::Faulted;
+      }
+      const std::string lower = http::ascii_lower_copy(*name);
+      if (std::find(writer->declared_trailers.begin(),
+                    writer->declared_trailers.end(), lower) ==
+          writer->declared_trailers.end()) {
+        set_fault(frame, "InvalidHeaderError",
+                  "response trailer was not declared: " + lower);
+        return SendStatus::Faulted;
+      }
+      writer->pending_bytes = lower + ": " + *value + "\r\n";
+      writer->pending = RuntimeHttpServerResponseWriter::Pending::Trailer;
+      return *flush_pending();
+    }
+
+    if (selector == "finish") {
+      if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+        set_fault(frame, "ArgumentError", "stream body finish takes no arguments");
+        return SendStatus::Faulted;
+      }
+      if (const std::optional<SendStatus> status = flush_pending()) {
+        return *status;
+      }
+      if (!writer->body_closed) {
+        set_fault(frame, "RequestStateError",
+                  "close streaming body before finishing trailers");
+        return SendStatus::Faulted;
+      }
+      if (writer->finished) {
+        *out = Value::null();
+        return SendStatus::Matched;
+      }
+      writer->pending_bytes = "\r\n";
+      writer->pending = RuntimeHttpServerResponseWriter::Pending::Finish;
+      return *flush_pending();
+    }
+
+    if (selector == "closed?") {
+      if (!args.empty() || !kw_args.empty() || !block.is_null()) {
+        set_fault(frame, "ArgumentError", "stream body closed? takes no arguments");
+        return SendStatus::Faulted;
+      }
+      *out = Value::boolean(writer->body_closed);
+      return SendStatus::Matched;
+    }
+    set_fault(frame, "NoMethodError",
+              "net.http.ServerResponseWriter has no method " + selector);
     return SendStatus::Faulted;
   }
 
@@ -18953,10 +20069,28 @@ private:
         return apply_http_server_request_send(frame, server_request, selector,
                                               args, block, kw_args, out);
       }
+      if (const auto request_body =
+              std::dynamic_pointer_cast<RuntimeHttpServerRequestBody>(
+                  io_value)) {
+        return apply_http_server_request_body_send(
+            frame, request_body, selector, args, block, kw_args, out);
+      }
+      if (const auto request_chunk =
+              std::dynamic_pointer_cast<RuntimeHttpServerRequestChunk>(
+                  io_value)) {
+        return apply_http_server_request_chunk_send(
+            frame, request_chunk, selector, args, block, kw_args, out);
+      }
       if (const auto server_response =
               std::dynamic_pointer_cast<RuntimeHttpServerResponse>(io_value)) {
         return apply_http_server_response_send(frame, server_response, selector,
                                                args, block, kw_args, out);
+      }
+      if (const auto response_writer =
+              std::dynamic_pointer_cast<RuntimeHttpServerResponseWriter>(
+                  io_value)) {
+        return apply_http_server_response_writer_send(
+            frame, response_writer, selector, args, block, kw_args, out);
       }
 
       const auto file = std::dynamic_pointer_cast<RuntimeFile>(io_value);
@@ -23318,6 +24452,10 @@ private:
         (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
          receiver.is_map()) &&
         collection_selector_in({"copy", "deep_copy"});
+    const bool collection_freeze_selector =
+        (receiver.is_list() || receiver.is_tuple() || receiver.is_set() ||
+         receiver.is_map()) &&
+        collection_selector == "freeze";
     const bool builtin_selector =
         selector_in({"==", "===", "!="}) ||
         ((receiver.is_list() || receiver.is_tuple() || receiver.is_set()) &&
@@ -23325,6 +24463,7 @@ private:
         (receiver.is_list() && collection_selector == "[]=") ||
         list_mutation_selector || map_mutation_selector ||
         set_mutation_selector || data_path_selector || collection_copy_selector ||
+        collection_freeze_selector ||
         (receiver_is_range && range_collection_selector) ||
         (receiver_is_lazy_seq && lazy_seq_collection_selector) ||
         (receiver.is_map() && collection_selector_in({"empty?",
@@ -23474,6 +24613,23 @@ private:
         return SendStatus::Faulted;
       }
       *out = *copied;
+      return SendStatus::Matched;
+    }
+
+    if (collection_freeze_selector) {
+      if (!require_arity(0) || !require_no_block()) {
+        return SendStatus::Faulted;
+      }
+      if (receiver.is_list()) {
+        receiver.as_list()->frozen = true;
+      } else if (receiver.is_map()) {
+        receiver.as_map()->frozen = true;
+      } else if (receiver.is_set()) {
+        receiver.as_set()->frozen = true;
+      }
+      // Tuple is immutable by construction. All collection forms return the
+      // receiver, matching other non-bang snapshot/qualification operations.
+      *out = receiver;
       return SendStatus::Matched;
     }
 
@@ -27824,7 +28980,8 @@ private:
         return false;
       }
       set_fault(frame, "NoMethodError",
-                "selector is not implemented in current runtime baseline");
+                "selector `" + *selector +
+                    "` is not implemented in current runtime baseline");
       return false;
     }
     if (property_assignment) {
@@ -29851,6 +31008,10 @@ private:
   // or falls back to blocking. `park_request_` is set by such a suspension
   // point to stop the task driver's step loop and describe the wake source.
   bool parkable_ = false;
+  // Scheduler owning a persistent task VM. HTTP streaming response blocks use
+  // the same scheduler so request reads and response writes can independently
+  // park without pinning a worker.
+  std::shared_ptr<RuntimeTaskModule> task_module_;
   std::optional<ParkRequest> park_request_;
   // Set when this Vm executes inside a property arm of an outer Vm (nested
   // executions inherit the non-suspendable dynamic extent).

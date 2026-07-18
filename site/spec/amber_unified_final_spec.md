@@ -7072,7 +7072,7 @@ Dotted access is member access regardless of receiver kind ("dot is a message; i
 
 > The bare read form `x.name` is stable across `prop` ↔ nullary-`def` refactors. The explicit form `x.name()` is method-call syntax only and is stable only while `name` is method-shaped. Public APIs should document query members in bare form.
 
-The formatter normatively rewrites zero-argument explicit calls of `?`-suffixed predicates (`x.empty?()` → `x.empty?`). Other explicit nullary calls are left untouched: explicit parentheses remain a legitimate style for effectful operations. Bare access to a `!`-suffixed method warns (`W_BARE_BANG_CALL`); strict profiles may promote the warning to an error.
+The formatter normatively rewrites zero-argument explicit calls of `?`-suffixed predicates (`x.empty?()` → `x.empty?`). Other explicit nullary calls are left untouched: explicit parentheses remain a legitimate spelling. Bare access to a syntactically nullary `!`-suffixed method is an ordinary implicit zero-argument send and produces no diagnostic; `!` communicates API convention, not different call syntax.
 
 ### 7. Non-suspendable property arms
 
@@ -7109,7 +7109,6 @@ Protocol positions (keyword spread `kwargs`, and any future protocol reads) requ
 | `AMB_BLOCK_PARAM_NOT_LAST` | parser | a `&name` block parameter is not the final parameter, or more than one is declared |
 | `AMB_BLOCK_PARAM_PATTERN` | parser | `&` applied to a pattern rather than a single name |
 | `AMB_BLOCK_PASS_TARGET` | parser / binder | a trailing `&name` block-pass is not last, or its target is not a bound callable |
-| `W_BARE_BANG_CALL` | binder, warning | bare access invokes a `!`-suffixed method |
 
 Runtime error classes `ReadOnlyPropertyError` and `WriteOnlyPropertyError` are registered and rescuable.
 

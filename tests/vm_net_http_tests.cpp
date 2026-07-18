@@ -1346,6 +1346,163 @@ void test_http_server_allows_cooperative_concurrency_per_worker() {
                  "net.http.Server workers/concurrency handles parked hooks");
 }
 
+void test_http_server_streaming_response_extensions_and_trailer() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server, ServerResponse\n"
+      "\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, workers: 1)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 1) |req|:\n"
+      "    ServerResponse.stream(trailers: [\"x-check\"]) |body|:\n"
+      "      body.write(\"one\", extensions: [[\"seq\", \"1\"], "
+      "[\"flag\", null]])\n"
+      "      body.write(\"two\")\n"
+      "      body.close()\n"
+      "      body.trailer(\"x-check\", \"ok\")\n"
+      "      body.finish()\n"
+      "\n"
+      "res = Client().get(\"http://127.0.0.1:#{port}/stream\")\n"
+      "text = res.body_text()\n"
+      "trailer = res.body().trailers().first(\"x-check\")\n"
+      "runner.wait()\n"
+      "res.headers().first(\"transfer-encoding\") == \"chunked\" and "
+      "text == \"onetwo\" and trailer == \"ok\"\n");
+  expect_ok_true(result,
+                 "server streaming response writes chunks and trailer");
+}
+
+void test_http_server_reads_chunked_request_by_wire_chunk() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, RequestBody, Server, ServerResponse\n"
+      "\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, workers: 1)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 1) |req|:\n"
+      "    input = req.body_stream()\n"
+      "    a = input.read_chunk()\n"
+      "    b = input.read_chunk()\n"
+      "    done = input.read_chunk()\n"
+      "    ServerResponse.text(\"#{input.framing()}:#{a.text()}:"
+      "#{b.text()}:#{done == null}\")\n"
+      "\n"
+      "payload = RequestBody.stream(length: null) |writer|:\n"
+      "  writer.write_all!(\"one\".bytes())\n"
+      "  writer.write_all!(\"two\".bytes())\n"
+      "res = Client().post(\"http://127.0.0.1:#{port}/upload\", "
+      "body: payload)\n"
+      "text = res.body_text()\n"
+      "runner.wait()\n"
+      "text == \"chunked:one:two:true\"\n");
+  expect_ok_true(result, "server request stream preserves wire chunks");
+}
+
+void test_http_server_streaming_is_full_duplex() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import io\n"
+      "import net\n"
+      "import task\n"
+      "from net.http import Server, ServerResponse\n"
+      "\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, workers: 1)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 1) |req|:\n"
+      "    input = req.body_stream()\n"
+      "    ServerResponse.stream(trailers: [\"x-echo\"]) |output|:\n"
+      "      first = input.read_chunk()\n"
+      "      output.write(first.bytes(), extensions: first.extensions())\n"
+      "      second = input.read_chunk()\n"
+      "      output.write(second.bytes(), extensions: second.extensions())\n"
+      "      done = input.read_chunk()\n"
+      "      upload_trailer = input.trailers().first(\"x-upload\")\n"
+      "      output.close()\n"
+      "      output.trailer(\"x-echo\", upload_trailer)\n"
+      "      output.finish()\n"
+      "\n"
+      "socket = net.tcp.connect(\"127.0.0.1\", port)\n"
+      "socket.write_all!(\"POST /duplex HTTP/1.1\\r\\nhost: "
+      "localhost\\r\\ntransfer-encoding: chunked\\r\\ntrailer: "
+      "x-upload\\r\\n\\r\\n3;phase=one;flag\\r\\none\\r\\n\")\n"
+      "prefix = \"\"\n"
+      "while not prefix.contains?(\"3;phase=one;flag\\r\\none\\r\\n\"):\n"
+      "  buffer = io.ByteBuffer(4096)\n"
+      "  socket.read!(buffer)\n"
+      "  prefix += buffer.bytes().to_str()\n"
+      "socket.write_all!(\"3;phase=two\\r\\ntwo\\r\\n0\\r\\n"
+      "x-upload: accepted\\r\\n\\r\\n\")\n"
+      "rest = socket.read_all!().to_str()\n"
+      "runner.wait()\n"
+      "wire = prefix + rest\n"
+      "wire.contains?(\"transfer-encoding: chunked\\r\\n\") and "
+      "wire.contains?(\"3;phase=two\\r\\ntwo\\r\\n\") and "
+      "wire.contains?(\"0\\r\\nx-echo: accepted\\r\\n\\r\\n\")\n");
+  expect_ok_true(result,
+                 "server interleaves request reads and response writes");
+}
+
+void test_http_server_non_chunked_body_stream_framing() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server, ServerResponse\n"
+      "\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, workers: 1)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 2) |req|:\n"
+      "    input = req.body_stream()\n"
+      "    if input.framing() == :empty:\n"
+      "      ServerResponse.text(\"empty:#{input.read_chunk() == null}\")\n"
+      "    else:\n"
+      "      a = input.read_chunk(max_bytes: 2)\n"
+      "      b = input.read_chunk(max_bytes: 2)\n"
+      "      c = input.read_chunk(max_bytes: 2)\n"
+      "      done = input.read_chunk(max_bytes: 2)\n"
+      "      ServerResponse.text(\"#{input.framing()}:#{a.text()}:"
+      "#{b.text()}:#{c.text()}:#{done == null}:"
+      "#{input.trailers().empty?()}\")\n"
+      "post = Client().post(\"http://127.0.0.1:#{port}/fixed\", "
+      "body: \"hello\").body_text()\n"
+      "get = Client().get(\"http://127.0.0.1:#{port}/empty\").body_text()\n"
+      "runner.wait()\n"
+      "post == \"content_length:he:ll:o:true:true\" and "
+      "get == \"empty:true\"\n");
+  expect_ok_true(result,
+                 "non-chunked request bodies expose bounded or empty stream");
+}
+
+void test_http_server_expect_continue_before_body_read() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import io\n"
+      "import net\n"
+      "import task\n"
+      "from net.http import Server, ServerResponse\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, workers: 1)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 1) |req|:\n"
+      "    ServerResponse.stream() |output|:\n"
+      "      chunk = req.body_stream().read_chunk()\n"
+      "      output.write(chunk.bytes())\n"
+      "socket = net.tcp.connect(\"127.0.0.1\", port)\n"
+      "socket.write_all!(\"POST /expect HTTP/1.1\\r\\nhost: localhost\\r\\n"
+      "content-length: 4\\r\\nexpect: 100-continue\\r\\n\\r\\n\")\n"
+      "buffer = io.ByteBuffer(128)\n"
+      "socket.read!(buffer)\n"
+      "interim = buffer.bytes().to_str()\n"
+      "socket.write_all!(\"data\")\n"
+      "final = socket.read_all!().to_str()\n"
+      "runner.wait()\n"
+      "interim.contains?(\"HTTP/1.1 100 Continue\\r\\n\\r\\n\") and "
+      "final.contains?(\"HTTP/1.1 200 OK\") and "
+      "final.contains?(\"4\\r\\ndata\\r\\n0\\r\\n\\r\\n\")\n");
+  expect_ok_true(result,
+                 "stream producer emits 100 Continue before first body read");
+}
+
 } // namespace
 
 int main() {
@@ -1353,6 +1510,11 @@ int main() {
   test_from_import_request_send();
   test_http_server_serves_request_hook();
   test_http_server_allows_cooperative_concurrency_per_worker();
+  test_http_server_streaming_response_extensions_and_trailer();
+  test_http_server_reads_chunked_request_by_wire_chunk();
+  test_http_server_streaming_is_full_duplex();
+  test_http_server_non_chunked_body_stream_framing();
+  test_http_server_expect_continue_before_body_read();
   test_get_status();
   test_get_body_text();
   test_get_ok_predicate();
