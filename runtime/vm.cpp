@@ -15887,6 +15887,17 @@ private:
       line_start = line_end + 2U;
     }
 
+    // RFC 10008 section 2 requires QUERY requests to identify the media type
+    // that defines the query semantics. Reject before invoking application
+    // code so every net.http.Server user gets the protocol guarantee.
+    const std::optional<std::string> query_content_type =
+        headers.first("content-type");
+    if (method == "QUERY" &&
+        (!query_content_type.has_value() || query_content_type->empty())) {
+      result.message = "QUERY request requires Content-Type";
+      return result;
+    }
+
     const bool has_transfer_encoding = headers.contains("transfer-encoding");
     const bool has_content_length = headers.contains("content-length");
     if (has_transfer_encoding && has_content_length) {
@@ -16710,9 +16721,9 @@ private:
                                 *timeout, *pool_timeout, block, out);
   }
 
-  // The shared get/head/post/put/patch/delete path: resolve the request, check
-  // the per-origin net.connect capability, run one exchange, and return (or
-  // scope, when a block is given) a Response.
+  // The shared get/head/query/post/put/patch/delete path: resolve the request,
+  // check the per-origin net.connect capability, run one exchange, and return
+  // (or scope, when a block is given) a Response.
   SendStatus http_client_request(
       const Frame &frame, const std::shared_ptr<RuntimeHttpClient> &client,
       const std::string &method, bool allow_body,
@@ -16848,6 +16859,20 @@ private:
       std::shared_ptr<RuntimeHttpRequestBody> *body_after, bool *replays_body) {
     if (!http_redirect_status(status)) {
       return false;
+    }
+    // RFC 10008 section 2.5: 301/302/307/308 repeat the QUERY at the new
+    // target, while 303 identifies a result retrievable with GET.
+    if (method == "QUERY") {
+      if (status == 303) {
+        *method_after = "GET";
+        body_after->reset();
+        *replays_body = false;
+      } else {
+        *method_after = method;
+        *body_after = body;
+        *replays_body = body != nullptr;
+      }
+      return true;
     }
     if (method == "GET" || method == "HEAD") {
       *method_after = method;
@@ -17559,9 +17584,12 @@ private:
 
       http::HttpHeaders next_headers =
           http_redirect_headers(std::move(current_headers), cross_origin);
-      if (current_body != nullptr && body_after == nullptr) {
+      if (body_after == nullptr &&
+          (current_body != nullptr || current_method != method_after)) {
         next_headers.remove("content-length");
         next_headers.remove("transfer-encoding");
+        next_headers.remove("content-type");
+        next_headers.remove("content-encoding");
       }
       current_headers = std::move(next_headers);
       current_method = std::move(method_after);
@@ -17759,6 +17787,10 @@ private:
     }
     if (selector == "head") {
       return http_client_request(frame, client, "HEAD", false, args, block,
+                                 kw_args, out);
+    }
+    if (selector == "query") {
+      return http_client_request(frame, client, "QUERY", true, args, block,
                                  kw_args, out);
     }
     if (selector == "delete") {

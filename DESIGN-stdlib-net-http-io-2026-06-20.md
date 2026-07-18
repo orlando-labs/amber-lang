@@ -446,6 +446,9 @@ client.get(url, headers: {}, timeout: inherit) |response|: ...
 client.head(url, headers: {}, timeout: inherit) -> Response
 client.head(url, headers: {}, timeout: inherit) |response|: ...
 
+client.query(url, headers: {}, body: null, timeout: inherit) -> Response
+client.query(url, headers: {}, body: null, timeout: inherit) |response|: ...
+
 client.post(url, headers: {}, body: null, timeout: inherit) -> Response
 client.post(url, headers: {}, body: null, timeout: inherit) |response|: ...
 
@@ -537,6 +540,8 @@ Rules:
 The core client does not forbid request bodies for methods such as `GET` or `DELETE`, because the low-level client should not invent protocol law. However:
 
 - `client.get` and `client.head` helpers do not accept body.
+- `client.query` accepts body and callers must supply a matching `Content-Type`
+  as required by RFC 10008.
 - `Request(method: :get, body: ...)` is allowed.
 - A lint/profile diagnostic may warn about body use where application semantics are unclear.
 
@@ -970,6 +975,8 @@ Client(redirects: :safe)
 Rules:
 
 - Follow 301, 302, 303, 307, 308 for `GET` and `HEAD`.
+- For `QUERY`, preserve the method and replayable body across 301, 302, 307,
+  and 308; rewrite 303 to `GET` and drop the body (RFC 10008 section 2.5).
 - For other methods, follow only 303 by rewriting to `GET` and dropping the body.
 - Never replay non-replayable bodies.
 - Never forward `authorization`, `cookie`, `proxy-authorization`, or caller-supplied `host` across origin.
@@ -1548,7 +1555,7 @@ client.send(req) |res|:
 
 - `:off` returns 3xx.
 - `:manual` exposes parsed Location.
-- `:safe` follows GET/HEAD 301/302/303/307/308.
+- `:safe` follows GET/HEAD 301/302/303/307/308 and RFC 10008 QUERY redirects.
 - 303 rewrites non-GET/HEAD to GET.
 - 307/308 preserve method for allowed methods.
 - Non-replayable body is not redirected.

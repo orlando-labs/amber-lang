@@ -903,6 +903,80 @@ void test_post_body() {
   expect_ok_int(result, 200, "post with body");
 }
 
+void test_query_body_and_content_type() {
+  std::string server_error;
+  std::string request;
+  const amber::runtime::ExecutionResult result = run_with_server_capture(
+      "import net\n"
+      "res = net.http.Client().query(\"http://127.0.0.1:%PORT%/search\", "
+      "headers: {\"content-type\": \"application/sql\"}, "
+      "body: \"SELECT 1\")\n"
+      "res.status()\n",
+      kResponse, &server_error, &request);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_int(result, 200, "query with body");
+  expect(request.find("QUERY /search HTTP/1.1\r\n") == 0,
+         "QUERY request method serialized");
+  expect(request.find("content-type: application/sql\r\n") !=
+             std::string::npos,
+         "QUERY request carries Content-Type");
+  expect(request.rfind("SELECT 1") == request.size() - 8U,
+         "QUERY request carries query content");
+}
+
+void test_redirect_query_preserves_method_and_body() {
+  std::string server_error;
+  std::vector<std::string> requests;
+  int accepts = 0;
+  const amber::runtime::ExecutionResult result = run_with_persistent_server(
+      "import net\n"
+      "client = net.http.Client(redirects: :safe)\n"
+      "res = client.query(\"http://127.0.0.1:%PORT%/search\", "
+      "headers: {\"content-type\": \"application/sql\"}, "
+      "body: \"SELECT 1\")\n"
+      "rec = res.redirects()[0]\n"
+      "\"#{res.body_text()}:#{rec.method_before()}:#{rec.method_after()}\"\n",
+      {"HTTP/1.1 302 Found\r\nLocation: /search-v2\r\n"
+       "Content-Length: 0\r\n\r\n",
+       "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"},
+      &server_error, &requests, &accepts);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "ok:QUERY:QUERY",
+                   "QUERY 302 redirect preserves method");
+  expect(requests.size() == 2, "QUERY redirect server saw two requests");
+  expect(requests[1].find("QUERY /search-v2 HTTP/1.1\r\n") == 0,
+         "redirected QUERY targets new resource");
+  expect(requests[1].rfind("SELECT 1") == requests[1].size() - 8U,
+         "redirected QUERY replays static query content");
+}
+
+void test_redirect_303_rewrites_query_to_get() {
+  std::string server_error;
+  std::vector<std::string> requests;
+  int accepts = 0;
+  const amber::runtime::ExecutionResult result = run_with_persistent_server(
+      "import net\n"
+      "client = net.http.Client(redirects: :safe)\n"
+      "res = client.query(\"http://127.0.0.1:%PORT%/search\", "
+      "headers: {\"content-type\": \"application/sql\"}, "
+      "body: \"SELECT 1\")\n"
+      "rec = res.redirects()[0]\n"
+      "\"#{res.body_text()}:#{rec.method_before()}:#{rec.method_after()}\"\n",
+      {"HTTP/1.1 303 See Other\r\nLocation: /result\r\n"
+       "Content-Length: 0\r\n\r\n",
+       "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"},
+      &server_error, &requests, &accepts);
+  expect(server_error.empty(), "server error: " + server_error);
+  expect_ok_string(result, "ok:QUERY:GET", "QUERY 303 redirects with GET");
+  expect(requests.size() == 2, "QUERY 303 server saw two requests");
+  expect(requests[1].find("GET /result HTTP/1.1\r\n") == 0,
+         "QUERY 303 retrieves result with GET");
+  expect(requests[1].find("SELECT 1") == std::string::npos,
+         "QUERY 303 drops query content");
+  expect(requests[1].find("content-type:") == std::string::npos,
+         "QUERY 303 drops query representation metadata");
+}
+
 void test_request_body_text_static() {
   std::string server_error;
   std::string request;
@@ -1318,6 +1392,25 @@ void test_http_server_serves_request_hook() {
   expect_ok_true(result, "net.http.Server serve hook responds");
 }
 
+void test_http_server_rejects_query_without_content_type() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server, ServerResponse\n"
+      "\n"
+      "server = Server(host: \"127.0.0.1\", port: 0)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 1) |req|:\n"
+      "    ServerResponse.text(\"handler should not run\")\n"
+      "\n"
+      "res = Client().query(\"http://127.0.0.1:#{port}/search\", "
+      "body: \"SELECT 1\")\n"
+      "body = res.body_text()\n"
+      "runner.wait()\n"
+      "res.status() == 400 and body.contains?(\"Content-Type\")\n");
+  expect_ok_true(result, "net.http.Server requires Content-Type for QUERY");
+}
+
 void test_http_server_allows_cooperative_concurrency_per_worker() {
   const amber::runtime::ExecutionResult result = execute_source(
       "import task\n"
@@ -1509,6 +1602,7 @@ int main() {
   test_from_import_client();
   test_from_import_request_send();
   test_http_server_serves_request_hook();
+  test_http_server_rejects_query_without_content_type();
   test_http_server_allows_cooperative_concurrency_per_worker();
   test_http_server_streaming_response_extensions_and_trailer();
   test_http_server_reads_chunked_request_by_wire_chunk();
@@ -1538,6 +1632,9 @@ int main() {
   test_redirect_max_redirects_raises();
   test_redirect_nonreplayable_body_raises();
   test_post_body();
+  test_query_body_and_content_type();
+  test_redirect_query_preserves_method_and_body();
+  test_redirect_303_rewrites_query_to_get();
   test_request_body_text_static();
   test_request_body_stream_chunked();
   test_request_body_from_reader_fixed();
