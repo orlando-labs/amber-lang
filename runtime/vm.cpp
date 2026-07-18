@@ -1863,6 +1863,40 @@ public:
     return with_runtime_names({std::move(native_out), std::nullopt});
   }
 
+  ExecutionResult invoke_native_stdlib_send(
+      Value receiver, const std::string &selector,
+      const std::vector<Value> &args,
+      const std::vector<std::pair<std::string, Value>> &keyword_args,
+      Value block) {
+    if (current_runtime_task_context() == nullptr &&
+        root_task_context_ == nullptr) {
+      root_task_context_ = RuntimeTaskContext::create();
+    }
+    RuntimeTaskContextScope task_context_scope(root_task_context_, true, true);
+
+    std::vector<std::pair<std::uint32_t, Value>> kw_args;
+    kw_args.reserve(keyword_args.size());
+    for (const auto &[name, value] : keyword_args) {
+      kw_args.push_back({intern_runtime_symbol(name), value});
+    }
+
+    Frame frame;
+    Value out = Value::null();
+    const SendStatus status = try_apply_scalar_send(
+        frame, receiver, selector, args, block, kw_args, &out);
+    state_->heap.drain_remote_frees();
+    if (status == SendStatus::Matched && !fault_.has_value()) {
+      return with_runtime_names({std::move(out), std::nullopt});
+    }
+    if (status == SendStatus::Faulted || fault_.has_value()) {
+      return with_runtime_names({Value::null(), fault_});
+    }
+    return with_runtime_names(fail(
+        "NoMethodError", "native stdlib value has no method `" + selector +
+                             "`",
+        0, 0));
+  }
+
   // Arm the compile-time step budget on this VM's (shared) runtime state.
   void enable_step_budget(std::int64_t steps) {
     state_->step_budget_enabled = true;
@@ -31140,6 +31174,21 @@ ExecutionResult invoke_runtime_native_extension(
         context.dispatch_registry, context.error_registry,
         std::move(context.macro_block_executor));
   return vm.invoke_native_extension(code_id, args, std::move(self));
+}
+
+ExecutionResult invoke_runtime_native_stdlib_send(
+    const bytecode::BcModule &module, RuntimeVmExecutionContext context,
+    Value receiver, std::string selector, const std::vector<Value> &args,
+    const std::vector<std::pair<std::string, Value>> &keyword_args,
+    Value block) {
+  Vm vm(module, std::move(context.state), std::move(context.module_id),
+        context.world_options, context.capabilities, context.effects,
+        std::move(context.trace_recorder), context.native_registry,
+        context.module_registry, context.type_registry,
+        context.dispatch_registry, context.error_registry,
+        std::move(context.macro_block_executor));
+  return vm.invoke_native_stdlib_send(
+      std::move(receiver), selector, args, keyword_args, std::move(block));
 }
 
 ExecutionResult execute_code(const bytecode::BcModule &module,

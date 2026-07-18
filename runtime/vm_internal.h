@@ -652,6 +652,12 @@ ExecutionResult invoke_runtime_native_extension(
     const bytecode::BcModule &module, RuntimeVmExecutionContext context,
     std::uint32_t code_id, const std::vector<Value> &args, Value self);
 
+ExecutionResult invoke_runtime_native_stdlib_send(
+    const bytecode::BcModule &module, RuntimeVmExecutionContext context,
+    Value receiver, std::string selector, const std::vector<Value> &args,
+    const std::vector<std::pair<std::string, Value>> &keyword_args,
+    Value block);
+
 // Keyword-argument entry: `kw_args` pairs the keyword's symbol id (in
 // `module`'s symbol table) with its value. Requires a single-signature method
 // entry for the code id; used by the macro expander's keyword call channel.

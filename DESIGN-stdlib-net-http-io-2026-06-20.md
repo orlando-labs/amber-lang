@@ -1580,6 +1580,10 @@ client.send(req) |res|:
 ### 25.10. Implementation parity
 
 - VM/native parity.
+- The cpp-bytecode-direct lane supports scalar and scoped-block
+  `Client#query` through the runtime-owned native stdlib send bridge; the
+  request/response path does not execute Amber bytecode or retain a
+  whole-program fallback.
 - Deterministic fake transport tests.
 - Loopback integration tests.
 - Both runtime `Value` representations if applicable.

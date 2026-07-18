@@ -408,6 +408,23 @@ Value RuntimeWorld::string_value(std::string text) {
   return Value::string(id);
 }
 
+Value RuntimeWorld::symbol_value(std::string text) {
+  if (impl_ == nullptr || impl_->owned_module == nullptr) {
+    return Value::null();
+  }
+  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
+  std::lock_guard<std::mutex> guard(impl_->value_mutex);
+  std::vector<std::string> &symbols = impl_->owned_module->symbols;
+  const auto found = std::find(symbols.begin(), symbols.end(), text);
+  if (found != symbols.end()) {
+    return Value::symbol(
+        static_cast<std::uint32_t>(std::distance(symbols.begin(), found)));
+  }
+  const std::uint32_t id = static_cast<std::uint32_t>(symbols.size());
+  symbols.push_back(std::move(text));
+  return Value::symbol(id);
+}
+
 Value RuntimeWorld::list_value(std::vector<Value> items) {
   if (impl_ == nullptr || impl_->state == nullptr) {
     return Value::null();
@@ -554,6 +571,47 @@ ExecutionResult RuntimeWorld::invoke_native_extension(
   impl_->record_event(replay::make_event(
       result.ok() ? "native_extension.completed" : "native_extension.failed",
       {{"code_id", std::to_string(code_id)}}));
+  return result;
+}
+
+ExecutionResult RuntimeWorld::invoke_native_stdlib_send(
+    Value receiver, std::string selector, const std::vector<Value> &args,
+    const std::vector<std::pair<std::string, Value>> &keyword_args,
+    Value block) {
+  if (impl_ == nullptr || impl_->module == nullptr) {
+    return {Value::null(),
+            Fault{"VMError", "runtime world is not bound", 0, 0}};
+  }
+  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
+  impl_->state->initialize_for_module(*impl_->module);
+
+  RuntimeVmExecutionContext context;
+  context.state = impl_->state;
+  context.module_id =
+      impl_->package.has_value() ? impl_->package->manifest.root_module : "";
+  context.world_options = &impl_->options;
+  context.capabilities = &impl_->capabilities;
+  context.effects = &impl_->effects;
+  context.trace_recorder = [impl = impl_](RuntimeTraceEvent event) {
+    impl->record_event(std::move(event));
+  };
+  context.native_registry = &impl_->native_registry;
+  context.module_registry = &impl_->module_registry;
+  context.type_registry = &impl_->type_registry;
+  context.dispatch_registry = &impl_->dispatch_registry;
+  context.error_registry = &impl_->error_registry;
+
+  ExecutionResult result = invoke_runtime_native_stdlib_send(
+      *impl_->module, std::move(context), std::move(receiver),
+      std::move(selector), args, keyword_args, std::move(block));
+  if (!result.runtime_strings.empty()) {
+    impl_->owned_module->strings = result.runtime_strings;
+  }
+  if (!result.runtime_symbols.empty()) {
+    impl_->owned_module->symbols = result.runtime_symbols;
+  }
+  result.runtime_strings = impl_->owned_module->strings;
+  result.runtime_symbols = impl_->owned_module->symbols;
   return result;
 }
 

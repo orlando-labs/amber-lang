@@ -343,7 +343,17 @@ public:
   ExecutionResult invoke_native_extension(
       std::uint32_t code_id, const std::vector<Value> &args = {},
       Value self = Value::null());
+  // Invoke one builtin/native-stdlib send without entering the bytecode
+  // interpreter. Native executable backends use this narrow bridge for
+  // effectful stdlib objects whose implementation and ownership live in the
+  // runtime (for example net.http.Client and Response).
+  ExecutionResult invoke_native_stdlib_send(
+      Value receiver, std::string selector,
+      const std::vector<Value> &args = {},
+      const std::vector<std::pair<std::string, Value>> &keyword_args = {},
+      Value block = Value::null());
   Value string_value(std::string text);
+  Value symbol_value(std::string text);
   Value list_value(std::vector<Value> items);
 
   ExecutionResult define_instance_method(std::uint32_t class_index,

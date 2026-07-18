@@ -582,6 +582,7 @@ test: build
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_capability_modules_core/main.am > $(BUILD_DIR)/native-capability-modules-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-capability-modules-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-capability-modules-core.dump
+	python3 tests/native_http_query_test.py $(BUILD_DIR)/amberc $(BUILD_DIR)/native-http-query
 	$(BUILD_DIR)/amberc build tests/fixtures/native_fs_path_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-fs-path-core > $(BUILD_DIR)/native-fs-path-core-build.json
 	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-fs-path-core-build.json
 	$(BUILD_DIR)/native-fs-path-core > $(BUILD_DIR)/native-fs-path-core.out

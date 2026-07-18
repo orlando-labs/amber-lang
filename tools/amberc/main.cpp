@@ -1194,6 +1194,7 @@ struct NativeCppBuildPlan {
   amber::runtime::NumericPolicy numeric_policy;
   bool entry_native = false;
   bool uses_bytecode_fallback = true;
+  bool uses_native_stdlib_bridge = false;
 };
 
 struct NativeExecutableBuildResult {
@@ -1779,6 +1780,12 @@ bool native_cpp_lookup_const_supported(
   }
   const std::string path_text =
       native_cpp_constant_path_text(module, path_const_id);
+  static const std::set<std::string> native_stdlib_bridge_paths = {
+      "net", "net.http", "net.http.Client"};
+  if (native_stdlib_bridge_paths.find(path_text) !=
+      native_stdlib_bridge_paths.end()) {
+    return true;
+  }
   if (native_cpp_declared_error_path(module, path_text, true)) {
     return true;
   }
@@ -1804,16 +1811,17 @@ bool native_cpp_lookup_const_supported(
 // Eligibility allowlist for the cpp-bytecode-direct backend.
 //
 // INVARIANT (amber.native-backend-equivalence.v1): every opcode/selector
-// admitted here must either be observably side-effect-free or mutate only an
-// object allocated in the disposable native heap. The native lane handles
-// anything it cannot execute (including checked-Int overflow) by throwing
-// NativeBailout and re-running the WHOLE program under the VM; that restart is
-// sound while eligible code has produced no externally observable effects.
-// Do not admit output/IO/channel/shared-state selectors here. Code objects
-// rejected by this allowlist may still avoid the whole-program restart via
-// the per-function scalar VM bridge (`native_cpp_code_vm_callable` below),
-// which has its own effect-free constraint. `make backend-equivalence`
-// asserts the observable half of these invariants over corpus/run.
+// admitted here must either be observably side-effect-free, mutate only an
+// object allocated in the disposable native heap, or commit the native effect
+// barrier before its first observable effect. Before that barrier the native
+// lane may handle NativeBailout by re-running the WHOLE program under the VM;
+// after it, a bailout is a terminal NativeCodeError and can never duplicate an
+// output, task, or IO operation. Effectful helpers admitted below therefore
+// must finish their supported shape after calling native_commit_effect(). Code
+// objects rejected by this allowlist may still avoid the whole-program restart
+// via the per-function scalar VM bridge (`native_cpp_code_vm_callable` below),
+// which has its own effect-free constraint. `make backend-equivalence` asserts
+// the observable half of these invariants over corpus/run.
 bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                                const amber::bytecode::BcCode &code,
                                std::string *reason) {
@@ -2511,6 +2519,35 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
            kw_count <= 1U && kw_allowed({"inherit"})) ||
           (selector == "get" && pos_count == 0U && no_block &&
            kw_count <= 1U && kw_allowed({"default"}));
+      bool http_send = false;
+      if ((selector == "http" || selector == "Client") && pos_count == 0U &&
+          no_block) {
+        http_send =
+            selector == "http"
+                ? kw_count == 0U
+                : kw_allowed({"timeout", "pool_timeout", "idle_timeout",
+                              "max_idle_connections", "max_idle_per_origin",
+                              "max_active_per_origin", "redirects",
+                              "max_redirects"});
+      } else if (selector == "query" && pos_count == 1U) {
+        http_send = kw_allowed(
+            {"headers", "body", "timeout", "pool_timeout"});
+      } else if ((selector == "body_text" || selector == "body_bytes") &&
+                 pos_count == 0U && no_block) {
+        http_send = selector == "body_text"
+                        ? kw_allowed({"limit", "encoding"})
+                        : kw_allowed({"limit"});
+      } else if ((selector == "status" || selector == "reason" ||
+                  selector == "informational?" || selector == "success?" ||
+                  selector == "ok?" || selector == "redirect?" ||
+                  selector == "client_error?" ||
+                  selector == "server_error?" || selector == "closed?" ||
+                  selector == "close!" || selector == "headers" ||
+                  selector == "body" || selector == "redirect_location" ||
+                  selector == "redirects") &&
+                 pos_count == 0U && kw_count == 0U && no_block) {
+        http_send = true;
+      }
       bool amber_send =
           selector == "stringify" && pos_count == 1U && kw_count <= 1U &&
           no_block;
@@ -2551,7 +2588,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
           !random_send && !time_send && !uuid_send && !regexp_send &&
           !regexp_replace_send && !url_send && !math_send && !benchmark_send &&
           !argparser_send && !fs_path_send && !atomic_send && !mutex_send &&
-          !io_send && !task_send && !amber_send && !result_send && !error_send &&
+          !io_send && !task_send && !http_send && !amber_send && !result_send &&
+          !error_send &&
           !declared_error_send && !triple_eq_send && !user_send) {
         *reason = "unsupported SEND selector '" + selector + "' at pc " +
                   std::to_string(pc) + " still uses VM fallback";
@@ -2561,7 +2599,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
           !random_send && !time_send && !uuid_send && !regexp_send &&
           !regexp_replace_send && !url_send && !math_send && !benchmark_send &&
           !argparser_send && !fs_path_send && !atomic_send && !mutex_send &&
-          !io_send && !task_send && !amber_send && !result_send && !error_send &&
+          !io_send && !task_send && !http_send && !amber_send && !result_send &&
+          !error_send &&
           !declared_error_send && !triple_eq_send && !user_send &&
           !map_get_or_set_send &&
           (kw_count != 0U || (!no_block && !collection_block_send))) {
@@ -4354,6 +4393,20 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_module_expr =
                 "native_error_constant(native_hex_to_string(\"" +
                 string_to_hex_text(path_text) + "\"))";
+          } else if (path_text == "net") {
+            native_module_expr =
+                "NativeValue::runtime_handle(amber::runtime::Value::"
+                "native_type(amber::runtime::RuntimeNativeTypeKind::Net))";
+          } else if (path_text == "net.http") {
+            native_module_expr =
+                "NativeValue::runtime_handle(amber::runtime::Value::"
+                "native_type(amber::runtime::RuntimeNativeTypeKind::"
+                "NetHttp))";
+          } else if (path_text == "net.http.Client") {
+            native_module_expr =
+                "NativeValue::runtime_handle(amber::runtime::Value::"
+                "native_type(amber::runtime::RuntimeNativeTypeKind::"
+                "NetHttpClient))";
           } else if (name == "Str") {
             native_module_expr = "NativeValue::str_type()";
           } else if (name == "Int") {
@@ -4869,6 +4922,18 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                    ", native_hex_to_string(\"" +
                    string_to_hex_text(selector) + "\"), " +
                    pos_args_expr(0U) + ", " +
+                   (has_block
+                        ? read_reg_expr(
+                              static_cast<std::uint32_t>(block_reg))
+                        : "NativeValue::nullv()") +
+                   ")");
+      out << "  } else if (native_value_is_http_receiver("
+          << read_reg_expr(recv) << ")) {\n";
+      write_reg_stmt(
+          dst, "native_http_send(" + read_reg_expr(recv) +
+                   ", native_hex_to_string(\"" +
+                   string_to_hex_text(selector) + "\"), " +
+                   pos_args_expr(0U) + ", " + call_kw_args_expr() + ", " +
                    (has_block
                         ? read_reg_expr(
                               static_cast<std::uint32_t>(block_reg))
@@ -6486,6 +6551,15 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
                       const std::vector<amber::pkg::PackageNativeExtension>
                           &native_extensions = {}) {
   NativeCppBuildPlan plan;
+  for (std::uint32_t const_id = 0;
+       const_id < static_cast<std::uint32_t>(module.const_pool.size());
+       ++const_id) {
+    const std::string path = native_cpp_constant_path_text(module, const_id);
+    if (path == "net" || path == "net.http" || path == "net.http.Client") {
+      plan.uses_native_stdlib_bridge = true;
+      break;
+    }
+  }
   std::string first_reason;
   const NativeCppNumericProfile numeric_profile =
       native_cpp_numeric_profile(module);
@@ -6821,6 +6895,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeAtomic;\n";
   out << "struct NativeErrorInstance;\n";
   out << "struct NativeForeignHandle;\n";
+  out << "struct NativeRuntimeHandle;\n";
   out << "struct NativeInstance;\n";
   out << "using NativeTime = amber::runtime::RuntimeTimeValue;\n";
   out << "using NativeTimePeriod = amber::runtime::RuntimeTimePeriodValue;\n";
@@ -6846,7 +6921,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "ArgParser, "
          "FsPath, Regexp, RegexpMatch, Uuid, Time, TimePeriod, HeapString, "
          "ErrorNamespace, TextWriter, Task, TaskLocal, Result, Mutex, Atomic, "
-         "ErrorInstance, ForeignHandle, Instance, "
+         "ErrorInstance, ForeignHandle, RuntimeHandle, Instance, "
          "Closure };\n";
   out << "  Tag tag;\n";
   // String payloads are ids into the native string table; interning keeps
@@ -6998,6 +7073,8 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
          "NativeValue message);\n";
   out << "  static NativeValue foreign_handle("
          "amber::runtime::Value value, std::uint32_t class_index);\n";
+  out << "  static NativeValue runtime_handle("
+         "amber::runtime::Value value);\n";
   out << "  static NativeValue instance(std::uint32_t class_index);\n";
   out << "  static NativeValue closure(NativeClosure *value);\n";
   out << "};\n\n";
@@ -7181,6 +7258,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  amber::runtime::Value value = amber::runtime::Value::null();\n";
   out << "  std::uint32_t class_index = 0;\n";
   out << "};\n";
+  out << "struct NativeRuntimeHandle : NativeRcHeader {\n";
+  out << "  amber::runtime::Value value = amber::runtime::Value::null();\n";
+  out << "};\n";
   out << "struct NativeInstance : NativeRcHeader {\n";
   out << "  std::uint32_t class_index = 0;\n";
   out << "  std::unordered_map<std::string, NativeValue> ivars;\n";
@@ -7292,6 +7372,8 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
       delete static_cast<NativeErrorInstance *>(payload); return;
     case NativeValue::Tag::ForeignHandle:
       delete static_cast<NativeForeignHandle *>(payload); return;
+    case NativeValue::Tag::RuntimeHandle:
+      delete static_cast<NativeRuntimeHandle *>(payload); return;
     case NativeValue::Tag::Instance:
       delete static_cast<NativeInstance *>(payload); return;
     default: return;
@@ -7537,6 +7619,13 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  out.heap_value = handle; out.tag = Tag::ForeignHandle; "
          "return out;\n";
   out << "}\n";
+  out << "NativeValue NativeValue::runtime_handle("
+         "amber::runtime::Value value) {\n";
+  out << "  NativeValue out; auto *handle = new NativeRuntimeHandle();\n";
+  out << "  handle->value = std::move(value);\n";
+  out << "  out.heap_value = handle; out.tag = Tag::RuntimeHandle; "
+         "return out;\n";
+  out << "}\n";
   out << "NativeValue NativeValue::instance(std::uint32_t class_index) {\n";
   out << "  NativeValue out;\n";
   out << "  auto *instance = new NativeInstance();\n";
@@ -7744,6 +7833,10 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
          "value.tag == NativeValue::Tag::TextBufferType || "
          "value.tag == NativeValue::Tag::TextWriter;\n";
   out << "}\n";
+  out << "static bool native_value_is_http_receiver("
+         "const NativeValue &value) {\n";
+  out << "  return value.tag == NativeValue::Tag::RuntimeHandle;\n";
+  out << "}\n";
   out << "static bool native_value_is_task_receiver("
          "const NativeValue &value) {\n";
   out << "  return value.tag == NativeValue::Tag::TaskModule || "
@@ -7765,6 +7858,12 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "  if (value.tag != NativeValue::Tag::ForeignHandle || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return static_cast<NativeForeignHandle *>(value.heap_value);\n";
+  out << "}\n";
+  out << "static NativeRuntimeHandle *as_native_runtime_handle("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag != NativeValue::Tag::RuntimeHandle || "
+         "value.heap_value == nullptr) throw NativeBailout();\n";
+  out << "  return static_cast<NativeRuntimeHandle *>(value.heap_value);\n";
   out << "}\n";
   out << "static NativeValue native_load_ivar(const NativeValue &receiver, "
          "const std::string &name) {\n";
@@ -7875,12 +7974,19 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
   out << "static NativeValue native_io_send("
          "const NativeValue &receiver, const std::string &selector, "
          "std::initializer_list<NativeValue> args, NativeValue block);\n\n";
-  if (!plan.vm_callable_code_ids.empty() ||
+  if (plan.uses_native_stdlib_bridge || !plan.vm_callable_code_ids.empty() ||
       !plan.native_extension_code_ids.empty()) {
     out << "static amber::runtime::Value amber_native_bridge_argument("
            "const NativeValue &arg);\n";
+    out << "static amber::runtime::RuntimeWorld &"
+           "amber_native_bridge_world();\n";
     out << "static NativeValue amber_native_bridge_result_current("
            "const amber::runtime::Value &value);\n";
+    out << "static NativeValue amber_native_bridge_execution_result("
+           "const amber::runtime::ExecutionResult &result);\n";
+  }
+  if (!plan.vm_callable_code_ids.empty() ||
+      !plan.native_extension_code_ids.empty()) {
     out << "struct NativeTaskLocalStoredValueHolder final : "
            "amber::runtime::RuntimeTaskLocalStoredValueBase {\n";
     out << "  NativeValue value;\n";
@@ -7902,6 +8008,11 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
     out << "  }\n";
     out << "};\n\n";
   }
+  out << "static NativeValue native_http_send("
+         "const NativeValue &receiver, const std::string &selector, "
+         "const std::vector<NativeValue> &args, "
+         "const std::vector<NativeCallKeyword> &kwargs, "
+         "NativeValue block);\n\n";
   out << "static NativeValue native_task_send("
          "const NativeValue &receiver, const std::string &selector, "
          "std::initializer_list<NativeValue> args, "
@@ -9472,6 +9583,10 @@ static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs) {
     return left.is_ok == right.is_ok &&
            native_value_equal(left.payload, right.payload);
   }
+  case NativeValue::Tag::RuntimeHandle:
+    return amber::runtime::value_equals(
+        as_native_runtime_handle(lhs)->value,
+        as_native_runtime_handle(rhs)->value);
   default:
     throw NativeBailout();
   }
@@ -16007,6 +16122,9 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "  if (value.tag == NativeValue::Tag::Instance) "
          "return native_user_send(value, \"call\", args, kwargs, "
          "std::move(block));\n";
+  out << "  if (value.tag == NativeValue::Tag::RuntimeHandle) "
+         "return native_http_send(value, \"__call__\", args, kwargs, "
+         "std::move(block));\n";
   out << "  return amber_native_call_closure_with_keywords("
          "value, args, kwargs, std::move(block));\n";
   out << "  } catch (const NativeBailout &bailout) {\n";
@@ -16092,6 +16210,55 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "    return NativeValue::nullv();\n";
   out << "  }\n";
   out << "  throw NativeBailout();\n";
+  out << "}\n\n";
+  out << "static NativeValue native_http_send("
+         "const NativeValue &receiver, const std::string &selector, "
+         "const std::vector<NativeValue> &args, "
+         "const std::vector<NativeCallKeyword> &kwargs, "
+         "NativeValue block) {\n";
+  if (plan.uses_native_stdlib_bridge) {
+    out << "  const bool scoped_query = selector == \"query\" && "
+           "block.tag != NativeValue::Tag::Null;\n";
+    out << "  if (block.tag != NativeValue::Tag::Null && !scoped_query) "
+           "throw NativeBailout(\"native HTTP block is not supported for \" "
+           "+ selector);\n";
+    out << "  amber::runtime::Value runtime_receiver = "
+           "amber_native_bridge_argument(receiver);\n";
+    out << "  std::vector<amber::runtime::Value> runtime_args;\n";
+    out << "  runtime_args.reserve(args.size());\n";
+    out << "  for (const NativeValue &arg : args) runtime_args.push_back("
+           "amber_native_bridge_argument(arg));\n";
+    out << "  std::vector<std::pair<std::string, amber::runtime::Value>> "
+           "runtime_kwargs;\n";
+    out << "  runtime_kwargs.reserve(kwargs.size());\n";
+    out << "  for (const NativeCallKeyword &kwarg : kwargs) {\n";
+    out << "    runtime_kwargs.push_back({kwarg.name, "
+           "amber_native_bridge_argument(kwarg.value)});\n";
+    out << "  }\n";
+    out << "  if (selector == \"query\" || selector == \"body_text\" || "
+           "selector == \"body_bytes\" || selector == \"close!\") "
+           "native_commit_effect();\n";
+    out << "  NativeValue result = amber_native_bridge_execution_result("
+           "amber_native_bridge_world().invoke_native_stdlib_send("
+           "std::move(runtime_receiver), selector, runtime_args, "
+           "runtime_kwargs));\n";
+    out << "  if (!scoped_query) return result;\n";
+    out << "  try {\n";
+    out << "    NativeValue block_result = "
+           "amber_native_call_closure(block, {result});\n";
+    out << "    (void)native_http_send(result, \"close!\", {}, {}, "
+           "NativeValue::nullv());\n";
+    out << "    return block_result;\n";
+    out << "  } catch (...) {\n";
+    out << "    try { (void)native_http_send(result, \"close!\", {}, {}, "
+           "NativeValue::nullv()); } catch (...) {}\n";
+    out << "    throw;\n";
+    out << "  }\n";
+  } else {
+    out << "  (void)receiver; (void)selector; (void)args; (void)kwargs; "
+           "(void)block;\n";
+    out << "  throw NativeBailout(\"native HTTP bridge is unavailable\");\n";
+  }
   out << "}\n\n";
   out << "static amber::runtime::RuntimeTaskModule &native_task_runtime() {\n";
   out << "  static amber::runtime::RuntimeTaskModule runtime;\n";
@@ -16854,7 +17021,7 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "  return 0;\n";
     out << "}\n\n";
   }
-  if (!plan.vm_callable_code_ids.empty() ||
+  if (plan.uses_native_stdlib_bridge || !plan.vm_callable_code_ids.empty() ||
       !plan.native_extension_code_ids.empty()) {
     out << "static std::uint32_t amber_native_bridge_foreign_class_index("
            "const amber::runtime::Value &value) {\n";
@@ -16908,8 +17075,10 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "    out_state->runtime_symbols = "
            "out_state->decoded.module.symbols;\n";
     out << "    out_state->world = "
-           "std::make_unique<amber::runtime::RuntimeWorld>("
-           "out_state->decoded.module);\n";
+           "[&] { amber::runtime::RuntimeWorldOptions options; "
+           "options.capability_grants = embedded_capability_grants(); "
+           "return std::make_unique<amber::runtime::RuntimeWorld>("
+           "out_state->decoded.module, std::move(options)); }();\n";
     out << "    return out_state;\n";
     out << "  }();\n";
     out << "  return *state;\n";
@@ -16955,6 +17124,26 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "    return NativeValue::symbol_ref(native_intern_symbol("
            "runtime_symbols[symbol_id]));\n";
     out << "  }\n";
+    out << "  if (value.is_native_type()) {\n";
+    out << "    switch (value.as_native_type().kind) {\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::Net:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttp:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpClient:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpRequest:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpRequestBody:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpHeaders:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpServer:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpServerRequest:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpServerResponse:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpJson:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpJsonGetJson:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpJsonPostJson:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpForm:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpFormBody:\n";
+    out << "      return NativeValue::runtime_handle(value);\n";
+    out << "    default: break;\n";
+    out << "    }\n";
+    out << "  }\n";
     out << "  if (value.is_uuid()) {\n";
     out << "    const auto uuid = value.as_uuid();\n";
     out << "    if (uuid == nullptr) throw NativeBailout();\n";
@@ -16974,6 +17163,11 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
            "amber::runtime::RuntimeBytes>(value.as_io_value());\n";
     out << "    if (bytes != nullptr) return "
            "NativeValue::bytes(bytes->string());\n";
+    out << "    const auto io_value = value.as_io_value();\n";
+    out << "    if (io_value != nullptr && "
+           "std::string(io_value->type_name()).compare(0, 9, "
+           "\"net.http.\") == 0) return "
+           "NativeValue::runtime_handle(value);\n";
     out << "  }\n";
     out << "  if (value.is_list()) {\n";
     out << "    const auto list = value.as_list();\n";
@@ -17032,6 +17226,21 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "  return amber_native_bridge_result(value, state.runtime_strings, "
            "state.runtime_symbols);\n";
     out << "}\n\n";
+    out << "static NativeValue amber_native_bridge_execution_result("
+           "const amber::runtime::ExecutionResult &result) {\n";
+    out << "  AmberNativeBridgeState &state = amber_native_bridge_state();\n";
+    out << "  if (!result.runtime_strings.empty()) "
+           "state.runtime_strings = result.runtime_strings;\n";
+    out << "  if (!result.runtime_symbols.empty()) "
+           "state.runtime_symbols = result.runtime_symbols;\n";
+    out << "  if (!result.ok()) {\n";
+    out << "    if (!result.fault.has_value()) throw NativeBailout();\n";
+    out << "    throw NativeRaised{native_named_error("
+           "result.fault->error_name, result.fault->message)};\n";
+    out << "  }\n";
+    out << "  return amber_native_bridge_result(result.value, "
+           "state.runtime_strings, state.runtime_symbols);\n";
+    out << "}\n\n";
     out << "static amber::runtime::Value amber_native_bridge_argument("
            "const NativeValue &arg) {\n";
     out << "  switch (arg.tag) {\n";
@@ -17047,6 +17256,9 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "  case NativeValue::Tag::HeapString: "
            "return amber_native_bridge_world().string_value("
            "native_string_text(arg));\n";
+    out << "  case NativeValue::Tag::Symbol: "
+           "return amber_native_bridge_world().symbol_value("
+           "native_symbol_text(arg.scalar_value));\n";
     out << "  case NativeValue::Tag::Bytes: "
            "return amber::runtime::Value::io_value("
            "std::make_shared<amber::runtime::RuntimeBytes>("
@@ -17061,6 +17273,8 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
            "as_native_task_local(arg).key));\n";
     out << "  case NativeValue::Tag::ForeignHandle: "
            "return as_native_foreign_handle(arg)->value;\n";
+    out << "  case NativeValue::Tag::RuntimeHandle: "
+           "return as_native_runtime_handle(arg)->value;\n";
     out << "  case NativeValue::Tag::List: {\n";
     out << "    std::vector<amber::runtime::Value> items;\n";
     out << "    items.reserve(as_list(arg).items.size());\n";
@@ -17068,6 +17282,16 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
            "items.push_back(amber_native_bridge_argument(item));\n";
     out << "    return amber_native_bridge_world().list_value("
            "std::move(items));\n";
+    out << "  }\n";
+    out << "  case NativeValue::Tag::Map: {\n";
+    out << "    std::vector<amber::runtime::MapEntry> entries;\n";
+    out << "    entries.reserve(as_map(arg).entries.size());\n";
+    out << "    for (const auto &entry : as_map(arg).entries) {\n";
+    out << "      entries.emplace_back(amber_native_bridge_argument("
+           "entry.first), amber_native_bridge_argument(entry.second));\n";
+    out << "    }\n";
+    out << "    return amber::runtime::make_symbol_map_value("
+           "std::move(entries), false, as_map(arg).strict);\n";
     out << "  }\n";
     out << "  case NativeValue::Tag::Instance: "
            "return amber::runtime::Value::null();\n";
@@ -17255,6 +17479,8 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "  case NativeValue::Tag::ForeignHandle: return \"<instance \" + "
          "native_user_class_name("
          "as_native_foreign_handle(value)->class_index) + \">\";\n";
+  out << "  case NativeValue::Tag::RuntimeHandle: "
+         "return \"<native runtime value>\";\n";
   out << "  case NativeValue::Tag::Closure: return \"<closure>\";\n";
   out << "  case NativeValue::Tag::List: {\n";
   out << "    const auto &items = as_list(value).items;\n";

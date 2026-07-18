@@ -31,8 +31,12 @@ overflow, which it detects with `__builtin_*_overflow` helpers) by throwing
 program, including module init, under the VM.
 
 This is observably equivalent **only while native-eligible code produces no
-effect that survives a bailout**. Most admitted operations are simply
-side-effect-free. Two additional families are safe by reachability:
+effect that survives a bailout**. Effectful direct-native helpers call
+`native_commit_effect()` before their first observable operation. After that
+barrier, `main()` turns `NativeBailout` into `NativeCodeError` instead of
+restarting the VM, so an output, task, or IO operation cannot be duplicated.
+Most other admitted operations are simply side-effect-free. Two additional
+families are safe by reachability:
 
 - user instances, ivars, and mutable collections allocated by the direct lane
   live only in its private heap; `LOAD_IVAR`, `STORE_IVAR`, user-method
@@ -43,15 +47,17 @@ side-effect-free. Two additional families are safe by reachability:
   sampled value and every value derived from it are abandoned too.
 
 The eligibility scan in `native_cpp_code_supported`
-(`tools/amberc/main.cpp`) still rejects output selectors
-(`print`/`p`/`pp`), external IO, database calls, channels, task/synchronization
-state, and every other effect that can escape the native heap. No mutable
-object crosses the scalar VM bridge, so native ivars cannot alias VM state.
+(`tools/amberc/main.cpp`) rejects every effectful shape that lacks a complete
+direct-native helper and an effect barrier. Supported text output, task
+operations, and the `net.http.Client#query` path commit that barrier
+before the effect. No mutable object crosses the scalar VM bridge, so native
+ivars cannot alias VM state.
 
 Rule for widening native coverage: **an opcode or selector may be added only
 if it is side-effect-free, if all of its mutations are confined to disposable
-native state, or after the whole-program restart is replaced with a resumable
-stateful native/VM boundary** (see
+native state, if it commits the effect barrier and cannot bail out throughout
+the supported post-effect shape, or after the whole-program restart is
+replaced with a resumable stateful native/VM boundary** (see
 `docs/engineering/full-native-implementation-plan-v1.md`). Any violation can
 show up in this bundle as duplicated output or external mutation.
 
@@ -80,6 +86,26 @@ When every code object is either `direct-native` or `native-extension`, the
 generated source omits `run_vm_entry`, `amber_vm_fallback_call`, and every
 `RuntimeWorld::execute` call. A `NativeBailout` is then a native execution error
 rather than permission to restart the program under bytecode.
+
+## Direct native stdlib sends
+
+Runtime-owned stdlib objects can cross the generated/native boundary as opaque
+`RuntimeHandle` values. `RuntimeWorld::invoke_native_stdlib_send` enters the
+same C++ stdlib dispatcher used by the VM without pushing or stepping a
+bytecode frame. Scalar, string, Symbol, Bytes, List, and Map arguments are
+marshalled into the host world; runtime-owned results retain their runtime
+`Value` and ownership.
+
+The first effectful user of this path is HTTP QUERY. Constant lookup
+for `net`, `net.http`, and `net.http.Client`, client construction,
+`Client#query`, and the response accessors used to inspect or consume the
+result are direct-native eligible. The scoped block form invokes its native
+closure with the Response and closes the Response on both normal and exceptional
+exit. Capability grants are copied into the host world, so the ordinary
+per-origin `net.connect` check remains authoritative.
+`tests/native_http_query_test.py` requires full native coverage, asserts that
+the executable contains no bytecode fallback, and verifies the QUERY request
+line, Content-Type, body, status, and response body against a loopback server.
 
 ## Per-function VM fallback (step 2, scalar bridge)
 
