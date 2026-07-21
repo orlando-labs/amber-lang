@@ -190,6 +190,7 @@ enum class RuntimeSupervisorPolicy {
 
 struct RuntimeTaskOptions {
   RuntimeSupervisorPolicy policy = RuntimeSupervisorPolicy::CancelScope;
+  bool resume_on_cancel = false;
 };
 
 // Process-wide identity for a task-local slot. Keys are immutable and do not
@@ -811,6 +812,7 @@ public:
 
   RuntimeTaskHandle async(TaskFunction function);
   RuntimeTaskHandle spawn(TaskFunction function);
+  RuntimeTaskHandle spawn_resumable(TaskFunction function);
 
   Value sync(TaskFunction function) const;
   bool sync_active() const;
@@ -823,7 +825,9 @@ public:
 private:
   enum class SpawnKind { SameStrand, NewStrand };
 
-  RuntimeTaskHandle spawn_with_kind(SpawnKind kind, TaskFunction function);
+  RuntimeTaskHandle spawn_with_kind(
+      SpawnKind kind, TaskFunction function,
+      RuntimeTaskOptions options = RuntimeTaskOptions{});
 
   std::shared_ptr<RuntimeScheduler> scheduler_;
 };

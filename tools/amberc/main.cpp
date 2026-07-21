@@ -1616,7 +1616,8 @@ bool native_cpp_user_method_selector(const amber::bytecode::BcModule &module,
 // raises the same NoMethodError as the VM instead of retaining bytecode solely
 // because the current graph has no implementation.
 bool native_cpp_open_protocol_selector(const std::string &selector) {
-  return selector == "around_controller";
+  return selector == "around_controller" || selector == "start" ||
+         selector == "ready?" || selector == "stop";
 }
 
 bool native_cpp_user_constructor_shape(const amber::bytecode::BcModule &module,
@@ -2546,6 +2547,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       const bool atomic_send =
           kw_count == 0U &&
           ((selector == "new" && pos_count == 1U && no_block) ||
+           (selector == "get" && pos_count == 0U && no_block) ||
+           (selector == "set" && pos_count == 1U && no_block) ||
            (selector == "update" && pos_count == 0U && !no_block));
       const bool mutex_send =
           kw_count == 0U &&
@@ -2581,15 +2584,19 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
           (selector == "get" && pos_count == 0U && no_block &&
            kw_count <= 1U && kw_allowed({"default"}));
       bool http_send = false;
-      if ((selector == "http" || selector == "Client") && pos_count == 0U &&
+      if ((selector == "http" || selector == "tcp" ||
+           selector == "Client") &&
+          pos_count == 0U &&
           no_block) {
         http_send =
-            selector == "http"
+            selector == "http" || selector == "tcp"
                 ? kw_count == 0U
                 : kw_allowed({"timeout", "pool_timeout", "idle_timeout",
                               "max_idle_connections", "max_idle_per_origin",
                               "max_active_per_origin", "redirects",
                               "max_redirects"});
+      } else if (selector == "connect" && pos_count == 2U && no_block) {
+        http_send = kw_count == 0U;
       } else if ((selector == "get" || selector == "head" ||
                   selector == "delete") &&
                  pos_count == 1U && no_block) {
@@ -2600,6 +2607,9 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
         http_send = kw_allowed(
             {"headers", "body", "timeout", "pool_timeout"});
       } else if (selector == "write_all!" && pos_count == 1U &&
+                 kw_count == 0U && no_block) {
+        http_send = true;
+      } else if (selector == "read_all!" && pos_count == 0U &&
                  kw_count == 0U && no_block) {
         http_send = true;
       } else if (selector == "write" && pos_count == 1U && no_block) {
@@ -2617,6 +2627,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                         : kw_allowed({"limit"});
       } else if (selector == "serve" && pos_count == 0U && !no_block) {
         http_send = kw_allowed({"max_requests"});
+      } else if (selector == "shutdown!" && pos_count == 0U && no_block) {
+        http_send = kw_allowed({"timeout"});
       } else if ((selector == "status" || selector == "reason" ||
                   selector == "informational?" || selector == "success?" ||
                   selector == "ok?" || selector == "redirect?" ||
@@ -2624,6 +2636,10 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                   selector == "server_error?" || selector == "closed?" ||
                   selector == "close!" || selector == "headers" ||
                   selector == "body" || selector == "port" ||
+                  selector == "local_endpoint" || selector == "workers" ||
+                  selector == "max_concurrent_per_worker" ||
+                  selector == "stats" || selector == "accepting?" ||
+                  selector == "stop_accepting!" ||
                   selector == "trailers" || selector == "finish" ||
                   selector == "close" ||
                   selector == "redirect_location" ||
@@ -16490,9 +16506,12 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "    runtime_kwargs.push_back({kwarg.name, "
            "amber_native_bridge_argument(kwarg.value)});\n";
     out << "  }\n";
-    out << "  if (selector == \"query\" || selector == \"body_text\" || "
+    out << "  if (selector == \"query\" || selector == \"connect\" || "
+           "selector == \"write_all!\" || selector == \"read_all!\" || "
+           "selector == \"body_text\" || "
            "selector == \"body_bytes\" || selector == \"close!\" || "
-           "selector == \"serve\") "
+           "selector == \"serve\" || selector == \"stop_accepting!\" || "
+           "selector == \"shutdown!\") "
            "native_commit_effect();\n";
     out << "  amber::runtime::Value runtime_block = bridged_block "
            "? amber::runtime::Value::io_value(std::make_shared<"
@@ -16787,9 +16806,14 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "    return NativeValue::atomic(*args.begin());\n";
   out << "  }\n";
   out << "  NativeAtomic &atomic = as_mutable_atomic(receiver);\n";
+  out << "  std::lock_guard<std::mutex> guard(atomic.mutex);\n";
+  out << "  if (selector == \"get\" && args.size() == 0U && "
+         "block.tag == NativeValue::Tag::Null) return atomic.value;\n";
+  out << "  if (selector == \"set\" && args.size() == 1U && "
+         "block.tag == NativeValue::Tag::Null) { atomic.value = *args.begin(); "
+         "return atomic.value; }\n";
   out << "  if (selector != \"update\" || args.size() != 0U || "
          "block.tag == NativeValue::Tag::Null) throw NativeBailout();\n";
-  out << "  std::lock_guard<std::mutex> guard(atomic.mutex);\n";
   out << "  NativeValue next = "
          "amber_native_call_closure(block, {atomic.value});\n";
   out << "  atomic.value = next;\n";
@@ -17102,10 +17126,7 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "    }\n";
   out << "    if (selector == \"call\") throw NativeRaised{native_named_error("
          "\"TypeError\", \"CALL expects closure, class, or object with call method\")};\n";
-  out << "    throw NativeBailout("
-         "\"user send class \" + std::to_string(class_index) + "
-         "(class_side ? \" class selector \" : \" instance selector \") + "
-         "selector);\n";
+  out << "    return native_missing_selector(selector);\n";
   out << "  }\n";
   out << "  return invoke(*method, receiver);\n";
   out << "}\n\n";
@@ -17394,6 +17415,9 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "  if (value.is_native_type()) {\n";
     out << "    switch (value.as_native_type().kind) {\n";
     out << "    case amber::runtime::RuntimeNativeTypeKind::Net:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetEndpoint:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetTcp:\n";
+    out << "    case amber::runtime::RuntimeNativeTypeKind::NetUdp:\n";
     out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttp:\n";
     out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpClient:\n";
     out << "    case amber::runtime::RuntimeNativeTypeKind::NetHttpRequest:\n";

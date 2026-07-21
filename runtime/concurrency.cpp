@@ -2842,6 +2842,7 @@ private:
     std::optional<TaskError> first_child_error;
     RuntimeSupervisorPolicy supervisor_policy =
         RuntimeSupervisorPolicy::CancelScope;
+    bool resume_on_cancel = false;
   };
 
   struct TimerEntry {
@@ -2907,6 +2908,7 @@ private:
     strand.function = std::move(function);
     strand.state = RuntimeStrandState::Runnable;
     strand.supervisor_policy = options.policy;
+    strand.resume_on_cancel = options.resume_on_cancel;
     strands_[strand_id] = std::move(strand);
     ++stats_.strands_created;
     ++stats_.tasks_created;
@@ -3050,7 +3052,29 @@ private:
     mark_cancel_requested_locked(task);
     cancel_active_children_locked(task_id, excluded_child_id);
 
-    if (task.state == RuntimeStrandState::Running ||
+    if (task.state == RuntimeStrandState::Running) {
+      // A resumable VM may already have requested a cooperative park while
+      // its worker is still publishing the Sleeping transition. Preserve a
+      // wake in that race so the VM resumes, observes cancellation, and
+      // unwinds ensure scopes instead of being finalized underneath them.
+      if (task.resume_on_cancel && task.park_pending) {
+        task.park_wake_pending = true;
+        task.park_wake_worker_index.reset();
+      }
+      return true;
+    }
+    if (task.resume_on_cancel && task.parked_once &&
+        task.state == RuntimeStrandState::Sleeping) {
+      ++task.wake_generation;
+      task.wake_pending = true;
+      task.state = RuntimeStrandState::Runnable;
+      ++task.explicit_wakes;
+      ++stats_.explicit_wakes;
+      enqueue_runnable_locked(task_id, std::nullopt);
+      return true;
+    }
+    if ((task.resume_on_cancel && task.parked_once &&
+         task.state == RuntimeStrandState::Runnable) ||
         (task.state == RuntimeStrandState::Waiting &&
          task.pending_completion_state == RuntimeStrandState::New)) {
       return true;
@@ -3790,6 +3814,12 @@ RuntimeTaskHandle RuntimeTaskModule::spawn(TaskFunction function) {
   return spawn_with_kind(SpawnKind::NewStrand, std::move(function));
 }
 
+RuntimeTaskHandle RuntimeTaskModule::spawn_resumable(TaskFunction function) {
+  RuntimeTaskOptions options;
+  options.resume_on_cancel = true;
+  return spawn_with_kind(SpawnKind::NewStrand, std::move(function), options);
+}
+
 Value RuntimeTaskModule::sync(TaskFunction function) const {
   if (!function) {
     throw RuntimeTaskFailure("ArgumentError", "task sync block is missing");
@@ -3828,8 +3858,8 @@ const RuntimeScheduler &RuntimeTaskModule::scheduler() const {
   return *scheduler_;
 }
 
-RuntimeTaskHandle RuntimeTaskModule::spawn_with_kind(SpawnKind kind,
-                                                     TaskFunction function) {
+RuntimeTaskHandle RuntimeTaskModule::spawn_with_kind(
+    SpawnKind kind, TaskFunction function, RuntimeTaskOptions options) {
   auto state = std::make_shared<RuntimeTaskHandle::State>();
   const std::string inherited_annotation = current_runtime_task_annotation();
   auto task_body = [state, function = std::move(function),
@@ -3872,9 +3902,11 @@ RuntimeTaskHandle RuntimeTaskModule::spawn_with_kind(SpawnKind kind,
   };
 
   const std::uint64_t task_id =
-      kind == SpawnKind::SameStrand
-          ? scheduler_->spawn_task(std::move(task_body))
-          : scheduler_->spawn_strand(std::move(task_body));
+      options.resume_on_cancel
+          ? scheduler_->spawn_task(options, std::move(task_body))
+          : kind == SpawnKind::SameStrand
+                ? scheduler_->spawn_task(std::move(task_body))
+                : scheduler_->spawn_strand(std::move(task_body));
   return RuntimeTaskHandle(scheduler_, task_id, std::move(state));
 }
 

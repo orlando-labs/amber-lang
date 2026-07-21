@@ -7,6 +7,6 @@ def main():
     value.update: _1 + 2
   worker.wait()
   if worker.done? and worker.failed?.not:
-    value.update: _1 + 1
+    value.set(value.get + 1)
   else:
     0

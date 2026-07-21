@@ -2,11 +2,25 @@ package native.open_protocol_core
 
 export main
 
+class ProtocolProvider:
+  def request():
+    true
+
+class MissingProtocol:
+  def marker():
+    true
+
 def main():
   result = "unexpected-open-protocol-result"
   try:
     null.around_controller(1, 2)
   rescue NoMethodError |error|:
     if error.message == "selector `around_controller` is not implemented in current runtime baseline":
+      result = "open-protocol-ok"
+  if result == "open-protocol-ok":
+    result = "unexpected-user-protocol-result"
+    try:
+      MissingProtocol().request()
+    rescue NoMethodError:
       result = "native-open-protocol-ok"
   result

@@ -1596,6 +1596,119 @@ void test_http_server_expect_continue_before_body_read() {
                  "stream producer emits 100 Continue before first body read");
 }
 
+void test_http_server_keepalive_head_and_contentless_semantics() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server, ServerResponse\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, idle_timeout: 0.2)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve() |req|:\n"
+      "    if req.path() == \"/none\":\n"
+      "      ServerResponse(status: 204)\n"
+      "    else:\n"
+      "      ServerResponse.text(\"body\")\n"
+      "client = Client()\n"
+      "first = client.get(\"http://127.0.0.1:#{port}/one\")\n"
+      "first_body = first.body_text()\n"
+      "head = client.head(\"http://127.0.0.1:#{port}/head\")\n"
+      "head_body = head.body_text()\n"
+      "none = client.get(\"http://127.0.0.1:#{port}/none\")\n"
+      "none_body = none.body_text()\n"
+      "client.close!()\n"
+      "clean = server.shutdown!(timeout: 1.0)\n"
+      "stats = runner.wait()\n"
+      "clean and first_body == \"body\" and head_body == \"\" and "
+      "head.headers().first(\"content-length\") == \"4\" and "
+      "none.status() == 204 and none_body == \"\" and "
+      "none.headers().first(\"content-length\") == null and "
+      "stats[\"accepted\"] == 1 and stats[\"requests\"] == 3 and "
+      "stats[\"keepalive_requests\"] == 2\n");
+  expect_ok_true(result,
+                 "server keeps connections alive and frames HEAD/204");
+}
+
+void test_http_server_deadline_cancellation_unwinds_ensure() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server, ServerResponse\n"
+      "events = []\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, idle_timeout: 0.1)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve() |req|:\n"
+      "    events.push!(\"acquire\")\n"
+      "    try:\n"
+      "      task.sleep(5000)\n"
+      "      ServerResponse.text(\"late\")\n"
+      "    ensure:\n"
+      "      events.push!(\"release\")\n"
+      "client = task.spawn:\n"
+      "  try:\n"
+      "    Client(timeout: 10.0).get(\"http://127.0.0.1:#{port}/slow\").body_text()\n"
+      "  rescue UnexpectedEofError:\n"
+      "    null\n"
+      "  rescue ConnectionResetError:\n"
+      "    null\n"
+      "attempts = 0\n"
+      "while server.stats()[\"active_requests\"] == 0 and attempts < 1000:\n"
+      "  task.sleep(1)\n"
+      "  attempts += 1\n"
+      "clean = server.shutdown!(timeout: 0.01)\n"
+      "client.wait()\n"
+      "stats = runner.wait()\n"
+      "not clean and events == [\"acquire\", \"release\"] and "
+      "stats[\"active_requests\"] == 0 and stats[\"forced_shutdowns\"] == 1\n");
+  expect_ok_true(result,
+                 "deadline cancellation unwinds request ensure scopes");
+}
+
+void test_http_server_overload_rejects_excess_connection() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server, ServerResponse\n"
+      "server = Server(host: \"127.0.0.1\", port: 0, workers: 1, "
+      "max_concurrent_per_worker: 1, idle_timeout: 0.1)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve() |req|:\n"
+      "    task.sleep(100)\n"
+      "    ServerResponse.text(\"admitted\")\n"
+      "first = task.spawn:\n"
+      "  Client().get(\"http://127.0.0.1:#{port}/slow\").body_text()\n"
+      "attempts = 0\n"
+      "while server.stats()[\"active_requests\"] == 0 and attempts < 1000:\n"
+      "  task.sleep(1)\n"
+      "  attempts += 1\n"
+      "excess = Client().get(\"http://127.0.0.1:#{port}/excess\")\n"
+      "excess.body_text()\n"
+      "clean = server.shutdown!(timeout: 1.0)\n"
+      "admitted = first.wait()\n"
+      "stats = runner.wait()\n"
+      "clean and admitted == \"admitted\" and excess.status() == 503 and "
+      "stats[\"rejected\"] >= 1\n");
+  expect_ok_true(result, "server rejects overload without displacing work");
+}
+
+void test_http_server_control_flow_failure_is_not_a_500_response() {
+  const amber::runtime::ExecutionResult result = execute_source(
+      "import task\n"
+      "from net.http import Client, Server\n"
+      "server = Server(host: \"127.0.0.1\", port: 0)\n"
+      "port = server.port()\n"
+      "runner = task.spawn:\n"
+      "  server.serve(max_requests: 1) |req|:\n"
+      "    raise IsolationError(\"runtime control flow\")\n"
+      "status = try:\n"
+      "  Client().get(\"http://127.0.0.1:#{port}/failure\").status()\n"
+      "rescue Exception:\n"
+      "  0\n"
+      "stats = runner.wait()\n"
+      "status == 0 and stats[\"failed\"] == 1\n");
+  expect_ok_true(result,
+                 "server never converts runtime control flow into 500");
+}
+
 } // namespace
 
 int main() {
@@ -1609,6 +1722,10 @@ int main() {
   test_http_server_streaming_is_full_duplex();
   test_http_server_non_chunked_body_stream_framing();
   test_http_server_expect_continue_before_body_read();
+  test_http_server_keepalive_head_and_contentless_semantics();
+  test_http_server_deadline_cancellation_unwinds_ensure();
+  test_http_server_overload_rejects_excess_connection();
+  test_http_server_control_flow_failure_is_not_a_500_response();
   test_get_status();
   test_get_body_text();
   test_get_ok_predicate();

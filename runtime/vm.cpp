@@ -881,10 +881,20 @@ struct RuntimeHttpServerStats {
   std::uint64_t failed = 0;
   std::uint64_t rejected = 0;
   std::uint64_t active = 0;
+  std::uint64_t requests = 0;
+  std::uint64_t active_requests = 0;
+  std::uint64_t keepalive_requests = 0;
+  std::uint64_t forced_shutdowns = 0;
   std::uint64_t capacity = 0;
 };
 
 class RuntimeHttpServer final : public RuntimeIoResource {
+  struct ActiveConnection {
+    std::shared_ptr<RuntimeTcpStream> stream;
+    RuntimeTaskHandle handle;
+    bool has_handle = false;
+  };
+
 public:
   RuntimeHttpServer()
       : RuntimeIoResource(RuntimeIsolationMode::Unchecked),
@@ -893,16 +903,7 @@ public:
   bool shareable() const override { return true; }
 
   RuntimeIoStatus close() override {
-    bool do_close = false;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      do_close = !closed_flag_;
-      closed_flag_ = true;
-    }
-    cv_.notify_all();
-    if (listener != nullptr) {
-      (void)listener->close();
-    }
+    const bool do_close = stop_accepting();
     if (do_close) {
       return RuntimeIoResource::close();
     }
@@ -911,34 +912,90 @@ public:
     return ok;
   }
 
-  bool closed_server() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return closed_flag_;
-  }
-
-  bool wait_for_slot() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [&] { return closed_flag_ || active_ < capacity(); });
-    if (closed_flag_) {
-      return false;
-    }
-    ++active_;
-    ++stats_.accepted;
-    stats_.active = static_cast<std::uint64_t>(active_);
-    return true;
-  }
-
-  void release_slot(bool failed) {
+  bool stop_accepting() {
+    bool changed = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (active_ > 0) {
-        --active_;
+      changed = accepting_;
+      accepting_ = false;
+    }
+    cv_.notify_all();
+    if (listener != nullptr) {
+      (void)listener->close();
+    }
+    return changed;
+  }
+
+  bool accepting() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return accepting_;
+  }
+
+  bool closed_server() const {
+    return !accepting();
+  }
+
+  std::optional<std::uint64_t>
+  try_acquire_connection(const std::shared_ptr<RuntimeTcpStream> &stream) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!accepting_ || active_connections_.size() >= capacity()) {
+      return std::nullopt;
+    }
+    const std::uint64_t id = next_connection_id_++;
+    ActiveConnection active;
+    active.stream = stream;
+    active_connections_.emplace(id, std::move(active));
+    ++stats_.accepted;
+    stats_.active = static_cast<std::uint64_t>(active_connections_.size());
+    return id;
+  }
+
+  void attach_task(std::uint64_t id, RuntimeTaskHandle handle) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = active_connections_.find(id);
+      if (found != active_connections_.end()) {
+        found->second.handle = std::move(handle);
+        found->second.has_handle = true;
       }
+    }
+    cv_.notify_all();
+  }
+
+  void begin_request(bool keepalive) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++stats_.requests;
+    ++active_requests_;
+    if (keepalive) {
+      ++stats_.keepalive_requests;
+    }
+    stats_.active_requests = static_cast<std::uint64_t>(active_requests_);
+  }
+
+  void end_request() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (active_requests_ > 0) {
+        --active_requests_;
+      }
+      stats_.active_requests = static_cast<std::uint64_t>(active_requests_);
+    }
+    cv_.notify_all();
+  }
+
+  void release_connection(std::uint64_t id, bool failed) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      const auto found = active_connections_.find(id);
+      if (found == active_connections_.end()) {
+        return;
+      }
+      active_connections_.erase(found);
       ++stats_.completed;
       if (failed) {
         ++stats_.failed;
       }
-      stats_.active = static_cast<std::uint64_t>(active_);
+      stats_.active = static_cast<std::uint64_t>(active_connections_.size());
     }
     cv_.notify_all();
   }
@@ -953,7 +1010,59 @@ public:
 
   void wait_until_quiescent() {
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [&] { return active_ == 0; });
+    cv_.wait(lock, [&] { return active_connections_.empty(); });
+  }
+
+  bool shutdown(std::chrono::milliseconds timeout) {
+    stop_accepting();
+    std::vector<std::shared_ptr<RuntimeTcpStream>> remaining_streams;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      const bool drained = cv_.wait_for(
+          lock, timeout, [&] { return active_connections_.empty(); });
+      if (drained) {
+        return true;
+      }
+      ++stats_.forced_shutdowns;
+      remaining_streams.reserve(active_connections_.size());
+      for (const auto &entry : active_connections_) {
+        remaining_streams.push_back(entry.second.stream);
+      }
+    }
+    for (const auto &stream : remaining_streams) {
+      if (stream != nullptr) {
+        (void)stream->close();
+      }
+    }
+
+    // A forced shutdown can race the tiny interval between registering an
+    // accepted connection and publishing its task handle. Keep the connection
+    // record until that publication (or normal task completion) so shutdown
+    // never returns while an untracked request task is still unwinding.
+    std::vector<std::pair<std::uint64_t, RuntimeTaskHandle>> remaining_tasks;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock, [&] {
+        for (const auto &entry : active_connections_) {
+          if (!entry.second.has_handle) {
+            return false;
+          }
+        }
+        return true;
+      });
+      remaining_tasks.reserve(active_connections_.size());
+      for (const auto &entry : active_connections_) {
+        remaining_tasks.push_back({entry.first, entry.second.handle});
+      }
+    }
+    for (auto &entry : remaining_tasks) {
+      (void)entry.second.cancel();
+    }
+    for (auto &entry : remaining_tasks) {
+      (void)entry.second.wait();
+      release_connection(entry.first, true);
+    }
+    return false;
   }
 
   std::size_t capacity() const { return workers * max_concurrent_per_worker; }
@@ -961,7 +1070,8 @@ public:
   RuntimeHttpServerStats stats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     RuntimeHttpServerStats out = stats_;
-    out.active = static_cast<std::uint64_t>(active_);
+    out.active = static_cast<std::uint64_t>(active_connections_.size());
+    out.active_requests = static_cast<std::uint64_t>(active_requests_);
     out.capacity = static_cast<std::uint64_t>(capacity());
     return out;
   }
@@ -976,12 +1086,16 @@ public:
   std::size_t max_body_bytes = 1024 * 1024;
   std::chrono::milliseconds read_timeout = std::chrono::milliseconds(30000);
   std::chrono::milliseconds write_timeout = std::chrono::milliseconds(30000);
+  std::chrono::milliseconds idle_timeout = std::chrono::milliseconds(15000);
+  std::size_t max_requests_per_connection = 100;
 
 private:
   mutable std::mutex mutex_;
   std::condition_variable cv_;
-  bool closed_flag_ = false;
-  std::size_t active_ = 0;
+  bool accepting_ = true;
+  std::uint64_t next_connection_id_ = 1;
+  std::size_t active_requests_ = 0;
+  std::unordered_map<std::uint64_t, ActiveConnection> active_connections_;
   RuntimeHttpServerStats stats_;
 };
 
@@ -998,6 +1112,8 @@ public:
   std::shared_ptr<class RuntimeHttpServerRequestBody> body_stream;
   RuntimeEndpoint local_endpoint;
   RuntimeEndpoint remote_endpoint;
+  int minor_version = 1;
+  bool keep_alive = true;
 };
 
 enum class RuntimeHttpServerRequestFraming {
@@ -14737,6 +14853,41 @@ private:
                 "headers must be a Map or net.http.Headers");
       return false;
     }
+    if (headers_value.is_list() || headers_value.is_tuple()) {
+      bool was_tuple = false;
+      const std::optional<std::vector<Value>> pairs =
+          extract_sequence_items(frame, headers_value, &was_tuple);
+      if (!pairs.has_value()) {
+        return false;
+      }
+      for (const Value &pair : *pairs) {
+        bool pair_was_tuple = false;
+        const std::optional<std::vector<Value>> items =
+            extract_sequence_items(frame, pair, &pair_was_tuple);
+        if (!items.has_value() || items->size() != 2U) {
+          set_fault(frame, "TypeError",
+                    "header pairs must contain name and value");
+          return false;
+        }
+        const std::optional<std::string> name =
+            text_from_symbol_or_string((*items)[0]);
+        const std::optional<std::string> value =
+            (*items)[1].is_string()
+                ? text_from_symbol_or_string((*items)[1])
+                : std::nullopt;
+        if (!name.has_value() || !value.has_value()) {
+          set_fault(frame, "TypeError",
+                    "header pair names and values must be strings");
+          return false;
+        }
+        std::string error;
+        if (!out->add(*name, *value, &error)) {
+          raise_runtime_error(frame, "InvalidHeaderError", error);
+          return false;
+        }
+      }
+      return true;
+    }
     if (!headers_value.is_map()) {
       set_fault(frame, "TypeError",
                 "headers must be a Map or net.http.Headers");
@@ -15594,6 +15745,8 @@ private:
       return "Accepted";
     case 204:
       return "No Content";
+    case 205:
+      return "Reset Content";
     case 301:
       return "Moved Permanently";
     case 302:
@@ -15610,6 +15763,8 @@ private:
       return "Bad Request";
     case 404:
       return "Not Found";
+    case 405:
+      return "Method Not Allowed";
     case 413:
       return "Payload Too Large";
     case 417:
@@ -15618,6 +15773,8 @@ private:
       return "Request Header Fields Too Large";
     case 500:
       return "Internal Server Error";
+    case 503:
+      return "Service Unavailable";
     case 501:
       return "Not Implemented";
     default:
@@ -15631,31 +15788,93 @@ private:
       set_fault(frame, "TypeError", "status must be Int");
       return false;
     }
-    if (value.as_integer() < 100 || value.as_integer() > 999) {
-      set_fault(frame, "ArgumentError", "status must be between 100 and 999");
+    if (value.as_integer() < 100 || value.as_integer() > 599) {
+      set_fault(frame, "ArgumentError", "status must be between 100 and 599");
       return false;
     }
     *out = static_cast<int>(value.as_integer());
     return true;
   }
 
-  std::string http_server_response_wire(RuntimeHttpServerResponse response) {
-    std::string body = std::move(response.body);
-    if (response.status == 204 || response.status == 304) {
-      body.clear();
+  bool http_server_response_requests_close(
+      const RuntimeHttpServerResponse &response) {
+    return http_server_header_has_token(response.headers, "connection",
+                                        "close");
+  }
+
+  void http_server_apply_connection_headers(RuntimeHttpServerResponse *response,
+                                            int request_minor_version,
+                                            bool close_connection) {
+    std::string error;
+    if (close_connection) {
+      (void)response->headers.set("connection", "close", &error);
+    } else if (request_minor_version == 0) {
+      (void)response->headers.set("connection", "keep-alive", &error);
     }
+  }
+
+  std::string http_server_response_wire(RuntimeHttpServerResponse response,
+                                        const std::string &request_method,
+                                        int request_minor_version,
+                                        bool close_connection) {
+    if (response.status >= 100 && response.status < 200) {
+      throw RuntimeTaskFailure(
+          "ArgumentError",
+          "informational response cannot be a final server response");
+    }
+    const bool head = request_method == "HEAD";
+    const bool contentless = response.status == 204 || response.status == 205 ||
+                             response.status == 304;
+    const std::size_t representation_size = response.body.size();
+    if (contentless && representation_size != 0U) {
+      throw RuntimeTaskFailure("ArgumentError",
+                               "response status does not permit content");
+    }
+    if (response.headers.contains("transfer-encoding") ||
+        response.headers.contains("trailer")) {
+      throw RuntimeTaskFailure(
+          "InvalidHeaderError",
+          "buffered response owns Transfer-Encoding and Trailer");
+    }
+
     std::string header_error;
-    if (!response.headers.contains("content-length")) {
-      (void)response.headers.set("content-length", std::to_string(body.size()),
-                                 &header_error);
+    if (response.status == 204) {
+      response.headers.remove("content-length");
+    } else if (response.status == 205) {
+      const std::optional<std::uint64_t> length =
+          http_server_content_length(response.headers, &header_error);
+      if (!length.has_value() || *length != 0U) {
+        throw RuntimeTaskFailure("InvalidHeaderError",
+                                 "205 Content-Length must be zero");
+      }
+      if (!response.headers.contains("content-length")) {
+        (void)response.headers.set("content-length", "0", &header_error);
+      }
+    } else if (response.status != 304) {
+      const std::optional<std::uint64_t> length =
+          http_server_content_length(response.headers, &header_error);
+      if (!length.has_value() ||
+          (!head && response.headers.contains("content-length") &&
+           *length != representation_size)) {
+        throw RuntimeTaskFailure(
+            "InvalidHeaderError",
+            "Content-Length does not match buffered response body");
+      }
+      if (!response.headers.contains("content-length")) {
+        (void)response.headers.set("content-length",
+                                   std::to_string(representation_size),
+                                   &header_error);
+      }
     }
-    if (!response.headers.contains("connection")) {
-      (void)response.headers.set("connection", "close", &header_error);
-    }
+    http_server_apply_connection_headers(&response, request_minor_version,
+                                         close_connection);
+    const std::string body = (head || contentless) ? std::string{} : response.body;
     const std::string reason = response.reason.empty()
                                    ? http_server_reason_phrase(response.status)
                                    : response.reason;
-    std::string wire = "HTTP/1.1 " + std::to_string(response.status);
+    std::string wire =
+        std::string(request_minor_version == 0 ? "HTTP/1.0 " : "HTTP/1.1 ") +
+        std::to_string(response.status);
     if (!reason.empty()) {
       wire += " ";
       wire += reason;
@@ -15673,11 +15892,38 @@ private:
   }
 
   std::string http_server_streaming_response_head(
-      const RuntimeHttpServerResponse &response) {
+      RuntimeHttpServerResponse response, int request_minor_version,
+      bool close_connection) {
+    if ((response.status >= 100 && response.status < 200) ||
+        response.status == 204 || response.status == 205 ||
+        response.status == 304) {
+      throw RuntimeTaskFailure(
+          "ArgumentError", "streaming response status must permit content");
+    }
+    std::string error;
+    if (!response.headers.set("transfer-encoding", "chunked", &error)) {
+      throw RuntimeTaskFailure("InvalidHeaderError", error);
+    }
+    if (!response.trailer_names.empty()) {
+      std::string names;
+      for (const std::string &name : response.trailer_names) {
+        if (!names.empty()) {
+          names += ", ";
+        }
+        names += name;
+      }
+      if (!response.headers.set("trailer", names, &error)) {
+        throw RuntimeTaskFailure("InvalidHeaderError", error);
+      }
+    }
+    http_server_apply_connection_headers(&response, request_minor_version,
+                                         close_connection);
     const std::string reason = response.reason.empty()
                                    ? http_server_reason_phrase(response.status)
                                    : response.reason;
-    std::string wire = "HTTP/1.1 " + std::to_string(response.status);
+    std::string wire =
+        std::string(request_minor_version == 0 ? "HTTP/1.0 " : "HTTP/1.1 ") +
+        std::to_string(response.status);
     if (!reason.empty()) {
       wire += " ";
       wire += reason;
@@ -15746,13 +15992,17 @@ private:
   bool
   write_http_server_response(const std::shared_ptr<RuntimeTcpStream> &stream,
                              RuntimeHttpServerResponse response,
-                             std::chrono::milliseconds timeout) {
+                             std::chrono::milliseconds timeout,
+                             const std::string &request_method = "GET",
+                             int request_minor_version = 1,
+                             bool close_connection = true) {
     if (stream == nullptr) {
       return false;
     }
-    const std::string wire = http_server_response_wire(std::move(response));
+    const std::string wire = http_server_response_wire(
+        std::move(response), request_method, request_minor_version,
+        close_connection);
     RuntimeIoStatus written = stream->write_all(wire, timeout);
-    (void)stream->close();
     return written.ok;
   }
 
@@ -15801,6 +16051,7 @@ private:
   struct RuntimeHttpServerReadResult {
     bool ok = false;
     bool eof = false;
+    bool timed_out = false;
     int error_status = 400;
     std::string message;
     std::shared_ptr<RuntimeHttpServerRequest> request;
@@ -15852,16 +16103,49 @@ private:
     return expected.value_or(0);
   }
 
+  bool http_server_header_has_token(const http::HttpHeaders &headers,
+                                    const std::string &name,
+                                    const std::string &token) {
+    for (std::string value : headers.all(name)) {
+      value = http::ascii_lower_copy(std::move(value));
+      std::size_t start = 0;
+      while (start <= value.size()) {
+        const std::size_t comma = value.find(',', start);
+        std::size_t end = comma == std::string::npos ? value.size() : comma;
+        while (start < end && (value[start] == ' ' || value[start] == '\t')) {
+          ++start;
+        }
+        while (end > start &&
+               (value[end - 1U] == ' ' || value[end - 1U] == '\t')) {
+          --end;
+        }
+        if (value.substr(start, end - start) == token) {
+          return true;
+        }
+        if (comma == std::string::npos) {
+          break;
+        }
+        start = comma + 1U;
+      }
+    }
+    return false;
+  }
+
   RuntimeHttpServerReadResult
   read_http_server_request(const std::shared_ptr<RuntimeHttpServer> &server,
-                           const std::shared_ptr<RuntimeTcpStream> &stream) {
+                           const std::shared_ptr<RuntimeTcpStream> &stream,
+                           std::string initial_bytes = {},
+                           std::optional<std::chrono::milliseconds> timeout =
+                               std::nullopt) {
     RuntimeHttpServerReadResult result;
     if (server == nullptr || stream == nullptr) {
       result.message = "invalid server stream";
       return result;
     }
 
-    std::string bytes;
+    std::string bytes = std::move(initial_bytes);
+    const std::chrono::milliseconds header_timeout =
+        timeout.value_or(server->read_timeout);
     std::size_t header_end = std::string::npos;
     while ((header_end = bytes.find("\r\n\r\n")) == std::string::npos) {
       if (bytes.size() > server->max_header_bytes) {
@@ -15870,13 +16154,14 @@ private:
         return result;
       }
       RuntimeByteBuffer buffer(4096);
-      RuntimeIoStatus read = stream->read(buffer, server->read_timeout);
+      RuntimeIoStatus read = stream->read(buffer, header_timeout);
       if (read.eof) {
         result.eof = bytes.empty();
         result.message = "connection closed before request headers";
         return result;
       }
       if (!read.ok) {
+        result.timed_out = read.timed_out;
         result.message =
             read.message.empty() ? "failed to read request" : read.message;
         return result;
@@ -15943,6 +16228,13 @@ private:
         break;
       }
       line_start = line_end + 2U;
+    }
+
+    const std::vector<std::string> hosts = headers.all("host");
+    if (hosts.size() > 1U || (version == "HTTP/1.1" && hosts.size() != 1U) ||
+        (!hosts.empty() && hosts[0].empty())) {
+      result.message = "HTTP/1.1 requires exactly one non-empty Host";
+      return result;
     }
 
     // RFC 10008 section 2 requires QUERY requests to identify the media type
@@ -16055,6 +16347,12 @@ private:
     request->body_stream = std::move(body);
     request->local_endpoint = stream->local_endpoint();
     request->remote_endpoint = stream->remote_endpoint();
+    request->minor_version = version == "HTTP/1.0" ? 0 : 1;
+    request->keep_alive =
+        !http_server_header_has_token(request->headers, "connection", "close") &&
+        (request->minor_version == 1 ||
+         http_server_header_has_token(request->headers, "connection",
+                                      "keep-alive"));
     result.ok = true;
     result.request = std::move(request);
     return result;
@@ -16074,6 +16372,10 @@ private:
     add("failed", stats.failed);
     add("rejected", stats.rejected);
     add("active", stats.active);
+    add("requests", stats.requests);
+    add("active_requests", stats.active_requests);
+    add("keepalive_requests", stats.keepalive_requests);
+    add("forced_shutdowns", stats.forced_shutdowns);
     add("capacity", stats.capacity);
     return state_->heap.make_symbol_map_value(std::move(entries), false, true);
   }
@@ -16205,7 +16507,8 @@ private:
       }
     }
     if ((response->status >= 100 && response->status < 200) ||
-        response->status == 204 || response->status == 304) {
+        response->status == 204 || response->status == 205 ||
+        response->status == 304) {
       set_fault(frame, "ArgumentError",
                 "streaming response status must permit a response body");
       return SendStatus::Faulted;
@@ -16236,26 +16539,6 @@ private:
             keyword_arg_value(kw_args, "trailers")) {
       if (!http_trailer_names_from_value(frame, *value,
                                          &response->trailer_names)) {
-        return SendStatus::Faulted;
-      }
-    }
-    std::string error;
-    if (!response->headers.set("transfer-encoding", "chunked", &error) ||
-        (!response->headers.contains("connection") &&
-         !response->headers.set("connection", "close", &error))) {
-      set_fault(frame, "InvalidHeaderError", error);
-      return SendStatus::Faulted;
-    }
-    if (!response->trailer_names.empty()) {
-      std::string names;
-      for (const std::string &name : response->trailer_names) {
-        if (!names.empty()) {
-          names += ", ";
-        }
-        names += name;
-      }
-      if (!response->headers.set("trailer", names, &error)) {
-        set_fault(frame, "InvalidHeaderError", error);
         return SendStatus::Faulted;
       }
     }
@@ -16334,7 +16617,8 @@ private:
             frame, kw_args,
             {"host", "port", "workers", "max_concurrent_per_worker", "backlog",
              "reuse_addr", "max_header_bytes", "max_body_bytes", "read_timeout",
-             "write_timeout"})) {
+             "write_timeout", "idle_timeout", "max_requests_per_connection",
+             "overload"})) {
       return SendStatus::Faulted;
     }
 
@@ -16406,6 +16690,28 @@ private:
       }
       server->write_timeout = *parsed;
     }
+    if (const std::optional<Value> value =
+            keyword_arg_value(kw_args, "idle_timeout")) {
+      const std::optional<std::chrono::milliseconds> parsed =
+          io_timeout_from_value(frame, *value);
+      if (!parsed.has_value()) {
+        return SendStatus::Faulted;
+      }
+      server->idle_timeout = *parsed;
+    }
+    if (!http_size_keyword_option(frame, kw_args,
+                                  "max_requests_per_connection", 100,
+                                  /*allow_zero=*/false,
+                                  &server->max_requests_per_connection)) {
+      return SendStatus::Faulted;
+    }
+    if (const std::optional<Value> value = keyword_arg_value(kw_args, "overload")) {
+      const std::optional<std::string> policy = text_from_symbol_or_string(*value);
+      if (!policy.has_value() || *policy != "reject") {
+        set_fault(frame, "ArgumentError", "overload must be :reject");
+        return SendStatus::Faulted;
+      }
+    }
 
     const RuntimeEndpoint endpoint{server->host, server->port};
     if (!check_io_policy(frame, "net_listen", "net.listen",
@@ -16420,8 +16726,11 @@ private:
     }
     server->listener = std::move(listening.listener);
     server->port = server->listener->local_endpoint().port;
+    // Header/idle reads are bounded blocking operations. Provision one worker
+    // per admitted connection so an idle keep-alive socket cannot starve
+    // another connection while preserving the configured hard capacity.
     server->task = std::make_shared<RuntimeTaskModule>(
-        RuntimeSchedulerConfig{server->workers, 1});
+        RuntimeSchedulerConfig{server->capacity(), 1});
     *out = Value::io_value(std::move(server));
     return SendStatus::Matched;
   }
@@ -16464,15 +16773,22 @@ private:
     }
 
     struct RequestTaskState {
+      std::uint64_t connection_id = 0;
       std::shared_ptr<RuntimeTcpStream> stream;
       std::function<Value()> handler;
       std::function<Value()> producer;
       std::shared_ptr<RuntimeHttpServerResponseWriter> writer;
       std::shared_ptr<RuntimeHttpServerRequestBody> request_body;
+      std::string buffered;
+      std::string request_method;
+      int request_minor_version = 1;
+      bool request_keep_alive = false;
+      bool close_after_response = true;
+      bool request_in_flight = false;
+      std::size_t request_count = 0;
       bool request_started = false;
       bool headers_sent = false;
       bool released = false;
-      bool failed = false;
     };
 
     auto finish_task = [server](const std::shared_ptr<RequestTaskState> &state,
@@ -16481,10 +16797,14 @@ private:
         return;
       }
       state->released = true;
+      if (state->request_in_flight) {
+        state->request_in_flight = false;
+        server->end_request();
+      }
       if (state->stream != nullptr) {
         (void)state->stream->close();
       }
-      server->release_slot(failed);
+      server->release_connection(state->connection_id, failed);
     };
 
     std::size_t accepted_count = 0;
@@ -16506,7 +16826,18 @@ private:
                                            : accepted.message);
         return SendStatus::Faulted;
       }
-      if (!server->wait_for_slot()) {
+      const std::optional<std::uint64_t> connection_id =
+          server->try_acquire_connection(accepted.stream);
+      if (!connection_id.has_value()) {
+        if (accepted.stream != nullptr && server->accepting()) {
+          RuntimeHttpServerResponse overloaded =
+              http_server_error_response(503, "service unavailable");
+          (void)write_http_server_response(
+              accepted.stream, std::move(overloaded), server->write_timeout);
+          server->reject_request();
+          (void)accepted.stream->close();
+          continue;
+        }
         if (accepted.stream != nullptr) {
           (void)accepted.stream->close();
         }
@@ -16515,116 +16846,208 @@ private:
       ++accepted_count;
 
       auto state = std::make_shared<RequestTaskState>();
+      state->connection_id = *connection_id;
       state->stream = std::move(accepted.stream);
       ResumableTaskFactory factory = *handler_factory;
-      server->task->spawn([this, server, state, factory,
-                           finish_task]() mutable {
+      RuntimeTaskHandle request_task = server->task->spawn_resumable(
+          [this, server, state, factory, finish_task]() mutable {
         RuntimeTaskAnnotationScope annotation("net.http.server.request");
         state->stream->adopt_to_current_owner();
-        if (!state->request_started) {
-          RuntimeHttpServerReadResult read =
-              read_http_server_request(server, state->stream);
-          if (!read.ok) {
-            if (!read.eof) {
-              RuntimeHttpServerResponse response =
-                  http_server_error_response(read.error_status, read.message);
-              (void)write_http_server_response(
-                  state->stream, std::move(response), server->write_timeout);
-              server->reject_request();
-            }
-            finish_task(state, !read.eof);
-            return Value::null();
-          }
-          state->request_body = read.request->body_stream;
-          state->handler = factory({Value::io_value(std::move(read.request))});
-          state->request_started = true;
-        }
-
-        try {
-          if (state->producer) {
-            (void)state->producer();
-            if (runtime_task_is_parked()) {
+        while (true) {
+          if (!state->request_started) {
+            const bool keepalive_read = state->request_count > 0;
+            RuntimeHttpServerReadResult read = read_http_server_request(
+                server, state->stream, std::move(state->buffered),
+                keepalive_read
+                    ? std::optional<std::chrono::milliseconds>(
+                          server->idle_timeout)
+                    : std::nullopt);
+            if (!read.ok) {
+              if (!read.eof && !(keepalive_read && read.timed_out)) {
+                RuntimeHttpServerResponse response = http_server_error_response(
+                    read.error_status, read.message);
+                (void)write_http_server_response(
+                    state->stream, std::move(response), server->write_timeout);
+                server->reject_request();
+              }
+              finish_task(state, !read.eof && !read.timed_out);
               return Value::null();
             }
-            if (!http_server_finish_streaming_response(state->writer)) {
-              throw RuntimeTaskFailure(
-                  "ConnectionError",
-                  "failed to finish streaming HTTP response");
-            }
-            finish_task(state, false);
-            return Value::null();
+            state->request_body = read.request->body_stream;
+            state->request_method = read.request->method;
+            state->request_minor_version = read.request->minor_version;
+            state->request_keep_alive = read.request->keep_alive;
+            ++state->request_count;
+            state->close_after_response =
+                !state->request_keep_alive || !server->accepting() ||
+                state->request_count >= server->max_requests_per_connection;
+            state->handler =
+                factory({Value::io_value(std::move(read.request))});
+            state->request_started = true;
+            state->request_in_flight = true;
+            server->begin_request(state->request_count > 1);
           }
 
-          Value result = state->handler();
-          if (runtime_task_is_parked()) {
-            return Value::null();
-          }
-          RuntimeHttpServerResponse response;
-          if (!http_server_response_from_value(result, &response)) {
-            throw RuntimeTaskFailure("TypeError",
-                                     "HTTP server handler must return "
-                                     "ServerResponse, Str, Bytes, or null");
-          }
-          if (response.streaming()) {
-            // Selecting a streaming body is the logical response commitment
-            // point. The wire head remains deferred until the producer first
-            // writes, closes, finishes, or declares a trailer so an incoming
-            // Expect: 100-continue request can still be acknowledged first.
-            state->headers_sent = true;
-            state->writer =
-                std::make_shared<RuntimeHttpServerResponseWriter>();
-            state->writer->stream = state->stream;
-            state->writer->write_timeout = server->write_timeout;
-            state->writer->declared_trailers = response.trailer_names;
-            state->writer->final_response_started =
-                state->request_body->final_response_started;
-            state->writer->pending_bytes =
-                http_server_streaming_response_head(response);
-            state->writer->pending =
-                RuntimeHttpServerResponseWriter::Pending::Head;
-            state->producer = response.producer_factory(
-                {Value::io_value(state->writer)});
+          auto complete_request = [&]() -> bool {
+            if (state->request_in_flight) {
+              state->request_in_flight = false;
+              server->end_request();
+            }
+            const bool reusable =
+                !state->close_after_response && server->accepting() &&
+                state->request_body != nullptr &&
+                state->request_body->closed;
+            if (!reusable) {
+              finish_task(state, false);
+              return false;
+            }
+            state->buffered = std::move(state->request_body->buffered);
             state->handler = {};
+            state->producer = {};
+            state->writer.reset();
+            state->request_body.reset();
+            state->request_started = false;
+            state->headers_sent = false;
+            return true;
+          };
 
-            (void)state->producer();
+          try {
+            if (state->producer) {
+              (void)state->producer();
+              if (runtime_task_is_parked()) {
+                return Value::null();
+              }
+              if (!http_server_finish_streaming_response(state->writer)) {
+                throw RuntimeTaskFailure(
+                    "ConnectionError",
+                    "failed to finish streaming HTTP response");
+              }
+              if (!complete_request()) {
+                return Value::null();
+              }
+              continue;
+            }
+
+            Value result = state->handler();
             if (runtime_task_is_parked()) {
               return Value::null();
             }
-            if (!http_server_finish_streaming_response(state->writer)) {
-              throw RuntimeTaskFailure(
-                  "ConnectionError",
-                  "failed to finish streaming HTTP response");
+            RuntimeHttpServerResponse response;
+            if (!http_server_response_from_value(result, &response)) {
+              throw RuntimeTaskFailure("TypeError",
+                                       "HTTP server handler must return "
+                                       "ServerResponse, Str, Bytes, or null");
             }
-            finish_task(state, false);
+
+            if (response.streaming() && state->request_method == "HEAD") {
+              response.producer_factory = {};
+              response.trailer_names.clear();
+              response.headers.remove("transfer-encoding");
+              response.headers.remove("trailer");
+            }
+
+            state->close_after_response =
+                state->close_after_response ||
+                http_server_response_requests_close(response) ||
+                state->request_body == nullptr ||
+                !state->request_body->closed;
+            if (response.streaming()) {
+              // Selecting a streaming body is the logical response commitment
+              // point. The wire head remains deferred until the producer first
+              // writes, closes, finishes, or declares a trailer so an incoming
+              // Expect: 100-continue request can still be acknowledged first.
+              state->headers_sent = true;
+              state->writer =
+                  std::make_shared<RuntimeHttpServerResponseWriter>();
+              state->writer->stream = state->stream;
+              state->writer->write_timeout = server->write_timeout;
+              state->writer->declared_trailers = response.trailer_names;
+              state->writer->final_response_started =
+                  state->request_body->final_response_started;
+              state->writer->pending_bytes =
+                  http_server_streaming_response_head(
+                      response, state->request_minor_version,
+                      state->close_after_response);
+              state->writer->pending =
+                  RuntimeHttpServerResponseWriter::Pending::Head;
+              state->producer = response.producer_factory(
+                  {Value::io_value(state->writer)});
+              state->handler = {};
+
+              (void)state->producer();
+              if (runtime_task_is_parked()) {
+                return Value::null();
+              }
+              if (!http_server_finish_streaming_response(state->writer)) {
+                throw RuntimeTaskFailure(
+                    "ConnectionError",
+                    "failed to finish streaming HTTP response");
+              }
+              if (!complete_request()) {
+                return Value::null();
+              }
+              continue;
+            }
+
+            state->request_body->final_response_started->store(
+                true, std::memory_order_release);
+            if (!write_http_server_response(
+                    state->stream, std::move(response), server->write_timeout,
+                    state->request_method, state->request_minor_version,
+                    state->close_after_response)) {
+              throw RuntimeTaskFailure(
+                  "ConnectionError", "failed to write HTTP response");
+            }
+            if (!complete_request()) {
+              return Value::null();
+            }
+          } catch (const RuntimeTaskFailure &failure) {
+            const bool control_flow =
+                failure.error_name() == "CancelledError" ||
+                failure.error_name() == "FlowCancelledError" ||
+                failure.error_name() == "IsolationError" ||
+                failure.error_name() == "LifetimeError" ||
+                failure.error_name() == "CapabilityError" ||
+                failure.error_name() == "EffectViolationError" ||
+                failure.error_name() == "DeterminismError" ||
+                failure.error_name() == "UnsupportedProfileError" ||
+                failure.error_name() == "WorldFrozenError" ||
+                failure.error_name() == "ConnectionResetError" ||
+                failure.error_name() == "BrokenPipeError" ||
+                failure.error_name() == "UnexpectedEofError";
+            if (control_flow) {
+              finish_task(state, true);
+              return Value::null();
+            }
+            const bool headers_sent =
+                state->headers_sent ||
+                (state->writer != nullptr && state->writer->head_sent);
+            if (!headers_sent) {
+              if (state->request_body != nullptr) {
+                state->request_body->final_response_started->store(
+                    true, std::memory_order_release);
+              }
+              RuntimeHttpServerResponse response = http_server_error_response(
+                  500, failure.message().empty() ? "handler failed"
+                                                 : failure.message());
+              (void)write_http_server_response(
+                  state->stream, std::move(response), server->write_timeout,
+                  state->request_method, state->request_minor_version, true);
+            }
+            finish_task(state, true);
+            return Value::null();
+          } catch (const RuntimeTaskCancelled &) {
+            finish_task(state, true);
             return Value::null();
           }
-          state->request_body->final_response_started->store(
-              true, std::memory_order_release);
-          (void)write_http_server_response(state->stream, std::move(response),
-                                           server->write_timeout);
-          finish_task(state, false);
-        } catch (const RuntimeTaskFailure &failure) {
-          const bool headers_sent =
-              state->headers_sent ||
-              (state->writer != nullptr && state->writer->head_sent);
-          if (!headers_sent) {
-            if (state->request_body != nullptr) {
-              state->request_body->final_response_started->store(
-                  true, std::memory_order_release);
-            }
-            RuntimeHttpServerResponse response = http_server_error_response(
-                500, failure.message().empty() ? "handler failed"
-                                               : failure.message());
-            (void)write_http_server_response(state->stream,
-                                             std::move(response),
-                                             server->write_timeout);
-          }
-          finish_task(state, true);
         }
-        return Value::null();
       });
+      server->attach_task(*connection_id, std::move(request_task));
     }
 
+    if (max_requests.has_value() && accepted_count >= *max_requests) {
+      server->stop_accepting();
+    }
     server->wait_until_quiescent();
     *out = http_server_stats_value(server->stats());
     return SendStatus::Matched;
@@ -18660,6 +19083,39 @@ private:
         return SendStatus::Faulted;
       }
       *out = Value::null();
+      return SendStatus::Matched;
+    }
+    if (selector == "stop_accepting!") {
+      if (!bare("stop_accepting!")) {
+        return SendStatus::Faulted;
+      }
+      (void)server->stop_accepting();
+      *out = Value::null();
+      return SendStatus::Matched;
+    }
+    if (selector == "accepting?") {
+      if (!bare("accepting?")) {
+        return SendStatus::Faulted;
+      }
+      *out = Value::boolean(server->accepting());
+      return SendStatus::Matched;
+    }
+    if (selector == "shutdown!") {
+      if (!args.empty() || !block.is_null() ||
+          !reject_unknown_keywords(frame, kw_args, {"timeout"})) {
+        return SendStatus::Faulted;
+      }
+      std::chrono::milliseconds timeout = std::chrono::milliseconds(30000);
+      if (const std::optional<Value> value =
+              keyword_arg_value(kw_args, "timeout")) {
+        const std::optional<std::chrono::milliseconds> parsed =
+            io_timeout_from_value(frame, *value);
+        if (!parsed.has_value()) {
+          return SendStatus::Faulted;
+        }
+        timeout = *parsed;
+      }
+      *out = Value::boolean(server->shutdown(timeout));
       return SendStatus::Matched;
     }
     if (selector == "closed?") {
