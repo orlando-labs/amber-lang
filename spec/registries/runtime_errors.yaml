@@ -37,6 +37,8 @@ errors:
     parent: Exception
   - name: IsolationError
     parent: Exception
+  - name: FrozenError
+    parent: Exception
   - name: DestroyedAccessError
     parent: LifetimeError
   - name: UseAfterFreeError

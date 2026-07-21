@@ -54,4 +54,61 @@ def main():
   if filtered.count() == 2 and filtered[:b] == 20 and filtered[:d] == 4:
     score = score + 1
 
+  stored = {a: 1}
+  stored_result = stored.store!(:b, 2)
+  stored_result.store!(:c, 3)
+  if stored[:b] == 2 and stored[:c] == 3:
+    score = score + 1
+
+  frozen_map = {a: 1}
+  frozen_map_result = frozen_map.freeze()
+  map_frozen = false
+  try:
+    frozen_map.store!(:b, 2)
+  rescue FrozenError |error|:
+    map_frozen = error.message == "cannot modify frozen map"
+  mutable_map_copy = frozen_map.copy()
+  mutable_map_copy.store!(:b, 2)
+  if frozen_map_result[:a] == 1 and map_frozen and frozen_map.has_key?(:b) == false and mutable_map_copy[:b] == 2:
+    score = score + 1
+
+  frozen_list = [1]
+  frozen_list_result = frozen_list.freeze()
+  list_frozen = false
+  try:
+    frozen_list.push!(2)
+  rescue FrozenError |error|:
+    list_frozen = error.message == "cannot modify frozen list"
+  mutable_list_copy = frozen_list.copy()
+  mutable_list_copy.push!(2)
+  if frozen_list_result[0] == 1 and list_frozen and frozen_list.count() == 1 and mutable_list_copy.count() == 2:
+    score = score + 1
+
+  frozen_set = Set{1}
+  frozen_set_result = frozen_set.freeze()
+  set_frozen = false
+  try:
+    frozen_set.add!(2)
+  rescue FrozenError |error|:
+    set_frozen = error.message == "cannot modify frozen set"
+  mutable_set_copy = frozen_set.copy()
+  mutable_set_copy.add!(2)
+  if frozen_set_result.contains?(1) and set_frozen and frozen_set.contains?(2) == false and mutable_set_copy.contains?(2):
+    score = score + 1
+
+  frozen_tuple = (1, 2)
+  frozen_tuple_result = frozen_tuple.freeze()
+  if frozen_tuple_result.count() == 2 and frozen_tuple_result[0] == 1:
+    score = score + 1
+
+  indexed = []
+  [10, 20].each_with_index |value, index|:
+    indexed.push!(value + index)
+  if indexed[0] == 10 and indexed[1] == 21:
+    score = score + 1
+
+  indexed_pairs = [10, 20].each_with_index()
+  if indexed_pairs[0][0] == 10 and indexed_pairs[0][1] == 0 and indexed_pairs[1][0] == 20 and indexed_pairs[1][1] == 1:
+    score = score + 1
+
   score

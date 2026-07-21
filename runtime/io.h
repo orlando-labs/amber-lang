@@ -13,11 +13,24 @@
 
 namespace amber::runtime {
 
+struct Value;
+
 class RuntimeIoValue {
 public:
   virtual ~RuntimeIoValue() = default;
   virtual const char *type_name() const = 0;
   virtual bool shareable() const { return false; }
+};
+
+// Host-native blocks let a native executable hand a callback to runtime-owned
+// async resources (notably net.http.Server) without re-entering bytecode. The
+// runtime only depends on this narrow value-level interface; generated native
+// code owns argument/result conversion and exception translation.
+class RuntimeNativeBlock : public RuntimeIoValue {
+public:
+  const char *type_name() const override { return "runtime.NativeBlock"; }
+  bool shareable() const override { return true; }
+  virtual Value invoke(const std::vector<Value> &args) = 0;
 };
 
 struct RuntimeIoStatus {

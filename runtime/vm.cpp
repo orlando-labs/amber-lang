@@ -12951,6 +12951,15 @@ private:
       set_fault(frame, "TypeError", context + " requires block");
       return std::nullopt;
     }
+    if (block.is_io_value()) {
+      const std::shared_ptr<RuntimeNativeBlock> native_block =
+          std::dynamic_pointer_cast<RuntimeNativeBlock>(block.as_io_value());
+      if (native_block != nullptr) {
+        return [native_block](const std::vector<Value> &args) {
+          return native_block->invoke(args);
+        };
+      }
+    }
     if (!block.is_closure()) {
       set_fault(frame, "TypeError", context + " block must be closure");
       return std::nullopt;
@@ -13039,6 +13048,17 @@ private:
     if (block.is_null()) {
       set_fault(frame, "TypeError", context + " requires block");
       return std::nullopt;
+    }
+    if (block.is_io_value()) {
+      const std::shared_ptr<RuntimeNativeBlock> native_block =
+          std::dynamic_pointer_cast<RuntimeNativeBlock>(block.as_io_value());
+      if (native_block != nullptr) {
+        return [native_block](std::vector<Value> args) {
+          return [native_block, args = std::move(args)]() mutable {
+            return native_block->invoke(args);
+          };
+        };
+      }
     }
     if (!block.is_closure()) {
       set_fault(frame, "TypeError", context + " block must be closure");
@@ -15180,7 +15200,11 @@ private:
                   "net.http.RequestBody.stream requires a block");
         return SendStatus::Faulted;
       }
-      if (!block.is_closure()) {
+      const bool native_block =
+          block.is_io_value() &&
+          std::dynamic_pointer_cast<RuntimeNativeBlock>(block.as_io_value()) !=
+              nullptr;
+      if (!block.is_closure() && !native_block) {
         set_fault(frame, "TypeError",
                   "RequestBody.stream block must be closure");
         return SendStatus::Faulted;
@@ -16158,7 +16182,11 @@ private:
                                  {"status", "reason", "headers", "trailers"})) {
       return SendStatus::Faulted;
     }
-    if (task_module_ == nullptr) {
+    const bool native_block =
+        block.is_io_value() &&
+        std::dynamic_pointer_cast<RuntimeNativeBlock>(block.as_io_value()) !=
+            nullptr;
+    if (task_module_ == nullptr && !native_block) {
       set_fault(frame, "RequestStateError",
                 "ServerResponse.stream must be selected by a server task");
       return SendStatus::Faulted;

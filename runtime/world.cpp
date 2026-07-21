@@ -363,7 +363,7 @@ struct RuntimeWorld::Impl {
   RuntimeReplayValidation replay_validation;
   std::size_t replay_cursor = 0;
   std::mutex value_mutex;
-  std::mutex execution_mutex;
+  std::recursive_mutex execution_mutex;
 };
 
 RuntimeWorld::RuntimeWorld(const bytecode::BcModule &module)
@@ -395,7 +395,8 @@ Value RuntimeWorld::string_value(std::string text) {
   if (impl_ == nullptr || impl_->owned_module == nullptr) {
     return Value::null();
   }
-  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
+  std::lock_guard<std::recursive_mutex> execution_guard(
+      impl_->execution_mutex);
   std::lock_guard<std::mutex> guard(impl_->value_mutex);
   std::vector<std::string> &strings = impl_->owned_module->strings;
   const auto found = std::find(strings.begin(), strings.end(), text);
@@ -412,7 +413,8 @@ Value RuntimeWorld::symbol_value(std::string text) {
   if (impl_ == nullptr || impl_->owned_module == nullptr) {
     return Value::null();
   }
-  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
+  std::lock_guard<std::recursive_mutex> execution_guard(
+      impl_->execution_mutex);
   std::lock_guard<std::mutex> guard(impl_->value_mutex);
   std::vector<std::string> &symbols = impl_->owned_module->symbols;
   const auto found = std::find(symbols.begin(), symbols.end(), text);
@@ -439,7 +441,8 @@ ExecutionResult RuntimeWorld::execute(std::uint32_t code_id,
     return {Value::null(),
             Fault{"VMError", "runtime world is not bound", 0, 0}};
   }
-  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
+  std::lock_guard<std::recursive_mutex> execution_guard(
+      impl_->execution_mutex);
   impl_->state->initialize_for_module(*impl_->module);
   impl_->record_event(replay::make_event(
       "task.started", {{"code_id", std::to_string(code_id)}}));
@@ -537,7 +540,8 @@ ExecutionResult RuntimeWorld::invoke_native_extension(
     return {Value::null(),
             Fault{"VMError", "runtime world is not bound", 0, 0}};
   }
-  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
+  std::lock_guard<std::recursive_mutex> execution_guard(
+      impl_->execution_mutex);
   impl_->state->initialize_for_module(*impl_->module);
   impl_->record_event(replay::make_event(
       "native_extension.started", {{"code_id", std::to_string(code_id)}}));
@@ -582,7 +586,8 @@ ExecutionResult RuntimeWorld::invoke_native_stdlib_send(
     return {Value::null(),
             Fault{"VMError", "runtime world is not bound", 0, 0}};
   }
-  std::lock_guard<std::mutex> execution_guard(impl_->execution_mutex);
+  std::lock_guard<std::recursive_mutex> execution_guard(
+      impl_->execution_mutex);
   impl_->state->initialize_for_module(*impl_->module);
 
   RuntimeVmExecutionContext context;

@@ -337,6 +337,11 @@ entries:
     intrinsic_id: amber.error.IsolationError.v1
     dispatch: exception_class
     shadowing: local_binding_disables_intrinsic_lowering
+  - name: FrozenError
+    kind: error_class
+    intrinsic_id: amber.error.FrozenError.v1
+    dispatch: exception_class
+    shadowing: local_binding_disables_intrinsic_lowering
   - name: DestroyedAccessError
     kind: error_class
     intrinsic_id: amber.error.DestroyedAccessError.v1

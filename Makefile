@@ -529,10 +529,14 @@ test: build
 	$(BUILD_DIR)/amberc build tests/fixtures/native_keyed_collections_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-keyed-collections-core > $(BUILD_DIR)/native-keyed-collections-core-build.json
 	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-keyed-collections-core-build.json
 	$(BUILD_DIR)/native-keyed-collections-core > $(BUILD_DIR)/native-keyed-collections-core.out
-	grep -q '^12$$' $(BUILD_DIR)/native-keyed-collections-core.out
+	grep -q '^19$$' $(BUILD_DIR)/native-keyed-collections-core.out
 	$(BUILD_DIR)/amberc native-dump tests/fixtures/native_keyed_collections_core/main.am > $(BUILD_DIR)/native-keyed-collections-core.dump
 	grep -q 'cpp-bytecode-direct-v1 coverage' $(BUILD_DIR)/native-keyed-collections-core.dump
 	grep -q 'mode=direct-native' $(BUILD_DIR)/native-keyed-collections-core.dump
+	$(BUILD_DIR)/amberc build tests/fixtures/native_open_protocol_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-open-protocol-core > $(BUILD_DIR)/native-open-protocol-core-build.json
+	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-open-protocol-core-build.json
+	$(BUILD_DIR)/native-open-protocol-core > $(BUILD_DIR)/native-open-protocol-core.out
+	grep -q '^"native-open-protocol-ok"$$' $(BUILD_DIR)/native-open-protocol-core.out
 	$(BUILD_DIR)/amberc build tests/fixtures/native_set_core/main.am --entry main-only --require-full-native -o $(BUILD_DIR)/native-set-core > $(BUILD_DIR)/native-set-core-build.json
 	grep -q '"native_full_coverage": true' $(BUILD_DIR)/native-set-core-build.json
 	$(BUILD_DIR)/native-set-core > $(BUILD_DIR)/native-set-core.out

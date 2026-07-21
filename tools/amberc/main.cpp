@@ -1338,7 +1338,9 @@ bool native_cpp_collection_selector(const std::string &selector,
   return ((selector == "[]" || selector == "[]?" || selector == "has_index?") &&
           pos_count == 1U) ||
          (selector == "[]=" && pos_count == 2U) ||
-         ((selector == "each" || selector == "map" || selector == "select" ||
+         (selector == "store!" && pos_count == 2U) ||
+         ((selector == "each" || selector == "each_with_index" ||
+           selector == "map" || selector == "select" ||
            selector == "reject" || selector == "find" || selector == "any?" ||
            selector == "all?" || selector == "none?" ||
            selector == "transform_keys" || selector == "transform_values") &&
@@ -1351,7 +1353,8 @@ bool native_cpp_collection_selector(const std::string &selector,
            selector == "entries" || selector == "reversed" ||
            selector == "sorted" || selector == "min" || selector == "max" ||
            selector == "minmax" || selector == "init" || selector == "tail" ||
-           selector == "copy" || selector == "deep_copy") &&
+           selector == "copy" || selector == "deep_copy" ||
+           selector == "freeze") &&
           pos_count == 0U) ||
          (selector == "first" && (pos_count == 0U || pos_count == 1U)) ||
          (selector == "bytes" && pos_count == 0U) ||
@@ -1607,6 +1610,15 @@ bool native_cpp_user_method_selector(const amber::bytecode::BcModule &module,
   return false;
 }
 
+// Open framework protocols can be invoked by a library even when the concrete
+// implementation is supplied only by a linked application module. The native
+// lane still emits normal user-object dispatch; on a non-user receiver it
+// raises the same NoMethodError as the VM instead of retaining bytecode solely
+// because the current graph has no implementation.
+bool native_cpp_open_protocol_selector(const std::string &selector) {
+  return selector == "around_controller";
+}
+
 bool native_cpp_user_constructor_shape(const amber::bytecode::BcModule &module,
                                        const std::string &selector) {
   if (selector != "new") {
@@ -1703,9 +1715,49 @@ bool native_cpp_declared_error_selector(
   return false;
 }
 
+struct NativeCppMergedExport {
+  std::string kind;
+  std::uint32_t target = 0;
+};
+
+std::optional<NativeCppMergedExport> native_cpp_merged_export_for_path(
+    const amber::bytecode::BcModule &module, std::uint32_t path_const_id) {
+  const std::string path =
+      native_cpp_constant_path_text(module, path_const_id);
+  if (path.empty()) return std::nullopt;
+  const std::string expected_key = "amber.merged.export:" + path;
+  for (const amber::bytecode::AttrEntry &attr : module.attrs) {
+    if (attr.key_str_id >= module.strings.size() ||
+        attr.value_str_id >= module.strings.size() ||
+        module.strings[attr.key_str_id] != expected_key) {
+      continue;
+    }
+    const std::string &value = module.strings[attr.value_str_id];
+    const std::size_t separator = value.find('\t');
+    if (separator == std::string::npos || separator + 1U >= value.size()) {
+      return std::nullopt;
+    }
+    const std::string target_text = value.substr(separator + 1U);
+    char *end = nullptr;
+    const unsigned long parsed = std::strtoul(target_text.c_str(), &end, 10);
+    if (end == target_text.c_str() || *end != '\0' ||
+        parsed > std::numeric_limits<std::uint32_t>::max()) {
+      return std::nullopt;
+    }
+    return NativeCppMergedExport{
+        value.substr(0, separator), static_cast<std::uint32_t>(parsed)};
+  }
+  return std::nullopt;
+}
+
 std::optional<std::uint32_t>
 native_cpp_class_index_for_path(const amber::bytecode::BcModule &module,
                                 std::uint32_t path_const_id) {
+  if (const auto merged =
+          native_cpp_merged_export_for_path(module, path_const_id);
+      merged.has_value() && merged->kind == "class") {
+    return merged->target;
+  }
   if (path_const_id >= module.const_pool.size()) {
     return std::nullopt;
   }
@@ -1737,6 +1789,12 @@ native_cpp_class_index_for_path(const amber::bytecode::BcModule &module,
 std::optional<std::uint32_t>
 native_cpp_function_code_for_path(const amber::bytecode::BcModule &module,
                                   std::uint32_t path_const_id) {
+  if (const auto merged =
+          native_cpp_merged_export_for_path(module, path_const_id);
+      merged.has_value() &&
+      (merged->kind == "method" || merged->kind == "code")) {
+    return merged->target;
+  }
   if (path_const_id >= module.const_pool.size()) {
     return std::nullopt;
   }
@@ -1781,7 +1839,9 @@ bool native_cpp_lookup_const_supported(
   const std::string path_text =
       native_cpp_constant_path_text(module, path_const_id);
   static const std::set<std::string> native_stdlib_bridge_paths = {
-      "net", "net.http", "net.http.Client"};
+      "net", "net.http", "net.http.Client", "net.http.Server",
+      "net.http.RequestBody", "net.http.ServerRequest",
+      "net.http.ServerResponse"};
   if (native_stdlib_bridge_paths.find(path_text) !=
       native_stdlib_bridge_paths.end()) {
     return true;
@@ -2198,7 +2258,8 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
       const bool no_block = operand_is_no_block(instruction, block_index);
       const bool scalar = scalar_shape && kw_count == 0U && no_block;
       const bool collection_block_send =
-          ((selector == "each" || selector == "map" || selector == "select" ||
+          ((selector == "each" || selector == "each_with_index" ||
+            selector == "map" || selector == "select" ||
             selector == "reject" || selector == "transform_keys" ||
             selector == "transform_values" || selector == "find" ||
             selector == "any?" || selector == "all?" || selector == "none?") &&
@@ -2529,21 +2590,43 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
                               "max_idle_connections", "max_idle_per_origin",
                               "max_active_per_origin", "redirects",
                               "max_redirects"});
-      } else if (selector == "query" && pos_count == 1U) {
+      } else if ((selector == "get" || selector == "head" ||
+                  selector == "delete") &&
+                 pos_count == 1U && no_block) {
+        http_send = kw_allowed({"headers", "timeout", "pool_timeout"});
+      } else if ((selector == "query" || selector == "post" ||
+                  selector == "put" || selector == "patch") &&
+                 pos_count == 1U) {
         http_send = kw_allowed(
             {"headers", "body", "timeout", "pool_timeout"});
+      } else if (selector == "write_all!" && pos_count == 1U &&
+                 kw_count == 0U && no_block) {
+        http_send = true;
+      } else if (selector == "write" && pos_count == 1U && no_block) {
+        http_send = kw_allowed({"extensions"});
+      } else if (selector == "trailer" && pos_count == 2U &&
+                 kw_count == 0U && no_block) {
+        http_send = true;
+      } else if (selector == "stream" && pos_count == 0U && !no_block) {
+        http_send = kw_allowed(
+            {"length", "status", "reason", "headers", "trailers"});
       } else if ((selector == "body_text" || selector == "body_bytes") &&
                  pos_count == 0U && no_block) {
         http_send = selector == "body_text"
                         ? kw_allowed({"limit", "encoding"})
                         : kw_allowed({"limit"});
+      } else if (selector == "serve" && pos_count == 0U && !no_block) {
+        http_send = kw_allowed({"max_requests"});
       } else if ((selector == "status" || selector == "reason" ||
                   selector == "informational?" || selector == "success?" ||
                   selector == "ok?" || selector == "redirect?" ||
                   selector == "client_error?" ||
                   selector == "server_error?" || selector == "closed?" ||
                   selector == "close!" || selector == "headers" ||
-                  selector == "body" || selector == "redirect_location" ||
+                  selector == "body" || selector == "port" ||
+                  selector == "trailers" || selector == "finish" ||
+                  selector == "close" ||
+                  selector == "redirect_location" ||
                   selector == "redirects") &&
                  pos_count == 0U && kw_count == 0U && no_block) {
         http_send = true;
@@ -2580,8 +2663,10 @@ bool native_cpp_code_supported(const amber::bytecode::BcModule &module,
           native_cpp_declared_error_selector(module, selector);
       const bool triple_eq_send = selector == "===" && pos_count == 1U &&
                                   kw_count == 0U && no_block;
-      const bool user_send = native_cpp_user_constructor_shape(module, selector) ||
-                             native_cpp_user_method_selector(module, selector);
+      const bool user_send =
+          native_cpp_user_constructor_shape(module, selector) ||
+          native_cpp_user_method_selector(module, selector) ||
+          native_cpp_open_protocol_selector(selector);
       if (!scalar && !native_cpp_collection_selector(selector, pos_count) &&
           !map_get_or_set_send &&
           !json_send && !codec_send && !digest_send && !range_send &&
@@ -4407,6 +4492,26 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                 "NativeValue::runtime_handle(amber::runtime::Value::"
                 "native_type(amber::runtime::RuntimeNativeTypeKind::"
                 "NetHttpClient))";
+          } else if (path_text == "net.http.Server") {
+            native_module_expr =
+                "NativeValue::runtime_handle(amber::runtime::Value::"
+                "native_type(amber::runtime::RuntimeNativeTypeKind::"
+                "NetHttpServer))";
+          } else if (path_text == "net.http.RequestBody") {
+            native_module_expr =
+                "NativeValue::runtime_handle(amber::runtime::Value::"
+                "native_type(amber::runtime::RuntimeNativeTypeKind::"
+                "NetHttpRequestBody))";
+          } else if (path_text == "net.http.ServerRequest") {
+            native_module_expr =
+                "NativeValue::runtime_handle(amber::runtime::Value::"
+                "native_type(amber::runtime::RuntimeNativeTypeKind::"
+                "NetHttpServerRequest))";
+          } else if (path_text == "net.http.ServerResponse") {
+            native_module_expr =
+                "NativeValue::runtime_handle(amber::runtime::Value::"
+                "native_type(amber::runtime::RuntimeNativeTypeKind::"
+                "NetHttpServerResponse))";
           } else if (name == "Str") {
             native_module_expr = "NativeValue::str_type()";
           } else if (name == "Int") {
@@ -5158,6 +5263,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_index_set(" + read_reg_expr(recv) + ", " +
                                 read_reg_expr(arg) + ", " +
                                 read_reg_expr(arg2) + ")");
+      } else if (selector == "store!") {
+        write_reg_stmt(dst, "native_map_store_bang(" + read_reg_expr(recv) +
+                                ", " + read_reg_expr(arg) + ", " +
+                                read_reg_expr(arg2) + ")");
       } else if (selector == "get_or_set!") {
         write_reg_stmt(
             dst, "native_map_get_or_set(" + read_reg_expr(recv) + ", " +
@@ -5181,6 +5290,13 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
                        read_reg_expr(static_cast<std::uint32_t>(block_reg)) +
                        ")");
         }
+      } else if (selector == "each_with_index") {
+        write_reg_stmt(
+            dst, "native_each_with_index(" + read_reg_expr(recv) + ", " +
+                     (has_block
+                          ? read_reg_expr(static_cast<std::uint32_t>(block_reg))
+                          : "NativeValue::nullv()") +
+                     ", " + (has_block ? "true" : "false") + ")");
       } else if (selector == "map" || selector == "select" ||
                  selector == "reject" || selector == "find" ||
                  selector == "transform_keys" ||
@@ -5225,6 +5341,10 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
         write_reg_stmt(dst, "native_copy(" + read_reg_expr(recv) + ", " +
                                 (selector == "deep_copy" ? "true" : "false") +
                                 ")");
+      } else if (selector == "freeze") {
+        write_reg_stmt(dst,
+                       "native_collection_freeze(" + read_reg_expr(recv) +
+                           ")");
       } else if (selector == "length" || selector == "size") {
         write_reg_stmt(dst, "native_length(" + read_reg_expr(recv) + ")");
       } else if (selector == "bytesize") {
@@ -5626,6 +5746,9 @@ emit_native_cpp_code_function(const amber::bytecode::BcModule &module,
             native_cpp_time_selector_enum(selector);
         write_reg_stmt(dst, "native_time_nullary(" + read_reg_expr(recv) +
                                 ", " + selector_enum + ")");
+      } else if (native_cpp_open_protocol_selector(selector)) {
+        write_reg_stmt(dst, "native_missing_selector(native_hex_to_string(\"" +
+                                string_to_hex_text(selector) + "\"))");
       }
       out << "  }\n";
       emit_next(pc, next_scalar_state);
@@ -6555,7 +6678,9 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
        const_id < static_cast<std::uint32_t>(module.const_pool.size());
        ++const_id) {
     const std::string path = native_cpp_constant_path_text(module, const_id);
-    if (path == "net" || path == "net.http" || path == "net.http.Client") {
+    if (path == "net" || path == "net.http" || path == "net.http.Client" ||
+        path == "net.http.Server" || path == "net.http.RequestBody" ||
+        path == "net.http.ServerRequest" || path == "net.http.ServerResponse") {
       plan.uses_native_stdlib_bridge = true;
       break;
     }
@@ -7120,11 +7245,13 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "struct NativeBytes : NativeRcHeader { std::string bytes; "
          "AMBER_NATIVE_POOL_NEW };\n";
   out << "struct NativeList : NativeRcHeader { "
-         "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
+         "std::vector<NativeValue> items; bool frozen = false; "
+         "AMBER_NATIVE_POOL_NEW };\n";
   out << "struct NativeTuple : NativeRcHeader { "
          "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
   out << "struct NativeSet : NativeRcHeader { "
-         "std::vector<NativeValue> items; AMBER_NATIVE_POOL_NEW };\n";
+         "std::vector<NativeValue> items; bool frozen = false; "
+         "AMBER_NATIVE_POOL_NEW };\n";
   out << "static constexpr std::size_t kNativeMapInlineNameIndexCapacity = "
          "8;\n";
   out << "struct NativeMap : NativeRcHeader {\n";
@@ -7134,6 +7261,7 @@ build_native_cpp_plan(const RunnableModuleArtifact &artifact,
   out << "  std::size_t inline_name_index_size = 0;\n";
   out << "  std::unordered_map<std::int64_t, std::size_t> name_index;\n";
   out << "  bool strict = false;\n";
+  out << "  bool frozen = false;\n";
   out << "  AMBER_NATIVE_POOL_NEW\n";
   out << "};\n";
   out << "struct NativeRange : NativeRcHeader {\n";
@@ -8165,6 +8293,30 @@ static void native_value_delete_payload(NativeValue::Tag tag, void *payload) {
          "value.heap_value == nullptr) throw NativeBailout();\n";
   out << "  return *static_cast<NativeMap *>(value.heap_value);\n";
   out << "}\n";
+  out << "static void native_require_mutable_collection("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::List && "
+         "as_list(value).frozen) throw NativeRaised{native_named_error("
+         "\"FrozenError\", \"cannot modify frozen list\")};\n";
+  out << "  if (value.tag == NativeValue::Tag::Set && "
+         "as_set(value).frozen) throw NativeRaised{native_named_error("
+         "\"FrozenError\", \"cannot modify frozen set\")};\n";
+  out << "  if (value.tag == NativeValue::Tag::Map && "
+         "as_map(value).frozen) throw NativeRaised{native_named_error("
+         "\"FrozenError\", \"cannot modify frozen map\")};\n";
+  out << "}\n";
+  out << "static NativeValue native_collection_freeze("
+         "const NativeValue &value) {\n";
+  out << "  if (value.tag == NativeValue::Tag::List) "
+         "as_mutable_list(value).frozen = true;\n";
+  out << "  else if (value.tag == NativeValue::Tag::Set) "
+         "as_mutable_set(value).frozen = true;\n";
+  out << "  else if (value.tag == NativeValue::Tag::Map) "
+         "as_mutable_map(value).frozen = true;\n";
+  out << "  else if (value.tag != NativeValue::Tag::Tuple) "
+         "throw NativeBailout();\n";
+  out << "  return value;\n";
+  out << "}\n";
   out << "static const NativeBytes &as_bytes(const NativeValue &value) {\n";
   out << "  if (value.tag != NativeValue::Tag::Bytes || "
          "value.heap_value == nullptr) throw NativeBailout();\n";
@@ -8390,6 +8542,7 @@ static void native_append_keyword_call_spread(
   out << "}\n";
   out << "static NativeValue native_list_set(const NativeValue &value, "
          "const NativeValue &index_value, const NativeValue &next_value) {\n";
+  out << "  native_require_mutable_collection(value);\n";
   out << "  auto &items = as_mutable_list(value).items;\n";
   out << "  const std::size_t index = "
          "native_sequence_index(as_int(index_value), "
@@ -9563,6 +9716,30 @@ static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs) {
   case NativeValue::Tag::Set:
     return native_unordered_sequence_equal(as_set(lhs).items,
                                            as_set(rhs).items);
+  case NativeValue::Tag::Map: {
+    const NativeMap &left = as_map(lhs);
+    const NativeMap &right = as_map(rhs);
+    if (left.entries.size() != right.entries.size()) return false;
+    std::vector<bool> matched(right.entries.size(), false);
+    for (const auto &left_entry : left.entries) {
+      bool found = false;
+      for (std::size_t index = 0; index < right.entries.size(); ++index) {
+        if (!matched[index] &&
+            native_value_equal(left_entry.first,
+                               right.entries[index].first)) {
+          if (!native_value_equal(left_entry.second,
+                                  right.entries[index].second)) {
+            return false;
+          }
+          matched[index] = true;
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+    return true;
+  }
   case NativeValue::Tag::Range: {
     const NativeRange &left = as_range(lhs);
     const NativeRange &right = as_range(rhs);
@@ -9587,8 +9764,29 @@ static bool native_value_equal(const NativeValue &lhs, const NativeValue &rhs) {
     return amber::runtime::value_equals(
         as_native_runtime_handle(lhs)->value,
         as_native_runtime_handle(rhs)->value);
+  case NativeValue::Tag::ErrorInstance: {
+    const NativeErrorInstance &left = as_native_error(lhs);
+    const NativeErrorInstance &right = as_native_error(rhs);
+    return left.error_id == right.error_id &&
+           native_value_equal(left.message, right.message);
+  }
+  case NativeValue::Tag::ErrorNamespace:
+    return native_error_namespace_path(lhs) ==
+           native_error_namespace_path(rhs);
+  case NativeValue::Tag::Uuid:
+    return as_uuid(lhs).bytes == as_uuid(rhs).bytes;
+  case NativeValue::Tag::Time:
+    return as_time(lhs).epoch_seconds == as_time(rhs).epoch_seconds &&
+           as_time(lhs).nanosecond == as_time(rhs).nanosecond;
+  case NativeValue::Tag::TimePeriod:
+    return as_time_period(lhs).months == as_time_period(rhs).months &&
+           as_time_period(lhs).days == as_time_period(rhs).days &&
+           as_time_period(lhs).nanoseconds == as_time_period(rhs).nanoseconds;
   default:
-    throw NativeBailout();
+    // Mutable/runtime-backed values, closures, and ordinary instances use
+    // identity equality. Singleton type/module tags have a zero scalar and
+    // therefore naturally compare equal within the same tag.
+    return lhs.scalar_value == rhs.scalar_value;
   }
 }
 
@@ -10130,6 +10328,7 @@ static NativeValue native_sequence_added(const NativeValue &receiver,
 
 static NativeValue native_set_add_mut(const NativeValue &receiver,
                                       const NativeValue &value) {
+  native_require_mutable_collection(receiver);
   NativeSet &set = as_mutable_set(receiver);
   native_append_unique_value(set.items, native_normalize_set_element(value));
   return receiver;
@@ -10137,6 +10336,7 @@ static NativeValue native_set_add_mut(const NativeValue &receiver,
 
 static NativeValue native_set_subtract_mut(const NativeValue &receiver,
                                            const NativeValue &other) {
+  native_require_mutable_collection(receiver);
   NativeSet &set = as_mutable_set(receiver);
   const std::vector<NativeValue> right = native_sequence_items_copy(other);
   std::vector<NativeValue> kept;
@@ -10311,6 +10511,7 @@ static NativeValue native_sequence_zip(
 
 static NativeValue native_list_push_mut(
     const NativeValue &value, std::initializer_list<NativeValue> additions) {
+  native_require_mutable_collection(value);
   NativeList &list = as_mutable_list(value);
   list.items.insert(list.items.end(), additions.begin(), additions.end());
   return value;
@@ -10469,8 +10670,18 @@ static NativeValue native_map_set(const NativeValue &value,
                                   const NativeValue &key,
                                   const NativeValue &next_value) {
   if (value.tag != NativeValue::Tag::Map) throw NativeBailout();
+  native_require_mutable_collection(value);
   native_map_store(as_mutable_map(value), key, next_value);
   return next_value;
+}
+
+static NativeValue native_map_store_bang(const NativeValue &value,
+                                         const NativeValue &key,
+                                         const NativeValue &next_value) {
+  if (value.tag != NativeValue::Tag::Map) throw NativeBailout();
+  native_require_mutable_collection(value);
+  native_map_store(as_mutable_map(value), key, next_value);
+  return value;
 }
 
 static NativeValue native_index_set(const NativeValue &value,
@@ -10521,6 +10732,35 @@ static NativeValue native_each(const NativeValue &value,
     return value;
   }
   throw NativeBailout();
+}
+
+static NativeValue native_each_with_index(const NativeValue &value,
+                                          const NativeValue &block_value,
+                                          bool has_block) {
+  const std::vector<NativeValue> items = native_sequence_items_copy(value);
+  if (!has_block) {
+    std::vector<NativeValue> pairs;
+    pairs.reserve(items.size());
+    for (std::size_t index = 0; index < items.size(); ++index) {
+      pairs.push_back(NativeValue::list(
+          {items[index], NativeValue::integer(
+                             static_cast<std::int64_t>(index))}));
+    }
+    return NativeValue::list(std::move(pairs));
+  }
+  for (std::size_t index = 0; index < items.size(); ++index) {
+    (void)amber_native_call_closure(
+        block_value,
+        {items[index],
+         NativeValue::integer(static_cast<std::int64_t>(index))});
+  }
+  return value;
+}
+
+static NativeValue native_missing_selector(const std::string &selector) {
+  throw NativeRaised{native_named_error(
+      "NoMethodError", "selector `" + selector +
+                           "` is not implemented in current runtime baseline")};
 }
 
 static NativeValue native_sequence_higher_order(
@@ -11620,8 +11860,13 @@ private:
 
 static NativeValue native_json_parse_value(const NativeValue &value) {
   if (!native_value_is_string(value)) throw NativeBailout();
-  NativeJsonParser parser(native_string_text(value));
-  return parser.parse_document();
+  try {
+    NativeJsonParser parser(native_string_text(value));
+    return parser.parse_document();
+  } catch (const NativeBailout &) {
+    throw NativeRaised{
+        native_named_error("JsonParseError", "malformed JSON input")};
+  }
 }
 )AMBERCPP";
   out << R"AMBERCPP(
@@ -13996,7 +14241,10 @@ static const NativeValue *native_benchmark_map_get(const NativeValue &map,
                                                    const std::string &key) {
   if (map.tag != NativeValue::Tag::Map) return nullptr;
   for (const auto &entry : as_map(map).entries) {
-    if (native_key_text(entry.first) == key) return &entry.second;
+    if (native_map_key_is_nameable(entry.first) &&
+        native_key_text(entry.first) == key) {
+      return &entry.second;
+    }
   }
   return nullptr;
 }
@@ -15006,8 +15254,9 @@ static NativeValue native_benchmark_send(
   out << "static NativeValue numeric_eq(const NativeValue &lhs, "
          "const NativeValue &rhs, bool negate) {\n";
   // Mirrors value_equals for scalar kinds: numeric pairs compare by value
-  // (Int/Int exact, otherwise double); other scalar pairs require matching
-  // tags; deep kinds (lists, closures) stay on the VM.
+  // (Int/Int exact, otherwise double); values of different non-string kinds
+  // are never equal. Same-kind deep values may still use their specialized
+  // native implementation or an explicitly classified fallback.
   out << "  if ((lhs.tag == NativeValue::Tag::Time && "
          "rhs.tag == NativeValue::Tag::Time) || "
          "(lhs.tag == NativeValue::Tag::TimePeriod && "
@@ -15041,72 +15290,10 @@ static NativeValue native_benchmark_send(
          "native_value_equal(lhs, rhs);\n";
   out << "    return NativeValue::boolean(negate ? !equal : equal);\n";
   out << "  }\n";
-  out << "  if (lhs.tag == NativeValue::Tag::List || "
-         "lhs.tag == NativeValue::Tag::Tuple || "
-         "lhs.tag == NativeValue::Tag::Set || "
-         "lhs.tag == NativeValue::Tag::Closure || "
-         "lhs.tag == NativeValue::Tag::Map || "
-         "lhs.tag == NativeValue::Tag::MathModule || "
-         "lhs.tag == NativeValue::Tag::JsonModule || "
-         "lhs.tag == NativeValue::Tag::YamlModule || "
-         "lhs.tag == NativeValue::Tag::BytesModule || "
-         "lhs.tag == NativeValue::Tag::Base64Module || "
-         "lhs.tag == NativeValue::Tag::Base64UrlModule || "
-         "lhs.tag == NativeValue::Tag::HexModule || "
-         "lhs.tag == NativeValue::Tag::DigestModule || "
-         "lhs.tag == NativeValue::Tag::BenchmarkModule || "
-         "lhs.tag == NativeValue::Tag::UrlModule || "
-         "lhs.tag == NativeValue::Tag::ArgParserModule || "
-         "lhs.tag == NativeValue::Tag::FsModule || "
-         "lhs.tag == NativeValue::Tag::SecureRandomModule || "
-         "lhs.tag == NativeValue::Tag::RangeModule || "
-         "lhs.tag == NativeValue::Tag::TimeModule || "
-         "lhs.tag == NativeValue::Tag::TimePeriodModule || "
-         "lhs.tag == NativeValue::Tag::Bytes || "
-         "lhs.tag == NativeValue::Tag::Range || "
-         "lhs.tag == NativeValue::Tag::ArgParser || "
-         "lhs.tag == NativeValue::Tag::FsPath || "
-         "lhs.tag == NativeValue::Tag::Time || "
-         "lhs.tag == NativeValue::Tag::TimePeriod || "
-         "rhs.tag == NativeValue::Tag::List || "
-         "rhs.tag == NativeValue::Tag::Tuple || "
-         "rhs.tag == NativeValue::Tag::Set || "
-         "rhs.tag == NativeValue::Tag::Map || "
-         "rhs.tag == NativeValue::Tag::MathModule || "
-         "rhs.tag == NativeValue::Tag::JsonModule || "
-         "rhs.tag == NativeValue::Tag::YamlModule || "
-         "rhs.tag == NativeValue::Tag::BytesModule || "
-         "rhs.tag == NativeValue::Tag::Base64Module || "
-         "rhs.tag == NativeValue::Tag::Base64UrlModule || "
-         "rhs.tag == NativeValue::Tag::HexModule || "
-         "rhs.tag == NativeValue::Tag::DigestModule || "
-         "rhs.tag == NativeValue::Tag::BenchmarkModule || "
-         "rhs.tag == NativeValue::Tag::UrlModule || "
-         "rhs.tag == NativeValue::Tag::ArgParserModule || "
-         "rhs.tag == NativeValue::Tag::FsModule || "
-         "rhs.tag == NativeValue::Tag::SecureRandomModule || "
-         "rhs.tag == NativeValue::Tag::RangeModule || "
-         "rhs.tag == NativeValue::Tag::TimeModule || "
-         "rhs.tag == NativeValue::Tag::TimePeriodModule || "
-         "rhs.tag == NativeValue::Tag::Bytes || "
-         "rhs.tag == NativeValue::Tag::Range || "
-         "rhs.tag == NativeValue::Tag::ArgParser || "
-         "rhs.tag == NativeValue::Tag::FsPath || "
-         "rhs.tag == NativeValue::Tag::Time || "
-         "rhs.tag == NativeValue::Tag::TimePeriod || "
-         "rhs.tag == NativeValue::Tag::Closure) throw NativeBailout();\n";
-  out << "  bool equal;\n";
-  out << "  if (lhs.tag == NativeValue::Tag::Integer && "
-         "rhs.tag == NativeValue::Tag::Integer) equal = "
-         "lhs.scalar_value == rhs.scalar_value;\n";
-  out << "  else if (numeric_tag(lhs) && numeric_tag(rhs)) equal = "
-         "as_double_numeric(lhs) == as_double_numeric(rhs);\n";
-  out << "  else if (native_value_is_string(lhs) && "
-         "native_value_is_string(rhs)) equal = "
-         "native_string_text_equal(lhs, rhs);\n";
-  out << "  else if (lhs.tag != rhs.tag) equal = false;\n";
-  out << "  else if (lhs.tag == NativeValue::Tag::Null) equal = true;\n";
-  out << "  else equal = lhs.scalar_value == rhs.scalar_value;\n";
+  out << "  if (!numeric_tag(lhs) && !numeric_tag(rhs) && "
+         "!(native_value_is_string(lhs) && native_value_is_string(rhs)) && "
+         "lhs.tag != rhs.tag) return NativeValue::boolean(negate);\n";
+  out << "  const bool equal = native_value_equal(lhs, rhs);\n";
   out << "  return NativeValue::boolean(negate ? !equal : equal);\n";
   out << "}\n\n";
   out << "static bool native_parse_int_text(const std::string &text, "
@@ -15822,6 +16009,30 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "  default: return std::nullopt;\n";
   out << "  }\n";
   out << "}\n";
+  out << "static bool native_method_needs_param_shaping("
+         "std::uint32_t code_id) {\n";
+  out << "  switch (code_id) {\n";
+  for (const EmittedNativeMethod &emitted : emitted_methods) {
+    const bool needs_shaping =
+        !emitted.method->clause_table.empty() ||
+        std::any_of(emitted.method->params.begin(),
+                    emitted.method->params.end(),
+                    [](const amber::bytecode::MethodParamEntry &param) {
+                      return (param.flags &
+                              (amber::bytecode::kMethodParamFlagRest |
+                               amber::bytecode::kMethodParamFlagKwRest |
+                               amber::bytecode::kMethodParamFlagKeyword |
+                               amber::bytecode::kMethodParamFlagHasDefault)) !=
+                             0U;
+                    });
+    if (needs_shaping) {
+      out << "  case " << emitted.method->entry_code_id
+          << "U: return true;\n";
+    }
+  }
+  out << "  default: return false;\n";
+  out << "  }\n";
+  out << "}\n";
   out << R"AMBERCPP(static std::vector<NativeValue> native_shape_method_args(
     std::uint32_t code_id,
     const std::vector<NativeValue> &positional,
@@ -16080,7 +16291,10 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "  NativeClosure *closure = as_closure(value);\n";
   out << "  NativeClosure invocation = *closure;\n";
   out << "  invocation.block = std::move(block);\n";
-  out << "  if (native_method_descriptor(invocation.code_id).has_value()) {\n";
+  out << "  if (!kwargs.empty() || "
+         "native_method_needs_param_shaping(invocation.code_id)) {\n";
+  out << "    if (!native_method_descriptor(invocation.code_id).has_value()) "
+         "throw NativeBailout();\n";
   out << "    std::vector<NativeValue> shaped = native_shape_method_args("
          "invocation.code_id, args, kwargs, invocation.block, &invocation);\n";
   out << "    return amber_native_call_shaped_method("
@@ -16142,6 +16356,7 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
          "const NativeValue &block, bool lazy) {\n";
   out << "  if (eager == lazy || map_value.tag != NativeValue::Tag::Map) "
          "throw NativeBailout();\n";
+  out << "  native_require_mutable_collection(map_value);\n";
   out << "  const auto *found = native_map_find_entry(map_value, key);\n";
   out << "  if (found != nullptr) return found->second;\n";
   out << "  NativeValue value = eager "
@@ -16211,6 +16426,47 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "  }\n";
   out << "  throw NativeBailout();\n";
   out << "}\n\n";
+  if (plan.uses_native_stdlib_bridge) {
+    out << "class AmberNativeBlock final : public "
+           "amber::runtime::RuntimeNativeBlock {\n";
+    out << "public:\n";
+    out << "  explicit AmberNativeBlock(NativeValue block) "
+           ": block_(std::move(block)) {}\n";
+    out << "  amber::runtime::Value invoke(const "
+           "std::vector<amber::runtime::Value> &args) override {\n";
+    out << "    std::vector<NativeValue> native_args;\n";
+    out << "    native_args.reserve(args.size());\n";
+    out << "    for (const amber::runtime::Value &arg : args) "
+           "native_args.push_back(amber_native_bridge_result_current(arg));\n";
+    out << "    try {\n";
+    out << "      return amber_native_bridge_argument("
+           "amber_native_call_closure(block_, native_args));\n";
+    out << "    } catch (const NativeRaised &raised) {\n";
+    out << "      if (raised.exception.tag == "
+           "NativeValue::Tag::ErrorInstance) {\n";
+    out << "        const NativeErrorInstance &error = "
+           "as_native_error(raised.exception);\n";
+    out << "        const std::string message = "
+           "native_value_is_string(error.message) "
+           "? native_string_text(error.message) "
+           ": std::string(\"native HTTP handler failed\");\n";
+    out << "        throw amber::runtime::RuntimeTaskFailure("
+           "native_error_registry.error_name(error.error_id), message);\n";
+    out << "      }\n";
+    out << "      throw amber::runtime::RuntimeTaskFailure("
+           "\"RuntimeError\", \"native HTTP handler raised\");\n";
+    out << "    } catch (const NativeBailout &bailout) {\n";
+    out << "      throw amber::runtime::RuntimeTaskFailure("
+           "\"NativeCodeError\", bailout.what());\n";
+    out << "    } catch (const std::exception &error) {\n";
+    out << "      throw amber::runtime::RuntimeTaskFailure("
+           "\"NativeCodeError\", error.what());\n";
+    out << "    }\n";
+    out << "  }\n";
+    out << "private:\n";
+    out << "  NativeValue block_;\n";
+    out << "};\n\n";
+  }
   out << "static NativeValue native_http_send("
          "const NativeValue &receiver, const std::string &selector, "
          "const std::vector<NativeValue> &args, "
@@ -16219,9 +16475,8 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   if (plan.uses_native_stdlib_bridge) {
     out << "  const bool scoped_query = selector == \"query\" && "
            "block.tag != NativeValue::Tag::Null;\n";
-    out << "  if (block.tag != NativeValue::Tag::Null && !scoped_query) "
-           "throw NativeBailout(\"native HTTP block is not supported for \" "
-           "+ selector);\n";
+    out << "  const bool bridged_block = !scoped_query && "
+           "block.tag != NativeValue::Tag::Null;\n";
     out << "  amber::runtime::Value runtime_receiver = "
            "amber_native_bridge_argument(receiver);\n";
     out << "  std::vector<amber::runtime::Value> runtime_args;\n";
@@ -16236,12 +16491,16 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
            "amber_native_bridge_argument(kwarg.value)});\n";
     out << "  }\n";
     out << "  if (selector == \"query\" || selector == \"body_text\" || "
-           "selector == \"body_bytes\" || selector == \"close!\") "
+           "selector == \"body_bytes\" || selector == \"close!\" || "
+           "selector == \"serve\") "
            "native_commit_effect();\n";
+    out << "  amber::runtime::Value runtime_block = bridged_block "
+           "? amber::runtime::Value::io_value(std::make_shared<"
+           "AmberNativeBlock>(block)) : amber::runtime::Value::null();\n";
     out << "  NativeValue result = amber_native_bridge_execution_result("
            "amber_native_bridge_world().invoke_native_stdlib_send("
            "std::move(runtime_receiver), selector, runtime_args, "
-           "runtime_kwargs));\n";
+           "runtime_kwargs, std::move(runtime_block)));\n";
     out << "  if (!scoped_query) return result;\n";
     out << "  try {\n";
     out << "    NativeValue block_result = "
@@ -16890,6 +17149,14 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
   out << "}\n";
   out << "static bool native_triple_eq(const NativeValue &matcher, "
          "const NativeValue &value) {\n";
+  out << "  if (matcher.tag == NativeValue::Tag::RuntimeHandle && "
+         "as_native_runtime_handle(matcher)->value.is_native_type()) {\n";
+  out << "    NativeValue matched = native_http_send("
+         "matcher, \"===\", {value}, {}, NativeValue::nullv());\n";
+  out << "    if (matched.tag != NativeValue::Tag::Bool) "
+         "throw NativeBailout();\n";
+  out << "    return matched.scalar_value != 0;\n";
+  out << "  }\n";
   out << "  if (matcher.tag == NativeValue::Tag::ErrorClass) {\n";
   out << "    const std::uint16_t target = "
          "static_cast<std::uint16_t>(matcher.scalar_value);\n";
@@ -17165,8 +17432,8 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
            "NativeValue::bytes(bytes->string());\n";
     out << "    const auto io_value = value.as_io_value();\n";
     out << "    if (io_value != nullptr && "
-           "std::string(io_value->type_name()).compare(0, 9, "
-           "\"net.http.\") == 0) return "
+           "std::string(io_value->type_name()).compare(0, 4, "
+           "\"net.\") == 0) return "
            "NativeValue::runtime_handle(value);\n";
     out << "  }\n";
     out << "  if (value.is_list()) {\n";
@@ -17178,7 +17445,9 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "      items.push_back(amber_native_bridge_result(item, "
            "runtime_strings, runtime_symbols));\n";
     out << "    }\n";
-    out << "    return NativeValue::list(std::move(items));\n";
+    out << "    NativeValue result = NativeValue::list(std::move(items));\n";
+    out << "    as_mutable_list(result).frozen = list->frozen;\n";
+    out << "    return result;\n";
     out << "  }\n";
     out << "  if (value.is_tuple()) {\n";
     out << "    const auto tuple = value.as_tuple();\n";
@@ -17200,7 +17469,9 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "      items.push_back(amber_native_bridge_result(item, "
            "runtime_strings, runtime_symbols));\n";
     out << "    }\n";
-    out << "    return native_set_from_items(std::move(items));\n";
+    out << "    NativeValue result = native_set_from_items(std::move(items));\n";
+    out << "    as_mutable_set(result).frozen = set->frozen;\n";
+    out << "    return result;\n";
     out << "  }\n";
     out << "  if (value.is_map()) {\n";
     out << "    const auto map = value.as_map();\n";
@@ -17214,11 +17485,13 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
            "amber_native_bridge_result(entry.value, runtime_strings, "
            "runtime_symbols));\n";
     out << "    }\n";
-    out << "    return NativeValue::map_entries(std::move(entries), "
-           "map->strict);\n";
+    out << "    NativeValue result = NativeValue::map_entries("
+           "std::move(entries), map->strict);\n";
+    out << "    as_mutable_map(result).frozen = map->frozen;\n";
+    out << "    return result;\n";
     out << "  }\n";
     out << "  throw NativeBailout("
-           "\"native-extension result is not representable\");\n";
+           "\"native bridge result is not representable\");\n";
     out << "}\n\n";
     out << "static NativeValue amber_native_bridge_result_current("
            "const amber::runtime::Value &value) {\n";
@@ -17280,18 +17553,44 @@ static AMBER_NATIVE_ALWAYS_INLINE NativeValue native_numeric_fast_cmp_int_rhs(
     out << "    items.reserve(as_list(arg).items.size());\n";
     out << "    for (const NativeValue &item : as_list(arg).items) "
            "items.push_back(amber_native_bridge_argument(item));\n";
-    out << "    return amber_native_bridge_world().list_value("
-           "std::move(items));\n";
+    out << "    return amber::runtime::make_list_value("
+           "std::move(items), as_list(arg).frozen);\n";
+    out << "  }\n";
+    out << "  case NativeValue::Tag::Tuple: {\n";
+    out << "    std::vector<amber::runtime::Value> items;\n";
+    out << "    items.reserve(as_tuple(arg).items.size());\n";
+    out << "    for (const NativeValue &item : as_tuple(arg).items) "
+           "items.push_back(amber_native_bridge_argument(item));\n";
+    out << "    return amber::runtime::make_tuple_value(std::move(items));\n";
+    out << "  }\n";
+    out << "  case NativeValue::Tag::Set: {\n";
+    out << "    std::vector<amber::runtime::Value> items;\n";
+    out << "    items.reserve(as_set(arg).items.size());\n";
+    out << "    for (const NativeValue &item : as_set(arg).items) "
+           "items.push_back(amber_native_bridge_argument(item));\n";
+    out << "    return amber::runtime::make_set_value("
+           "std::move(items), as_set(arg).frozen);\n";
     out << "  }\n";
     out << "  case NativeValue::Tag::Map: {\n";
     out << "    std::vector<amber::runtime::MapEntry> entries;\n";
     out << "    entries.reserve(as_map(arg).entries.size());\n";
     out << "    for (const auto &entry : as_map(arg).entries) {\n";
-    out << "      entries.emplace_back(amber_native_bridge_argument("
-           "entry.first), amber_native_bridge_argument(entry.second));\n";
+    out << "      amber::runtime::Value key = "
+           "amber_native_bridge_argument(entry.first);\n";
+    out << "      amber::runtime::MapEntry runtime_entry("
+           "key, amber_native_bridge_argument(entry.second));\n";
+    out << "      if (key.is_string()) {\n";
+    out << "        amber::runtime::Value canonical = "
+           "amber_native_bridge_world().symbol_value("
+           "native_string_text(entry.first));\n";
+    out << "        if (!canonical.is_symbol()) throw NativeBailout();\n";
+    out << "        runtime_entry.symbol_id = "
+           "canonical.as_symbol().symbol_id;\n";
+    out << "      }\n";
+    out << "      entries.push_back(std::move(runtime_entry));\n";
     out << "    }\n";
     out << "    return amber::runtime::make_symbol_map_value("
-           "std::move(entries), false, as_map(arg).strict);\n";
+           "std::move(entries), as_map(arg).frozen, as_map(arg).strict);\n";
     out << "  }\n";
     out << "  case NativeValue::Tag::Instance: "
            "return amber::runtime::Value::null();\n";
@@ -17958,7 +18257,7 @@ native_runtime_cache_key(const std::string &cxx,
   }
   const std::vector<std::string> header_dirs = {
       "runtime", "bytecode",  "frontend", "profile",
-      "package", "optimizer", "buildsys", "frozen"};
+      "package", "optimizer", "buildsys", "frozen", "spec/registries"};
   for (const std::string &dir : header_dirs) {
     const std::filesystem::path root = runtime_root / dir;
     if (!std::filesystem::exists(root)) {
@@ -17966,7 +18265,9 @@ native_runtime_cache_key(const std::string &cxx,
     }
     for (const auto &entry :
          std::filesystem::recursive_directory_iterator(root)) {
-      if (entry.is_regular_file() && entry.path().extension() == ".h") {
+      const std::string extension = entry.path().extension().string();
+      if (entry.is_regular_file() &&
+          (extension == ".h" || extension == ".def")) {
         hashed_files.push_back(entry.path());
       }
     }
@@ -20016,8 +20317,21 @@ private:
         entry.target_index = source.target_index;
       }
       out_.exports.push_back(entry);
-      state.exports[bc_symbol_or_empty(state.input->module, source.symbol_id)] =
-          ref;
+      const std::string export_name =
+          bc_symbol_or_empty(state.input->module, source.symbol_id);
+      state.exports[export_name] = ref;
+      if ((ref.kind == "method" || ref.kind == "code") &&
+          ref.code_id != 0U) {
+        add_module_attr(
+            &out_, "amber.merged.export:" + state.input->name + "." +
+                       export_name,
+            ref.kind + "\t" + std::to_string(ref.code_id));
+      } else if (ref.kind == "class") {
+        add_module_attr(
+            &out_, "amber.merged.export:" + state.input->name + "." +
+                       export_name,
+            "class\t" + std::to_string(ref.class_index));
+      }
     }
 
     for (const amber::bytecode::LineEntry &source :
